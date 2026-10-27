@@ -2,7 +2,7 @@ import type { PaneInfo } from '../types';
 import { useStore } from '../store';
 import { Tooltip } from './Tooltip';
 import { formatAgo, formatDuration } from '../lib/turnTime';
-import { turnChipModel } from '../lib/turnChip';
+import { turnChipAriaLabel, turnChipModel } from '../lib/turnChip';
 import { useTurnClock } from '../lib/useTurnClock';
 
 // Pane-header readout of the agent's last finished turn (daemon/turns.go):
@@ -40,7 +40,7 @@ export function PaneTurnChip({ pane, unseen }: { pane: PaneInfo; unseen: boolean
         <button
           type="button"
           className={cls}
-          aria-label={`${unseen ? 'New: ' : ''}last turn changed ${t.files} files. Review changes`}
+          aria-label={turnChipAriaLabel(t.files, unseen)}
           onClick={(e) => {
             e.stopPropagation();
             openTurnDiff(pane.id, t.n);

@@ -21,6 +21,14 @@ export function turnChipModel(pane: PaneInfo, now: number, unseen = false): Turn
   return last.files > 0 ? { kind: 'changed', turn: last } : { kind: 'done', turn: last };
 }
 
+// Screen-reader label for the turn chip. The file count needs a singular form
+// for exactly one changed file ("changed 1 file"), otherwise it reads
+// "changed 1 files".
+export function turnChipAriaLabel(files: number, unseen = false): string {
+  const prefix = unseen ? 'New: ' : '';
+  return `${prefix}last turn changed ${files} file${files === 1 ? '' : 's'}. Review changes`;
+}
+
 // paneFinishedUnseen: the agent finished a turn after the user last looked at
 // the pane. Shown as the chip's "new" highlight.
 export function paneFinishedUnseen(pane: PaneInfo, lastViewedMs: number): boolean {

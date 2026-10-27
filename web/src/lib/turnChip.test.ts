@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PaneInfo, TurnRecord } from '../types';
-import { paneFinishedUnseen, paneUnread, turnChipModel, turnChipMaxAgeMs, turnOutputGraceMs } from './turnChip';
+import { paneFinishedUnseen, paneUnread, turnChipAriaLabel, turnChipModel, turnChipMaxAgeMs, turnOutputGraceMs } from './turnChip';
 import { formatAgo, formatDuration } from './turnTime';
 
 const now = 1_700_000_000_000;
@@ -101,4 +101,18 @@ it('shows recovered provider time without manufacturing new unread', () => {
   const p = pane({ hasCodex: true, turn: { active: false, count: 3, last: { ...last, historical: true, source: 'codex:session' } } });
   expect(turnChipModel(p, now)?.turn.endedMs).toBe(last.endedMs);
   expect(paneFinishedUnseen(p, 0)).toBe(false);
+});
+
+describe('turnChipAriaLabel', () => {
+  it('uses the singular for exactly one changed file', () => {
+    expect(turnChipAriaLabel(1)).toBe('last turn changed 1 file. Review changes');
+  });
+
+  it('uses the plural for more than one changed file', () => {
+    expect(turnChipAriaLabel(2)).toBe('last turn changed 2 files. Review changes');
+  });
+
+  it('keeps the unseen prefix', () => {
+    expect(turnChipAriaLabel(1, true)).toBe('New: last turn changed 1 file. Review changes');
+  });
 });
