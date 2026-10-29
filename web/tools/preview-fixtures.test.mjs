@@ -7,7 +7,8 @@ describe('isolated preview read contract', () => {
 
   it('answers the reads the app shell makes at boot as an empty install', () => {
     const fixtures = buildPreviewFixtures('0.0.1');
-    for (const read of ['/api/agents', '/api/agents/reports', '/api/schedules', '/api/todos']) expect(fixtures[read]).toEqual([]);
+    for (const read of ['/api/agents', '/api/agents/reports', '/api/schedules']) expect(fixtures[read]).toEqual([]);
+    expect(fixtures).not.toHaveProperty('/api/todos');
     expect(fixtures['/api/orchestrator-hosts']).toEqual({ policyVersion: '', hosts: [] });
   });
 

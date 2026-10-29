@@ -54,12 +54,12 @@ func TestOrchestratorBriefTextConstraints(t *testing.T) {
 	if strings.Contains(orchestratorBrief, "'--resume' '") {
 		t.Fatal("brief contains the wrapped --resume marker resumeSessionIDFromCmd scans for")
 	}
-	for _, phrase := range []string{"Work directly", "ask_pane", "wait_for_pane", "read_pane_tail", "create_schedule", "add_todo", "update_todo", "list_managed_agents", "scripts/solu-review", "at most two review rounds", "The user decides what merges"} {
+	for _, phrase := range []string{"Work directly", "ask_pane", "wait_for_pane", "read_pane_tail", "create_schedule", "set_pane_flag", "scripts/solu-review", "at most two review rounds", "The user decides what merges"} {
 		if !strings.Contains(orchestratorBrief, phrase) {
 			t.Fatalf("brief never mentions %q", phrase)
 		}
 	}
-	for _, stale := range []string{"Use create_workflow_task", "Do not investigate before filing", "pipeline’s scout", "agent_resume_task", "depends_on"} {
+	for _, stale := range []string{"add_todo", "update_todo", "todo list", "Use create_workflow_task", "Do not investigate before filing", "pipeline’s scout", "agent_resume_task", "depends_on"} {
 		if strings.Contains(orchestratorBrief, stale) {
 			t.Fatalf("retired delegation policy remains: %q", stale)
 		}

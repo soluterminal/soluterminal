@@ -953,10 +953,8 @@ func main() {
 		log.Fatalf("schedule store: %v", err)
 	}
 
-	todos, err := NewTodoStore(*dataDir, bus)
-	if err != nil {
-		log.Fatalf("todo store: %v", err)
-	}
+	// Todos was removed: save a one-time, read-only export of the old list.
+	runRemovedTodosExport(*dataDir)
 
 	// Agent control plane (docs/agent-control-plane/): deterministic staged
 	// engineering workflows. Init failure disables the feature, never boot.
@@ -1041,7 +1039,6 @@ func main() {
 		attention:          attention,
 		recentFiles:        newRecentFilesRing(),
 		scheds:             scheds,
-		todos:              todos,
 		updater:            updater,
 		preview:            newPreviewChannel(*dataDir),
 		metrics:            metrics,

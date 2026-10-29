@@ -3,12 +3,11 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { useEntitlements } from '../../entitlements';
 import { useStore } from '../../store';
 import { api } from '../../api';
-import { InboxHost, openInbox } from './InboxPanel';
+import { InboxHost, openInbox, openInboxAt } from './InboxPanel';
 import { __resetFeedbackInboxForTests } from '../../lib/useFeedbackInbox';
-import { __resetWardenInboxForTests } from '../../lib/useWardenInbox';
-import { __resetWardenReadForTests } from '../../lib/wardenRead';
-import type { Schedule, WardenRun } from '../../types';
-import type { FeedbackEvent } from '../../api';
+import { setExtensionsForTests } from '../../extensions';
+import type { Schedule } from '../../types';
+import type { AgentReport, FeedbackEvent } from '../../api';
 
 // LOCAL yesterday at noon — "now - 26h" is timezone/time-of-day flaky (at
 // 00:31 UTC it lands two calendar days back and the "Yesterday" group never
@@ -49,26 +48,12 @@ function fbEvent(over: Partial<FeedbackEvent> = {}): FeedbackEvent {
   };
 }
 
-function wardenRun(over: Partial<WardenRun> = {}): WardenRun {
-  return {
-    kind: 'triage',
-    paneTitle: 'blocked-pane',
-    at: new Date(Date.now() - 120_000).toISOString(),
-    status: 'ok',
-    summary: 'needs a decision: A or B',
-    logFile: 'run-w1.log',
-    ...over,
-  };
-}
-
 beforeEach(() => useEntitlements.setState({ loaded: true, team: true, operator: true }));
 
 afterEach(() => {
   useEntitlements.setState({ loaded: false, team: false, operator: false });
   useStore.setState({ schedules: [] });
   __resetFeedbackInboxForTests([]);
-  __resetWardenInboxForTests([]);
-  __resetWardenReadForTests([]);
   vi.restoreAllMocks();
 });
 
@@ -79,7 +64,10 @@ function openHost() {
 
 describe('InboxHost / feed', () => {
   it('opens on the event, pins needs-you, groups the rest by day, Esc closes', () => {
-    useStore.setState({ schedules: [sched()] });
+    useStore.setState({ schedules: [sched(), sched({
+      id: 's2', name: 'Nightly tests',
+      runs: [{ at: yesterdayNoon(), status: 'fired', summary: 'Nothing new needs you.' }],
+    })] });
     __resetFeedbackInboxForTests([fbEvent()]);
     openHost();
 
@@ -128,34 +116,61 @@ describe('InboxHost / feed', () => {
     expect(fbRead).toHaveBeenCalledWith(42);
   });
 
-  it('warden triage pins as needs-you and its brief opens in the reading pane', async () => {
-    const logSpy = vi.spyOn(api, 'wardenRunLog').mockResolvedValue(
-      '# Fleet brief\n\n## NEEDS A DECISION\n- rotate the leaked key',
-    );
-    __resetWardenReadForTests([]);
-    __resetWardenInboxForTests([wardenRun()]);
+  it('files one row per automation with "+N earlier", and needs you counts once', () => {
+    const now = Date.now();
+    const runs = Array.from({ length: 5 }, (_, i) => ({
+      at: new Date(now - (i + 1) * 86_400_000).toISOString(),
+      status: 'fired' as const,
+      summary: `## Needs you\n- ask number ${i}`,
+    }));
+    useStore.setState({ schedules: [sched({ runs })] });
     openHost();
-
-    // A triage is a demand → pins under "Needs you".
-    expect(screen.getByText('Needs you')).toBeInTheDocument();
-    expect(screen.getByText(/Triage — blocked-pane/)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText(/Triage — blocked-pane/));
-    await waitFor(() => expect(logSpy).toHaveBeenCalledWith('run-w1.log'));
-    expect(await screen.findByText(/rotate the leaked key/)).toBeInTheDocument();
+    // Only the newest report is on the face of the row; older ones fold.
+    expect(screen.getByText(/ask number 0/)).toBeInTheDocument();
+    expect(screen.queryByText(/ask number 1/)).toBeNull();
+    expect(screen.getByText('+4 earlier')).toBeInTheDocument();
+    expect(screen.getAllByText('needs you')).toHaveLength(1);
+    expect(screen.getByTitle('Mark all 1 read')).toBeInTheDocument();
   });
 
-  it('viewing a warden brief marks it read (client ledger), clearing mark-all', () => {
-    __resetWardenReadForTests([]);
-    __resetWardenInboxForTests([wardenRun({ kind: 'brief', logFile: 'run-w2.log', summary: 'all quiet' })]);
-    vi.spyOn(api, 'wardenRunLog').mockResolvedValue('# Fleet brief\n\nNothing needs you.');
+  it('counts past the render cap read "50+", not a silent 50', () => {
+    const now = Date.now();
+    const schedules = Array.from({ length: 53 }, (_, i) => sched({
+      id: `s${i}`, name: `Task ${i}`,
+      runs: [{ at: new Date(now - i * 60_000).toISOString(), status: 'fired', summary: 'Nothing new needs you.' }],
+    }));
+    useStore.setState({ schedules });
     openHost();
+    expect(screen.getByTitle('Mark all 50+ read')).toBeInTheDocument();
+    // The window still renders only the newest 50 rows.
+    expect(screen.getByText('Task 0')).toBeInTheDocument();
+    expect(screen.queryByText('Task 52')).toBeNull();
+  });
 
-    // Unread → the Mark-all affordance is present.
-    expect(screen.getByText('Mark all read')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Mark all read'));
-    // The client ledger flips it read and notifies → no more unread → gone.
-    expect(screen.queryByText('Mark all read')).toBeNull();
+  // A built-in agent alert carries its own markdown: it opens without a run
+  // log, and its links point at the held issues.
+  it('a PR-reviewer or held-fixes alert opens its own text in the reading pane', async () => {
+    const runLog = vi.spyOn(api, 'agentRunLog');
+    const alert: AgentReport = {
+      agentId: 'builtin:fix-agent', agentName: 'Fix agent', runId: 'held-abc',
+      at: new Date(Date.now() - 60_000).toISOString(),
+      title: 'Fix agent is holding 2 feedback fixes for you',
+      preview: '#29, #36: it won\'t open a PR for these without a person.',
+      items: [], kind: 'builtin',
+      body: '## Fix agent is holding 2 feedback fixes for you\n\n- [#29](https://github.com/o/fb/issues/29): its reviewer held the change\n',
+    };
+    const acknowledge = vi.fn(async () => {});
+    setExtensionsForTests([{ inboxReports: { useReports: () => [alert], acknowledge, acknowledgeAll: async () => {} } }]);
+    try {
+      openHost();
+      expect(screen.getByText('Needs you')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Fix agent'));
+      const link = await screen.findByRole('link', { name: '#29' });
+      expect(link.getAttribute('href')).toBe('https://github.com/o/fb/issues/29');
+      expect(runLog).not.toHaveBeenCalled();
+    } finally {
+      setExtensionsForTests(null);
+    }
   });
 
   it('report row opens the report in the reading pane and viewing marks it read', async () => {
@@ -199,6 +214,46 @@ describe('InboxHost / feed', () => {
     expect(await screen.findByText('Needs your info', { exact: false })).toBeInTheDocument();
     // Selecting the feedback row marked it read.
     expect(fbRead).toHaveBeenCalledWith(42);
+  });
+});
+
+describe('InboxHost / notification targets', () => {
+  it('a schedule target opens that automation\'s newest report', async () => {
+    vi.spyOn(api, 'scheduleRunLog').mockResolvedValue('Digest body from the tap.');
+    vi.spyOn(api, 'markScheduleRead').mockResolvedValue(undefined as never);
+    useStore.setState({ schedules: [sched(), sched({ id: 's2', name: 'Nightly tests' })] });
+    render(<InboxHost />);
+    act(() => openInboxAt({ schedule: 's1' }));
+    expect(screen.getByText(/Report · Morning digest/)).toBeInTheDocument();
+    expect(await screen.findByText(/Digest body from the tap/)).toBeInTheDocument();
+  });
+
+  it('a target that is not loaded yet is selected as soon as it arrives', async () => {
+    vi.spyOn(api, 'scheduleRunLog').mockResolvedValue('Late body.');
+    vi.spyOn(api, 'markScheduleRead').mockResolvedValue(undefined as never);
+    render(<InboxHost />);
+    act(() => openInboxAt({ schedule: 's1' }));
+    expect(screen.getByText('Nothing open')).toBeInTheDocument();
+    act(() => useStore.setState({ schedules: [sched()] }));
+    expect(await screen.findByText(/Late body/)).toBeInTheDocument();
+  });
+
+  it('an agent target opens and acknowledges that agent\'s pending decision', async () => {
+    const report: AgentReport = {
+      agentId: 'agt_1', agentName: 'Repo Medic', runId: 'run_9',
+      at: new Date().toISOString(), title: 'Needs you — approve', preview: 'approve the fix', logFile: 'r9.md',
+    };
+    const acknowledge = vi.fn().mockResolvedValue(undefined);
+    setExtensionsForTests([{ inboxReports: { useReports: () => [report], acknowledge, acknowledgeAll: vi.fn() } }]);
+    vi.spyOn(api, 'agentRunLog').mockResolvedValue('# Medic\n\nApprove the fix please.');
+    try {
+      render(<InboxHost />);
+      act(() => openInboxAt({ agent: 'agt_1' }));
+      expect(await screen.findByText(/Approve the fix please/)).toBeInTheDocument();
+      expect(acknowledge).toHaveBeenCalledWith(report);
+    } finally {
+      setExtensionsForTests(null);
+    }
   });
 });
 

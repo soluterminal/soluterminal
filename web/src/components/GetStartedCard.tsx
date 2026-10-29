@@ -1,22 +1,35 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useCloud } from '../cloud';
 import { countSiteDownload } from '../lib/countDownload';
 import { SITE_DOWNLOAD_URL } from '../lib/siteLinks';
-import { detectVisitorOS } from './DesktopInstallerLink';
+import { HANDHELD_WINDOWS_ONLY, DESKTOP_WINDOWS_ONLY, WINDOWS_VERSIONS_NOTE } from '../lib/windowsOnlyCopy';
+import { detectVisitorOS, isHandheldVisitor } from './DesktopInstallerLink';
 import { useIsMobileDevice } from './useIsMobileView';
 
 // The hosted app's first screen for an account with no machines, however it
 // signed in: download the Windows app from the website, sign in there with
-// the same email, and the PC shows up here. Visitors who aren't on Windows get the link to take to their PC instead;
-// never the headless install command.
+// the same email, and the PC shows up here. Visitors who aren't on Windows
+// are told it is a Windows app and get the link to take to their PC instead
+// (shared from a phone or tablet, copied on a Mac or Linux desktop); never
+// the headless install command.
 
 export const GET_STARTED_TITLE = "You're in. Three steps to your first team.";
-const SITE_DOWNLOAD_LABEL = SITE_DOWNLOAD_URL.replace(/^https:\/\//, '').replace(/\/$/, '');
+
+// Which first step a visitor gets. Any Windows browser (ARM and touch PCs
+// included) downloads the app; phones and tablets, iPads among them, and
+// Mac or Linux desktops get the link for their PC. A browser we can't place
+// keeps the Windows download.
+export type DownloadRoute = 'windows' | 'handheld' | 'desktop';
+
+export function downloadRoute(isMobile: boolean): DownloadRoute {
+  const os = detectVisitorOS();
+  if (os === 'windows') return 'windows';
+  if (isMobile || isHandheldVisitor()) return 'handheld';
+  return os === 'other' ? 'windows' : 'desktop';
+}
 
 export function usesWindowsDownload(isMobile: boolean): boolean {
-  if (isMobile) return false;
-  const os = detectVisitorOS();
-  return os === 'windows' || os === 'other';
+  return downloadRoute(isMobile) === 'windows';
 }
 
 /** A direct link to the website's installer file, counted as the account path. */
@@ -33,21 +46,21 @@ export function SiteInstallerLink({ className, children }: { className?: string;
 // machines sees these steps.
 export function GetStartedCard({ email }: { email: string | null }) {
   const isMobile = useIsMobileDevice();
-  const windows = usesWindowsDownload(isMobile);
+  const route = downloadRoute(isMobile);
   const size = useCloud((s) => s.siteInstaller.size);
 
   return (
     <section className="cloud-gate-start" aria-label={GET_STARTED_TITLE}>
       <ol className="cloud-gate-start-steps">
         <li>
-          {windows ? (
+          {route === 'windows' ? (
             <>
               <strong>Download SoluTerminal for Windows</strong>
               <SiteInstallerLink className="cloud-gate-start-download">Download for Windows</SiteInstallerLink>
               <span className="cloud-gate-footnote">{size}, from soluterminal.com.</span>
             </>
           ) : (
-            <OtherDeviceStep email={email} />
+            <OtherDeviceStep handheld={route === 'handheld'} />
           )}
         </li>
         <li>
@@ -67,34 +80,44 @@ export function GetStartedCard({ email }: { email: string | null }) {
   );
 }
 
-function OtherDeviceStep({ email }: { email: string | null }) {
-  const [copied, setCopied] = useState<'idle' | 'copied' | 'failed'>('idle');
-  const copy = async () => {
+function OtherDeviceStep({ handheld }: { handheld: boolean }) {
+  const [shared, setShared] = useState<'idle' | 'copied' | 'failed'>('idle');
+  useEffect(() => {
+    if (shared !== 'copied') return;
+    const t = window.setTimeout(() => setShared('idle'), 1800);
+    return () => window.clearTimeout(t);
+  }, [shared]);
+  const share = async () => {
+    // A phone's share sheet sends the link to the PC however the visitor
+    // likes. Desktops copy it: their share sheets are rarely how a link
+    // reaches another computer.
+    if (handheld && typeof navigator.share === 'function') {
+      try {
+        await navigator.share({ url: SITE_DOWNLOAD_URL });
+        return;
+      } catch (e) {
+        // Closing the sheet is a choice, not a failure.
+        if (e instanceof DOMException && e.name === 'AbortError') return;
+      }
+    }
     try {
       await navigator.clipboard.writeText(SITE_DOWNLOAD_URL);
-      setCopied('copied');
+      setShared('copied');
     } catch {
-      // No clipboard (insecure origin, old browser): the link is on screen.
-      setCopied('failed');
+      // No clipboard (insecure origin, old browser): show the address to select.
+      setShared('failed');
     }
-    window.setTimeout(() => setCopied('idle'), 1800);
   };
-  // Opens the visitor's own mail app addressed to themselves; nothing is sent
-  // by us.
-  const mailto =
-    `mailto:${email ? encodeURIComponent(email) : ''}` +
-    `?subject=${encodeURIComponent('SoluTerminal for Windows')}` +
-    `&body=${encodeURIComponent(`SoluTerminal for Windows: ${SITE_DOWNLOAD_URL}`)}`;
   return (
     <>
-      <strong>Download it on your Windows PC: {SITE_DOWNLOAD_LABEL}</strong>
+      <strong>{handheld ? HANDHELD_WINDOWS_ONLY : DESKTOP_WINDOWS_ONLY}</strong>
       <span className="cloud-gate-start-actions">
-        <button type="button" className="cloud-gate-link" onClick={() => void copy()}>
-          {copied === 'copied' ? 'Copied' : copied === 'failed' ? 'Select and copy the link' : 'Copy link'}
+        <button type="button" className="cloud-gate-link" onClick={() => void share()}>
+          {shared === 'copied' ? 'Copied' : handheld ? 'Share link' : 'Copy link'}
         </button>
-        <a className="cloud-gate-inline-link" href={mailto}>Email me the link</a>
       </span>
-      <span className="cloud-gate-footnote">SoluTerminal runs on Windows 10 &amp; 11. macOS and Linux coming soon.</span>
+      {shared === 'failed' && <span className="cloud-gate-start-address">{SITE_DOWNLOAD_URL}</span>}
+      <span className="cloud-gate-footnote">{WINDOWS_VERSIONS_NOTE}</span>
     </>
   );
 }

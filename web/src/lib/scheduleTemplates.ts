@@ -26,8 +26,8 @@ export interface ScheduleTemplate {
     cron?: string;
     permission?: 'plan' | 'edit';
     notifyOnRun?: boolean;
-    /** Appended on operator installs only: it calls MCP tools (todos) that
-     *  public installs don't have (daemon/mcp_public.go). */
+    /** Appended on operator installs only, for MCP tools that public
+     *  installs don't have (daemon/mcp_public.go). */
     operatorPromptSuffix?: string;
   };
 }
@@ -55,10 +55,6 @@ export const SCHEDULE_TEMPLATES: ScheduleTemplate[] = [
         'Summarize what changed in this repo overnight: merged PRs, new issues, '
         + 'failing CI, and anything awaiting my review. Keep it under 15 lines and '
         + 'lead with whatever needs my decision today.',
-      operatorPromptSuffix:
-        'Also call the list_todos MCP '
-        + "tool and add an '## Open todos' section: the open count plus the 3 oldest "
-        + 'open items, oldest first; omit the section entirely if there are no open todos.',
     },
   },
   {

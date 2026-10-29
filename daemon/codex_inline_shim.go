@@ -93,7 +93,7 @@ func runCodexInlineShim(cliArgs []string) int {
 	}
 	// Do this before even probing the CLI. An unavailable selected team route
 	// must not start a personal login or reuse a stale parent capability.
-	childEnv := os.Environ()
+	childEnv := codexShimEnvironment(cliArgs, os.Environ())
 	if paneBroker.codexShellLaunch != nil {
 		cliArgs, childEnv, err = paneBroker.codexShellLaunch(bin, cliArgs, childEnv)
 	}
@@ -135,6 +135,17 @@ func runCodexInlineShim(cliArgs []string) int {
 		return 1
 	}
 	return 0
+}
+
+// codexShimEnvironment is the environment a typed `codex` starts from. A
+// retained shell can outlive the daemon that gave it its address, so a model
+// invocation follows this data directory's current owner (live panes connect
+// to it); utility invocations keep the inherited environment untouched.
+func codexShimEnvironment(args, env []string) []string {
+	if model, _ := codexUnixModelInvocation(args); model {
+		return shellDaemonEnvironment(env)
+	}
+	return env
 }
 
 // The shim already resolved the user's executable and broker route. PATH is

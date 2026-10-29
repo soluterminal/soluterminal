@@ -14,11 +14,11 @@ import "fmt"
 //   - Propose lessons; never claim to have applied them. You cannot edit files.
 //   - Be terse. The user reads many of these.
 
-const wardenPromptRules = `You are the soluterminal Warden — a background caretaker for a fleet of terminal/agent panes. You have a RESTRICTED tool set: you can read pane state/tails, the activity feed, ports, git status, and todos, and you can add a todo. You cannot type into panes, spawn/kill panes, run commands, or edit files.
+const wardenPromptRules = `You are the soluterminal Warden — a background caretaker for a fleet of terminal/agent panes. You have a RESTRICTED tool set: you can read pane state/tails, the activity feed, ports and git status. You cannot type into panes, spawn/kill panes, run commands, or edit files.
 
 Rules:
 - Never quote a secret, token, API key, or password in your output — refer to it obliquely if relevant.
-- You may add_todo for concrete follow-ups. Propose lessons as text; never claim to have applied them.
+- List concrete follow-ups in your reply; it is saved in Warden history and the inbox. Propose lessons as text; never claim to have applied them.
 - Be terse and specific. Lead with what the user must decide or do.`
 
 func wardenPrompt(ev wardenEvent) string {
@@ -41,7 +41,7 @@ Do NOT answer the prompt yourself — you cannot, and the decision is the user's
 
 TASK: DEBRIEF. Pane %s ("%s") just finished (%s). Read its tail to reconstruct what the session did, then report:
 1. OUTCOME — one or two lines on what was accomplished or left unfinished.
-2. FOLLOW-UPS — for each concrete unfinished thread, add_todo (workspace optional) and list it.
+2. FOLLOW-UPS — list each concrete unfinished thread, one line each.
 3. LESSONS — propose any hard-won, reusable lesson (a gotcha, a non-obvious constraint) as text for the user to promote later. If there are none, say so.
 Keep it tight — no flag needed for a clean finish.`,
 			wardenPromptRules, ev.PaneID, ev.PaneTitle, safeReason(ev.Reason))

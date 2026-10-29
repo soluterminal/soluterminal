@@ -141,7 +141,6 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['workspace.panes', 'middleClickPaste', 'Middle-click paste'],
   ['workspace.panes', 'autoNamePanes', 'Name new agent panes with AI', ['title', 'rename', 'ai name', 'haiku']],
   ['workspace.sidebar', 'sidebarSections', 'Sidebar sections'],
-  ['workspace.sidebar', 'todos', 'Todos'],
   ['workspace.sidebar', 'files', 'Files'],
   ['workspace.sidebar', 'ports', 'Localhost ports'],
   ['workspace.sidebar', 'background', 'Detached sessions'],

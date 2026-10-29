@@ -118,6 +118,42 @@ describe('SchedulesSection agent cockpit links', () => {
   });
 });
 
+describe('SchedulesSection housekeeping', () => {
+  beforeEach(() => {
+    useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
+  });
+  afterEach(() => {
+    cleanup();
+    useStore.setState({ schedules: [], panes: {} });
+  });
+
+  function renderWith(schedules: Schedule[]) {
+    useStore.setState({ schedules, panes: {}, focusedPaneId: null, toast: vi.fn() });
+    return render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+  }
+
+  it('"N new" counts only enabled schedules; a paused one keeps its own dot', () => {
+    const run = [{ at: iso(Date.now() - 60_000), status: 'fired' as const, summary: 'report' }];
+    renderWith([
+      { ...task, id: 't-on', name: 'Enabled digest', runs: run },
+      { ...task, id: 't-off', name: 'Paused digest', enabled: false, runs: run },
+    ]);
+    expect(screen.getByRole('button', { name: '1 new' })).toBeInTheDocument();
+    expect(within(rowFor('Paused digest')).getByLabelText('New report')).toBeInTheDocument();
+  });
+
+  it('shows why the daemon paused a schedule', () => {
+    renderWith([{ ...prompt, enabled: false, pausedReason: 'its target pane is gone' }]);
+    const tag = within(rowFor(prompt.name)).getByText(/paused: its target pane is gone/);
+    expect(tag.getAttribute('title')).toMatch(/Paused automatically/);
+  });
+
+  it('a user-paused schedule still just says paused', () => {
+    renderWith([{ ...prompt, enabled: false }]);
+    expect(within(rowFor(prompt.name)).getByText('· paused')).toBeInTheDocument();
+  });
+});
+
 // docs/DESIGN-agents-surface.md §7.2's board-steward row serves two shapes from
 // one id, and the section only decides WHERE each one goes: the empty-state
 // line inside the "nothing scheduled yet" block, the honesty line under the one

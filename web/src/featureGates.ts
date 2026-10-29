@@ -26,9 +26,7 @@ export const FEATURE_GATES: readonly FeatureGate[] = [
   { file: 'App.tsx', flag: 'operator', surface: 'Orchestrator presets, Muse install banner, Tasks shortcut' },
   { file: 'components/Sidebar.tsx', flag: 'operator', surface: 'Agents sections; internal sidebar defaults' },
   { file: 'components/sidebar/SidebarCustomizer.tsx', flag: 'operator', surface: 'Agents in the customiser' },
-  { file: 'components/sidebar/SchedulesSection.tsx', flag: 'operator', surface: '"Make this an agent…"' },
-  { file: 'components/TodoQuickAdd.tsx', flag: 'operator', surface: 'Todos section default visibility' },
-  { file: 'components/ScheduleDialog.tsx', flag: 'operator', surface: 'Agent-task schedule options, open todos in the Morning digest recipe' },
+  { file: 'components/ScheduleDialog.tsx', flag: 'operator', surface: 'Agent-task schedule options' },
   { file: 'components/SetupChecklist.tsx', flag: 'operator', surface: 'Muse row' },
   { file: 'components/WelcomeOverlay.tsx', flag: 'operator', surface: 'Orchestrator line on the welcome slides' },
   { file: 'components/Topbar.tsx', flag: 'operator', surface: 'Refresh view button' },
@@ -41,7 +39,6 @@ export const FEATURE_GATES: readonly FeatureGate[] = [
   { file: 'components/WhatsNewToast.tsx', flag: 'operator', surface: 'Raw commit notes' },
   { file: 'components/StatusBar.tsx', flag: 'operator', surface: 'Release chips and system detail' },
   { file: 'components/system/SystemPage.tsx', flag: 'operator', surface: 'Workflow, release and cleanup cards' },
-  { file: 'lib/useWardenInbox.ts', flag: 'operator', surface: 'Warden briefs in the inbox' },
   // Team: what a customer team plan could carry.
   { file: 'components/settings/DevicesTab.tsx', flag: 'team', surface: '"Team account" label' },
   { file: 'components/PaneCredentialBadge.tsx', flag: 'team', surface: 'Saved-account detail on the pane badge' },

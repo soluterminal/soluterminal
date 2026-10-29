@@ -13,10 +13,11 @@ import { sidebarSectionSlot } from '../../extensions';
 // NOTE: 'aria' was retired as a section in 2026-07 — the panel was removed;
 // the auto-approver's controls live on pane badges + the account footer.
 // Stale 'aria' entries in saved prefs are unknown keys and get dropped.
+// NOTE: 'todos' was retired in 2026-10 with the Todos feature; stale entries
+// are unknown keys too and get dropped the same way.
 export type MiddleKey =
   | 'owners'
   | 'agentPanes'
-  | 'todos'
   | 'files'
   | 'ports'
   | 'background'
@@ -30,7 +31,6 @@ export type MiddleKey =
 // DEFAULT_HIDDEN) so a new user isn't greeted by a wall of power-user panels.
 export const DEFAULT_MIDDLE_ORDER: MiddleKey[] = [
   'agentPanes',
-  'todos',
   'files',
   'ports',
   'background',
@@ -55,12 +55,12 @@ export const DEFAULT_MIDDLE_ORDER: MiddleKey[] = [
 // user has to go looking for is autonomy they don't know about.
 export const DEFAULT_HIDDEN: MiddleKey[] = ['credentials', 'mcp'];
 
-// Public beta installs (not team) also start with Todos, Files and Localhost
-// ports tucked away: useful, but not what a first-time user needs on screen.
+// Public beta installs (not team) also start with Files and Localhost ports
+// tucked away: useful, but not what a first-time user needs on screen.
 // The ports status chip and "dev server up" toast still work, file tiles still
 // open from paths and Ctrl+P, and every section is one click away in
 // Settings → Sidebar.
-export const PUBLIC_DEFAULT_HIDDEN: MiddleKey[] = [...DEFAULT_HIDDEN, 'todos', 'files', 'ports'];
+export const PUBLIC_DEFAULT_HIDDEN: MiddleKey[] = [...DEFAULT_HIDDEN, 'files', 'ports'];
 
 export function defaultHidden(team: boolean): MiddleKey[] {
   return team ? [...DEFAULT_HIDDEN] : [...PUBLIC_DEFAULT_HIDDEN];
@@ -101,7 +101,6 @@ export function sectionOffered(key: MiddleKey): boolean {
 // Human labels for the customizer + the right-click "Hide …" item.
 export const MIDDLE_SECTION_LABELS: Record<MiddleKey, string> = {
   owners: 'Task Owners',
-  todos: 'Todos',
   files: 'Files',
   ports: 'Services',
   background: 'Detached sessions',
@@ -210,12 +209,3 @@ export function reorderMiddle(
   return base;
 }
 
-// Whether the Todos section is on screen. Quick capture (palette, Alt+T) only
-// makes sense when the list it adds to is visible.
-export function todosSectionVisible(
-  order: readonly string[] | undefined,
-  hidden: readonly string[] | undefined,
-  team: boolean,
-): boolean {
-  return effectiveMiddleOrder(order, hidden, team).includes('todos');
-}

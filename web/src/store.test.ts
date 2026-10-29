@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Layout, PaneInfo, Todo, Workspace } from './types';
+import type { Layout, PaneInfo, Workspace } from './types';
 import { api, ApiError, currentRoutingScope } from './api';
 import {
   ariaObservationFingerprint,
@@ -435,37 +435,6 @@ describe('zoom is cleared when focus routes to new content', () => {
     const s = useStore.getState();
     expect(s.zoomedPaneId).toBeNull();
     expect(s.focusedPaneId).toBe('pane_new');
-  });
-});
-
-describe('todo-prefilled task composition state', () => {
-
-  it('forwards taskId when patching a todo', async () => {
-    const td: Todo = {
-      id: 'todo_prefill', text: 'Review auth', done: false, createdAt: 1, source: 'user',
-    };
-    const linked = { ...td, taskId: 'wft_created' };
-    const updateTodo = vi.spyOn(api, 'updateTodo').mockResolvedValue(linked);
-    useStore.setState({ todos: [td] });
-
-    await useStore.getState().patchTodo(td.id, { taskId: 'wft_created' });
-
-    expect(updateTodo).toHaveBeenCalledWith(td.id, { taskId: 'wft_created' });
-    expect(useStore.getState().todos).toEqual([linked]);
-  });
-
-  it('preserves the todo array when refresh returns an identical payload', async () => {
-    const td: Todo = {
-      id: 'todo_same', text: 'Review release recovery', done: false,
-      createdAt: 1, source: 'user', workspace: 'soluterminal',
-    };
-    const original = [td];
-    vi.spyOn(api, 'listTodos').mockResolvedValue([{ ...td }]);
-    useStore.setState({ todos: original });
-
-    await useStore.getState().refreshTodos();
-
-    expect(useStore.getState().todos).toBe(original);
   });
 });
 

@@ -261,6 +261,12 @@ type UpdateStatus struct {
 	RequiredReason      string `json:"requiredReason,omitempty"`
 	ShellRequired       bool   `json:"shellRequired"`
 	ShellRequiredReason string `json:"shellRequiredReason,omitempty"`
+	// ShellAutoApplyPaused: the signed control file (or this channel's default
+	// when it says nothing) has the unattended installer restart off. The web
+	// then never arms its countdown and shows the ordinary installer banner;
+	// apply-shell?silent=1 is refused. Clicked updates are unaffected.
+	ShellAutoApplyPaused       bool   `json:"shellAutoApplyPaused"`
+	ShellAutoApplyPausedReason string `json:"shellAutoApplyPausedReason,omitempty"`
 
 	// UpdateChannel is the build this install follows: "public" or "team"
 	// (update_channel.go). Empty until the first decision is known.
@@ -383,6 +389,17 @@ type Updater struct {
 	// it to exercise the staged/launching/confirmed/failed state machine without
 	// opening a real installer.
 	launchShell func(path, shellPlatform string, lg *shellLaunchLog) (launchResult, error)
+	// launchShellSilent is the unattended counterpart (updater_shell_silent.go):
+	// it starts the courier that installs with /S after the app exits.
+	launchShellSilent func(path, shellPlatform, sha256 string, lg *shellLaunchLog) (launchResult, error)
+	// The last silent courier this daemon started, so a second app window's
+	// countdown cannot start another one while the first is waiting. Guarded by mu.
+	shellSilentVersion string
+	shellSilentPath    string
+	shellSilentAt      time.Time
+	// The courier's attempt id, until its outcome has been read from the
+	// launch log (observeSilentCourierLocked).
+	shellSilentAttempt string
 	// shellDisplayPath converts a WSL path to its Windows spelling. It is a
 	// narrow test seam because process-wide WSL detection cannot be disabled on
 	// a WSL test runner whose Windows interop is intentionally unavailable.
@@ -565,9 +582,13 @@ func NewUpdater(current, shellCurrent, shellPlatform string, bus *uiBus, metrics
 	}
 	home, _ := os.UserHomeDir()
 	launchShell := launchInstaller
+	launchShellSilent := launchSilentInstaller
 	if os.Getenv("SOLU_SHELL_LAUNCH_FORCE_FAIL") == "1" {
 		launchShell = func(path, shellPlatform string, lg *shellLaunchLog) (launchResult, error) {
 			return launchResult{}, fmt.Errorf("%w: forced by SOLU_SHELL_LAUNCH_FORCE_FAIL", errLaunchNotObserved)
+		}
+		launchShellSilent = func(path, shellPlatform, _ string, lg *shellLaunchLog) (launchResult, error) {
+			return launchShell(path, shellPlatform, lg)
 		}
 	}
 	// ResponseHeaderTimeout bounds a stalled connection before the response
@@ -593,6 +614,7 @@ func NewUpdater(current, shellCurrent, shellPlatform string, bus *uiBus, metrics
 		status:              UpdateStatus{Current: current, ShellCurrent: shellCurrent, UpdateChannel: channel},
 		drainWindow:         defaultWorkflowDrainWindow,
 		launchShell:         launchShell,
+		launchShellSilent:   launchShellSilent,
 		shellDisplayPath:    shellInstallerDisplayPath,
 		shellLogf:           log.Printf,
 		bus:                 bus,
@@ -1027,6 +1049,8 @@ func (u *Updater) recomputeShellLocked() {
 		u.status.ShellRequiredReason = requiredReason(
 			"the desktop app ("+u.shellCurrent+")", u.ctrlEffective.MinShellVer, u.ctrlEffective.Message)
 	}
+	u.status.ShellAutoApplyPaused, u.status.ShellAutoApplyPausedReason = u.ctrlEffective.shellAutoApplyPaused(u.channel)
+	u.observeSilentCourierLocked()
 }
 
 func (u *Updater) populateRollbackStatusLocked(now time.Time) {

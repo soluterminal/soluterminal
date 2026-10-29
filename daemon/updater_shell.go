@@ -24,6 +24,8 @@ type launchResult struct {
 	Method  string
 	PID     string
 	Session string
+	// Attempt identifies a silent courier's lines in the launch log.
+	Attempt string
 }
 
 const shellDowngradeTokenSuffix = ".allow-daemon-downgrade"
@@ -99,6 +101,19 @@ func shellDowngradeAdmission(target, currentDaemon, currentShell string, forceDo
 // dialog. We don't currently resume — sha mismatch = re-download —
 // but the path is stable for future improvement.
 func (u *Updater) ApplyShell(ctx context.Context, dataDir string, forceDowngrade bool) (string, error) {
+	return u.applyShell(ctx, dataDir, forceDowngrade, false)
+}
+
+// applyShell is ApplyShell with an unattended mode. silent stages and verifies
+// the installer exactly as the attended path does (same manifest, channel,
+// hold and downgrade checks), then hands it to a courier that installs it with
+// no installer window once the desktop app exits, and relaunches the app (see
+// updater_shell_silent.go). The two modes never combine with a forced
+// downgrade: an unattended update must not override that refusal.
+func (u *Updater) applyShell(ctx context.Context, dataDir string, forceDowngrade, silent bool) (string, error) {
+	if silent && forceDowngrade {
+		return "", errors.New("a silent installer update never forces a downgrade")
+	}
 	u.mu.Lock()
 	if u.shellApplying {
 		u.mu.Unlock()
@@ -126,6 +141,23 @@ func (u *Updater) ApplyShell(ctx context.Context, dataDir string, forceDowngrade
 	if !ok {
 		u.mu.Unlock()
 		return "", fmt.Errorf("no installer in manifest for shell platform %s", u.shellPlatform)
+	}
+	if silent {
+		if !silentShellSupported(u.shellPlatform) {
+			u.mu.Unlock()
+			return "", errSilentShellUnsupported
+		}
+		if paused, reason := u.ctrlEffective.shellAutoApplyPaused(u.channel); paused {
+			u.mu.Unlock()
+			return "", &silentShellPausedError{reason: reason}
+		}
+		// Every app window runs its own countdown. The first one to finish
+		// starts the courier; a second request inside the courier's wait window
+		// gets the same answer instead of a second courier and a second install.
+		if path, reuse, err := u.recentSilentShellLaunchLocked(targetVersion, time.Now()); reuse || err != nil {
+			u.mu.Unlock()
+			return path, err
+		}
 	}
 	// Capture the installed versions while holding the updater lock so the log
 	// describes the exact decision. The admission check intentionally uses the
@@ -238,13 +270,27 @@ func (u *Updater) ApplyShell(ctx context.Context, dataDir string, forceDowngrade
 		_ = os.Remove(dstPath)
 		return "", fmt.Errorf("update channel changed to %s while the installer downloaded; not launching the %s installer", u.channelSnapshot(), shellChannel)
 	}
+	if silent {
+		// The operator may have paused it while the installer downloaded.
+		if paused, reason := u.ctrlEffective.shellAutoApplyPaused(u.channel); paused {
+			u.status.ShellLaunch = nil
+			u.mu.Unlock()
+			return "", &silentShellPausedError{reason: reason}
+		}
+	}
 	u.setShellLaunchLocked(ShellLaunchState{State: "launching", StagedPath: displayPath})
 	u.mu.Unlock()
-	result, launchErr := u.launchShell(displayPath, shellPlatform, lg)
+	var result launchResult
+	var launchErr error
+	if silent {
+		// The courier checks this digest again right before it installs.
+		result, launchErr = u.launchShellSilent(displayPath, shellPlatform, platform.SHA256, lg)
+	} else {
+		result, launchErr = u.launchShell(displayPath, shellPlatform, lg)
+	}
 	if launchErr != nil {
 		return "", u.finishShellLaunchFailed(displayPath, launchErr, lg)
 	}
-
 	lg.event("launched", map[string]string{
 		"path": displayPath, "method": result.Method, "pid": result.PID, "session": result.Session,
 	})
@@ -253,6 +299,11 @@ func (u *Updater) ApplyShell(ctx context.Context, dataDir string, forceDowngrade
 		State: "launched", StagedPath: displayPath, Method: result.Method,
 		PID: result.PID, Session: result.Session,
 	})
+	// Under the same lock as "launched", so the courier's later verdict
+	// (observeSilentCourierLocked) can only ever replace it, never be replaced.
+	if silent {
+		u.noteSilentShellLaunchLocked(targetVersion, displayPath, result.Attempt, time.Now())
+	}
 	u.mu.Unlock()
 	if u.bus != nil {
 		u.bus.publish(uiEvent{Type: "update-available"})

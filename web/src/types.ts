@@ -559,6 +559,9 @@ export interface Schedule {
   errorCount: number;
   lastFiredAt?: string;
   lastReadAt?: string;  // newest run the user has read (reports reader); daemon-synced
+  // Why the DAEMON paused it (e.g. "its target pane is gone"); absent when
+  // the user paused it. Cleared when it is turned back on or retargeted.
+  pausedReason?: string;
 }
 
 export interface ScheduleInput {
@@ -940,7 +943,9 @@ export interface UpdateStatus {
   shellAvailable?: boolean;
   shellApplying?: boolean;
   shellLaunch?: {
-    state: 'staged' | 'launching' | 'launched' | 'launch-failed';
+    // rejected: the silent courier found the installer changed after it was
+    // verified, installed nothing and removed it (no stagedPath to offer).
+    state: 'staged' | 'launching' | 'launched' | 'launch-failed' | 'rejected';
     stagedPath?: string;
     method?: string;
     pid?: string;
@@ -964,6 +969,11 @@ export interface UpdateStatus {
   requiredReason?: string;
   shellRequired?: boolean;
   shellRequiredReason?: string;
+  // The signed control file (or this channel's default: on for team, off for
+  // public) has the unattended installer restart off. The countdown never
+  // arms and the ordinary installer banner shows; clicks are unaffected.
+  shellAutoApplyPaused?: boolean;
+  shellAutoApplyPausedReason?: string;
 }
 
 export type UpdateHoldCause = 'focus' | 'workflow' | 'unknown';
@@ -1130,21 +1140,6 @@ export interface CreatePaneReq {
 // What Claude Code would see for a given pane's project. Returned by
 // GET /api/mcp/servers?cwd=…. Read-only — the UI doesn't mutate this;
 // users still edit ~/.claude.json or .mcp.json with their own tooling.
-// Todo is the left-panel backlog item (see daemon/todos.go). One global
-// list across workspaces; the optional `workspace` tag is set by Claude
-// when adding via the `add_todo` MCP tool, blank for user-typed entries.
-export interface Todo {
-  id: string;
-  text: string;
-  done: boolean;
-  createdAt: number;        // unix millis
-  doneAt?: number;          // unix millis
-  workspace?: string;
-  source: 'user' | 'claude';
-  taskId?: string;
-  originalText?: string;
-  duplicateOf?: string;
-}
 
 // Claude account credentials management (left-sidebar "Credentials"
 // section). The active account is machine-wide — switching it changes

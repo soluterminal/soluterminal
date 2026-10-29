@@ -119,10 +119,15 @@ type Schedule struct {
 	// missed", not "replay three days of them"). Task-kind recurring
 	// only: task runs need no pane, so they can't race the workspace
 	// restore that is still in flight at boot.
-	CatchUp   bool          `json:"catchUp,omitempty"`
-	Enabled   bool          `json:"enabled"`
-	CreatedAt time.Time     `json:"createdAt"`
-	Runs      []ScheduleRun `json:"runs,omitempty"` // last N runs (newest first)
+	CatchUp bool `json:"catchUp,omitempty"`
+	Enabled bool `json:"enabled"`
+	// PausedReason says why the DAEMON paused this schedule (today: its
+	// target pane is gone), so the row can explain itself instead of failing
+	// and paging on every fire. Empty for a schedule the user paused. Cleared
+	// when the schedule is turned back on or retargeted.
+	PausedReason string        `json:"pausedReason,omitempty"`
+	CreatedAt    time.Time     `json:"createdAt"`
+	Runs         []ScheduleRun `json:"runs,omitempty"` // last N runs (newest first)
 
 	// Lifetime counters — every recordRun bumps the one matching the
 	// run's status. Separate from `Runs` because the run-list is capped
@@ -341,6 +346,48 @@ type ScheduleStore struct {
 	// back here, and holding both mutexes in either order is the deadlock.
 	ownedRunGate   func(agentID string) (bool, string)
 	ownedRunMirror func(agentID string, run ScheduleRun)
+
+	// lifeCtx ends when the store stops; a task run waiting out its one
+	// retry (schedules_limits.go) gives up on it instead of firing into a
+	// dying daemon.
+	lifeCtx context.Context
+
+	// usageLimitUntil is when the Claude subscription's usage limit resets,
+	// learned from the last task run that hit it. Task runs before then are
+	// skipped instead of spending a spawn on "You've hit your weekly limit".
+	// Memory only: after a restart the next run re-learns it.
+	usageLimitUntil time.Time
+
+	// lastReminderSync is the payload of the last reminder sync the cloud
+	// accepted, and when; an unchanged set is not re-sent until
+	// reminderResyncEvery has passed (schedules_reminders.go).
+	lastReminderSync   string
+	lastReminderSyncAt time.Time
+
+	// editSeq counts the user's pauses, resumes and edits per schedule
+	// (SetEnabled, Update). The daemon's own re-arm of a one-time task past a
+	// usage-limit reset checks it under s.mu, so it can never undo a pause or
+	// edit that landed after it decided (deferOneTime).
+	editSeq map[string]uint64
+}
+
+// bumpEditUnlocked records a user pause/resume/edit. Caller holds s.mu.
+func (s *ScheduleStore) bumpEditUnlocked(id string) {
+	if s.editSeq == nil {
+		s.editSeq = map[string]uint64{}
+	}
+	s.editSeq[id]++
+}
+
+// editStamp snapshots whether a schedule is on and its edit count, together.
+func (s *ScheduleStore) editStamp(id string) (enabled bool, seq uint64, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sched, ok := s.items[id]
+	if !ok {
+		return false, 0, false
+	}
+	return sched.Enabled, s.editSeq[id], true
 }
 
 // SetAgentRunner installs the managed-agent run hook. Safe for concurrent use.
@@ -385,6 +432,7 @@ func (s *ScheduleStore) SetOwnedRunMirror(fn func(agentID string, run ScheduleRu
 func (s *ScheduleStore) SetPusher(p *Pusher) {
 	s.mu.Lock()
 	s.pusher = p
+	s.lastReminderSync = "" // a new connection gets the set even if unchanged
 	s.mu.Unlock()
 	// Fresh cloud connection → upload the current reminder set so the
 	// cloud safety net covers reminders created while offline.
@@ -494,6 +542,7 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.preFireCancel = cancel
+	s.lifeCtx = ctx
 	go s.watchPreFire(ctx)
 
 	// Catch-up fires, one per opted-in task schedule that missed runs.
@@ -941,6 +990,7 @@ func (s *ScheduleStore) Update(id string, in ScheduleInput) (*Schedule, error) {
 	if in.Enabled != nil {
 		enabled = *in.Enabled
 	}
+	s.bumpEditUnlocked(id)
 	sched.Name = scheduleName(in)
 	sched.Cron = strings.TrimSpace(in.Cron)
 	sched.RunAt = in.RunAt
@@ -953,6 +1003,10 @@ func (s *ScheduleStore) Update(id string, in ScheduleInput) (*Schedule, error) {
 	sched.Permission = strings.TrimSpace(in.Permission)
 	sched.Model = strings.TrimSpace(in.Model)
 	sched.TimeoutMin = in.TimeoutMin
+	if in.PaneID != sched.PaneID || enabled {
+		// Retargeted or turned back on: the daemon's pause reason is stale.
+		sched.PausedReason = ""
+	}
 	sched.PaneID = in.PaneID
 	sched.Prompt = strings.TrimRight(in.Prompt, " \t\r\n")
 	sched.NotifyOnRun = in.NotifyOnRun
@@ -1028,7 +1082,7 @@ func (s *ScheduleStore) MarkRead(id string, at time.Time) (*Schedule, error) {
 		return nil, err
 	}
 	s.mu.Unlock()
-	s.notifyChanged()
+	s.notifyScheduleChanged(id)
 	return sched, nil
 }
 
@@ -1055,8 +1109,10 @@ func (s *ScheduleStore) SetEnabled(id string, enabled bool) (*Schedule, error) {
 		}
 	}
 	s.unscheduleUnlocked(id)
+	s.bumpEditUnlocked(id)
 	sched.Enabled = enabled
 	if enabled {
+		sched.PausedReason = ""
 		// Stamp the disabled→enabled edge so the boot-time missed-fire
 		// count never blames a deliberate pause on daemon downtime.
 		now := time.Now()
@@ -1119,6 +1175,11 @@ func (s *ScheduleStore) SnoozeNext(id string) (*Schedule, error) {
 func (s *ScheduleStore) FireNow(id string) (*Schedule, error) {
 	s.mu.Lock()
 	sched, ok := s.items[id]
+	if ok && sched.isTask() {
+		// "Run now" is the user's probe past a usage-limit hold: if the limit
+		// is still spent, this run fails and sets the hold again.
+		s.usageLimitUntil = time.Time{}
+	}
 	s.mu.Unlock()
 	if !ok {
 		return nil, errors.New("schedule not found")
@@ -1128,11 +1189,22 @@ func (s *ScheduleStore) FireNow(id string) (*Schedule, error) {
 }
 
 func (s *ScheduleStore) notifyChanged() {
+	s.notifyScheduleChanged("")
+}
+
+// notifyScheduleChanged tells clients one schedule changed (a run started or
+// landed, a report was read). The event names it in Text, so a client can
+// fetch just that row (GET /api/schedules/{id}) instead of the whole list —
+// every run used to make every open window reload the full list (~160 KB on a
+// busy machine) twice. An empty id means "the list itself changed" (create,
+// delete, edit): refetch everything. Clients that ignore Text simply refetch
+// the list, as before.
+func (s *ScheduleStore) notifyScheduleChanged(id string) {
 	// Any schedule mutation may change the upcoming-reminder set; keep the
 	// cloud mirror fresh (debounced, no-op without a pusher).
 	s.scheduleReminderSync()
 	if s.uiBus == nil {
 		return
 	}
-	s.uiBus.publish(uiEvent{Type: "schedules-changed"})
+	s.uiBus.publish(uiEvent{Type: "schedules-changed", Text: id})
 }

@@ -13,6 +13,7 @@ const shellStatus = (): UpdateStatus => ({
   shellCurrent: '1.0.0',
   shellAvailable: true,
   shellLatest: '2.0.0',
+  shellAutoApplyPaused: false,
 });
 
 describe('UpdateBanner shell auto-restart states', () => {
@@ -64,6 +65,16 @@ describe('UpdateBanner shell auto-restart states', () => {
     useStore.setState({ updateSettings: { autoApply: 'off', shellAutoApply: 'when-idle' } });
     const { container } = render(<UpdateBanner />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it('shows the ordinary installer banner when the silent restart is paused by control', () => {
+    useStore.setState({
+      updateSettings: { autoApply: 'off', shellAutoApply: 'when-idle' },
+      updateStatus: { ...shellStatus(), shellAutoApplyPaused: true, shellAutoApplyPausedReason: 'automatic desktop restarts are not enabled for this channel yet' },
+    });
+    render(<UpdateBanner />);
+    expect(screen.getByText('Desktop installer update ready')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Update now' })).toBeInTheDocument();
   });
 
   it('keeps the manual-only copy and Update now action unchanged when off', () => {
@@ -238,7 +249,7 @@ describe('UpdateBanner shell auto-restart states', () => {
     expect(invoke.mock.calls.some(([command]) => command === 'open_external_window')).toBe(false);
   });
 
-  it('holds a shell-only downgrade from daemon status before native invocation', async () => {
+  it('does not offer a shell-only installer that carries an older daemon', async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === 'browser_pane_ping') return '0.0.900';
       if (command === 'apply_shell_update') throw new Error('native admission must not be reached');
@@ -258,12 +269,11 @@ describe('UpdateBanner shell auto-restart states', () => {
       applyAllUpdates: realApplyAllUpdates,
     });
     render(<UpdateBanner />);
-    fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-
-    await waitFor(() => expect(toast).toHaveBeenCalledWith(
-      expect.stringContaining('installed daemon 0.0.932 is newer than bundled daemon 0.0.916'),
-      expect.anything(),
-    ));
+    // Every launch path refuses an installer that carries an older daemon, so
+    // the banner does not offer it (lib/installerUpdate.ts).
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(screen.queryByRole('button', { name: 'Update now' })).not.toBeInTheDocument();
+    expect(toast).not.toHaveBeenCalled();
     expect(invoke.mock.calls.some(([command]) => command === 'apply_shell_update')).toBe(false);
     expect(invoke.mock.calls.some(([command]) => command === 'open_external_window')).toBe(false);
   });
@@ -300,6 +310,30 @@ describe('UpdateBanner shell auto-restart states', () => {
     await waitFor(() => expect(applyShellUpdate).toHaveBeenCalledOnce());
     expect(invoke.mock.calls.some(([command]) => command === 'plugin:opener|open_url')).toBe(false);
     expect(JSON.stringify(invoke.mock.calls)).not.toContain('github.com');
+  });
+
+  // The app's own version can show an installer the daemon does not flag
+  // (shellAvailable false: a WSL daemon still believes the older shell). The
+  // click must use the same route as the popover, not the daemon-only action.
+  it('installs a client-detected installer through the app updater', async () => {
+    const invoke = vi.fn(async (command: string, _args?: unknown) => {
+      if (command === 'apply_shell_update') return { launched: true, path: 'C:\\setup-2.0.0.exe' };
+      if (command === 'browser_pane_ping') return '1.0.0';
+      return undefined;
+    });
+    Object.defineProperty(window, '__SOLU_TAURI__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    const applyShellUpdate = vi.fn().mockResolvedValue(undefined);
+    useStore.setState({
+      updateStatus: { current: '1.0.0', available: false, shellLatest: '2.0.0', shellAvailable: false },
+      applyShellUpdate: applyShellUpdate as never,
+      applyAllUpdates: realApplyAllUpdates,
+    });
+    render(<UpdateBanner />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Update now' }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('apply_shell_update', { forceDowngrade: false }));
+    expect(applyShellUpdate).not.toHaveBeenCalled();
   });
 
   // A local daemon built with sign-in serves /api/config, so useCloud reads

@@ -55,6 +55,12 @@ func (s *ScheduleStore) checkPreFire() {
 		if sched.isAgentRun() {
 			continue
 		}
+		// The built-in agents (fix, PR, investigate, triage) run every few
+		// minutes around the clock; a "fires in 5 minutes" chime for each
+		// was ~16 an hour of noise about infrastructure, not the user's work.
+		if sched.Kind == "agent" {
+			continue
+		}
 		next := e.Next
 		if next.IsZero() || next.Before(now) || next.After(horizon) {
 			continue
@@ -192,8 +198,13 @@ func (s *ScheduleStore) fire(id string) {
 	}
 	pane, ok := s.mgr.Get(paneID)
 	if !ok {
+		// Pause rather than fail on every fire: a prompt schedule aimed at a
+		// closed pane used to error (and page the phone) every 5 minutes or
+		// every night for weeks. This run's error is the one notification;
+		// the row then says why it stopped.
+		s.pauseForReason(id, targetPaneGoneReason)
 		run.Status = "error"
-		run.Detail = "target pane no longer exists"
+		run.Detail = "target pane no longer exists — paused. Pick a pane and turn it back on to resume."
 		s.recordRun(id, run)
 		return
 	}
@@ -269,6 +280,25 @@ func (s *ScheduleStore) fire(id string) {
 			Text: fmt.Sprintf("⏰ %s → %s", sched.Name, displayTitle(pane)),
 		})
 	}
+}
+
+// targetPaneGoneReason is the PausedReason of a prompt schedule whose target
+// pane closed.
+const targetPaneGoneReason = "its target pane is gone"
+
+// pauseForReason disables a schedule on the daemon's own initiative and
+// records why, for the row to show.
+func (s *ScheduleStore) pauseForReason(id, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sched, ok := s.items[id]
+	if !ok {
+		return
+	}
+	s.unscheduleUnlocked(id)
+	sched.Enabled = false
+	sched.PausedReason = reason
+	_ = s.saveUnlocked()
 }
 
 // fireAgentRun is the managed-agent counterpart of fireTask/fireAgent
@@ -382,7 +412,7 @@ func (s *ScheduleStore) recordRun(id string, run ScheduleRun) {
 	}
 	_ = s.saveUnlocked()
 	s.mu.Unlock()
-	s.notifyChanged()
+	s.notifyScheduleChanged(id)
 	metrics.IncLabelled("solud_schedule_runs_total", map[string]string{"kind": kind, "status": run.Status})
 
 	// Off the lock, on purpose: the mirror calls into the ManagedAgentStore, which
@@ -457,6 +487,6 @@ func (s *ScheduleStore) stampRunDetail(id string, at time.Time, note string) {
 	}
 	s.mu.Unlock()
 	if ok {
-		s.notifyChanged()
+		s.notifyScheduleChanged(id)
 	}
 }

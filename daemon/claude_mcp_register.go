@@ -23,7 +23,7 @@ const (
 
 // Self-registration of the daemon's MCP server with Claude Code, so panes
 // running `claude` get the soluterminal tools (list_ports, open_browser,
-// todos, schedules, …) without the user ever hand-typing a URL. Hand-typing
+// schedules, …) without the user ever hand-typing a URL. Hand-typing
 // is exactly how one install ended up registered at http://0.0.0.0:8787/mcp
 // — a BIND address pasted from the README's --addr example — which fails to
 // connect and silently strips every soluterminal tool from every session.

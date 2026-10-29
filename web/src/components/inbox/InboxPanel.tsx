@@ -4,11 +4,9 @@ import { createPortal } from 'react-dom';
 import { api, type FeedbackThread } from '../../api';
 import { useStore } from '../../store';
 import { runPreview } from '../../lib/reportsFeed';
-import { inboxFeed, type InboxItem } from '../../lib/inboxFeed';
+import { INBOX_CAP, inboxCountLabel, inboxFeed, type InboxItem } from '../../lib/inboxFeed';
 import { useFeedbackInbox, markFeedbackEventRead } from '../../lib/useFeedbackInbox';
-import { useWardenInbox, notifyWardenInbox } from '../../lib/useWardenInbox';
 import { acknowledgeAllInboxReports, acknowledgeInboxReport, useInboxReports } from '../../extensions';
-import { markWardenRunRead, markAllWardenRead, wardenRunId } from '../../lib/wardenRead';
 import { renderReportMarkdown } from '../../lib/reportMarkdown';
 import { relativeTime } from '../sidebar/time';
 import { useFocusTrap } from '../useFocusTrap';
@@ -16,6 +14,7 @@ import { useDraggableDialog } from '../useDraggableDialog';
 import { TaskReportView } from '../ScheduleHistoryDialog';
 import { FeedbackComposer } from './FeedbackComposer';
 import './inbox.css';
+import { useUnsentInput } from '../../lib/unsentInput';
 
 // The inbox — soluterminal's mail, with mail-client anatomy. One centered
 // two-pane window on the Settings sizing contract (centered card, header
@@ -29,16 +28,17 @@ import './inbox.css';
 // On phones the window is a full-screen sheet: the list pushes to the
 // detail, ‹ Inbox backs out.
 //
-// Entry points all funnel through the `solu:open-inbox` event (the topbar
-// bubble, the footer chip, notification taps, Ctrl+K); the legacy
-// `solu:open-reports-feed` event still opens the feed. The host is ALWAYS
-// mounted in App — on phones the drawer and status bar may not exist.
+// Entry points all funnel through the `solu:open-inbox` event: the topbar
+// bubble, the Automations "N new" chip, Help › Send feedback / Ctrl+K, and
+// tapped automation or agent push notifications (App.tsx routes those here
+// with a `schedule` / `agent` target, which selects that item once it is in
+// the feed). The legacy `solu:open-reports-feed` event still opens the feed.
+// The host is ALWAYS mounted in App — on phones the drawer may not exist.
 
 type Sel =
   | { kind: 'report'; scheduleId: string; runAt: string }
   | { kind: 'thread'; number: number }
-  | { kind: 'warden'; id: string; logFile?: string }
-  | { kind: 'agentreport'; id: string; runId: string; logFile?: string }
+  | { kind: 'agentreport'; id: string; runId: string; logFile?: string; body?: string }
   | { kind: 'compose' }
   | null;
 
@@ -46,13 +46,25 @@ export function openInbox(view?: 'feed' | 'compose', thread?: number) {
   window.dispatchEvent(new CustomEvent('solu:open-inbox', { detail: { view, thread } }));
 }
 
+/** What a notification tap asks the inbox to open once its item is loaded. */
+export type InboxTarget = { schedule: string } | { agent: string };
+
+/** Open the inbox on one automation's report row or one agent's decision. */
+export function openInboxAt(target: InboxTarget) {
+  window.dispatchEvent(new CustomEvent('solu:open-inbox', { detail: { target } }));
+}
+
+function itemMatchesTarget(it: InboxItem, target: InboxTarget): boolean {
+  if ('schedule' in target) return it.report?.schedule.id === target.schedule;
+  return it.agentReport?.agentId === target.agent;
+}
+
 function selFor(it: InboxItem): Sel {
   if (it.report) {
     return { kind: 'report', scheduleId: it.report.schedule.id, runAt: it.report.run.at };
   }
   if (it.feedback) return { kind: 'thread', number: it.feedback.number };
-  if (it.warden) return { kind: 'warden', id: wardenRunId(it.warden), logFile: it.warden.logFile };
-  if (it.agentReport) return { kind: 'agentreport', id: it.agentReport.agentId, runId: it.agentReport.runId, logFile: it.agentReport.logFile };
+  if (it.agentReport) return { kind: 'agentreport', id: it.agentReport.agentId, runId: it.agentReport.runId, logFile: it.agentReport.logFile, body: it.agentReport.body };
   return null;
 }
 
@@ -62,7 +74,6 @@ function itemSelected(it: InboxItem, sel: Sel): boolean {
     return !!it.report && it.report.schedule.id === sel.scheduleId && it.report.run.at === sel.runAt;
   }
   if (sel.kind === 'thread') return !!it.feedback && it.feedback.number === sel.number;
-  if (sel.kind === 'warden') return !!it.warden && wardenRunId(it.warden) === sel.id;
   if (sel.kind === 'agentreport') return !!it.agentReport && it.agentReport.agentId === sel.id && it.agentReport.runId === sel.runId;
   return false;
 }
@@ -88,7 +99,8 @@ function InboxRow({ it, isSel, onSelect }: {
   isSel: boolean;
   onSelect: (it: InboxItem) => void;
 }) {
-  const failed = it.report?.run.status === 'error' || (it.warden ? it.warden.status !== 'ok' : false);
+  const failed = it.report?.run.status === 'error';
+  const earlier = it.report?.earlierUnread ?? 0;
   const preview = it.report ? runPreview(it.report.run) : it.preview;
   const ref = useRef<HTMLButtonElement | null>(null);
   // Keyboard selection must stay in view (jsdom has no scrollIntoView).
@@ -98,11 +110,9 @@ function InboxRow({ it, isSel, onSelect }: {
   const when = new Date(it.at).toLocaleString();
   const title = it.source === 'feedback'
     ? `Your report "${it.title}" · ${when} — open the conversation`
-    : it.source === 'warden'
-      ? `${it.title} · ${when} — open the brief`
-      : it.source === 'agentreport'
-        ? `${it.sender} · ${when} — open the Needs you report`
-      : `${it.sender} · ${when} — open the report`;
+    : it.source === 'agentreport'
+      ? `${it.sender} · ${when} — open the Needs you report`
+      : `${it.sender} · ${when} — open the latest report${earlier > 0 ? ` (${earlier} earlier unread)` : ''}`;
   return (
     <button
       ref={ref}
@@ -118,8 +128,8 @@ function InboxRow({ it, isSel, onSelect }: {
         <span className="inbox-row-top">
           <span className="inbox-row-name">{it.source === 'report' || it.source === 'agentreport' ? it.sender : it.title}</span>
           {it.source === 'feedback' && <span className="inbox-row-src">feedback</span>}
-          {it.source === 'warden' && <span className="inbox-row-src">warden</span>}
           {it.source === 'agentreport' && <span className="inbox-row-src">agent</span>}
+          {earlier > 0 && <span className="inbox-row-src">+{earlier} earlier</span>}
           <span className="inbox-row-when">{relativeTime(new Date(it.at).getTime())}</span>
         </span>
         <span className="inbox-row-sub">
@@ -151,13 +161,14 @@ function dayLabel(iso: string): string {
   return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
 }
 
-type Filter = 'all' | 'report' | 'feedback' | 'warden' | 'agentreport';
+type Filter = 'all' | 'report' | 'feedback' | 'agentreport';
 
 // Needs-you AND unread pins to the top — that's the "act on this" pile.
 // Once read it re-files chronologically (a handled ask shouldn't nag).
-// This is also the ↑/↓ traversal order: exactly what the eye sees.
+// This is also the ↑/↓ traversal order: exactly what the eye sees. Only the
+// newest INBOX_CAP rows of the filter render; counts cover them all.
 function visualOrder(items: InboxItem[], filter: Filter): { pinned: InboxItem[]; rest: InboxItem[] } {
-  const shown = filter === 'all' ? items : items.filter((i) => i.source === filter);
+  const shown = (filter === 'all' ? items : items.filter((i) => i.source === filter)).slice(0, INBOX_CAP);
   return {
     pinned: shown.filter((i) => i.unread && i.needsYou),
     rest: shown.filter((i) => !(i.unread && i.needsYou)),
@@ -184,7 +195,6 @@ function FeedView({ items, filter, setFilter, sel, onSelect }: {
     all: items.length,
     report: items.filter((i) => i.source === 'report').length,
     feedback: items.filter((i) => i.source === 'feedback').length,
-    warden: items.filter((i) => i.source === 'warden').length,
     agentreport: items.filter((i) => i.source === 'agentreport').length,
   };
   // The filter strip appears only when at least TWO sources have items (one
@@ -193,12 +203,11 @@ function FeedView({ items, filter, setFilter, sel, onSelect }: {
   const present = ([
     { key: 'report', label: 'Reports' },
     { key: 'feedback', label: 'Feedback' },
-    { key: 'warden', label: 'Warden' },
     { key: 'agentreport', label: 'Agents' },
   ] as const).filter((s) => counts[s.key] > 0);
   const filterTabs: { key: Filter; label: string }[] = [
-    { key: 'all', label: `All ${counts.all}` },
-    ...present.map((s) => ({ key: s.key as Filter, label: `${s.label} ${counts[s.key]}` })),
+    { key: 'all', label: `All ${inboxCountLabel(counts.all)}` },
+    ...present.map((s) => ({ key: s.key as Filter, label: `${s.label} ${inboxCountLabel(counts[s.key])}` })),
   ];
   const empty = pinned.length === 0 && groups.length === 0;
 
@@ -258,63 +267,12 @@ const EVENT_LABEL: Record<string, string> = {
   'reply': 'You replied',
 };
 
-// The Warden brief reader — fetches the run's markdown (api.wardenRunLog) and
-// renders it with the same reader as task reports. Simpler than TaskReportView:
-// one log file, no run cursor, no meta split (the daemon writes plain report
-// markdown). A run with no log file has nothing to open.
-function WardenReadView({ logFile }: { logFile?: string }) {
-  const toast = useStore((s) => s.toast);
-  const [text, setText] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!logFile) return;
-    let alive = true;
-    setText(null);
-    setErr(null);
-    api.wardenRunLog(logFile)
-      .then((t) => { if (alive) setText(t); })
-      .catch((e) => {
-        if (!alive) return;
-        setErr((e as Error).message || 'Brief unavailable.');
-        toast('Brief unavailable — its log may have rotated out.', { kind: 'info', ttlMs: 5000 });
-      });
-    return () => { alive = false; };
-  }, [logFile, toast]);
-
-  if (!logFile) {
-    return (
-      <div className="inbox-read-empty">
-        <div className="inbox-empty-title">No brief to show</div>
-        <p>This run produced no readable log.</p>
-      </div>
-    );
-  }
-  if (err) {
-    return (
-      <div className="inbox-read-empty">
-        <div className="inbox-empty-title">Brief unavailable</div>
-        <p>{err}</p>
-      </div>
-    );
-  }
-  return (
-    <div className="inbox-scroll">
-      {text === null ? (
-        <div className="inbox-read-empty"><p>Loading brief…</p></div>
-      ) : (
-        <div className="report-md report-md-reader">{renderReportMarkdown(text)}</div>
-      )}
-    </div>
-  );
-}
-
-function AgentReportReadView({ agentId, logFile }: { agentId: string; logFile?: string }) {
+function AgentReportReadView({ agentId, logFile, body }: { agentId: string; logFile?: string; body?: string }) {
   const toast = useStore((s) => s.toast);
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    if (!logFile) return;
+    if (body || !logFile) return;
     let alive = true;
     setText(null);
     setErr(null);
@@ -326,7 +284,12 @@ function AgentReportReadView({ agentId, logFile }: { agentId: string; logFile?: 
         toast('Agent report unavailable — its log may have rotated out.', { kind: 'info', ttlMs: 5000 });
       });
     return () => { alive = false; };
-  }, [agentId, logFile, toast]);
+  }, [agentId, logFile, body, toast]);
+  // A built-in agent alert (PR reviewer down, held fixes) carries its own
+  // text; there is no run log behind it.
+  if (body) {
+    return <div className="inbox-scroll"><div className="report-md report-md-reader">{renderReportMarkdown(body)}</div></div>;
+  }
   if (!logFile || err) {
     return <div className="inbox-read-empty"><div className="inbox-empty-title">Report unavailable</div><p>{err ?? 'This run produced no readable log.'}</p></div>;
   }
@@ -340,6 +303,7 @@ function ThreadView({ number }: { number: number }) {
   const [thread, setThread] = useState<FeedbackThread | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
+  useUnsentInput(replyText);
   const [sending, setSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -437,18 +401,20 @@ function ThreadView({ number }: { number: number }) {
 
 // --------------------------------------------------------------- window ---
 
-function InboxWindow({ sel, setSel, onClose }: {
+function InboxWindow({ sel, setSel, target, clearTarget, onClose }: {
   sel: Sel;
   setSel: (s: Sel) => void;
+  /** A notification tap's item, selected as soon as it is in the feed. */
+  target: InboxTarget | null;
+  clearTarget: () => void;
   onClose: () => void;
 }) {
   const schedules = useStore((s) => s.schedules);
   const feedback = useFeedbackInbox();
-  const warden = useWardenInbox();
   const agentReports = useInboxReports();
   const isPhone = useIsPhone();
   const [filter, setFilter] = useState<Filter>('all');
-  const items = useMemo(() => inboxFeed(schedules, feedback, warden, agentReports), [schedules, feedback, warden, agentReports]);
+  const items = useMemo(() => inboxFeed(schedules, feedback, agentReports), [schedules, feedback, agentReports]);
   const unread = useMemo(() => items.filter((i) => i.unread), [items]);
 
   // Settings' window contract: flex-centered by the backdrop, then pinned so
@@ -459,13 +425,24 @@ function InboxWindow({ sel, setSel, onClose }: {
 
   const select = useCallback((it: InboxItem) => {
     // Viewing marks read — feedback stamps here; reports stamp inside
-    // TaskReportView when the run actually renders; warden stamps its
-    // client-side ledger here.
+    // TaskReportView when the run actually renders; agent decisions are
+    // acknowledged here.
     if (it.feedback) markFeedbackEventRead(it.feedback.number);
-    if (it.warden && markWardenRunRead(it.warden)) notifyWardenInbox();
     if (it.agentReport) void acknowledgeInboxReport(it.agentReport).catch(() => {});
+    // Any selection settles a pending notification target, so a late-loading
+    // item can never yank the reader away from what the user picked.
+    clearTarget();
     setSel(selFor(it));
-  }, [setSel]);
+  }, [setSel, clearTarget]);
+
+  // A tapped push names its automation or agent before the feed may have
+  // loaded it (cold start, the 60 s agent poll). Select it the moment it
+  // appears; until then the window simply shows the feed.
+  useEffect(() => {
+    if (!target) return;
+    const it = items.find((i) => itemMatchesTarget(i, target));
+    if (it) select(it);
+  }, [target, items, clearTarget, select]);
 
   // ↑/↓ (and j/k — mail muscle memory) move the selection; selection IS
   // opening. Esc closes (phone: backs out of the detail first). Movement
@@ -517,9 +494,6 @@ function InboxWindow({ sel, setSel, onClose }: {
         markFeedbackEventRead(it.feedback.number);
       }
     }
-    // Warden runs stamp the client-side ledger in one pass, then notify once.
-    const wardenRuns = unread.filter((i) => i.warden).map((i) => i.warden!);
-    if (markAllWardenRead(wardenRuns)) notifyWardenInbox();
     void acknowledgeAllInboxReports(unread.filter((i) => i.agentReport).map((i) => i.agentReport!)).catch(() => {});
   }
 
@@ -559,7 +533,7 @@ function InboxWindow({ sel, setSel, onClose }: {
               <button
                 type="button"
                 className="reader-btn"
-                title={`Mark all ${unread.length} read`}
+                title={`Mark all ${inboxCountLabel(unread.length)} read`}
                 onClick={markAllRead}
               >Mark all read</button>
             )}
@@ -599,8 +573,7 @@ function InboxWindow({ sel, setSel, onClose }: {
               />
             )}
             {sel?.kind === 'thread' && <ThreadView number={sel.number} />}
-            {sel?.kind === 'warden' && <WardenReadView key={sel.id} logFile={sel.logFile} />}
-            {sel?.kind === 'agentreport' && <AgentReportReadView key={`${sel.id}:${sel.runId}`} agentId={sel.id} logFile={sel.logFile} />}
+            {sel?.kind === 'agentreport' && <AgentReportReadView key={`${sel.id}:${sel.runId}`} agentId={sel.id} logFile={sel.logFile} body={sel.body} />}
             {sel?.kind === 'compose' && (
               <div className="inbox-scroll is-flush">
                 <FeedbackComposer
@@ -627,17 +600,20 @@ function InboxWindow({ sel, setSel, onClose }: {
 // Always-mounted host (App). Also serves `solu:open-reports-feed` (the
 // sidebar chip's original event) so older surfaces keep working.
 export function InboxHost() {
-  const [state, setState] = useState<{ open: boolean; sel: Sel }>({ open: false, sel: null });
+  const [state, setState] = useState<{ open: boolean; sel: Sel; target: InboxTarget | null }>(
+    { open: false, sel: null, target: null });
 
   useEffect(() => {
     const onOpen = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { view?: 'feed' | 'compose'; thread?: number } | undefined;
+      const detail = (e as CustomEvent).detail as {
+        view?: 'feed' | 'compose'; thread?: number; target?: InboxTarget;
+      } | undefined;
       const sel: Sel = detail?.thread
         ? { kind: 'thread', number: detail.thread }
         : detail?.view === 'compose'
           ? { kind: 'compose' }
           : null;
-      setState({ open: true, sel });
+      setState({ open: true, sel, target: detail?.target ?? null });
     };
     window.addEventListener('solu:open-inbox', onOpen);
     window.addEventListener('solu:open-reports-feed', onOpen);
@@ -647,12 +623,16 @@ export function InboxHost() {
     };
   }, []);
 
+  const clearTarget = useCallback(() => setState((s) => ({ ...s, target: null })), []);
+  const setSel = useCallback((sel: Sel) => setState((s) => ({ ...s, sel })), []);
   if (!state.open) return null;
   return (
     <InboxWindow
       sel={state.sel}
-      setSel={(sel) => setState((s) => ({ ...s, sel }))}
-      onClose={() => setState({ open: false, sel: null })}
+      setSel={setSel}
+      target={state.target}
+      clearTarget={clearTarget}
+      onClose={() => setState({ open: false, sel: null, target: null })}
     />
   );
 }

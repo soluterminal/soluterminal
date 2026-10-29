@@ -21,6 +21,7 @@ import { IconPaperclip, IconSend, IconStop } from './icons';
 import { composerVoiceAvailable, slotValue, useComposerVoice } from '../../extensions';
 import { useAccountFeatures } from '../../entitlements';
 import './composer.css';
+import { useUnsentInput } from '../../lib/unsentInput';
 
 export interface ComposerVoiceProps {
   /** Reject delayed dictation after its surface changes scope or target. */
@@ -114,6 +115,8 @@ export function Composer(props: ComposerProps): React.ReactElement {
   } = props;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Unsent text holds the unattended updates (lib/unsentInput.ts).
+  useUnsentInput(draft);
 
   // Dictation needs a free account (cloud voice): without one this is a
   // plain text composer with an always-visible Send button.

@@ -62,6 +62,22 @@ func (a *apiServer) listSchedules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+// getSchedule answers one row, on the same visibility terms as the list: a
+// hidden agent trigger or an imported schedule is "not found" here too. It is
+// what a client fetches when a `schedules-changed` event names one schedule.
+func (a *apiServer) getSchedule(w http.ResponseWriter, r *http.Request) {
+	if a.scheds == nil {
+		http.Error(w, "schedule not found", 404)
+		return
+	}
+	s, ok := a.scheds.Get(r.PathValue("id"))
+	if !ok || s.isAgentRun() || s.OwnedByAgentID != "" {
+		http.Error(w, "schedule not found", 404)
+		return
+	}
+	writeJSON(w, 200, a.makeScheduleDTO(s))
+}
+
 // agentRunScheduleRefused answers 400 when a human-surface mutation targets a
 // hidden agent trigger, naming the endpoint that DOES own it. Returns true when
 // the request was refused (and answered).

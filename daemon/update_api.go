@@ -107,10 +107,33 @@ func (a *apiServer) updateApplyShell(w http.ResponseWriter, r *http.Request) {
 	}
 	// Keep the override deliberately narrow: only the exact documented query
 	// authorizes a downgrade. Extra/duplicated parameters must not accidentally
-	// turn an otherwise-normal automatic request into a forced one.
+	// turn an otherwise-normal automatic request into a forced one. The
+	// unattended update is its own exact query and never forces.
 	forceDowngrade := r.URL.RawQuery == "force=1"
-	path, err := a.updater.ApplyShell(r.Context(), a.dataDir, forceDowngrade)
+	silent := r.URL.RawQuery == "silent=1"
+	var path string
+	var err error
+	if silent {
+		path, err = a.updater.ApplyShellSilent(r.Context(), a.dataDir)
+	} else {
+		path, err = a.updater.ApplyShell(r.Context(), a.dataDir, forceDowngrade)
+	}
 	if err != nil {
+		var paused *silentShellPausedError
+		if errors.As(err, &paused) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"code": "shell_silent_paused", "paused": true, "reason": paused.reason, "message": err.Error(),
+			})
+			return
+		}
+		if errors.Is(err, errSilentShellUnsupported) || errors.Is(err, errSilentCourierWaiting) {
+			code := "shell_silent_unsupported"
+			if errors.Is(err, errSilentCourierWaiting) {
+				code = "shell_silent_waiting"
+			}
+			writeJSON(w, http.StatusConflict, map[string]any{"code": code, "message": err.Error()})
+			return
+		}
 		var held *updateHeldError
 		if errors.As(err, &held) {
 			writeUpdateHeld(w, held)
@@ -130,7 +153,11 @@ func (a *apiServer) updateApplyShell(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, redactUpdateURLs(err.Error()), 500)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"applying": true, "installerPath": path})
+	// silent:true tells the page the installer will run on its own once the
+	// app exits. A daemon without the silent mode treats ?silent=1 as an
+	// ordinary request, opens the installer window and omits it, and the page
+	// then must not close the app as if nothing were left to do.
+	writeJSON(w, 200, map[string]any{"applying": true, "installerPath": path, "silent": silent})
 }
 
 // refuseInstallerOverRelay answers 403 and reports true when r arrived over

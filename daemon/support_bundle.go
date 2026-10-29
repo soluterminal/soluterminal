@@ -413,10 +413,10 @@ func supportBundleHasDaemonIdentity(a *apiServer) bool {
 var supportBundlePrivateLogMarkers = []string{
 	"[native-input]",
 	"aria: send_input",
-	// The todo normalizer logs up to 120 characters of the model reply when its
-	// JSON does not parse. That reply routinely echoes the user's private todo
-	// text, which token redaction cannot make safe, so those records are omitted
-	// from the bundle too.
+	// The removed todo normalizer logged up to 120 characters of the model
+	// reply when its JSON did not parse. That reply routinely echoed the user's
+	// private todo text, which token redaction cannot make safe. Older daemon
+	// logs still hold those records, so they stay omitted from the bundle.
 	"invalid json reply",
 }
 

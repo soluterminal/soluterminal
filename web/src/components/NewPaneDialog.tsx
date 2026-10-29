@@ -567,7 +567,7 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
           {role === 'orchestrator' && selectedOrchestratorSupport.supported && (
             <div className="dialog-help" style={{ color: 'var(--accent)' }}>
               → This {agentLabel(selectedAgent)} session runs as your <strong>Orchestrator</strong>: it investigates, builds,
-              coordinates other panes, keeps the todo list current, and reports what needs your decision.
+              coordinates other panes, and reports what needs your decision.
             </div>
           )}
           {isClaude && glmAllowed && (

@@ -8,10 +8,10 @@ import { deriveRollbackPresentation, deriveUpdateHoldPresentation, type Rollback
 import { userFacingNotes } from '../lib/releaseNotes';
 import { useOperatorFeatures } from '../entitlements';
 import { isPreviewBuild } from '../previewBoot';
-import { isVersionNewer } from '../lib/useCloudShellUpdate';
+import { installerUpdate } from '../lib/installerUpdate';
 import { applyShellUpdateNative, browserPanePing, isDesktopApp, revealShellInstallerNative } from '../tauri-browser';
 import { fallBackToDownloadPage } from '../lib/shellUpdateFallback';
-import { daemonOnThisComputer, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
+import { daemonOnThisComputer, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
 import { UPDATE_CHECK_FAILED } from '../lib/updateErrors';
 import { useIsMobileDevice } from './useIsMobileView';
 import { useDismiss } from './useDismiss';
@@ -146,8 +146,13 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   // to the daemon's. Computed client-side so it's populated even when the daemon
   // can't see the shell (a WSL/Linux daemon under a Windows shell, or cloud).
   const shellCur = desktopVersion || (shellCurrent !== '?' ? shellCurrent : null);
-  const shellUpd = !!(shellLatest && shellCur && isVersionNewer(shellLatest, shellCur));
-  const shellHeld = !!(shellLatest && status?.holdVersion === shellLatest);
+  const installer = installerUpdate(status, shellCur);
+  const shellUpd = !!(shellLatest && shellCur && installer.newer);
+  const shellHeld = installer.held;
+  // The carried installer is older than the installed daemon, so every launch
+  // path would refuse it. Say why instead of offering a button that comes back
+  // after the daemon update and then refuses the click.
+  const shellBlockedByDaemon = shellUpd && installer.blockedByDaemon;
   const lastError = status?.lastError;
   const lastChecked = status?.lastCheckedMs;
   const lastSuccess = status?.lastSuccessMs;
@@ -164,7 +169,7 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   // Windows shell, or cloud where the daemon is remote — unlike the daemon-driven
   // apply, which needs daemon + shell on the same machine (and silently no-ops
   // from a Linux daemon). So detect client-side (shellUpd) and act natively.
-  const shellUpdatable = isDesktopApp() && !isMobileDevice && shellUpd && !shellHeld;
+  const shellUpdatable = isDesktopApp() && !isMobileDevice && shellUpd && !shellHeld && !shellBlockedByDaemon;
   const shellStatusOnly = shellUpd && isMobileDevice;
   const queuedRollbackTarget = deferredUpdate?.rollbackTarget;
   const anyApplying = requestInFlight || applying || shellApplying || shellNativeApplying || rollbackPending;
@@ -244,7 +249,11 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   } else if (shellAutoRestart) {
     const seconds = Math.max(0, Math.ceil((shellAutoRestart.deadlineMs - Date.now()) / 1000));
     buttonSub = `↻ Restarts automatically in ${seconds}s`;
-  } else if (shellAutoApply === 'when-idle' && shellUpdatable) {
+  } else if (available && shellUpdatable && latest) {
+    // One click, two steps: the installer relaunches the app, and the new app
+    // finishes the daemon update itself (store continueUpdateAfterInstaller).
+    buttonSub = `Installer first · the app finishes v${latest} after it restarts`;
+  } else if (shellAutoApply === 'when-idle' && shellUpdatable && shellAutoApplyEnabled(status)) {
     buttonSub = '↻ Restarts automatically when idle';
   }
 
@@ -458,6 +467,11 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
           {`${stalePaneCount} ${stalePaneCount === 1 ? 'pane' : 'panes'} on older builds · update when restarted`}
         </div>
       )}
+      {shellBlockedByDaemon && isDesktopApp() && !isMobileDevice && (
+        <div className="vp-summary" data-testid="vp-installer-blocked">
+          {`Desktop app v${shellCur} · installer v${shellLatest} carries an older daemon than v${current}, so it updates with the next desktop release`}
+        </div>
+      )}
 
       {anyAvailable ? (
         <button
@@ -506,6 +520,9 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
       )}
 
       {lastError && <div className="vp-error">{UPDATE_CHECK_FAILED}</div>}
+      {status?.shellLaunch?.state === 'rejected' && status.shellLaunch.error && (
+        <div className="vp-error">{status.shellLaunch.error}</div>
+      )}
       {shellStatusOnly && (
         <div className="vp-error">
           Installer updates must be started from the desktop app on that computer.

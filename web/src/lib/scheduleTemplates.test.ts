@@ -30,17 +30,15 @@ describe('SCHEDULE_TEMPLATES', () => {
     }
   });
 
-  it('adds oldest open todos to the morning digest only on operator installs', () => {
+  it('never asks for the removed todo tools, on any install', () => {
+    for (const t of SCHEDULE_TEMPLATES) {
+      for (const operator of [true, false]) {
+        expect(templatePrompt(t, operator), t.id).not.toMatch(/list_todos|add_todo|update_todo|todo/i);
+      }
+    }
     const digest = SCHEDULE_TEMPLATES.find((t) => t.id === 'morning-digest')!;
-    const operator = templatePrompt(digest, true);
-    expect(operator).toContain('list_todos MCP tool');
-    expect(operator).toContain("'## Open todos'");
-    expect(operator).toContain('3 oldest open items, oldest first');
-    expect(operator).toContain('omit the section entirely if there are no open todos');
-    // Public installs don't have the todo tools (daemon/mcp_public.go).
-    const pub = templatePrompt(digest, false);
-    expect(pub).not.toMatch(/list_todos|todo/i);
-    expect(pub).toContain('lead with whatever needs my decision today.');
+    expect(templatePrompt(digest, true)).toBe(templatePrompt(digest, false));
+    expect(templatePrompt(digest, false)).toContain('lead with whatever needs my decision today.');
   });
 
   it('never asks a public install for tools it lacks', () => {

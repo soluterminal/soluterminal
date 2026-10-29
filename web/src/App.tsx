@@ -96,9 +96,9 @@ function focusPaneTextarea(paneId: string): void {
 
 import { Topbar } from './components/Topbar';
 import { ScheduleHistoryDeepLink } from './components/ScheduleHistoryDialog';
+import { routeNotificationTap } from './lib/notificationTap';
 import { InboxHost } from './components/inbox/InboxPanel';
 import { ScheduleDialogHost } from './components/ScheduleDialogHost';
-import { TodoQuickAdd } from './components/TodoQuickAdd';
 import { UpdateOverlay } from './components/UpdateOverlay';
 import { RequiredUpdateModal } from './components/RequiredUpdateModal';
 import { DaemonHealthBanner } from './components/DaemonHealthBanner';
@@ -151,6 +151,7 @@ import { PrivateRelayIdentityWarning } from './components/PrivateRelayIdentityWa
 import { PrivateRelayStatus } from './components/PrivateRelayStatus';
 import { RebuildBackoff } from './lib/rebuildBackoff';
 import { PRIVATE_RELAY_STATUS_EVENT } from './lib/privateRelay';
+import { installerUpdate } from './lib/installerUpdate';
 
 const ActivityDialog = lazy(() =>
   import('./components/ActivityDialog').then((mod) => ({ default: mod.ActivityDialog })),
@@ -758,18 +759,17 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const paneId = params.get('pane');
     if (!paneId) return;
-    // Schedule pushes ride the same slot as "sched:<id>" (pusher.go). A tap
-    // on "⏰ Morning digest" should land on the report, not fizzle in the
-    // pane-poll below. Strip-then-dispatch; ScheduleHistoryDeepLink (always
-    // mounted) owns waiting for the schedule to appear in the store.
-    if (paneId.startsWith('sched:')) {
-      const schedId = paneId.slice('sched:'.length);
+    // Automation and agent pushes ride the same slot as "sched:<id>" /
+    // "agent:<id>" (pusher.go). A tap on "⏰ Morning digest" should land on
+    // its Inbox report, not fizzle in the pane-poll below.
+    // routeNotificationTap owns waiting for the item to load.
+    if (paneId.startsWith('sched:') || paneId.startsWith('agent:')) {
       try {
         params.delete('pane');
         const qs = params.toString();
         window.history.replaceState({}, '', window.location.pathname + (qs ? '?' + qs : '') + window.location.hash);
       } catch { /* ignore */ }
-      window.dispatchEvent(new CustomEvent('solu:open-schedule-history', { detail: { id: schedId } }));
+      routeNotificationTap(paneId);
       return;
     }
     let cancelled = false;
@@ -800,19 +800,14 @@ export default function App() {
 
   // Notification tap while the app is ALREADY open at this machine. The SW
   // can't hand a running page a new query param — it posts a message
-  // instead (sw v24). Same routing as the ?pane= arrival above: schedule
-  // ids open the report, pane ids get revealed.
+  // instead (sw v24). Same routing as the ?pane= arrival above: automation
+  // and agent ids open their Inbox item, pane ids get revealed.
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
     const onMsg = (e: MessageEvent) => {
       const d = e.data as { type?: string; paneId?: string } | null;
       if (!d || d.type !== 'solu:notification-tap' || !d.paneId) return;
-      if (d.paneId.startsWith('sched:')) {
-        window.dispatchEvent(new CustomEvent('solu:open-schedule-history', {
-          detail: { id: d.paneId.slice('sched:'.length) },
-        }));
-        return;
-      }
+      if (routeNotificationTap(d.paneId)) return;
       const st = useStore.getState();
       if (st.panes[d.paneId]) void st.revealPane(d.paneId);
     };
@@ -1045,7 +1040,6 @@ export default function App() {
       void st.refreshPanes();
       void st.refreshUpdateStatus();
       void st.refreshSchedules();
-      void st.refreshTodos();
 
       // ARIA cap pill resync: aria-status-changed is also a
       // transition-only event, so any fires that landed while SSE was
@@ -1296,9 +1290,10 @@ export default function App() {
           // reflects the current pause state.
           void api.ariaStatus().then((s) => st.setAriaStatusSnapshot(s)).catch(() => {});
         } else if (msg.type === 'schedules-changed') {
-          void st.refreshSchedules();
-        } else if (msg.type === 'todos-changed') {
-          void st.refreshTodos();
+          // A run event names its schedule: refetch that row only. No name
+          // means the list itself changed (create, edit, delete).
+          if (msg.text) void st.refreshSchedule(msg.text);
+          else void st.refreshSchedules();
         } else if (uiEventHandler(msg.type)) {
           // Events of optional features (extensions.ts).
           uiEventHandler(msg.type)!(msg);
@@ -1346,7 +1341,10 @@ export default function App() {
           void (async () => {
             await st.refreshUpdateStatus();
             const fresh = useStore.getState().updateStatus;
-            if (fresh?.shellAvailable && fresh.shellLatest && coalesceUpdateToast(fresh.shellLatest)) {
+            // Not for an installer every launch path would refuse because it
+            // carries an older daemon than this one (lib/installerUpdate.ts).
+            if (fresh?.shellAvailable && fresh.shellLatest && !installerUpdate(fresh).blockedByDaemon
+              && coalesceUpdateToast(fresh.shellLatest)) {
               useStore.getState().toast(
                 `New installer ${fresh.shellLatest} available`,
                 { kind: 'info', icon: '↑', ttlMs: 8000 },
@@ -1813,10 +1811,6 @@ export default function App() {
                 case 'pane.zoom':
                   useStore.getState().toggleZoom();
                   break;
-                case 'todo.quickAdd':
-                  // Handled by the always-mounted TodoQuickAdd overlay.
-                  window.dispatchEvent(new CustomEvent('solu:todo-capture-open'));
-                  break;
                 case 'palette.actions':
                   setPalette({ open: true, mode: 'actions' });
                   break;
@@ -2109,8 +2103,6 @@ export default function App() {
       {/* Hosts registered by optional features — same always-mounted
           rationale (see extensions.ts). */}
       {slotList('appHosts').map((Host, i) => <Host key={i} />)}
-      {/* Quick todo capture (Alt+T / palette / `solu:todo-capture-open`). */}
-      <TodoQuickAdd />
       {/* Row 1 (the .app grid's `auto` banner row). Both in-flow advisories
           share this single wrapper so neither becomes an extra grid child
           that would shift the Topbar/pane-grid into the wrong rows. */}

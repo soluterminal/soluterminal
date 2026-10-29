@@ -23,10 +23,11 @@ import { type NativeMetaBarFields, NATIVE_METABAR_DEFAULTS, sanitizeMetaBarField
 import { clearVitalsSnapshot } from './native/vitalsSnapshot';
 import { prettyModelName } from './native/modelInfo';
 import { hasAnyUnsentDraft } from './native/useNativePane';
-import { applyShellUpdateSilentNative, exitForUpdateNative, getShellVersion, isDesktopApp } from './tauri-browser';
+import { applyShellUpdateSilentNative, exitForUpdateNative, getShellVersion, isDesktopApp, type ShellUpdateNativeResult } from './tauri-browser';
 import { isCloudLaunchMode, isVersionNewer } from './lib/useCloudShellUpdate';
-import { daemonOnThisComputer } from './lib/shellUpdateRoute';
-import type { BrowserInfo, FileTileInfo, Layout, McpServer, NativeSettings, OrchestratorHostInfo, PaneAutoMode, PaneEffort, PaneInfo, PaneRole, Port, RecoveryResumeMode, RecoverySettings, RollbackDecline, Schedule, ScheduleInput, ShellAutoRestart, Todo, UpdateAutoApplyMode, UpdateHold, UpdateSettings, UpdateStatus, WardenSettings, Workspace, WorkspaceSummary } from './types';
+import { daemonOnThisComputer, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from './lib/shellUpdateRoute';
+import { hasRegisteredUnsentInput } from './lib/unsentInput';
+import type { BrowserInfo, FileTileInfo, Layout, McpServer, NativeSettings, OrchestratorHostInfo, PaneAutoMode, PaneEffort, PaneInfo, PaneRole, Port, RecoveryResumeMode, RecoverySettings, RollbackDecline, Schedule, ScheduleInput, ShellAutoRestart, UpdateAutoApplyMode, UpdateHold, UpdateSettings, UpdateStatus, WardenSettings, Workspace, WorkspaceSummary } from './types';
 import { agentLabel, effectivePaneAgent } from './lib/agentKind';
 import {
   buildNxMFromLeaves,
@@ -66,6 +67,7 @@ import {
 import { getDaemonHealthState, refreshDaemonHealth, subscribeDaemonHealthState } from './lib/useDaemonHealth';
 import { slotValue } from './extensions';
 import { defaultBrowserUrl } from './lib/browserStart';
+export type PaneSnapshotFn = (opts?: { screen?: boolean }) => string;
 export type { DropZone } from './lib/paneDnd';
 export { leafCount, paneIdsInOrder } from './lib/layout';
 export type { LayoutPresetId } from './lib/layout';
@@ -202,6 +204,13 @@ function queueDeferredUpdate(next: UpdateHold, auto: boolean) {
       }
     }
 
+    // An unattended swap held for other work also waits out text typed in a
+    // compose box meanwhile: the swap reloads the page.
+    if (current.auto && !current.rollbackTarget && hasUnsentInput()) {
+      queueDeferredUpdate(current, current.auto);
+      return;
+    }
+
     try {
       if (current.rollbackTarget) {
         await get().rollbackUpdate({
@@ -336,6 +345,40 @@ function writeShellHoldStamp(stamp: ShellHoldStamp): void {
   try { localStorage.setItem(SHELL_AUTO_HOLD_KEY, JSON.stringify(stamp)); } catch { /* memory only */ }
 }
 
+// "Update now (app + installer)" is ONE click for two steps. applyAllUpdates
+// launches the installer first (it must: updating the daemon first can make
+// the carried installer a downgrade), and the installer closes and relaunches
+// the app. Most installers carry an older daemon than the manifest's latest
+// (daemon-only releases carry the last installer forward), so the relaunched
+// app still had the daemon update waiting and the user had to click again.
+// The click's intent survives the relaunch here; the next page load that sees
+// the new desktop app finishes the daemon step itself. It never fires on the
+// page that launched the installer (a cancelled installer leaves the app
+// running and unchanged), and it lapses after UPDATE_CONTINUE_TTL_MS.
+const UPDATE_CONTINUE_KEY = 'solu.update.continueAfterInstaller';
+export const UPDATE_CONTINUE_TTL_MS = 2 * 60 * 60 * 1000;
+const UPDATE_CONTINUE_PAGE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+interface UpdateContinuation { shellTarget: string; daemonTarget: string; at: number; page: string }
+let updateContinueMem: UpdateContinuation | null = null;
+let updateContinueCheckInFlight = false;
+
+function readUpdateContinuation(): UpdateContinuation | null {
+  try {
+    const value = localStorage.getItem(UPDATE_CONTINUE_KEY);
+    if (value) return JSON.parse(value) as UpdateContinuation;
+  } catch { /* memory fallback */ }
+  return updateContinueMem;
+}
+
+function writeUpdateContinuation(next: UpdateContinuation | null): void {
+  updateContinueMem = next;
+  try {
+    if (next) localStorage.setItem(UPDATE_CONTINUE_KEY, JSON.stringify(next));
+    else localStorage.removeItem(UPDATE_CONTINUE_KEY);
+  } catch { /* memory only */ }
+}
+
 export function noteUserActivity(): void {
   lastUserInputMs = Math.max(Date.now(), lastUserInputMs + 1);
 }
@@ -359,6 +402,69 @@ function disarmShellAutoRestart(): void {
   if (useStore.getState().shellAutoRestart) useStore.setState({ shellAutoRestart: null });
 }
 
+// Text typed and not yet sent: a native pane's draft (kept per pane, mounted
+// or not) or any other compose box on this page (lib/unsentInput.ts). Both
+// unattended updates wait for it: the daemon swap reloads the page and the
+// installer update restarts the app.
+export function hasUnsentInput(): boolean {
+  return hasAnyUnsentDraft() || hasRegisteredUnsentInput();
+}
+
+// The desktop app's installer update runs only for the app on this computer,
+// talking to its own daemon. Not useCloud's mode: a signed-in local install
+// reports 'cloud' too (shellUpdateRoute.ts), which kept this path off on every
+// official install.
+function shellAutoApplyAllowedHere(): boolean {
+  return isDesktopApp() && daemonOnThisComputer() && !isMobileViewport();
+}
+
+// The silent installer update for this install's channel. On the team channel
+// only the local daemon can fetch and verify the team installer; it stages it
+// and a courier installs it with no window once the app exits. Elsewhere the
+// app's own updater does the same from the public releases.
+type SilentShellOutcome = ShellUpdateNativeResult & { interactiveLaunched?: boolean; paused?: boolean };
+
+async function applyShellUpdateSilently(status: UpdateStatus | null): Promise<SilentShellOutcome> {
+  if (!shellUpdateNeedsDaemon(status)) return applyShellUpdateSilentNative(false);
+  try {
+    const accepted = await api.applyShellUpdate(false, { silent: true });
+    // A daemon without the silent mode opened the installer window instead.
+    // Closing the app now would leave the user with a half-finished wizard.
+    if (accepted.silent !== true) return { ok: false, interactiveLaunched: true };
+    return { ok: true };
+  } catch (error) {
+    const body = error instanceof ApiError && error.body && typeof error.body === 'object'
+      ? error.body as Record<string, unknown>
+      : {};
+    const code = apiErrorCode(error);
+    // Paused by the operator between the last status read and now: a state,
+    // not a failure.
+    if (code === 'shell_silent_paused') return { ok: false, paused: true };
+    return {
+      ok: false,
+      // A typed refusal gets the caller's own copy, not the raw HTTP text.
+      error: code ? undefined : error instanceof Error ? error.message : String(error),
+      downgradeRefused: code === 'shell_daemon_downgrade_refused',
+      ...(code === 'update_held' ? { updateHeld: true } : {}),
+      installedVersion: typeof body.installedVersion === 'string' ? body.installedVersion : undefined,
+      installerVersion: typeof body.installerVersion === 'string'
+        ? body.installerVersion
+        : typeof body.heldVersion === 'string' ? body.heldVersion : undefined,
+    };
+  }
+}
+
+function shellHoldCopy(reason: string | undefined): string {
+  switch (reason) {
+    case 'agent mid-turn': return 'an agent is mid-turn';
+    case 'approval pending': return 'an approval is waiting for you';
+    case 'pane needs user input': return 'a pane is waiting for your answer';
+    case 'workflow invocation in flight': return 'a workflow is still running';
+    case 'unsent draft': return 'a message box has text you have not sent';
+    default: return reason ?? 'active work';
+  }
+}
+
 function shellUpdateSafetyGate(): { idle: boolean; reason?: string } {
   const state = useStore.getState();
   if (nativePaneBusy(state.panes)) return { idle: false, reason: 'agent mid-turn' };
@@ -371,7 +477,7 @@ function shellUpdateSafetyGate(): { idle: boolean; reason?: string } {
   if (state.updateStatus?.workflowDeferred || (state.updateStatus?.workflowInflight ?? 0) > 0) {
     return { idle: false, reason: 'workflow invocation in flight' };
   }
-  if (hasAnyUnsentDraft()) return { idle: false, reason: 'unsent draft' };
+  if (hasUnsentInput()) return { idle: false, reason: 'unsent draft' };
   return { idle: true };
 }
 
@@ -552,15 +658,6 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   schedules: Schedule[];
   orchestratorHosts: OrchestratorHostInfo[] | null;
   loadOrchestratorHosts: () => Promise<void>;
-  // Sidebar TODO list. Global across workspaces — see daemon/todos.go.
-  // Newest-first (server controls order); SSE `todos-changed` triggers
-  // refreshTodos so writes from any client (UI, MCP via Claude, another
-  // browser tab) propagate.
-  todos: Todo[];
-  refreshTodos: () => Promise<void>;
-  addTodo: (text: string, workspace?: string) => Promise<void>;
-  patchTodo: (id: string, patch: { text?: string; done?: boolean; taskId?: string }) => Promise<void>;
-  removeTodo: (id: string) => Promise<void>;
 
   // Restart recovery controls what the daemon does with resumable Claude panes
   // after a host reboot / WSL shutdown. Manual is the safe default: panes stay
@@ -850,9 +947,11 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // Per-pane snapshot getters (set by <Pane> when xterm mounts).
   // Returns a plain-text dump of the last ~50 lines of the pane's
   // visible buffer — used by voice-to-text to give the cleanup LLM
-  // context about what the user is currently looking at.
-  paneSnapshots: Record<string, () => string>;
-  registerPaneSnapshot: (id: string, fn: () => string) => void;
+  // context about what the user is currently looking at. With
+  // { screen: true } it returns only the live screen rows (no
+  // scrollback), which menu-key confirmation needs (lib/menuKeys.ts).
+  paneSnapshots: Record<string, PaneSnapshotFn>;
+  registerPaneSnapshot: (id: string, fn: PaneSnapshotFn) => void;
   unregisterPaneSnapshot: (id: string, expected?: unknown) => void;
   getFocusedPaneSnapshot: () => string | null;
 
@@ -1000,6 +1099,8 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // loadWorkspace restores what we just wrote — not a stale snapshot.
   mergeSavedWorkspaceIntoCache: (saved: Workspace) => void;
   refreshSchedules: () => Promise<void>;
+  /** Refetch ONE schedule (a run started or landed) and patch it in place. */
+  refreshSchedule: (id: string) => Promise<void>;
 
   // Self-update — daemon polls GitHub Releases every 15 min and
   // publishes "update-available" via the SSE bus when a new version
@@ -1050,6 +1151,9 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // Monotonic combined-update flow. A component may supply the native shell
   // launcher for cloud/WSL topology; ordering and downgrade policy stay here.
   applyAllUpdates: (opts?: { applyShell?: () => Promise<void>; shellActionable?: boolean }) => Promise<ApplyAllUpdatesResult | undefined>;
+  // Finishes the daemon half of a combined update once the installer has
+  // relaunched the app (see UPDATE_CONTINUE_KEY). Runs on every status refresh.
+  continueUpdateAfterInstaller: () => Promise<void>;
 
   // MCP servers configured for a given pane cwd. Cached per-cwd so
   // switching focus between panes that share a project doesn't refetch.
@@ -1290,18 +1394,11 @@ function trackWorkspaceSave<T>(save: Promise<T>): Promise<T> {
   return save;
 }
 let refreshSchedulesInFlight: Promise<void> | null = null;
-
-function todoRefreshSignature(todos: Todo[]): string {
-  return JSON.stringify(todos.map((todo) => ({
-    id: todo.id,
-    text: todo.text,
-    done: todo.done,
-    doneAt: todo.doneAt,
-    taskId: todo.taskId,
-    workspace: todo.workspace,
-    duplicateOf: todo.duplicateOf,
-  })));
-}
+const refreshScheduleInFlight = new Map<string, Promise<void>>();
+// Rows invalidated while a fetch that may predate the change was in flight
+// (e.g. a run ended while its "running…" row was being fetched). Each gets
+// one trailing fetch once nothing is in flight for it.
+const scheduleRowsDirty = new Set<string>();
 
 function scheduleAutosave(get: () => State) {
   if (workspaceMovedTo(get().activeWorkspace)) return;
@@ -2653,7 +2750,6 @@ export const useStore = create<State>((set, get, storeApi) => ({
   workspaces: [],
   schedules: [],
   orchestratorHosts: null,
-  todos: [],
   recoverySettings: null,
   nativeSettings: null,
   updateSettings: null,
@@ -3880,7 +3976,6 @@ export const useStore = create<State>((set, get, storeApi) => ({
         workspaces: [],
         ports: [],
         schedules: [],
-        todos: [],
         browsers: {},
         files: {},
         activeWorkspace: CURRENT_WS,
@@ -4370,49 +4465,58 @@ export const useStore = create<State>((set, get, storeApi) => ({
         // Non-fatal; retry happens on the next poll or uiBus event.
       } finally {
         refreshSchedulesInFlight = null;
+        for (const id of [...scheduleRowsDirty]) {
+          if (refreshScheduleInFlight.has(id)) continue;
+          scheduleRowsDirty.delete(id);
+          void get().refreshSchedule(id);
+        }
       }
     })();
     return refreshSchedulesInFlight;
   },
 
-  refreshTodos: async () => {
-    try {
-      const t = await api.listTodos();
-      set((state) => (
-        todoRefreshSignature(state.todos) === todoRefreshSignature(t)
-          ? state
-          : { todos: t }
-      ));
-    } catch {
-      // Non-fatal; SSE `todos-changed` and the next user write will retry.
+  // A run event names its schedule, so one ~KB row comes back instead of the
+  // whole list (~160 KB with 38 schedules' run histories) — previously every
+  // run made every open window reload everything, twice. A full refresh
+  // already in flight covers the row, so ride it.
+  refreshSchedule: async (id) => {
+    const pending = refreshScheduleInFlight.get(id) ?? refreshSchedulesInFlight;
+    if (pending) {
+      // That response may predate this change: fetch the row once more after.
+      scheduleRowsDirty.add(id);
+      return pending;
     }
+    const p = (async () => {
+      try {
+        const row = await api.getSchedule(id);
+        const list = get().schedules;
+        const at = list.findIndex((s) => s.id === id);
+        if (at === -1) {
+          set({ schedules: [...list, row] });
+        } else if (!sameJsonValue(list[at], row)) {
+          const next = list.slice();
+          next[at] = row;
+          set({ schedules: next });
+        }
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) {
+          const list = get().schedules;
+          if (list.some((s) => s.id === id)) set({ schedules: list.filter((s) => s.id !== id) });
+        } else if (e instanceof ApiError && (e.status === 405 || e.status === 400)) {
+          // An older daemon without the single-row route: fall back.
+          await get().refreshSchedules();
+        }
+        // Otherwise non-fatal; the next event or reconnect resyncs.
+      } finally {
+        refreshScheduleInFlight.delete(id);
+        if (scheduleRowsDirty.delete(id) && !refreshSchedulesInFlight) void get().refreshSchedule(id);
+      }
+    })();
+    refreshScheduleInFlight.set(id, p);
+    return p;
   },
-  addTodo: async (text, workspace) => {
-    const td = await api.createTodo(text, workspace);
-    set((st) => ({ todos: [td, ...st.todos] }));
-  },
-  patchTodo: async (id, patch) => {
-    const prev = get().todos;
-    // Optimistic — checkbox feedback shouldn't wait on a round trip.
-    set({ todos: prev.map((t) => (t.id === id ? { ...t, ...patch, doneAt: patch.done ? Date.now() : (patch.done === false ? undefined : t.doneAt) } : t)) });
-    try {
-      const td = await api.updateTodo(id, patch);
-      set((st) => ({ todos: st.todos.map((t) => (t.id === id ? td : t)) }));
-    } catch (e) {
-      set({ todos: prev });
-      throw e;
-    }
-  },
-  removeTodo: async (id) => {
-    const prev = get().todos;
-    set({ todos: prev.filter((t) => t.id !== id) });
-    try {
-      await api.deleteTodo(id);
-    } catch (e) {
-      set({ todos: prev });
-      throw e;
-    }
-  },
+
+
 
   loadRecoverySettings: async () => {
     try {
@@ -4600,6 +4704,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
       // its once-per-version guard keeps repeated polls from re-firing.
       get().maybeAutoApplyUpdate();
       get().maybeAutoApplyShellUpdate();
+      void get().continueUpdateAfterInstaller();
     } catch {
       // Daemon temporarily unreachable (mid-restart, network blip); the
       // SSE "update-available" frame will retrigger us, and the user
@@ -4646,6 +4751,10 @@ export const useStore = create<State>((set, get, storeApi) => ({
     if (!s?.available || !s.latest) return;
     if (s.holdVersion && s.holdVersion === s.latest) return;
     if (s.applying || s.workflowDeferred || st.deferredUpdate) return; // already swapping / queued
+    // The swap reloads the page, which loses a compose box's unsent text. Wait
+    // until it is sent or cleared: the next status refresh (30 s poll, SSE)
+    // re-evaluates, and no stamp is written, so nothing is used up meanwhile.
+    if (hasUnsentInput()) return;
     const v = s.latest;
     // Once per version — but a transient failure retries after the cooldown, and
     // a NEW version (different `latest`) always gets a fresh attempt.
@@ -4656,19 +4765,19 @@ export const useStore = create<State>((set, get, storeApi) => ({
     // Swallow rejections: this is the unattended path, so a refusal (daemon
     // already mid-swap, another device won the race, network blip) gets no
     // toast — the stamp cooldown retries on a later poll if it mattered.
-    // NOTE: a silent swap reloads the page; if the user is mid-compose in a Focus
-    // pane (agent idle, so not "busy") their unsent draft is lost. Composer drafts
-    // aren't in the store today, so guarding on them is a fast-follow — see
-    // PLAN-auto-update-when-idle §4.
     void st.applyUpdate({ auto: true }).catch(() => {});
   },
 
   maybeAutoApplyShellUpdate: () => {
     const before = get();
     const status = before.updateStatus;
-    if (!isDesktopApp() || useCloud.getState().mode === 'cloud' || isMobileViewport()) return;
+    if (!shellAutoApplyAllowedHere()) return;
     if (before.updateSettings?.shellAutoApply !== 'when-idle') return;
     if (!status?.shellLatest || status.shellApplying || status.applying) return;
+    if (!shellAutoApplyEnabled(status)) return;
+    // Through the daemon only when it verified it can install for this
+    // computer's app (a plain install.sh daemon has no installer to offer).
+    if (shellUpdateNeedsDaemon(status) && !status.shellAvailable) return;
     if (status.holdVersion && status.holdVersion === status.shellLatest) return;
     if (status.current && isVersionNewer(status.current, status.shellLatest)) return;
     if (before.shellAutoRestart || shellAutoCheckInFlight) return;
@@ -4691,8 +4800,10 @@ export const useStore = create<State>((set, get, storeApi) => ({
         const fresh = current.updateStatus;
         if (!installed || !fresh?.shellLatest || !isVersionNewer(fresh.shellLatest, installed)) return;
         if (fresh.holdVersion && fresh.holdVersion === fresh.shellLatest) return;
-        if (!isDesktopApp() || useCloud.getState().mode === 'cloud' || isMobileViewport()) return;
+        if (!shellAutoApplyAllowedHere()) return;
         if (current.updateSettings?.shellAutoApply !== 'when-idle') return;
+        if (shellUpdateNeedsDaemon(fresh) && !fresh.shellAvailable) return;
+        if (!shellAutoApplyEnabled(fresh)) return;
         if (fresh.shellApplying || fresh.applying || current.shellAutoRestart) return;
         if (fresh.current && isVersionNewer(fresh.current, fresh.shellLatest)) return;
         const freshHold = readShellHoldStamp();
@@ -4723,6 +4834,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
             state.updateSettings?.shellAutoApply !== 'when-idle' ||
             state.updateStatus?.shellLatest !== armed.version ||
             state.updateStatus?.holdVersion === armed.version ||
+            !shellAutoApplyEnabled(state.updateStatus) ||
             !shellUpdateIdleGate().idle ||
             lastUserInputMs > shellAutoRestartArmedAtMs
           ) {
@@ -4750,6 +4862,16 @@ export const useStore = create<State>((set, get, storeApi) => ({
     const gate = opts?.userInitiated ? shellUpdateSafetyGate() : shellUpdateIdleGate();
     if (!gate.idle) {
       disarmShellAutoRestart();
+      // A click on "Restart now" must not just make the banner vanish.
+      if (opts?.userInitiated) {
+        get().toast(`Restart held: ${shellHoldCopy(gate.reason)}. It restarts automatically once that clears.`, {
+          kind: 'info', icon: '↑', ttlMs: 8000,
+        });
+      }
+      return;
+    }
+    if (!shellAutoApplyAllowedHere() || (!opts?.userInitiated && !shellAutoApplyEnabled(state.updateStatus))) {
+      disarmShellAutoRestart();
       return;
     }
     disarmShellAutoRestart();
@@ -4765,7 +4887,25 @@ export const useStore = create<State>((set, get, storeApi) => ({
         ? { ...current.updateStatus, shellApplying: true }
         : current.updateStatus,
     }));
-    const outcome = await applyShellUpdateSilentNative(false);
+    const outcome = await applyShellUpdateSilently(state.updateStatus);
+    if (outcome.paused) {
+      // Not an attempt and not an error: the manual banner takes over. Put
+      // back the count from before this call, so earlier failures still count.
+      if (previous && previous.version === version) writeShellAttemptStamp(previous);
+      else clearShellAttemptStamp(version);
+      if (opts?.userInitiated) {
+        get().toast('Automatic desktop restarts are paused for this install. Use Update now to install the desktop update.', {
+          kind: 'info', icon: '↑', ttlMs: 8000,
+        });
+      }
+      set((current) => ({
+        updateStatus: current.updateStatus
+          ? { ...current.updateStatus, shellApplying: false, shellAutoApplyPaused: true }
+          : current.updateStatus,
+      }));
+      void get().refreshUpdateStatus();
+      return;
+    }
     if (!outcome.ok) {
       set((current) => ({
         updateStatus: current.updateStatus
@@ -4776,6 +4916,8 @@ export const useStore = create<State>((set, get, storeApi) => ({
         ? `Desktop update refused: installed daemon ${outcome.installedVersion ?? 'unknown'} is newer than bundled daemon ${outcome.installerVersion ?? version}. Automatic updates never force a downgrade.`
         : outcome.updateHeld
           ? outcome.error ?? `Desktop version ${outcome.installerVersion ?? version} is paused by a rollback hold. Resume updates before retrying.`
+        : outcome.interactiveLaunched
+          ? 'The desktop installer opened — follow its prompts to finish the update.'
         : 'Automatic desktop update could not start — use Update now to finish manually.';
       get().toast(message, { kind: 'warn', icon: '⚠', ttlMs: 8000 });
       return;
@@ -5182,6 +5324,17 @@ export const useStore = create<State>((set, get, storeApi) => ({
       // Launch the installer first. It carries daemon == shell.version; after
       // restart that daemon can safely finish any remaining daemon-only update.
       // Updating the daemon first recreated the real 0.0.932→0.0.916 incident.
+      // The daemon half carries on after the relaunch. Only for a daemon on
+      // this computer: in cloud launch mode or a relayed session the status
+      // belongs to another machine's daemon, which this click never updates.
+      if (status?.available && status.latest && !cloudLaunchMode && daemonOnThisComputer()) {
+        writeUpdateContinuation({
+          shellTarget: installer,
+          daemonTarget: status.latest,
+          at: Date.now(),
+          page: UPDATE_CONTINUE_PAGE,
+        });
+      }
       try {
         await (opts?.applyShell ? opts.applyShell() : get().applyShellUpdate());
       } catch {
@@ -5212,6 +5365,58 @@ export const useStore = create<State>((set, get, storeApi) => ({
       return refusal;
     }
     return refusal;
+  },
+
+  continueUpdateAfterInstaller: async () => {
+    const intent = readUpdateContinuation();
+    if (!intent) return;
+    if (!intent.shellTarget || !intent.daemonTarget || Date.now() - intent.at > UPDATE_CONTINUE_TTL_MS) {
+      writeUpdateContinuation(null);
+      return;
+    }
+    // The page that launched the installer: the app has not been replaced.
+    if (intent.page === UPDATE_CONTINUE_PAGE) return;
+    if (!isDesktopApp() || isCloudLaunchMode() || !daemonOnThisComputer()) return;
+    const before = get();
+    const status = before.updateStatus;
+    if (!status?.current) return;
+    // Already there: the relaunched app may have updated its WSL daemon on its
+    // own (desktop daemon.rs request_wsl_upgrade_once), or another client did.
+    if (!isVersionNewer(intent.daemonTarget, status.current)) {
+      writeUpdateContinuation(null);
+      return;
+    }
+    // A swap or hold already in motion settles first; the next refresh decides.
+    if (status.applying || status.workflowDeferred || before.deferredUpdate || before.updateApplyRequestInFlight) return;
+    if (updateContinueCheckInFlight) return;
+    updateContinueCheckInFlight = true;
+    try {
+      const installed = await getShellVersion();
+      // The installer has not finished (or was cancelled): wait, until the TTL.
+      if (!installed || isVersionNewer(intent.shellTarget, installed)) return;
+      const fresh = get().updateStatus;
+      // A just-started daemon has not fetched its manifest yet (no latest,
+      // available false for its first seconds): unknown, not "nothing to do".
+      if (!fresh?.latest) return;
+      if (!fresh.available || (fresh.holdVersion && fresh.holdVersion === fresh.latest)) {
+        writeUpdateContinuation(null);
+        return;
+      }
+      if (fresh.applying || fresh.workflowDeferred || get().deferredUpdate || get().updateApplyRequestInFlight) return;
+      writeUpdateContinuation(null);
+      get().toast(`Desktop app updated — finishing the update to v${fresh.latest}…`, { kind: 'info', icon: '↑', ttlMs: 6000 });
+      try {
+        // Not forced: a mid-turn Focus pane or a workflow drain queues it
+        // exactly like the click would have, with the same visible hold.
+        await get().applyUpdate();
+      } catch (e) {
+        get().toast(`Couldn't finish the update automatically: ${(e as Error).message} — use Update now`, {
+          kind: 'warn', icon: '⚠', ttlMs: 8000,
+        });
+      }
+    } finally {
+      updateContinueCheckInFlight = false;
+    }
   },
 
   refreshMcpServers: async (cwd) => {

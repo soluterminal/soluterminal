@@ -53,9 +53,8 @@ const orchestratorBriefMarker = "You are the orchestrator for this machine"
 
 // orchestratorBrief is the chief-of-staff system prompt appended to a
 // role=orchestrator pane (terminal AND native). It defines the product
-// behavior: own buildable work, coordinate separate pane writers, keep the
-// shared todo list current, report what needs a human decision, and never route
-// around the approval gates.
+// behavior: own buildable work, coordinate separate pane writers, report what
+// needs a human decision, and never route around the approval gates.
 //
 // HARD constraints on this text (pinned by TestOrchestratorBriefTextConstraints):
 //   - NO ASCII single quote — the terminal argv is single-quoted into a
@@ -72,7 +71,7 @@ const orchestratorBrief = `You are the orchestrator for this machine. Own the wo
 
 Work directly in your session: investigate, implement, test and prepare changes for the user to merge. The workflow task engine is retired. Do not create workflow tasks. Use list_panes, ask_pane, wait_for_pane and read_pane_tail to coordinate separate writers when work splits cleanly. Give each worker a self-contained assignment and avoid conflicting edits. Use spawn_pane for user-driven interaction.
 
-Keep shared plans and handoffs in tracked repository files. Use create_schedule only when the user requests recurring work. Use add_todo and update_todo to keep the shared todo list current, and list_managed_agents for fleet status. Record done:true when your work completes an open todo.
+Keep shared plans and handoffs in tracked repository files. Use create_schedule only when the user requests recurring work. When a thread needs the user to come back to it, flag its pane with set_pane_flag and a short memo.
 
 Follow the repository AGENTS.md before handing back: get one independent review in a fresh context, fix each must-fix finding or explain the disagreement, and stop after at most two review rounds. In soluterminal use scripts/solu-review. The user decides what merges. Never bypass human approval gates or claim approval, merge or release without authoritative evidence.`
 

@@ -13,9 +13,7 @@ import { REBINDABLE_ACTIONS } from '../keybindings';
 import type { PaneAutoMode } from '../types';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { roleConvertAllowed, slotList, type PaletteAction } from '../extensions';
-import { operatorFeaturesAllowed, personalViewOn, useEntitlements } from '../entitlements';
-import { usePrefs } from '../prefs';
-import { todosSectionVisible } from './sidebar/sidebarSections';
+import { operatorFeaturesAllowed, useEntitlements } from '../entitlements';
 import { confirmConvertPaneRole } from './usePaneContextMenu';
 import { restartPaneFlow } from '../lib/paneRestart';
 import { useSettings } from '../settings';
@@ -316,18 +314,6 @@ export function CommandPalette({
         keywords: 'fanout multicast send all claude',
         shortcut: 'Alt+Shift+B',
         run: () => onOpenBroadcast(),
-      },
-      {
-        id: 'todo.quickAdd',
-        label: 'Add a todo',
-        hint: 'Quick capture into the global todo inbox',
-        category: 'Workspace',
-        keywords: 'todo task capture note remember idea backlog',
-        shortcut: 'Alt+T',
-        run: () => {
-          onClose();
-          window.dispatchEvent(new CustomEvent('solu:todo-capture-open'));
-        },
       },
       {
         id: 'settings.open',
@@ -836,8 +822,6 @@ export function CommandPalette({
     // The workflow Tasks console and Orchestrator role are team-only on the
     // public beta. Read per open (the memo re-runs on `open`).
     const team = operatorFeaturesAllowed();
-    const sidebar = personalViewOn() ? undefined : usePrefs.getState().prefs.sidebar;
-    const todosShown = todosSectionVisible(sidebar?.order, sidebar?.hidden, team);
     const ent = useEntitlements.getState();
     if (ent.loaded && (ent.real.team || ent.real.operator)) {
       const personal = ent.viewPersonal;
@@ -855,8 +839,7 @@ export function CommandPalette({
         },
       });
     }
-    return list.filter((a) => (team || !TEAM_ONLY_ACTIONS.has(a.id))
-      && (todosShown || a.id !== 'todo.quickAdd'));
+    return list.filter((a) => team || !TEAM_ONLY_ACTIONS.has(a.id));
     // `open` in the deps re-snapshots panes each time the palette opens
     // — see the unread-surface block above for why we don't subscribe.
   }, [open, recentlyClosedPanes, focusedPaneId, focusedPaneCwd, focusEnabled, isFocusedNative, isFocusedAgentCapable, focusedAgentLabel, isFocusedAutoApproveCapable, focusedAutoMode, workspaces, wsOrder, activeWorkspace, onClose, onOpenHelp, onOpenNewPane, onOpenBroadcast, onOpenFeedback]);

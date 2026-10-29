@@ -5,8 +5,9 @@ import { useIsMobileDevice, useIsMobileView } from './useIsMobileView';
 import { applyShellUpdateNative, isDesktopApp, revealShellInstallerNative } from '../tauri-browser';
 import { apiErrorCode } from '../api';
 import { fallBackToDownloadPage } from '../lib/shellUpdateFallback';
-import { daemonOnThisComputer, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
+import { daemonOnThisComputer, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
 import { useShellUpdate } from '../lib/useCloudShellUpdate';
+import { installerUpdate } from '../lib/installerUpdate';
 import { VersionPopover } from './VersionPopover';
 
 // THE update signal. It shows IMMEDIATELY when an update lands (the old
@@ -84,16 +85,18 @@ export function UpdateBanner() {
       && updateStatus?.workflowDeferState !== 'backoff'
       && updateStatus?.workflowDeferState !== 'publish')
   );
+  // Same installer verdict as the version popover (lib/installerUpdate.ts):
+  // the app's own version wins over the daemon's, and an installer that
+  // carries an older daemon than the installed one is not offered at all.
+  const installer = installerUpdate(updateStatus, clientShellUpdate.current);
   const shellNeedsManual =
-    shellAutoApplyNeedsManual(updateStatus?.shellLatest) &&
-    (!!updateStatus?.shellAvailable || clientShellUpdate.available);
-  const shellHeld = !!(updateStatus?.shellLatest && updateStatus.holdVersion === updateStatus.shellLatest);
+    shellAutoApplyNeedsManual(updateStatus?.shellLatest) && installer.actionable;
   // Only an install with the desktop app has an installer to update. The
   // daemon also flags one when it has never seen a desktop shell (a plain
   // install.sh daemon, shellCurrent empty), so a browser tab on such an
   // install must not offer it.
   const hasDesktopShell = isDesktopApp() || !!updateStatus?.shellCurrent;
-  const shellActionable = !shellHeld && (!!updateStatus?.shellAvailable || shellNeedsManual) && !isMobile && hasDesktopShell;
+  const shellActionable = installer.actionable && !isMobile && hasDesktopShell;
   const actionable = available || shellActionable || !!shellAutoRestart;
   const applying = (!!updateStatus?.applying && !updateStatus?.workflowDeferred) || !!updateStatus?.shellApplying;
   const targetVersion = shellAutoRestart?.version ?? (available ? updateStatus?.latest : updateStatus?.shellLatest) ?? null;
@@ -140,8 +143,11 @@ export function UpdateBanner() {
     // Both update tracks suppress their loud banner while their when-idle path
     // owns the pending work. The quiet status chip remains persistent. A failed
     // silent-shell attempt restores the manual fallback banner.
+    // A paused silent restart (control file / public default) owns nothing:
+    // the ordinary installer banner shows.
     const shellOwned =
       shellAutoApply === 'when-idle' &&
+      shellAutoApplyEnabled(updateStatus) &&
       shellActionable &&
       !shellNeedsManual;
     if (shellOwned && !available) return false;
@@ -246,12 +252,13 @@ export function UpdateBanner() {
         }
         await fallBackToDownloadPage(toast, result.error);
       };
-      if (available && shellActionable && shellNeedsManual) {
-        await applyAllUpdates({ applyShell: applyManualShellFallback, shellActionable: true });
-      } else if (available && shellActionable) await applyAllUpdates({ applyShell: applyManualShellFallback, shellActionable: true });
+      // Every installer click takes the same route as the version popover's:
+      // the app's own updater first (the daemon alone on the team channel),
+      // then the local daemon, then the download page. The installer may be
+      // known only from the app's own version (shellAvailable false), so the
+      // daemon-only applyShellUpdate is never the whole answer here.
+      if (shellActionable) await applyAllUpdates({ applyShell: applyManualShellFallback, shellActionable: true });
       else if (available) await applyUpdate();
-      else if (shellNeedsManual) await applyAllUpdates({ applyShell: applyManualShellFallback, shellActionable: true });
-      else await applyShellUpdate();
     } catch (e) {
       toast(`Update failed: ${(e as Error).message}`, { kind: 'error', icon: '⚠' });
     }

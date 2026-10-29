@@ -1439,6 +1439,16 @@ input:focus, select:focus, textarea:focus {
   white-space: nowrap;
 }
 .topbar .install-btn:hover { filter: brightness(1.15); }
+/* Tap-to-open help for the iOS "Add to Home Screen" pill. */
+.install-help {
+  max-width: min(300px, calc(100vw - 16px));
+  padding: 4px 6px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--fg);
+}
+.install-help p { margin: 0 0 8px; }
+.install-help p:last-child { margin-bottom: 0; color: var(--fg-dim); }
 /* Diagnostic states — shown when the site isn't installable yet or
    the SW is stuck. Dim styling signals "this is informational" so it
    doesn't compete with the active Install pill for attention. */
@@ -3783,11 +3793,9 @@ button.section-header-toggle:hover:not(:disabled) {
   box-shadow: 0 8px 22px rgba(0,0,0,0.28);
   flex-wrap: wrap;
 }
-/* Hide on phone — MobileKeyBar's always-visible 1/2/3/Esc row covers
-   the same keys and rendering both crowds the small screen. */
-@media (max-width: 720px) {
-  .approval-actions { display: none; }
-}
+/* Phones answer from MobileApprovalBar at the bottom (inside the quick-reply
+   bar) instead; showing both would offer the same keys twice. */
+body.mobile-approval-visible .approval-actions { display: none; }
 .approval-actions-label {
   font-size: 11px;
   color: var(--fg-dim);
@@ -4462,6 +4470,16 @@ button.cloud-gate-inline-link {
   font-size: 12px;
 }
 .cloud-gate-start-actions .cloud-gate-link { align-self: auto; }
+.cloud-gate-start-address {
+  display: block;
+  margin: 2px 0;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
 .cloud-gate-other-ways {
   display: flex;
   flex-direction: column;
@@ -8417,7 +8435,7 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
 }
 
 /* Attention bottom sheet (portaled to body). Sits above the keybar (z=50) and
-   the bottombar stacking contexts; below the todo capture overlay (z=130). */
+   the bottombar stacking contexts. */
 .mobile-attn-backdrop {
   position: fixed;
   inset: 0;
@@ -8613,6 +8631,48 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
      from the bottombar's neutral border so the bar reads as "action
      available" rather than chrome. */
   box-shadow: 0 -2px 8px color-mix(in srgb, var(--accent-2) 15%, transparent);
+}
+/* Phone answer row for a choice-prompt: one-tap keys stacked above the reply
+   field inside .mobile-quick-reply, so its measured height already reserves
+   room below the terminal and lifts the key bar above it. Warn tint matches
+   the choice-prompt state dot. */
+.mobile-approval-bar {
+  display: flex;
+  /* Wrap rather than push a key off screen (large text settings). */
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-2));
+  border-top: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+.mobile-approval-key {
+  /* Content width first (so "Esc · Cancel" never clips), then share the
+     rest of the row evenly. */
+  flex: 1 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--bg-3);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  border-radius: 8px;
+  color: var(--fg);
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mobile-approval-key.danger { color: var(--danger); }
+/* 320px phones: keep the key, drop its meaning word (still in aria-label). */
+@media (max-width: 359px) {
+  .mobile-approval-meaning { display: none; }
+}
+.mobile-approval-key:active {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: var(--accent-fg);
 }
 .mobile-quick-reply-input {
   flex: 1 1 auto;
@@ -9315,18 +9375,6 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
   font-size: 10px;
 }
 
-/* Todo actions respond immediately to the pointer/focus state. The is-hover
-   class preserves the component's explicit hover state for keyboard/jsdom
-   parity, while CSS :hover avoids waiting for a React commit during polling. */
-.todo-row .todo-row-action {
-  visibility: hidden;
-}
-.todo-row:hover .todo-row-action,
-.todo-row:focus-within .todo-row-action,
-.todo-row.is-hover .todo-row-action,
-.todo-row.no-hover .todo-row-action {
-  visibility: visible;
-}
 .sched-actions {
   position: absolute;
   top: 3px;
@@ -13351,7 +13399,7 @@ h6.md-heading {
 .native-transcript[data-display-mode='focus'] .native-thinking-body { margin-top: var(--native-gap-item); padding-left: 8px; }
 .native-transcript[data-display-mode='focus'] .native-diff-block { gap: var(--native-gap-item); }
 
-/* Todo list */
+/* Plan card (the agent's own step list: Claude TodoWrite, Codex plans) */
 .native-todo {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -16200,57 +16248,6 @@ textarea.ap-setup-input {
 .feedback-status-fix-drafted, .feedback-status-in-progress { border-color: #1565c0; color: var(--status-progress-fg); }
 .feedback-report-ask { display: flex; flex-direction: column; gap: 6px; }
 .feedback-report-ask textarea { width: 100%; resize: vertical; }
-
-/* ------------------------------------------------------------------ */
-/* Quick todo capture (TodoQuickAdd) — Spotlight-style one-line bar.  */
-/* Opened by Alt+T / palette / `solu:todo-capture-open`; portaled to  */
-/* <body> so it renders identically from any dispatcher.              */
-.todo-capture-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 130;
-  background: rgba(0, 0, 0, 0.35);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  /* High placement: capture is glance-and-go, keep it near the eye line and
-     clear of any on-screen keyboard on phones. */
-  padding: 16vh 16px 0;
-}
-.todo-capture {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 560px;
-  max-width: 100%;
-  background: var(--bg-2);
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  padding: 12px 14px;
-  box-shadow: var(--shadow-popover);
-}
-.todo-capture-icon { color: var(--accent); flex-shrink: 0; }
-.todo-capture input {
-  flex: 1 1 auto;
-  min-width: 0;
-  background: transparent;
-  border: none;
-  outline: none;
-  color: var(--fg);
-  font-size: 15px;
-}
-.todo-capture-hint {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--fg-dim);
-  white-space: nowrap;
-  user-select: none;
-}
-@media (max-width: 799px) {
-  .todo-capture { flex-wrap: wrap; }
-  /* 16px stops iOS Safari's focus-zoom. */
-  .todo-capture input { font-size: 16px; }
-}
 
 /* ── Warden settings tab ─────────────────────────────────────────────── */
 .pane-flag-memo-owner {

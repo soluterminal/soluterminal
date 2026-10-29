@@ -6,7 +6,6 @@
 .statusbar-panes,
 .statusbar-ports,
 .statusbar-tasks,
-.statusbar-reports,
 .statusbar-system {
   background: transparent;
   border: 1px solid transparent;
@@ -26,8 +25,7 @@
 }
 .statusbar-panes:hover,
 .statusbar-ports:hover,
-.statusbar-tasks:hover,
-.statusbar-reports:hover {
+.statusbar-tasks:hover {
   background: var(--bg-elev);
   color: var(--fg);
 }
@@ -125,43 +123,6 @@
 .statusbar-tasks.awaiting:hover {
   color: var(--warn);
   background: color-mix(in srgb, var(--warn) 22%, transparent);
-}
-
-/* Inbox chip tints follow the statusbar-dot palette: warn when an item needs
-   a decision, accent when items are merely unread. (The panes chip used to
-   share these for its "N need you" flip; that moved to the attention bell.) */
-.statusbar-reports.choice {
-  color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 14%, transparent);
-  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
-  font-weight: 600;
-}
-.statusbar-reports.choice:hover {
-  color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 22%, transparent);
-}
-.statusbar-reports.awaiting {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
-  font-weight: 600;
-}
-.statusbar-reports.awaiting:hover {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-}
-
-/* One-shot arrival pulse on a needs-you count INCREASE (mirrors the agents
-   chip's). currentColor, so the ring matches whichever tint is active. */
-.statusbar-chip-pulse {
-  animation: statusbar-chip-arrive 0.6s ease-out 1;
-}
-@keyframes statusbar-chip-arrive {
-  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent); }
-  100% { box-shadow: 0 0 0 7px transparent; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .statusbar-chip-pulse { animation: none; }
 }
 
 /* Panes popover */

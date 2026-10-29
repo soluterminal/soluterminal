@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../store';
 import type { UpdateStatus } from '../types';
@@ -247,6 +247,19 @@ describe('VersionPopover', () => {
     expect(reveal).toHaveBeenCalledOnce();
   });
 
+  it('explains a silent install the courier rejected, with nothing to reveal or run', () => {
+    renderPopover({
+      current: '1.0.0',
+      available: false,
+      shellLaunch: {
+        state: 'rejected',
+        error: 'The downloaded desktop installer changed after it was verified, so nothing was installed.',
+      },
+    });
+    expect(screen.getByText(/changed after it was verified, so nothing was installed/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Show in folder' })).not.toBeInTheDocument();
+  });
+
   it('does not render an unusable recovery panel for an empty native staged path', async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === 'browser_pane_ping') return '0.0.1';
@@ -314,8 +327,11 @@ describe('VersionPopover', () => {
       },
       applyAllUpdates: realApplyAllUpdates,
     });
+    // The API daemon (0.0.900) is older than the installer, so the web offers
+    // it; the app's own admission sees the newer Windows daemon (0.0.932) next
+    // to the executable and refuses — the WSL/Dual topology.
     renderPopover({
-      current: '0.0.932',
+      current: '0.0.900',
       available: false,
       shellCurrent: '0.0.900',
       shellLatest: '0.0.916',
@@ -329,7 +345,11 @@ describe('VersionPopover', () => {
     expect(screen.queryByRole('button', { name: 'Show in folder' })).not.toBeInTheDocument();
   });
 
-  it('uses daemon status to hold a shell-only downgrade and suppresses stale launch recovery', async () => {
+  // Most releases are daemon-only and carry the last installer forward, so the
+  // installer usually carries an older daemon than the one installed. Every
+  // launch path refuses it, and offering it brought "Update installer" back
+  // after each daemon update only to refuse the click: explain it instead.
+  it('does not offer an installer that carries an older daemon, and says why', async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === 'browser_pane_ping') return '0.0.900';
       if (command === 'apply_shell_update') throw new Error('native admission must not be reached');
@@ -355,11 +375,51 @@ describe('VersionPopover', () => {
     useStore.setState({ updateStatus: status, applyAllUpdates: realApplyAllUpdates });
     renderPopover(status);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Update installer' }));
-    expect(await screen.findByText(/installed daemon v0\.0\.932 is newer than bundled daemon v0\.0\.916/)).toBeInTheDocument();
+    expect(await screen.findByTestId('vp-installer-blocked')).toHaveTextContent(
+      'Desktop app v0.0.900 · installer v0.0.916 carries an older daemon than v0.0.932, so it updates with the next desktop release',
+    );
+    expect(screen.queryByRole('button', { name: 'Update installer' })).not.toBeInTheDocument();
+    expect(screen.getByText('Up to date')).toBeInTheDocument();
     expect(invoke.mock.calls.some(([command]) => command === 'apply_shell_update')).toBe(false);
     expect(invoke.mock.calls.some(([command]) => command === 'open_external_window')).toBe(false);
-    expect(screen.queryByRole('button', { name: 'Show in folder' })).not.toBeInTheDocument();
+  });
+
+  it('tells the user one click covers both steps of a combined update', async () => {
+    Object.defineProperty(window, '__SOLU_TAURI__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      value: { invoke: vi.fn(async (command: string) => (command === 'browser_pane_ping' ? '0.0.900' : undefined)) },
+      configurable: true,
+    });
+    const status: UpdateStatus = {
+      current: '0.0.900', latest: '0.0.932', available: true,
+      shellCurrent: '0.0.900', shellLatest: '0.0.916', shellAvailable: true,
+    };
+    useStore.setState({ updateStatus: status });
+    renderPopover(status);
+
+    const button = await screen.findByRole('button', { name: /Update now \(app \+ installer\)/ });
+    expect(button).toHaveTextContent('Installer first · the app finishes v0.0.932 after it restarts');
+  });
+
+  it('a daemon update with a blocked installer is a plain daemon update', async () => {
+    Object.defineProperty(window, '__SOLU_TAURI__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      value: { invoke: vi.fn(async (command: string) => (command === 'browser_pane_ping' ? '0.0.900' : undefined)) },
+      configurable: true,
+    });
+    const applyUpdate = vi.fn(async () => {});
+    const applyAllUpdates = vi.fn(async () => undefined);
+    const status: UpdateStatus = {
+      current: '0.0.932', latest: '0.0.940', available: true,
+      shellCurrent: '0.0.900', shellLatest: '0.0.916', shellAvailable: true,
+    };
+    useStore.setState({ updateStatus: status, applyUpdate, applyAllUpdates });
+    renderPopover(status);
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Update now/ }));
+    expect(screen.queryByRole('button', { name: /app \+ installer/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(applyUpdate).toHaveBeenCalledTimes(1));
+    expect(applyAllUpdates).not.toHaveBeenCalled();
   });
 });
 

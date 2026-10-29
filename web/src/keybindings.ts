@@ -72,12 +72,6 @@ export const REBINDABLE_ACTIONS: RebindableAction[] = [
     hint: 'Alt+Z — zoom the focused pane to fill the window; press again to restore. Rebind this if a GPU overlay (NVIDIA/AMD both default to Alt+Z) swallows the chord system-wide.',
     defaultCombo: 'alt+z',
   },
-  {
-    id: 'todo.quickAdd',
-    label: 'Quick todo capture',
-    hint: 'Alt+T — pop a one-line capture bar, type the todo, Enter saves it. Inside a terminal, Alt+T swaps words instead.',
-    defaultCombo: 'alt+t',
-  },
   // NOTE: "Force redraw focused pane" is intentionally NOT a rebindable
   // keyboard action. comboFromEvent drops Shift for letter keys, so
   // Ctrl+Shift+R can never serialize to "ctrl+shift+r" — the binding was
@@ -152,12 +146,14 @@ export function comboFromEvent(e: KeyboardEvent): string | null {
 // Resolve a combo to an action id. Check user overrides first; fall
 // back to defaults, skipping defaults for actions the user has
 // rebound (otherwise the original combo would still fire the action).
+// Saved overrides for actions that no longer exist (e.g. the removed
+// 'todo.quickAdd') are ignored, so their combo stays free.
 export function resolveCombo(
   combo: string,
   overrides: Record<string, string>,
 ): string | null {
   for (const [id, c] of Object.entries(overrides)) {
-    if (c && c === combo) return id;
+    if (c && c === combo && actionById(id)) return id;
   }
   for (const action of REBINDABLE_ACTIONS) {
     if (action.id in overrides) continue; // user rebound this one

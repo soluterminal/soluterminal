@@ -4,7 +4,7 @@ import "encoding/json"
 
 // The public beta's MCP surface. Installs without the team entitlement see
 // only the tools that work on the terminal app itself; the workflow
-// orchestrator, task owners, managed agents and todos are team-only, and so is
+// orchestrator, task owners and managed agents are team-only, and so is
 // the long delegation brief in mcpServerInstructions.
 
 var mcpPublicToolNames = map[string]bool{

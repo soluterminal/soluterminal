@@ -57,7 +57,7 @@ describe('ScheduleDialog', () => {
     expect(screen.getByLabelText<HTMLInputElement>('Read & plan only', { exact: false })).toBeChecked();
   });
 
-  it('fills the public Morning digest without the operator todo tools', async () => {
+  it('fills the public Morning digest without the removed todo tools', async () => {
     useEntitlements.setState({ loaded: true, team: false, operator: false });
     open('p1');
     fireEvent.click(screen.getByText('Morning digest'));

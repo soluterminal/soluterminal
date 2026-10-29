@@ -25,7 +25,7 @@ import (
 //     the real-time push already fired; prepare a proper brief for the user.
 //
 // The judgment run gets a per-run scoped capability token (mcp_scope.go): it
-// can read the fleet and annotate (flags/todos) but cannot send_input, spawn,
+// can read the fleet and annotate (flags) but cannot send_input, spawn,
 // kill, edit files, or create schedules. The scope is daemon-enforced, so a
 // drifted or injected run is bounded by Go code, not by its prompt.
 
@@ -40,7 +40,7 @@ const (
 )
 
 // wardenReadAnnotateTools is the v1 tool budget: read the fleet + annotate
-// (flags, todos). Deliberately NO send_input, answer_prompt, spawn_pane,
+// (flags). Deliberately NO send_input, answer_prompt, spawn_pane,
 // kill_pane, schedules, or file writes — a caretaker that observes and
 // reports, never one that acts unattended. Widening this is a deliberate,
 // trust-gated future step, not a config knob.
@@ -48,7 +48,7 @@ func wardenReadAnnotateTools() []string {
 	return []string{
 		"list_panes", "get_pane_state", "read_pane_tail", "read_activity",
 		"list_ports", "get_pane_livecwd", "git_status",
-		"list_workspaces", "list_todos", "add_todo", "set_pane_flag",
+		"list_workspaces", "set_pane_flag",
 	}
 }
 

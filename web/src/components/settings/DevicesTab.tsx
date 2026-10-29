@@ -32,6 +32,12 @@ export function DevicesTab() {
   const setUpdateShellAutoApply = useStore((s) => s.setUpdateShellAutoApply);
   const updateHoldVersion = useStore((s) => s.updateStatus?.holdVersion);
   const updateHoldExpiresMs = useStore((s) => s.updateStatus?.holdExpiresMs);
+  // The channel's signed update-control default (daemon/updater_control.go:
+  // off for public) can pause the unattended installer restart, and then
+  // "Restart when idle" does nothing, so the row is hidden. Only an explicit
+  // true hides it: a daemon older than the field shows the row as before. The
+  // saved choice is left as it is and applies again if the channel allows it.
+  const shellAutoApplyPaused = useStore((s) => s.updateStatus?.shellAutoApplyPaused === true);
   const releaseUpdateHold = useStore((s) => s.releaseUpdateHold);
   const desktop = isDesktopShell();
   const phoneAllowed = usePhoneAccessAllowed();
@@ -201,6 +207,7 @@ export function DevicesTab() {
           <option value="when-idle">Install when idle</option>
         </select>
       </SettingsRow>
+      {!shellAutoApplyPaused && (
       <SettingsRow
         label="Desktop app restarts"
         hint="Update the desktop app and relaunch it once you're idle (no agent working, nothing waiting for you, no recent typing). A 60-second countdown comes first and can be postponed for an hour."
@@ -214,6 +221,7 @@ export function DevicesTab() {
           <option value="when-idle">Restart when idle</option>
         </select>
       </SettingsRow>
+      )}
       {updateHoldVersion && (
         <SettingsRow
           label="Paused updates"

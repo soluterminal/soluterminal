@@ -4,6 +4,7 @@ import {
   DEFAULT_MIDDLE_ORDER,
   MIDDLE_SECTION_LABELS,
   effectiveMiddleOrder,
+  isMiddleKey,
   isUnclaimedSidebarSpace,
   reorderMiddle,
   resolvedMiddleOrder,
@@ -31,6 +32,11 @@ describe('resolvedMiddleOrder', () => {
     const out = resolvedMiddleOrder(['bogus', 'files', 'files', 'usage', 'ports']);
     expect(out.slice(0, 2)).toEqual(['files', 'ports']);
     expect(out).toHaveLength(DEFAULT_MIDDLE_ORDER.length);
+  });
+  it('drops the retired todos section from saved order and hidden lists', () => {
+    expect(resolvedMiddleOrder(['todos', 'files'])).not.toContain('todos');
+    expect(DEFAULT_MIDDLE_ORDER).not.toContain('todos');
+    expect(isMiddleKey('todos')).toBe(false);
   });
 });
 
@@ -108,9 +114,9 @@ describe('isUnclaimedSidebarSpace', () => {
 
 describe('reorderMiddle', () => {
   it('moves a section before another', () => {
-    const out = reorderMiddle(undefined, 'mcp', 'todos', 'before');
-    expect(out.indexOf('mcp')).toBe(out.indexOf('todos') - 1);
-    expect(out.indexOf('mcp')).toBeLessThan(out.indexOf('todos'));
+    const out = reorderMiddle(undefined, 'mcp', 'files', 'before');
+    expect(out.indexOf('mcp')).toBe(out.indexOf('files') - 1);
+    expect(out.indexOf('mcp')).toBeLessThan(out.indexOf('files'));
     expect([...out].sort()).toEqual([...DEFAULT_MIDDLE_ORDER].sort());
   });
 
@@ -133,7 +139,7 @@ describe('withoutTeamOnly', () => {
     const out = withoutTeamOnly(DEFAULT_MIDDLE_ORDER, false);
     expect(out).not.toContain('owners');
     expect(out).not.toContain('agents');
-    expect(out).toContain('todos');
+    expect(out).toContain('files');
     expect(out).not.toContain('credentials');
   });
 

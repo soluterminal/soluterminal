@@ -1613,8 +1613,14 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
     // Expose a snapshot getter so voice-to-text can ask "what is the
     // user currently looking at?" and feed that as context to the
     // cleanup LLM. Unregistered alongside the sender on unmount below.
-    registerPaneSnapshot(pane.id, () => {
+    registerPaneSnapshot(pane.id, (opts) => {
       const buf = term.buffer.active;
+      if (opts?.screen) {
+        // Live screen rows only: baseY is the first row of the screen.
+        const rows: string[] = [];
+        for (let i = buf.baseY; i < buf.baseY + term.rows; i++) rows.push(buf.getLine(i)?.translateToString(true) ?? '');
+        return rows.join('\n');
+      }
       const total = buf.length;
       const take = Math.min(50, total);
       const out: string[] = [];

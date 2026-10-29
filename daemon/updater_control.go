@@ -26,6 +26,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"soluterminal-shared/releases"
 )
 
 // controlStaleTTL bounds how long a last-known-good control file is trusted when
@@ -62,6 +64,36 @@ type UpdateControl struct {
 	RolloutPercent *int `json:"rollout_percent"`
 	// Message is an optional operator note surfaced in the update badge.
 	Message string `json:"message"`
+	// ShellAutoApplyPaused stops the UNATTENDED desktop-installer restart
+	// ("update when idle"; apply-shell?silent=1). A clicked installer update
+	// is never affected. *bool because absent has a per-channel meaning (see
+	// shellAutoApplyPaused): each channel reads its own control file, so the
+	// operator can leave team on and public off.
+	ShellAutoApplyPaused *bool `json:"shell_auto_apply_paused,omitempty"`
+}
+
+// shellAutoApplyPaused reports whether the unattended installer restart is
+// off for channel under control c, and why.
+//
+// Absent field (or no control document at all): ON for the team channel, OFF
+// for every other channel. The public fleet stays off until the operator
+// publishes a public control file with shell_auto_apply_paused: false.
+// The global kill switch (paused, including the fail-safe pause synthesized
+// when the control file is unreachable) also stops it.
+func (c *UpdateControl) shellAutoApplyPaused(channel string) (bool, string) {
+	if c != nil && c.Paused {
+		return true, "updates paused by operator"
+	}
+	if c != nil && c.ShellAutoApplyPaused != nil {
+		if *c.ShellAutoApplyPaused {
+			return true, "automatic desktop restarts paused by operator"
+		}
+		return false, ""
+	}
+	if channel == releases.FlavorTeam {
+		return false, ""
+	}
+	return true, "automatic desktop restarts are not enabled for this channel yet"
 }
 
 // controlURL derives the control-file URL from the manifest URL by swapping the

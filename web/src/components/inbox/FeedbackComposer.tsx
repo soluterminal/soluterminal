@@ -3,6 +3,7 @@ import { api, type FeedbackAttachment, type FeedbackReq, type FeedbackStatus } f
 import { SITE_CONTACT_EMAIL } from '../../lib/siteLinks';
 import { useStore } from '../../store';
 import { useCloud } from '../../cloud';
+import { useUnsentInput } from '../../lib/unsentInput';
 
 // The feedback form — extracted from the old FeedbackModal so the inbox
 // panel's Compose view hosts it (the modal is retired; compose now lives
@@ -57,6 +58,7 @@ export function FeedbackComposer({ onDone, onCancel }: { onDone: () => void; onC
   const [type, setType] = useState<FeedbackType>(draft.current?.type ?? 'bug');
   const [title, setTitle] = useState(draft.current?.title ?? '');
   const [body, setBody] = useState(draft.current?.body ?? '');
+  useUnsentInput(body);
   // Off by default: pane text and logs go only when the user asks.
   const [includeSnapshot, setIncludeSnapshot] = useState(draft.current?.includeSnapshot ?? false);
   const [submitting, setSubmitting] = useState(false);

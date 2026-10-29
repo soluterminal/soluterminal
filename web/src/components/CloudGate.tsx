@@ -15,6 +15,7 @@ import { Login } from './CloudLogin';
 import { HeardAboutPrompt } from './HeardAboutPrompt';
 import { SignupConsentPrompt } from './SignupConsentPrompt';
 import { INSTALL_SCRIPT_DEFAULT_CLOUD, INSTALL_SCRIPT_URL } from '../lib/siteLinks';
+import { WINDOWS_VERSIONS_NOTE } from '../lib/windowsOnlyCopy';
 
 // CloudGate wraps the app. Mode is decided by probing /api/config:
 // exists → cloud flow (Supabase login + machine picker); missing →
@@ -474,9 +475,8 @@ function HostThisComputer({ team, onClose }: { team: boolean; onClose: () => voi
       ) : (
         <>
           <div className="cloud-gate-claim-help">
-            SoluTerminal runs on Windows 10 &amp; 11. Download it on your Windows PC
-            from soluterminal.com/download and sign in with the same email. macOS and
-            Linux coming soon.
+            {WINDOWS_VERSIONS_NOTE} Download it on your Windows PC from
+            soluterminal.com/download and sign in with the same email.
           </div>
           <div className="cloud-gate-actions">
             <button type="button" onClick={onClose} className="cloud-gate-link cloud-gate-link--action">

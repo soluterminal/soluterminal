@@ -15,7 +15,11 @@ package main
 //
 // Sync triggers piggyback on notifyChanged (every create/update/delete/
 // enable/run) behind a debounce, plus SetPusher (cloud connect) so a fresh
-// pairing uploads the existing set.
+// pairing uploads the existing set. A set the cloud already accepted is not
+// re-sent: every run notifies, so on a machine whose built-in agents fire
+// every few minutes this used to POST the same (usually empty) set about 700
+// times a day. reminderResyncEvery still re-sends an unchanged set now and
+// then, which keeps the replace-semantics self-healing if the cloud loses it.
 
 import (
 	"bytes"
@@ -30,6 +34,10 @@ import (
 // reminderSyncDebounce batches bursts (e.g. a run recording + auto-disable +
 // save all notify within milliseconds) into one POST.
 var reminderSyncDebounce = 2 * time.Second
+
+// reminderResyncEvery bounds how long an unchanged reminder set goes without
+// being re-sent.
+var reminderResyncEvery = 6 * time.Hour
 
 type reminderSyncItem struct {
 	SchedID string    `json:"schedId"`
@@ -78,15 +86,29 @@ func (s *ScheduleStore) scheduleReminderSync() {
 }
 
 func (s *ScheduleStore) syncRemindersNow() {
+	now := time.Now()
 	s.mu.Lock()
 	pusher := s.pusher
 	backendID := s.backendID
-	items := s.collectUpcomingRemindersUnlocked(time.Now())
+	items := s.collectUpcomingRemindersUnlocked(now)
 	s.mu.Unlock()
 	if pusher == nil {
 		return
 	}
-	pusher.SyncReminders(backendID, items)
+	// What the cloud would receive, privacy substitution included, so turning
+	// "Only devices I approve" on or off still re-sends the names.
+	key, _ := json.Marshal(map[string]any{"backendId": backendID, "reminders": pusher.reminderPayload(items)})
+	s.mu.Lock()
+	unchanged := string(key) == s.lastReminderSync && now.Sub(s.lastReminderSyncAt) < reminderResyncEvery
+	s.mu.Unlock()
+	if unchanged {
+		return
+	}
+	if pusher.SyncReminders(backendID, items) {
+		s.mu.Lock()
+		s.lastReminderSync, s.lastReminderSyncAt = string(key), now
+		s.mu.Unlock()
+	}
 }
 
 // reminderPayload is what the cloud may see of the reminders: with only
@@ -109,10 +131,12 @@ func (p *Pusher) reminderPayload(items []reminderSyncItem) []reminderSyncItem {
 // (replace semantics — idempotent and self-healing after either side loses
 // state). Best-effort: a failed sync just means the cloud safety net lags
 // until the next schedules change; the local scheduler is unaffected.
-func (p *Pusher) SyncReminders(backendID string, items []reminderSyncItem) {
+// Reports whether the cloud took the set (an older cloud's 404 counts: it
+// will not want the same set again either).
+func (p *Pusher) SyncReminders(backendID string, items []reminderSyncItem) bool {
 	token := p.getToken()
 	if token == "" {
-		return
+		return false
 	}
 	body, _ := json.Marshal(map[string]any{
 		"backendId": backendID,
@@ -120,19 +144,20 @@ func (p *Pusher) SyncReminders(backendID string, items []reminderSyncItem) {
 	})
 	req, err := http.NewRequest("POST", p.cloudBase+"/api/internal/reminders", bytes.NewReader(body))
 	if err != nil {
-		return
+		return false
 	}
 	machineauth.SignRequest(req, token, body, time.Now())
 	resp, err := p.client.Do(req)
 	if err != nil {
 		slog.Warn("reminder sync failed", "err", err)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 	// 404 = older cloud without the endpoint — fine, feature simply absent.
 	if resp.StatusCode >= 400 && resp.StatusCode != 404 {
 		slog.Warn("reminder sync rejected", "http", resp.StatusCode)
-		return
+		return false
 	}
 	slog.Debug("reminder sync ok", "count", len(items), "http", resp.StatusCode)
+	return true
 }

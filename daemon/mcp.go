@@ -23,9 +23,9 @@ const mcpProtocolVersion = "2024-11-05"
 const mcpServerInstructions = mcpDirectServerInstructions
 
 // The engine-free brief is also used by the generated global Codex policy.
-// Keep schedules, fleet visibility and pane coordination available without
+// Keep schedules and pane coordination available without
 // advertising task lifecycle or repair capabilities that cannot run.
-const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. The workflow task engine is unavailable. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards, and close it with kill_pane once you have its result unless the user wants it kept. Keep your own pane's working_on line current with set_pane_info as your work moves on. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Use list_todos when asked what is pending and update_todo with done:true when your work completes an open todo. Use list_managed_agents for fleet status. Preserve user authorization and required approval gates."
+const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. The workflow task engine is unavailable. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards, and close it with kill_pane once you have its result unless the user wants it kept. Keep your own pane's working_on line current with set_pane_info as your work moves on. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Preserve user authorization and required approval gates."
 
 // SOLU_MCP_MUTATION_POLICY controls MCP tools that directly mutate local
 // state without the ARIA confirmation channel. Default "allow" preserves
@@ -141,7 +141,7 @@ func (a *apiServer) mcpDispatch(req rpcReq, scope *mcpScope, callerPane string) 
 func (a *apiServer) mcpDispatchTransport(req rpcReq, scope *mcpScope, callerPane string) rpcResp {
 	base := rpcResp{JSONRPC: "2.0", ID: req.ID}
 	// Public installs (not operator) get the terminal tools only: no
-	// workflow, task-owner, managed-agent or todo tools, and short neutral
+	// workflow, task-owner or managed-agent tools, and short neutral
 	// instructions instead of the delegation brief. Scoped callers (managed
 	// agents, the Warden) only exist on operator installs. The personal view
 	// gives panes started while it is on the same public surface.
@@ -223,7 +223,7 @@ func mcpTools() []mcpTool {
 }
 
 func mcpCoreTools() []mcpTool {
-	return []mcpTool{
+	return append([]mcpTool{
 		{
 			Name: "preview_file",
 			Description: "Open a file in the soluterminal preview tile for the user to view. " +
@@ -241,39 +241,6 @@ func mcpCoreTools() []mcpTool {
 					}
 				},
 				"required": ["path"],
-				"additionalProperties": false
-			}`),
-		},
-		{
-			Name: "add_todo",
-			Description: "Append an item to the user's soluterminal backlog (the TODO list in " +
-				"the sidebar's left panel). Reach for this when the user says something like " +
-				"\"add this to my todos\", \"remind me to do X later\", \"jot this down\", or " +
-				"when you yourself surface a follow-up that's out of scope for the current " +
-				"session and worth not losing. The list is global across workspaces; pass the " +
-				"current project name in `workspace` so the user can filter later if they want. " +
-				"Don't use this for tracking your own in-session subtasks — use the built-in " +
-				"TodoWrite for that. This tool is for things that should outlive the session. " +
-				"The result is a JSON object {id, text, workspace}, so a workflow task can be linked " +
-				"without calling list_todos; it may also include duplicateOf and an advisory line " +
-				"when the item resembles an existing open todo.",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"text": {
-						"type": "string",
-						"description": "The todo item, phrased as the user would naturally read it back later (a single short imperative line, e.g. \"refactor the auth gate to drop the cookie path\")."
-					},
-					"workspace": {
-						"type": "string",
-						"description": "Optional. Short free-form tag for the project this todo relates to — typically the basename of your current working directory (e.g. \"soluterminal\"). Leave empty if the todo isn't project-scoped."
-					},
-					"taskId": {
-						"type": "string",
-						"description": "Optional workflow task id (wft_*) to link at creation, as an alternative to a follow-up update_todo."
-					}
-				},
-				"required": ["text"],
 				"additionalProperties": false
 			}`),
 		},
@@ -624,87 +591,6 @@ func mcpCoreTools() []mcpTool {
 			}`),
 		},
 		{
-			Name: "list_todos",
-			Description: "List the user's full soluterminal backlog — every TODO item with its id, " +
-				"text, done state, creation time (createdAt), and optional workspace tag. Use this to review the backlog, " +
-				"or to find the id of an item before calling update_todo or delete_todo. " +
-				"Use add_todo to append a new item. Done items older than 90 days move to " +
-				"~/.solu/todos-archive.json and are excluded by default; pass includeArchived to load them.",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"done": {
-						"type": "boolean",
-						"description": "Optional. Return only items with this done state."
-					},
-					"workspace": {
-						"type": "string",
-						"description": "Optional. Case-insensitive exact match on the workspace tag."
-					},
-					"query": {
-						"type": "string",
-						"description": "Optional. Case-insensitive substring match on todo text."
-					},
-					"limit": {
-						"type": "number",
-						"description": "Optional. Maximum items returned after filtering, preserving server order."
-					},
-					"includeArchived": {
-						"type": "boolean",
-						"description": "Optional, default false. Also include done items archived after 90 days."
-					}
-				},
-				"additionalProperties": false
-			}`),
-		},
-		{
-			Name: "update_todo",
-			Description: "Update an existing backlog item: mark it done or undone, and/or edit its " +
-				"text. The id must come from list_todos. Use this when the user says they've " +
-				"finished something (\"mark X done\") or wants to reword an item. Pass only the " +
-				"fields you want to change.",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string",
-						"description": "Todo id as returned by list_todos."
-					},
-					"done": {
-						"type": "boolean",
-						"description": "Optional. Set true to mark the item done, false to reopen it."
-					},
-					"text": {
-						"type": "string",
-						"description": "Optional. New text for the item. Must be non-empty if provided."
-					},
-					"taskId": {
-						"type": "string",
-						"description": "Historical task reference retained for compatibility."
-					}
-				},
-				"required": ["id"],
-				"additionalProperties": false
-			}`),
-		},
-		{
-			Name: "delete_todo",
-			Description: "Permanently remove an item from the user's soluterminal backlog. This is " +
-				"destructive — the item is gone, not just marked done (use update_todo for " +
-				"that). The id must come from list_todos.",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string",
-						"description": "Todo id as returned by list_todos."
-					}
-				},
-				"required": ["id"],
-				"additionalProperties": false
-			}`),
-		},
-		{
 			Name: "read_file",
 			Description: "Read a bounded slice of a text file and return its lines. ANSI-safe; " +
 				"refuses likely secret/.env files, binary files, and oversized files. Returns " +
@@ -875,7 +761,7 @@ func mcpCoreTools() []mcpTool {
 			Description: "List scheduled prompt-injections — recurring (cron) and one-time " +
 				"(run-at) jobs that fire a prompt into a pane on a timer. Each entry has its " +
 				"id, name, target pane, prompt, trigger, enabled state, next-fire time, fire/" +
-				"skip/error counts, and recent run history. Use this to review what's " +
+				"skip/error counts and last-fired time; pass includeRuns:true for recent run history. Use this to review what's " +
 				"scheduled, or to find a schedule's id before calling cancel_schedule. The result " +
 				"is {schedules, page}: schedules is this page and page.total counts every visible " +
 				"schedule after filters. When page.truncated is true, pass page.nextCursor as cursor.",
@@ -886,7 +772,7 @@ func mcpCoreTools() []mcpTool {
 					"cursor": {"type":"string","description":"Opaque cursor from a previous response's page.nextCursor. Valid only with the same filters."},
 					"nameContains": {"type":"string","description":"Optional. Case-insensitive substring match on the schedule name."},
 					"enabledOnly": {"type":"boolean","description":"Optional, default false. Return only enabled schedules."},
-					"includeRuns": {"type":"boolean","description":"Optional, default true. Pass false to omit each schedule's recent run history (the bulk of the payload)."}
+					"includeRuns": {"type":"boolean","description":"Optional, default false. Pass true to include each schedule's recent run history (up to 20 runs each; the bulk of the payload)."}
 				},
 				"additionalProperties": false
 			}`),
@@ -1033,7 +919,7 @@ func mcpCoreTools() []mcpTool {
 				"additionalProperties": false
 			}`),
 		},
-	}
+	}, removedTodoMCPTools()...)
 }
 
 type toolCallParams struct {
@@ -1057,6 +943,11 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 	// daemon-side wall, checked before any policy or handler logic runs.
 	if scope != nil && !scope.allows(p.Name) {
 		return toolErr("tool " + p.Name + " is not in this session's scope")
+	}
+	// Todos was removed: its old tool names answer one fixed notice and do
+	// nothing else, so no guard, activity row or handler runs for them.
+	if removedTodoToolNames[p.Name] {
+		return a.mcpToolTodosRemoved()
 	}
 	// "#3" and "@api-fix" become the pane's id before any guard reads it.
 	a.resolvePaneIDArgument(p.Arguments, callerPane)
@@ -1106,8 +997,6 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 	switch p.Name {
 	case "preview_file":
 		return a.mcpToolPreviewFile(p.Arguments)
-	case "add_todo":
-		return a.mcpToolAddTodo(p.Arguments)
 	case "list_panes":
 		return a.mcpToolListPanes(p.Arguments, callerPane)
 	case "read_pane_tail":
@@ -1151,12 +1040,6 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 		return a.mcpToolCloseBrowser(p.Arguments)
 	case "read_activity":
 		return a.mcpToolReadActivity(p.Arguments)
-	case "list_todos":
-		return a.mcpToolListTodos(p.Arguments)
-	case "update_todo":
-		return a.mcpToolUpdateTodo(p.Arguments)
-	case "delete_todo":
-		return a.mcpToolDeleteTodo(p.Arguments)
 	case "read_file":
 		return a.mcpToolReadFile(p.Arguments)
 	case "get_pane_livecwd":
@@ -1212,9 +1095,10 @@ func mcpToolRequiresMutationPolicy(tool string) bool {
 	case "send_input", "ask_pane", "spawn_pane", "create_schedule", "set_schedule_enabled", "cancel_schedule", "write_file_line", "open_browser", "close_browser",
 		// Every remaining mutator joined the gate in the Warden hardening
 		// pass — before it, `deny` still left kill_pane (!) and the
-		// flag/todo/workspace/preview mutators callable, which made the
-		// policy a false promise of read-only-ness.
-		"kill_pane", "rename_pane", "set_pane_info", "set_pane_flag", "switch_workspace", "preview_file", "add_todo", "update_todo", "delete_todo", "answer_prompt":
+		// flag/workspace/preview mutators callable, which made the policy a
+		// false promise of read-only-ness. The removed todo tools left the set:
+		// their stubs change nothing.
+		"kill_pane", "rename_pane", "set_pane_info", "set_pane_flag", "switch_workspace", "preview_file", "answer_prompt":
 		return true
 	default:
 		return false
@@ -1257,8 +1141,6 @@ func redactToolHint(tool string, args map[string]any) string {
 	switch tool {
 	case "preview_file":
 		hint = basename(pick("path"))
-	case "add_todo":
-		hint = pick("text")
 	case "send_input", "read_pane_tail", "get_pane_state", "kill_pane",
 		"rename_pane", "set_pane_info", "set_pane_flag", "get_pane_livecwd", "ask_pane", "wait_for_pane":
 		// Pane-targeting tools: the target id (the publish site upgrades
@@ -1320,57 +1202,6 @@ func (a *apiServer) mcpToolPreviewFile(args map[string]any) any {
 	}
 	a.uiBus.publish(uiEvent{Type: "open-file", Path: abs})
 	return toolOK(fmt.Sprintf("Opened %s in a soluterminal preview tile. The user can now see it in the UI.", abs))
-}
-
-func (a *apiServer) mcpToolAddTodo(args map[string]any) any {
-	text, _ := args["text"].(string)
-	workspace, _ := args["workspace"].(string)
-	taskID, _ := args["taskId"].(string)
-	if a.todos == nil {
-		return toolErr("todo store not initialized")
-	}
-	items := a.todos.List()
-	td, err := a.todos.Add(text, workspace, "claude", "", taskID)
-	if err != nil {
-		return toolErr(err.Error())
-	}
-	dup := findNearDuplicateTodo(td.Text, items, td.ID)
-	duplicateOf := ""
-	advisoryWarning := ""
-	if dup != nil {
-		applied, applyErr := a.todos.ApplyNormalization(td.ID, td.Text, "", "", dup.ID)
-		if applyErr != nil {
-			advisoryWarning = "Warning: todo was added, but its duplicate advisory could not be saved: " + applyErr.Error()
-		} else if applied {
-			duplicateOf = dup.ID
-		}
-	}
-	result := struct {
-		ID          string `json:"id"`
-		Text        string `json:"text"`
-		Workspace   string `json:"workspace"`
-		TaskID      string `json:"taskId,omitempty"`
-		DuplicateOf string `json:"duplicateOf,omitempty"`
-	}{
-		ID:          td.ID,
-		Text:        td.Text,
-		Workspace:   td.Workspace,
-		TaskID:      td.TaskID,
-		DuplicateOf: duplicateOf,
-	}
-	b, err := json.Marshal(result)
-	if err != nil {
-		return toolErr("marshal: " + err.Error())
-	}
-	response := string(b)
-	if duplicateOf != "" {
-		response += fmt.Sprintf("\nPossible duplicate of %s: %q — check it with list_todos and delete or merge if it is the same item.", dup.ID, dup.Text)
-	}
-	if advisoryWarning != "" {
-		response += "\n" + advisoryWarning
-	}
-	go a.normalizeTodoAsync(td.ID, td.Text, false)
-	return toolOK(response)
 }
 
 // mcpPaneSummary is the per-pane shape list_panes returns over MCP.
@@ -1990,116 +1821,6 @@ func (a *apiServer) mcpToolReadActivity(args map[string]any) any {
 	return toolOK(string(b))
 }
 
-func (a *apiServer) mcpToolListTodos(args map[string]any) any {
-	if a.todos == nil {
-		return toolErr("todo store not initialized")
-	}
-	type todoEntry struct {
-		ID        string `json:"id"`
-		Text      string `json:"text"`
-		Done      bool   `json:"done"`
-		CreatedAt int64  `json:"createdAt"`
-		Workspace string `json:"workspace,omitempty"`
-		TaskID    string `json:"taskId,omitempty"`
-		Archived  bool   `json:"archived,omitempty"`
-	}
-	items := a.todos.List()
-	archivedStart := len(items)
-	if includeArchived, _ := args["includeArchived"].(bool); includeArchived {
-		archived, err := a.todos.LoadArchive()
-		if err != nil {
-			return toolErr("load archive: " + err.Error())
-		}
-		items = append(items, archived...)
-	}
-	out := make([]todoEntry, 0, len(items))
-	doneFilter, hasDoneFilter := args["done"].(bool)
-	workspaceFilter, _ := args["workspace"].(string)
-	workspaceFilter = strings.TrimSpace(workspaceFilter)
-	query, _ := args["query"].(string)
-	query = strings.ToLower(strings.TrimSpace(query))
-	for i, td := range items {
-		if hasDoneFilter && td.Done != doneFilter {
-			continue
-		}
-		if workspaceFilter != "" && !strings.EqualFold(strings.TrimSpace(td.Workspace), workspaceFilter) {
-			continue
-		}
-		if query != "" && !strings.Contains(strings.ToLower(td.Text), query) {
-			continue
-		}
-		out = append(out, todoEntry{
-			ID:        td.ID,
-			Text:      td.Text,
-			Done:      td.Done,
-			CreatedAt: td.CreatedAt,
-			Workspace: td.Workspace,
-			TaskID:    td.TaskID,
-			Archived:  i >= archivedStart,
-		})
-	}
-	if limit, ok := args["limit"].(float64); ok {
-		if n := int(limit); n >= 1 && n < len(out) {
-			out = out[:n]
-		}
-	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return toolErr("marshal: " + err.Error())
-	}
-	return toolOK(string(b))
-}
-
-func (a *apiServer) mcpToolUpdateTodo(args map[string]any) any {
-	id, _ := args["id"].(string)
-	if strings.TrimSpace(id) == "" {
-		return toolErr("id is required")
-	}
-	if a.todos == nil {
-		return toolErr("todo store not initialized")
-	}
-	// Pass-through pointers: only fields the caller actually supplied
-	// are forwarded to TodoStore.Update, leaving the rest untouched.
-	var textPtr *string
-	var donePtr *bool
-	var taskIDPtr *string
-	if v, ok := args["text"].(string); ok {
-		textPtr = &v
-	}
-	if v, ok := args["done"].(bool); ok {
-		donePtr = &v
-	}
-	if v, ok := args["taskId"].(string); ok {
-		taskIDPtr = &v
-	}
-	if textPtr == nil && donePtr == nil && taskIDPtr == nil {
-		return toolErr("nothing to update — pass `done`, `text`, and/or `taskId`")
-	}
-	td, err := a.todos.Update(id, textPtr, donePtr, taskIDPtr)
-	if err != nil {
-		return toolErr(err.Error())
-	}
-	state := "open"
-	if td.Done {
-		state = "done"
-	}
-	return toolOK("Updated todo " + td.ID + " (" + state + "): " + td.Text)
-}
-
-func (a *apiServer) mcpToolDeleteTodo(args map[string]any) any {
-	id, _ := args["id"].(string)
-	if strings.TrimSpace(id) == "" {
-		return toolErr("id is required")
-	}
-	if a.todos == nil {
-		return toolErr("todo store not initialized")
-	}
-	if err := a.todos.Delete(id); err != nil {
-		return toolErr(err.Error())
-	}
-	return toolOK("Deleted todo " + id + " from the backlog.")
-}
-
 func (a *apiServer) mcpToolReadFile(args map[string]any) any {
 	if a.aria == nil {
 		return toolErr("read_file unavailable (aria not enabled)")
@@ -2308,10 +2029,9 @@ func (a *apiServer) mcpToolListSchedules(args map[string]any) any {
 	}
 	nameContains := strings.ToLower(mcpArgString(args, "nameContains", "name_contains"))
 	enabledOnly, _ := mcpPageArgBool(args, "enabledOnly", "enabled_only")
-	includeRuns := true
-	if value, present := mcpPageArgBool(args, "includeRuns", "include_runs"); present {
-		includeRuns = value
-	}
+	// Run history is opt-in: with it, an unfiltered list was ~35 KB (~9k
+	// tokens) on a busy machine, almost all of it runs a caller rarely needs.
+	includeRuns, _ := mcpPageArgBool(args, "includeRuns", "include_runs")
 	// Reuse makeScheduleDTO so the MCP shape matches the HTTP API's —
 	// the persisted Schedule fields plus the computed nextFire time.
 	//
@@ -2585,14 +2305,13 @@ func toolErr(msg string) map[string]any {
 	}
 }
 
-// mcpArgString encodes the key-case skew in the server's own surfaces:
-// update_todo and the server instructions advertise taskId, agent verbs read
-// taskId, workflow verbs read task_id/repo_path, and engine errors say repoPath.
-// Incoming MCP arguments are never schema-validated despite
+// mcpArgString encodes the key-case skew in the server's own surfaces: agent
+// verbs read taskId, workflow verbs read task_id/repo_path, and engine errors
+// say repoPath. Incoming MCP arguments are never schema-validated despite
 // additionalProperties:false, so a mis-cased key otherwise silently reads as
 // "". Callers pass that verb's advertised key first (snake_case for workflow
-// verbs, camelCase for agent verbs and update_todo), followed by its alias; the
-// first non-empty string wins when both spellings are present.
+// verbs, camelCase for agent verbs), followed by its alias; the first
+// non-empty string wins when both spellings are present.
 func mcpArgString(args map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := args[key].(string); ok {

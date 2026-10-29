@@ -13,7 +13,6 @@ import { sidebarSectionSlot } from '../extensions';
 import { SectionHeader } from './sidebar/SectionHeader';
 import { AgentPanesSection } from './sidebar/AgentPanesSection';
 import { IconGlobe, IconPlus } from './ui/icons';
-import { TodoSection } from './sidebar/TodoSection';
 import { WorkspaceSection } from './sidebar/WorkspaceSection';
 import { UsagePage } from './UsagePage';
 import type { WorkspaceDropTarget } from './sidebar/WorkspaceSection';
@@ -38,7 +37,7 @@ import { isWebService, workspacePorts } from '../lib/ports';
 
 // Three-zone sidebar layout:
 //   * Workspace zone (top) — collapsible, expanded by default
-//   * Middle accordion — at most one of (todos, background, ports, files,
+//   * Middle accordion — at most one of (background, ports, files,
 //     schedules, mcp) expanded at a time
 //   * ARIA zone (bottom) — collapsible, collapsed by default (the header
 //     strip carries live status + the cap-reset action, so day-to-day the
@@ -660,13 +659,6 @@ export function Sidebar({
   const renderMiddleSection = (key: MiddleKey) => {
     switch (key) {
       case 'owners': return null;
-      case 'todos':
-        return (
-          <TodoSection
-            collapsed={!isOpen('todos')}
-            onToggle={() => toggleMiddle('todos')}
-          />
-        );
       case 'agentPanes':
         return (
           <AgentPanesSection

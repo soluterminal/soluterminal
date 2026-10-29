@@ -24,7 +24,8 @@ describe('SystemPage',()=>{
     render(<SystemPage onClose={()=>{}}/>);
     expect(screen.getByText('Crew & runtimes')).toBeInTheDocument();
     expect(screen.getByText('Release & update')).toBeInTheDocument();
-    expect(screen.getByRole('button',{name:'Managed agents'})).toBeInTheDocument();
+    expect(screen.getByRole('button',{name:'Agents status'})).toBeInTheDocument();
+    expect(screen.queryByRole('button',{name:'Managed agents'})).not.toBeInTheDocument();
     expect(screen.getByRole('button',{name:'Schedules'})).toBeInTheDocument();
     expect(screen.queryByRole('button',{name:'Open Tasks › Engine'})).not.toBeInTheDocument();
     expect(mocks.activation).not.toHaveBeenCalled();

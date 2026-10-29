@@ -5,7 +5,7 @@ import { isTauri } from '../voice';
 import { alertDialog } from '../lib/dialog';
 import { IconBell, IconBellOff, IconVolume, IconShare } from './ui/icons';
 import { useAccountFeatures } from '../entitlements';
-import { IOS_PUSH_HINT, needsHomeScreenForPush } from '../lib/iosPush';
+import { IOS_BLOCKED_NOTIFICATIONS_HELP, IOS_ENABLE_NOTIFICATIONS_HELP, IOS_PUSH_HINT, isIosDevice, needsHomeScreenForPush } from '../lib/iosPush';
 
 // The alerts bell — now a notification center as well as the alert-channel
 // controls. All three original controls ("🔔/🔕" permission toggle, push "test"
@@ -32,7 +32,15 @@ async function requestToggle(next: boolean): Promise<boolean> {
     return false;
   }
   if (typeof Notification === 'undefined') {
-    await alertDialog('This browser does not support notifications.\n\nIn-app toasts still work.');
+    // iOS browser tabs have no Notification API; a Home Screen launch does.
+    await alertDialog(needsHomeScreenForPush()
+      ? IOS_ENABLE_NOTIFICATIONS_HELP
+      : 'This browser does not support notifications.\n\nIn-app toasts still work.');
+    return false;
+  }
+  if (Notification.permission === 'denied' && isIosDevice()) {
+    // Only a Home Screen launch reaches here on iOS (tabs have no API above).
+    await alertDialog(`Notifications are turned off for SoluTerminal.\n\n${IOS_BLOCKED_NOTIFICATIONS_HELP}\n\nIn-app toasts still work.`);
     return false;
   }
   if (Notification.permission === 'denied') {
@@ -40,7 +48,8 @@ async function requestToggle(next: boolean): Promise<boolean> {
       'Notifications are blocked by your browser for this site.\n\n' +
         '• Chrome / Edge: click the 🔒 / ⓘ icon in the address bar → Site settings → Notifications → Allow\n' +
         '• Firefox: click the 🔒 icon → Clear notification permission → try again\n' +
-        '• Safari (iOS 16.4+): Settings → Websites → Notifications → set this site to Allow.',
+        '• Safari on Mac: Safari → Settings → Websites → Notifications → set this site to Allow\n' +
+        `• ${IOS_BLOCKED_NOTIFICATIONS_HELP}`,
     );
     return false;
   }

@@ -11,7 +11,7 @@ export const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
   ],
   workspace: [
     'Pane layout', 'Arrange', 'Cols', 'Rows', 'Grid', 'Left+stack', 'Copy on select',
-    'Middle-click paste', 'Name new agent panes with AI', 'Sidebar sections', 'Todos', 'Files', 'Localhost ports',
+    'Middle-click paste', 'Name new agent panes with AI', 'Sidebar sections', 'Files', 'Localhost ports',
     'Detached sessions', 'Started by agents', 'Credentials', 'Automations', 'Agents', 'MCP servers', 'Reset to default',
   ],
   sessions: [

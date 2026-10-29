@@ -342,7 +342,7 @@ func validTriageAction(action string) bool {
 
 // triageQuestion reproduces the triage skill's action vocabulary as a Choice,
 // so the answer is a typed option with a calibrated confidence rather than
-// prose. The option descriptions mirror agentskills/triage/SKILL.md.
+// prose. The option descriptions mirror the retired workflow triage skill.
 func triageQuestion() typesafe.Question {
 	return typesafe.Choice(
 		map[string]any{

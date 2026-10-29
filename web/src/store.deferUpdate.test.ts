@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError } from './api';
 import { cancelDeferredUpdateRetry, nativePaneBusy, resetUpdateRecoveryForTests, useStore } from './store';
 import type { PaneInfo, UpdateHold, UpdateStatus } from './types';
+import { reportUnsentInput, resetUnsentInputForTests } from './lib/unsentInput';
+import { setDraft } from './native/useNativePane';
 
 const pane = (p: Partial<PaneInfo> & { id: string }): PaneInfo => ({ ...p }) as PaneInfo;
 const status = (over: Partial<UpdateStatus>): UpdateStatus =>
@@ -189,6 +191,28 @@ describe('typed deferred updates', () => {
     useStore.getState().maybeAutoApplyUpdate();
     expect(applySpy).toHaveBeenCalledTimes(1);
     expect(applySpy.mock.calls.some(([force]) => force === true)).toBe(false);
+  });
+
+  it('an unattended swap held for a mid-turn pane also waits out text typed meanwhile', async () => {
+    const applySpy = vi.spyOn(api, 'applyUpdate').mockResolvedValue({ applying: false });
+    vi.spyOn(api, 'getUpdateStatus').mockResolvedValue(status({ latest: '2.0.0', available: true }));
+    useStore.setState({ panes: { p: pane({ id: 'p', kind: 'native', agentMidTurn: true }) } });
+    await useStore.getState().applyUpdate({ auto: true });
+    expect(useStore.getState().deferredUpdate?.cause).toBe('focus');
+
+    useStore.setState({ panes: { p: pane({ id: 'p', kind: 'native', agentMidTurn: false }) } });
+    reportUnsentInput('reply', 'one more thing');
+    try {
+      await vi.advanceTimersByTimeAsync(4000 * 3);
+      expect(applySpy).not.toHaveBeenCalled();
+      expect(useStore.getState().deferredUpdate?.cause).toBe('focus');
+
+      reportUnsentInput('reply', '');
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(applySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      resetUnsentInputForTests();
+    }
   });
 
   it('treats a legacy cause-less 409 as unknown with generic non-forced copy', async () => {
@@ -423,5 +447,34 @@ describe('maybeAutoApplyUpdate', () => {
     useStore.getState().maybeAutoApplyUpdate();
     expect(applySpy).toHaveBeenCalledTimes(shouldApply ? 1 : 0);
     if (shouldApply) expect(applySpy).toHaveBeenCalledWith({ auto: true });
+  });
+
+  // The swap reloads the page. Unsent text in any compose box holds it until
+  // the text is sent or cleared, and the hold uses up no attempt.
+  it.each([
+    ['a native pane draft', '4.1.1', (text: string) => setDraft('p-draft', text)],
+    ['another compose box', '4.1.2', (text: string) => reportUnsentInput('feedback', text)],
+  ])('waits while %s holds unsent text', (_name, latest, type) => {
+    const applySpy = vi.fn().mockResolvedValue(undefined);
+    useStore.setState({
+      deferredUpdate: null,
+      updateSettings: { autoApply: 'when-idle' },
+      updateStatus: status({ latest, available: true }),
+      applyUpdate: applySpy as never,
+    });
+    try {
+      type('half a sentence');
+      useStore.getState().maybeAutoApplyUpdate();
+      useStore.getState().maybeAutoApplyUpdate();
+      expect(applySpy).not.toHaveBeenCalled();
+
+      type('');
+      useStore.getState().maybeAutoApplyUpdate();
+      expect(applySpy).toHaveBeenCalledTimes(1);
+      expect(applySpy).toHaveBeenCalledWith({ auto: true });
+    } finally {
+      type('');
+      resetUnsentInputForTests();
+    }
   });
 });

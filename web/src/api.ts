@@ -3042,6 +3042,18 @@ export interface AgentsPrAgent {
     reviewed: number; skipped: number; errors: number;
   } | null;
   reviews?: AgentsPrReview[] | null;
+  // The merge-gate watch: "down" when the reviewer's schedule is enabled but
+  // no run has completed for 30 minutes. Absent on older daemons.
+  heartbeat?: AgentsPrHeartbeat | null;
+}
+
+export interface AgentsPrHeartbeat {
+  state: 'off' | 'ok' | 'down';
+  lastCompletedAt?: string | null;
+  downSince?: string | null;
+  detectedAt?: string | null;
+  detail?: string;
+  scheduleId?: string;
 }
 
 export interface AgentsStatus {
@@ -3399,6 +3411,9 @@ export interface Agent {
   // that merely happens to be idle.
   blocked?: boolean;
   blockedReason?: string;
+  // Built on a workflow-engine template that was removed: it can never run
+  // again, so the card offers only Remove.
+  retired?: boolean;
   globalPaused?: boolean;
   effectiveReadTools?: string[];
   effectiveRouting?: AgentRuntimePolicy;
@@ -3462,6 +3477,10 @@ export interface AgentReport {
   preview?: string;
   // Older daemons serialize a zero-item report as null; treat absent/null as empty.
   items?: { taskId: string; decision?: string }[] | null;
+  // A built-in agent alert (PR reviewer down, held fixes) carries its own
+  // markdown instead of a run log.
+  kind?: 'builtin';
+  body?: string;
 }
 
 // The PATCH body for an agent. Every field optional and omitted-means-unchanged,
@@ -4649,6 +4668,9 @@ const coreApi = {
   // Schedules — recurring prompt injection into a pane, or a built-in
   // agent run (kind=agent). See daemon/schedules.go for semantics.
   listSchedules: () => apiFetch('/api/schedules').then(j<Schedule[]>),
+  // One row — what a `schedules-changed` event naming a schedule refetches.
+  // 404 = gone (deleted, or a hidden agent trigger).
+  getSchedule: (id: string) => apiFetch(`/api/schedules/${encodeURIComponent(id)}`).then(j<Schedule>),
 
   // Built-in runnable agents for the schedule dialog's picker. Old
   // daemons don't serve this — callers treat any failure as "no agents".
@@ -4681,26 +4703,6 @@ const coreApi = {
 
   snoozeSchedule: (id: string) =>
     apiFetch(`/api/schedules/${id}/snooze`, { method: 'POST' }).then(j<Schedule>),
-
-  // Todo backlog (left-panel inbox). Global, not per-workspace —
-  // see daemon/todos.go for the rationale. Frontend uses the SSE
-  // `todos-changed` event to refresh after writes from any source
-  // (UI, MCP, another browser tab).
-  listTodos: () => apiFetch('/api/todos').then(j<import('./types').Todo[]>),
-  createTodo: (text: string, workspace?: string) =>
-    apiFetch('/api/todos', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text, workspace }),
-    }).then(j<import('./types').Todo>),
-  updateTodo: (id: string, patch: { text?: string; done?: boolean; taskId?: string }) =>
-    apiFetch(`/api/todos/${id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(patch),
-    }).then(j<import('./types').Todo>),
-  deleteTodo: (id: string) =>
-    apiFetch(`/api/todos/${id}`, { method: 'DELETE' }).then(j<void>),
 
   // Claude account credentials. listClaudeAccounts is CHEAP (cached, no
   // token cost) — safe to call on section expand. refreshClaude is the
@@ -4926,11 +4928,16 @@ const coreApi = {
   // team channel, streamed through the cloud) and saw it start, which can take
   // minutes. The default 30 s bound would abort the request, and with it the
   // daemon's download, partway through.
-  applyShellUpdate: (forceDowngrade = false) => {
+  // silent: the unattended update (daemon/updater_shell_silent.go). The
+  // daemon stages the same verified installer, then a courier installs it with
+  // no window once this app exits; the answer carries silent:true. It never
+  // combines with a forced downgrade.
+  applyShellUpdate: (forceDowngrade = false, opts?: { silent?: boolean }) => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), SHELL_APPLY_TIMEOUT_MS);
-    return apiFetch(`/api/update/apply-shell${forceDowngrade ? '?force=1' : ''}`, { method: 'POST', signal: ctrl.signal })
-      .then(j<{ applying: boolean; installerPath?: string }>)
+    const query = opts?.silent ? '?silent=1' : forceDowngrade ? '?force=1' : '';
+    return apiFetch(`/api/update/apply-shell${query}`, { method: 'POST', signal: ctrl.signal })
+      .then(j<{ applying: boolean; installerPath?: string; silent?: boolean }>)
       .finally(() => clearTimeout(timer));
   },
   getRollbackTargets: () =>

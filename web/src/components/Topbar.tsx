@@ -14,9 +14,8 @@ import { HelpMenu } from './HelpMenu';
 import { IconNewWindow, IconPanelLeft, IconMessage, IconSettings, IconGlobe } from './ui/icons';
 import { useStore } from '../store';
 import { openInbox } from './inbox/InboxPanel';
-import { inboxFeed } from '../lib/inboxFeed';
+import { inboxCountLabel, inboxFeed } from '../lib/inboxFeed';
 import { useFeedbackInbox } from '../lib/useFeedbackInbox';
-import { useWardenInbox } from '../lib/useWardenInbox';
 import { slotList, useInboxReports } from '../extensions';
 import { useSettings } from '../settings';
 import { multiWindowAvailable, openWorkspaceWindow } from '../tauri-browser';
@@ -45,13 +44,12 @@ import { PersonalViewPill } from './PersonalViewPill';
 function InboxBubble() {
   const schedules = useStore((s) => s.schedules);
   const feedback = useFeedbackInbox();
-  const warden = useWardenInbox();
   const agentReports = useInboxReports();
-  const items = inboxFeed(schedules, feedback, warden, agentReports);
+  const items = inboxFeed(schedules, feedback, agentReports);
   const unread = items.filter((i) => i.unread);
   const needs = unread.some((i) => i.needsYou);
   const title = unread.length > 0
-    ? `Inbox — ${unread.length} unread${needs ? ', some need you' : ''}`
+    ? `Inbox — ${inboxCountLabel(unread.length)} unread${needs ? ', some need you' : ''}`
     : 'Inbox — reports from scheduled tasks, feedback updates, send feedback';
   return (
     <button

@@ -79,7 +79,8 @@ describe('CloudGate mobile machine picker', () => {
       </CloudGate>,
     );
 
-    expect(screen.getByText(/download it on your windows pc: soluterminal\.com\/download/i)).toBeInTheDocument();
+    expect(screen.getByText(/there's nothing to install on your phone\./i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Share link' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /download for windows/i })).toBeNull();
     expect(screen.queryByText(/download desktop app/i)).toBeNull();
     expect(document.body.textContent).not.toMatch(/curl|install\.sh|github/i);

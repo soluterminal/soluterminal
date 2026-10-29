@@ -1,20 +1,17 @@
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/shallow';
 import { useStore } from '../store';
 import { useDaemonHealth } from '../lib/useDaemonHealth';
 import { useShellUpdate } from '../lib/useCloudShellUpdate';
+import { installerUpdate } from '../lib/installerUpdate';
 import { toggleScrollDiag } from '../scrollDiag';
 import { VersionPopover } from './VersionPopover';
 import { isPreviewVersion, usePreviewChannel } from '../lib/previewChannel';
 import { ReleasePopover } from './ReleasePopover';
 import { PanesPopover } from './PanesPopover';
 import { PortsPopover } from './PortsPopover';
-import { openInbox } from './inbox/InboxPanel';
-import { inboxFeed } from '../lib/inboxFeed';
-import { useFeedbackInbox } from '../lib/useFeedbackInbox';
-import { useWardenInbox } from '../lib/useWardenInbox';
-import { slotList, useInboxReports } from '../extensions';
+import { slotList } from '../extensions';
 import { ranAgo } from '../lib/ranAgo';
 import { PhoneAccessChip } from './PhoneAccessChip';
 import { useOperatorFeatures } from '../entitlements';
@@ -381,73 +378,6 @@ function PanesChip() {
   );
 }
 
-// Inbox chip — everything addressed to the human: scheduled-task reports and
-// feedback-pipeline events (needs-info / fixed). Quiet-when-empty like
-// PortsChip: renders nothing until something has ever landed, then a dim
-// "Inbox" at rest. Unread items flip it to "N new" (accent); an unread report
-// that opened with the contract's "## Needs you" heading, a failed run, or a
-// needs-info feedback event flips it to "N need you" (warn). Deliberately NOT
-// merged into the panes chip's needs-you count: same grammar and palette, but
-// the click must land in the right place — panes → panes popover, inbox →
-// this feed.
-function InboxChip() {
-  const schedules = useStore((s) => s.schedules);
-  const feedback = useFeedbackInbox();
-  const warden = useWardenInbox();
-  const agentReports = useInboxReports();
-  const items = useMemo(() => inboxFeed(schedules, feedback, warden, agentReports), [schedules, feedback, warden, agentReports]);
-  const unread = useMemo(() => items.filter((i) => i.unread), [items]);
-  const needsYou = unread.filter((i) => i.needsYou).length;
-  const [pulse, setPulse] = useState(false);
-  // One-shot pulse ONLY on an unread-count INCREASE (value-transition guard,
-  // mirroring PanesChip: a re-render or a decrease never re-fires).
-  const prevUnread = useRef(unread.length);
-  useEffect(() => {
-    const prev = prevUnread.current;
-    prevUnread.current = unread.length;
-    if (unread.length > prev) {
-      setPulse(true);
-      const t = setTimeout(() => setPulse(false), 700);
-      return () => clearTimeout(t);
-    }
-  }, [unread.length]);
-  if (items.length === 0) return null;
-
-  // The noun stays "report(s)": schedule runs produce reports, and a feedback
-  // event is about a report the user FILED — while keeping the word distinct
-  // from the adjacent panes chip's bare "N need you".
-  const text = needsYou > 0
-    ? `${needsYou} report${needsYou === 1 ? '' : 's'} need${needsYou === 1 ? 's' : ''} you`
-    : unread.length > 0
-      ? `${unread.length} new report${unread.length === 1 ? '' : 's'}`
-      : 'Inbox';
-  const title = needsYou > 0
-    ? `${needsYou} inbox item${needsYou === 1 ? '' : 's'} asking for your decision — click to read`
-    : unread.length > 0
-      ? `${unread.length} inbox item${unread.length === 1 ? '' : 's'} you haven't read — click to read`
-      : 'Inbox — reports from your scheduled tasks and feedback updates';
-  const cls = [
-    'statusbar-reports',
-    needsYou > 0 ? 'choice' : unread.length > 0 ? 'awaiting' : '',
-    pulse ? 'statusbar-chip-pulse' : '',
-  ].filter(Boolean).join(' ');
-  return (
-    <>
-      <span className="statusbar-sep">·</span>
-      <Tooltip label={title} side="top">
-        <button
-          type="button"
-          className={cls}
-          aria-label={title}
-          onClick={() => openInbox()}
-        >
-          <span role="status" aria-live="polite">{text}</span>
-        </button>
-      </Tooltip>
-    </>
-  );
-}
-
 // Dev-servers chip. The old `25 ports` counted every same-user listener the
 // scanner sees — across BOTH backends in dual mode — so on a desktop the
 // number was mostly VS Code / Docker / Slack noise and tracked nothing the
@@ -603,9 +533,6 @@ export function StatusBar() {
         {/* Panes aggregate — flips to "N need you" when panes are waiting
             on the user; popover carries the breakdown + exited cleanup. */}
         <PanesChip />
-        {/* Inbox — task reports + feedback updates. Renders its own leading
-            separator, and nothing until something has ever landed. */}
-        <InboxChip />
         {/* Pane-owned listeners only — renders its own leading separator,
             and nothing when no pane runs a server. */}
         <PortsChip />
@@ -636,7 +563,10 @@ export function StatusBar() {
           // "solud {ver}" label to a full accent-tinted "↑ Update v{latest}"
           // with a single arrival pulse — loud enough to not miss, calm enough
           // to live with. Queued = a typed safety hold is active (breathing).
-          const hasUpdate = !!updateStatus?.available || shellUpdate.available;
+          // Same installer verdict as the banner and popover: one that carries
+          // an older daemon than this one cannot install, so it lights nothing.
+          const installerReady = installerUpdate(updateStatus, shellUpdate.current).actionable && shellUpdate.available;
+          const hasUpdate = !!updateStatus?.available || installerReady;
           const workflowBackoff = holdPresentation.workflowBackoff;
           const workflowDeferred = updateStatus?.workflowDeferred === true;
           const queued = (!!deferredUpdate || workflowDeferred) && !!updateStatus?.available;
@@ -661,7 +591,7 @@ export function StatusBar() {
           // A daemon update shows its target version; a shell-ONLY (installer)
           // update is a separate track that usually trails the daemon, so a
           // version there reads as a downgrade — label it plainly instead.
-          const shellOnly = !updateStatus?.available && shellUpdate.available;
+          const shellOnly = !updateStatus?.available && installerReady;
           const cls = [
             'statusbar-version',
             hasUpdate ? 'statusbar-version-has-update' : '',

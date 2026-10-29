@@ -1,5 +1,4 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { api } from '../../api';
 import { useStore } from '../../store';
 import type { Schedule } from '../../types';
 import { ScheduleDialog } from '../ScheduleDialog';
@@ -12,7 +11,6 @@ import { ScheduleHistoryDialog } from '../ScheduleHistoryDialog';
 import { useClampedMenuPosition } from '../useClampedMenuPosition';
 import { scheduleUnread } from '../../lib/scheduleUnread';
 import { RunStatusDot, RunStatusGlyph, scheduleRunVisual } from '../shared/runStatus';
-import { useOperatorFeatures } from '../../entitlements';
 
 interface SchedulesSectionProps {
   collapsed: boolean;
@@ -67,8 +65,6 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement | null>(null);
   const ctxMenuPos = useClampedMenuPosition(ctxMenuRef, ctxMenu);
-  // Turning a schedule into an agent lands it in the team-only Agents section.
-  const teamFeatures = useOperatorFeatures();
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -144,30 +140,6 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
   // The confirm copy leads with what does NOT change, because that is the
   // honest headline: the import gives the schedule a card, a pause button and a
   // history, and alters nothing about how it runs (§8.3 Phase 1).
-  async function handleMakeAgent(s: Schedule) {
-    if (!(await confirmDialog({
-      message: `Make "${s.name}" a managed agent?\n\n`
-        + 'This schedule already acts on your board. Make it a managed agent to see and'
-        + ' limit what it can do.\n\n'
-        + 'It keeps running exactly as it does now — same prompt, same cadence, same'
-        + ' permissions. It moves out of this list and onto an agent card, where you can'
-        + ' pause it, run it and read its history. Deleting the agent brings the schedule'
-        + ' straight back here.',
-      confirmLabel: 'Make it an agent',
-    }))) return;
-    try {
-      const agent = await api.importSchedule(s.id);
-      toast(`"${agent.name}" is now an agent — open Agents to see what it can do`, {
-        kind: 'success', icon: '◇', ttlMs: 4000,
-      });
-      // The row vanishes from this list on the next schedules refresh; land the
-      // user where its card now is.
-      setAgentsPanelOpen(true);
-    } catch (e) {
-      toast(`Could not make it an agent: ${(e as Error).message}`, { kind: 'error', icon: '⚠' });
-    }
-  }
-
   async function handleSnooze(s: Schedule) {
     try {
       await snoozeSchedule(s.id);
@@ -183,7 +155,10 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
   const hasFailingSchedule = schedules.some(
     (s) => s.enabled && s.runs?.[0]?.status === 'error',
   );
-  const unreadCount = schedules.filter(scheduleUnread).length;
+  // Enabled schedules only: a paused schedule's last report can never be
+  // replaced by a newer one, so counting it kept the chip from reaching 0.
+  // Its row still shows its own unread dot.
+  const unreadCount = schedules.filter((s) => s.enabled && scheduleUnread(s)).length;
 
   return (
     <div className="sidebar-section">
@@ -337,7 +312,14 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                     <span className="sched-unread-dot" title="New report — click to read" aria-label="New report" />
                   )}
                   {s.name}
-                  {!s.enabled && <span className="sched-paused-tag" title="Paused — it will not run again until re-enabled"> · paused</span>}
+                  {!s.enabled && (s.pausedReason ? (
+                    <span
+                      className="sched-paused-tag"
+                      title={`Paused automatically: ${s.pausedReason}. Edit it to pick another pane, then turn it back on.`}
+                    > · paused: {s.pausedReason}</span>
+                  ) : (
+                    <span className="sched-paused-tag" title="Paused — it will not run again until re-enabled"> · paused</span>
+                  ))}
                   {targetMissing && <span className="sched-warn" title="Target pane no longer exists"> <IconAlertTriangle size={11} style={{ verticalAlign: '-1px' }} /></span>}
                 </div>
                 <div className="sched-sub">
@@ -438,13 +420,6 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
               role="menuitem"
               onClick={() => { setCtxMenu(null); setDialog({ open: true, editing: s, fromPaneMenu: false }); }}
             >Edit…</button>
-            {teamFeatures && s.kind === 'task' && s.permission === 'edit' && !s.runAt && (
-              <button
-                role="menuitem"
-                title="Give this schedule an agent card — pause, history and a stated authority. It keeps running exactly as it does now."
-                onClick={() => { setCtxMenu(null); void handleMakeAgent(s); }}
-              >Make this an agent…</button>
-            )}
             {s.kind === 'agent' && (
               <button
                 role="menuitem"

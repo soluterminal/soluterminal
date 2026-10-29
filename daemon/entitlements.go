@@ -705,7 +705,7 @@ func cachedOperatorVerdictFresh() (on, ok, fresh bool) {
 }
 
 // teamCloudLLMAllowed reports whether calls to the operator-only cloud LLM
-// (/api/aria/complete: attention summaries, todo rewording) may be made. The
+// (/api/aria/complete: attention summaries) may be made. The
 // cloud refuses everyone else, so asking anyway only wastes requests and
 // uploads pane text for nothing. Before the cache is published (tests) the
 // historical behavior holds.

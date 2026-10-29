@@ -18,6 +18,7 @@ import {
   type BuilderSpec,
 } from '../lib/cron';
 import { parseNaturalSchedule } from '../lib/scheduleNL';
+import { useUnsentInput } from '../lib/unsentInput';
 
 // Add / edit modal for Schedules. A schedule is a trigger plus one of
 // two job kinds:
@@ -171,6 +172,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
   const [until, setUntil] = useState(defaultUntil());
   const [paneId, setPaneId] = useState('');
   const [prompt, setPrompt] = useState('');
+  useUnsentInput(open ? prompt : '');
   const [notifyOnRun, setNotifyOnRun] = useState(false);
   // Phone push needs a free account; the cloud fallback and chat delivery
   // are team-only on the public beta.

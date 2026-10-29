@@ -22,6 +22,13 @@ export function daemonOnThisComputer(): boolean {
 // it only from a manifest signed "flavor": "team". The app's own updater reads
 // the public releases only, and a public app refuses any other flavour, so on
 // this channel it is not used at all.
+// The unattended installer restart is allowed only when the daemon says so
+// explicitly (daemon/updater_control.go: on for team, off for public unless a
+// control file turns it on). A status without the field counts as paused.
+export function shellAutoApplyEnabled(status: UpdateStatus | null | undefined): boolean {
+  return status?.shellAutoApplyPaused === false;
+}
+
 export function shellUpdateNeedsDaemon(status: UpdateStatus | null | undefined): boolean {
   return status?.updateChannel === 'team' && daemonOnThisComputer();
 }

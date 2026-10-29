@@ -7,13 +7,28 @@ import { CloudGate } from './CloudGate';
 
 const WINDOWS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36';
 const MAC_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 Safari/605.1.15';
+const WINDOWS_ARM_UA = 'Mozilla/5.0 (Windows NT 10.0; ARM64) AppleWebKit/537.36 Chrome/130 Safari/537.36 Edg/130';
+const LINUX_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130 Safari/537.36';
+const IPHONE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1';
+const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36';
 const INSTALLER = 'https://soluterminal.com/download/SoluTerminal-Setup.exe';
+const HANDHELD_COPY =
+  "SoluTerminal is a Windows app. There's nothing to install on your phone. Open this page on your Windows PC to download it.";
+// Written with \s so the source-wide check in windowsOnlyCopy.test.ts
+// doesn't flag this file.
+const NO_OTHER_PLATFORMS = /coming\ssoon/i;
+const DESKTOP_COPY = 'SoluTerminal is a Windows app. Open this page on your Windows PC to download it.';
 
 const machine: CloudMachine = { id: 'mach_1', name: 'desk', online: true, backends: ['host'] };
 
 function visitor(ua: string, platform: string) {
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ua);
   vi.spyOn(navigator, 'platform', 'get').mockReturnValue(platform);
+}
+
+// navigator.share and navigator.clipboard, removed again after each test.
+function stub(name: 'share' | 'clipboard', value: unknown) {
+  Object.defineProperty(navigator, name, { configurable: true, value });
 }
 
 function seed(machines: CloudMachine[] = []) {
@@ -52,6 +67,8 @@ describe('hosted app get-started card', () => {
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    delete (navigator as { share?: unknown }).share;
+    delete (navigator as { clipboard?: unknown }).clipboard;
     sessionStorage.clear();
     useCloud.setState(useCloud.getInitialState(), true);
   });
@@ -105,32 +122,163 @@ describe('hosted app get-started card', () => {
     expect(screen.getByText(/80 MB, from soluterminal\.com\./)).toBeInTheDocument();
   });
 
-  it('tells Mac visitors it is Windows-only and offers the link, not an install command', () => {
+  it('tells Mac visitors it is a Windows app and offers the link to copy, not an install command', () => {
     visitor(MAC_UA, 'MacIntel');
     entitlements(false);
     seed();
     renderGate();
 
-    expect(screen.getByText('Download it on your Windows PC: soluterminal.com/download')).toBeInTheDocument();
-    expect(screen.getByText(/macOS and Linux coming soon/)).toBeInTheDocument();
+    expect(screen.getByText(DESKTOP_COPY)).toBeInTheDocument();
+    expect(screen.queryByText(HANDHELD_COPY)).toBeNull();
+    expect(screen.getByText('SoluTerminal runs on Windows 10 & 11.')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Download for Windows' })).toBeNull();
+    // Desktops copy; only phones and tablets get the share sheet.
     expect(screen.getByRole('button', { name: 'Copy link' })).toBeInTheDocument();
-    const mail = screen.getByRole('link', { name: 'Email me the link' });
-    expect(mail.getAttribute('href')).toMatch(/^mailto:new%40example\.com\?subject=/);
-    expect(decodeURIComponent(mail.getAttribute('href') ?? '')).toContain('https://soluterminal.com/download/');
+    expect(screen.queryByRole('button', { name: 'Share link' })).toBeNull();
+    expect(screen.queryByText('Email me the link')).toBeNull();
+    expect(document.querySelector('a[href^="mailto:"]')).toBeNull();
+    expect(document.body.textContent).not.toMatch(NO_OTHER_PLATFORMS);
     expect(document.body.innerHTML).not.toMatch(/github|install\.sh|curl/i);
   });
 
-  it('copies the download page link for a Mac visitor', async () => {
+  it('gives Linux desktops the same desktop step', () => {
+    visitor(LINUX_UA, 'Linux x86_64');
+    entitlements(false);
+    seed();
+    renderGate();
+    expect(screen.getByText(DESKTOP_COPY)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeInTheDocument();
+    expect(document.querySelector('a[href^="mailto:"]')).toBeNull();
+  });
+
+  it('copies the download page link on a Mac even when a share sheet exists', async () => {
     visitor(MAC_UA, 'MacIntel');
     entitlements(false);
+    const share = vi.fn(async () => {});
     const writeText = vi.fn(async () => {});
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    stub('share', share);
+    stub('clipboard', { writeText });
     seed();
     renderGate();
     fireEvent.click(screen.getByRole('button', { name: 'Copy link' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://soluterminal.com/download/'));
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
+    expect(share).not.toHaveBeenCalled();
+  });
+
+  it('shows the address to select when a Mac cannot copy', async () => {
+    visitor(MAC_UA, 'MacIntel');
+    entitlements(false);
+    stub('clipboard', { writeText: vi.fn(async () => { throw new Error('denied'); }) });
+    seed();
+    renderGate();
+    expect(screen.queryByText('https://soluterminal.com/download/')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Copy link' }));
+    expect(await screen.findByText('https://soluterminal.com/download/')).toHaveClass('cloud-gate-start-address');
+  });
+
+  it.each([
+    ['an iPhone', IPHONE_UA, 'iPhone', 5],
+    ['an Android phone', ANDROID_UA, 'Linux armv81', 5],
+    ['an iPad that reports itself as a Mac', MAC_UA, 'MacIntel', 5],
+  ])('tells %s there is nothing to install on it', (_name, ua, platform, touchPoints) => {
+    visitor(ua, platform);
+    Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: touchPoints });
+    entitlements(false);
+    seed();
+    renderGate();
+
+    expect(screen.getByText(HANDHELD_COPY)).toBeInTheDocument();
+    expect(screen.queryByText(DESKTOP_COPY)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Share link' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy link' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Download for Windows' })).toBeNull();
+    expect(document.querySelector('a[href^="mailto:"]')).toBeNull();
+    expect(document.body.textContent).not.toMatch(NO_OTHER_PLATFORMS);
+    // Steps 2 and 3 are unchanged.
+    expect(screen.getByText('Open it and sign in with the same email.')).toBeInTheDocument();
+    expect(screen.getByText(/your pc appears here\./i)).toBeInTheDocument();
+  });
+
+  it('opens the share sheet with the download page on a phone', async () => {
+    visitor(IPHONE_UA, 'iPhone');
+    entitlements(false);
+    const share = vi.fn(async () => {});
+    const writeText = vi.fn(async () => {});
+    stub('share', share);
+    stub('clipboard', { writeText });
+    seed();
+    renderGate();
+    fireEvent.click(screen.getByRole('button', { name: 'Share link' }));
+    await waitFor(() => expect(share).toHaveBeenCalledWith({ url: 'https://soluterminal.com/download/' }));
+    expect(writeText).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Share link' })).toBeInTheDocument();
+  });
+
+  it('does nothing more when the visitor closes the share sheet', async () => {
+    visitor(IPHONE_UA, 'iPhone');
+    entitlements(false);
+    const share = vi.fn(async () => { throw new DOMException('cancelled', 'AbortError'); });
+    const writeText = vi.fn(async () => {});
+    stub('share', share);
+    stub('clipboard', { writeText });
+    seed();
+    renderGate();
+    fireEvent.click(screen.getByRole('button', { name: 'Share link' }));
+    await waitFor(() => expect(share).toHaveBeenCalled());
+    expect(writeText).not.toHaveBeenCalled();
+    expect(screen.queryByText('https://soluterminal.com/download/')).toBeNull();
+  });
+
+  it('copies the link on a phone without a share sheet', async () => {
+    visitor(ANDROID_UA, 'Linux armv81');
+    entitlements(false);
+    const writeText = vi.fn(async () => {});
+    stub('clipboard', { writeText });
+    seed();
+    renderGate();
+    expect('share' in navigator).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Share link' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://soluterminal.com/download/'));
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
+  });
+
+  it('shows the address to select on a phone that can neither share nor copy', async () => {
+    visitor(IPHONE_UA, 'iPhone');
+    entitlements(false);
+    seed();
+    renderGate();
+    expect('clipboard' in navigator).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Share link' }));
+    expect(await screen.findByText('https://soluterminal.com/download/')).toHaveClass('cloud-gate-start-address');
+    expect(screen.getByRole('button', { name: 'Share link' })).toBeInTheDocument();
+  });
+
+  it('falls back to copying when the share sheet fails', async () => {
+    visitor(IPHONE_UA, 'iPhone');
+    entitlements(false);
+    const writeText = vi.fn(async () => {});
+    stub('share', vi.fn(async () => { throw new DOMException('blocked', 'NotAllowedError'); }));
+    stub('clipboard', { writeText });
+    seed();
+    renderGate();
+    fireEvent.click(screen.getByRole('button', { name: 'Share link' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://soluterminal.com/download/'));
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['Windows on ARM', WINDOWS_ARM_UA, 'Win32', 0],
+    ['a Windows touch PC', WINDOWS_UA, 'Win32', 10],
+  ])('keeps the Windows download for %s', (_name, ua, platform, touchPoints) => {
+    visitor(ua, platform);
+    Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: touchPoints });
+    entitlements(false);
+    seed();
+    renderGate();
+    expect(screen.getByRole('link', { name: 'Download for Windows' })).toHaveAttribute('href', INSTALLER);
+    expect(screen.queryByText(HANDHELD_COPY)).toBeNull();
+    expect(screen.queryByText(DESKTOP_COPY)).toBeNull();
   });
 
   it.each(['start', 'signin', 'download'])(

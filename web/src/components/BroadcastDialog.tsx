@@ -3,6 +3,7 @@ import { useStore } from '../store';
 import { submitToPane } from '../ptySubmit';
 import { api } from '../api';
 import { effectivePaneAgent } from '../lib/agentKind';
+import { useUnsentInput } from '../lib/unsentInput';
 
 // Send one prompt to many panes at once. Targets concurrent-Claude
 // workflows ("run /status in all three worktrees", "say continue to
@@ -40,6 +41,7 @@ export function BroadcastDialog({ onClose }: { onClose: () => void }) {
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [prompt, setPrompt] = useState('');
+  useUnsentInput(prompt);
   const [appendEnter, setAppendEnter] = useState(true);
   const [sending, setSending] = useState(false);
 

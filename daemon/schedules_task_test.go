@@ -255,6 +255,39 @@ func TestTaskRunCapturesLog(t *testing.T) {
 	if strings.Contains(got, "args: -p check the build") {
 		t.Errorf("prompt leaked into argv: %q", got)
 	}
+	// Tasks use the "new since your last report" contract, and the first run
+	// has no previous report to compare against.
+	if !strings.Contains(got, "Nothing new needs you.") || strings.Contains(got, "Your last report") {
+		t.Errorf("first run stdin should carry the task contract and no previous report: %q", got)
+	}
+	// The next run is handed the opening of this one.
+	for deadline := time.Now().Add(testSpawnWait); s.taskRunningFor(sched.ID); {
+		if time.Now().After(deadline) {
+			t.Fatal("first run never released its slot")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.fireTask(sched.ID, work, "check the build", "plan", "", 0)
+	var second ScheduleRun
+	for deadline := time.Now().Add(testSpawnWait); ; time.Sleep(20 * time.Millisecond) {
+		if got, _ := s.Get(sched.ID); len(got.Runs) >= 2 {
+			second = got.Runs[0]
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second run never recorded")
+		}
+	}
+	if second.Status != "fired" {
+		t.Fatalf("second run = %+v, want fired", second)
+	}
+	data2, err := os.ReadFile(filepath.Join(s.taskRunDir(sched.ID), second.LogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data2), "(Your last report, from ") {
+		t.Errorf("second run stdin missing the previous report lede: %q", data2)
+	}
 	// Deleting the schedule takes its run logs with it.
 	if err := s.Delete(sched.ID); err != nil {
 		t.Fatal(err)
@@ -1066,5 +1099,69 @@ func TestTaskProcessRunSummaryOnFailure(t *testing.T) {
 	}
 	if gotSilent.Runs[0].Summary != "failed" {
 		t.Errorf("run.Summary = %q, want failed", gotSilent.Runs[0].Summary)
+	}
+}
+
+func TestTaskPromptStdinCarriesLastReportLede(t *testing.T) {
+	at := time.Date(2026, 10, 27, 9, 0, 0, 0, time.Local)
+	runs := []ScheduleRun{
+		{At: at.Add(2 * time.Hour), Status: "skipped", Detail: "busy"},
+		{At: at.Add(time.Hour), Status: "error", Summary: "failed: exit 1"},
+		{At: at, Status: "fired", Summary: "## Needs you\n- merge PR #7"},
+	}
+	prev := lastReportRun(runs)
+	if prev == nil || !prev.At.Equal(at) {
+		t.Fatalf("lastReportRun = %+v, want the newest fired run with a summary", prev)
+	}
+	got := taskPromptStdin("check the build", prev, true)
+	for _, want := range []string{
+		"check the build",
+		"only for a decision or action the user must take that is new since your last report",
+		"\"Nothing new needs you.\"",
+		"(Your last report, from Tue 27 Oct 2026, began:\n## Needs you\n- merge PR #7\n)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stdin missing %q:\n%s", want, got)
+		}
+	}
+	if lastReportRun(runs[:2]) != nil {
+		t.Error("errors and skips are not reports")
+	}
+	if strings.Contains(got, "has not been read") || strings.Contains(got, "not read that report") {
+		t.Error("a read previous report needs no carry-forward note")
+	}
+	// An unread previous report: its open asks must be carried, not dropped.
+	if unread := taskPromptStdin("check the build", prev, false); !strings.Contains(unread,
+		"The user has not read that report yet: keep any of its asks that are still open under \"## Needs you\".") {
+		t.Errorf("unread previous report must ask to carry open asks:\n%s", unread)
+	}
+	if strings.Contains(taskPromptStdin("p", nil, false), "Your last report") {
+		t.Error("no previous report → no comparison block")
+	}
+	// Managed agents keep the original contract; only tasks changed.
+	if !strings.Contains(reportStyleHint, "Nothing needs you today.") {
+		t.Error("reportStyleHint (agents) must stay unchanged")
+	}
+}
+
+func TestTaskReportSeenIgnoresAReadMarkerMovedByALaterFailure(t *testing.T) {
+	mon := time.Date(2026, 10, 26, 9, 0, 0, 0, time.Local)
+	report := ScheduleRun{At: mon, Status: "fired", Summary: "## Needs you\n- approve PR #7"}
+	failed := ScheduleRun{At: mon.Add(24 * time.Hour), Status: "error", Summary: "failed: exit 1"}
+	skipped := ScheduleRun{At: mon.Add(25 * time.Hour), Status: "skipped"}
+	at := func(t time.Time) *time.Time { return &t }
+
+	read := Schedule{LastReadAt: at(mon), Runs: []ScheduleRun{skipped, report}}
+	if !taskReportSeen(read, lastReportRun(read.Runs)) {
+		t.Error("the report was opened and is still the newest run: seen")
+	}
+	// The user opened Tuesday's failure, never Monday's report.
+	viaFailure := Schedule{LastReadAt: at(failed.At), Runs: []ScheduleRun{failed, report}}
+	if taskReportSeen(viaFailure, lastReportRun(viaFailure.Runs)) {
+		t.Error("a marker moved by a later failed run must not count the report as seen")
+	}
+	unread := Schedule{Runs: []ScheduleRun{report}}
+	if taskReportSeen(unread, lastReportRun(unread.Runs)) {
+		t.Error("never opened: not seen")
 	}
 }

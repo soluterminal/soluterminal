@@ -410,12 +410,20 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, brokerOv
 			return nil
 		case e := <-clientDone:
 			clientDone <- e
+			if exitErr := codexLivePendingEngineExit(serverDone); exitErr != nil {
+				st.Error = exitErr.Error()
+				return exitErr
+			}
 			return e
 		case e := <-serverDone:
 			serverDone <- e
-			return errors.New("Codex engine stopped; resume this conversation")
+			exitErr := codexLiveEngineExit(e)
+			st.Error = exitErr.Error()
+			return exitErr
 		case <-rpc.done:
-			return errors.New("Codex authentication channel closed; resume this conversation")
+			exitErr := codexLiveClosedChannel(serverDone)
+			st.Error = exitErr.Error()
+			return exitErr
 		case update := <-rpc.accountUpdates:
 			if team {
 				continue

@@ -6,6 +6,8 @@ import { captureSessionGesture, processIdentity, terminalSession, useTerminalWin
 import { viewIsCurrent } from '../lib/viewActionGuard';
 import { beginQuickReplyAttachment, quickReplyDraft, setQuickReplyDraft } from '../lib/quickReplyDrafts';
 import { Composer } from './composer/Composer';
+import { MobileApprovalBar } from './MobileApprovalBar';
+import { isMenuKeyReply, paneScreen, sendMenuKey } from '../lib/menuKeys';
 import type { PaneInfo } from '../types';
 
 // Mobile reply follows the visible terminal, including a detached owner view.
@@ -35,9 +37,13 @@ function TargetQuickReply({ pane, scope, generation, sessionKey }: { pane: PaneI
   const mounted = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const liveMetadata = () => {
+    const state = useStore.getState();
+    return state.panes[pane.id] ?? (state.mainPresentation.kind === 'owner' ? state.mainPresentation.pane : undefined);
+  };
   const current = () => {
     const state = useStore.getState();
-    const metadata = state.panes[pane.id] ?? (state.mainPresentation.kind === 'owner' ? state.mainPresentation.pane : undefined);
+    const metadata = liveMetadata();
     return mounted.current && viewIsCurrent(scope, generation) && effectiveTerminalTarget(state) === pane.id && !!metadata && processIdentity(metadata) === identity;
   };
   const capture = () => {
@@ -58,11 +64,20 @@ function TargetQuickReply({ pane, scope, generation, sessionKey }: { pane: PaneI
     const valid = capture();
     const sender = useStore.getState().senders[sessionKey];
     if (!sender) return;
+    const send = (bytes: string) => valid() && useStore.getState().senders[sessionKey] === sender && sender(bytes);
+    // A single menu key at a choice prompt goes out without the forced Enter:
+    // Claude/Codex menus act on the key itself, and the Enter would answer the
+    // next screen (a queued permission prompt's default row). See menuKeys.ts.
+    if (liveMetadata()?.state === 'choice-prompt' && isMenuKeyReply(textRef.current)) {
+      const key = textRef.current.trim().toLowerCase();
+      if (sendMenuKey(send, key, () => paneScreen(useStore.getState().paneSnapshots[sessionKey]))) changeDraft('');
+      return;
+    }
     const hasClaude = pane.hasClaude === true || exe === 'claude';
     const bracketed = !hasClaude && textRef.current.includes('\n');
     const body = bracketed ? `\x1b[200~${textRef.current}\x1b[201~` : textRef.current;
     // Guard both the body and delayed Enter against target/process/sender drift.
-    if (submitToPane((bytes) => valid() && useStore.getState().senders[sessionKey] === sender && sender(bytes), body, { appendEnter: true, useBracketedPaste: bracketed })) changeDraft('');
+    if (submitToPane(send, body, { appendEnter: true, useBracketedPaste: bracketed })) changeDraft('');
   }
   async function pickFile(file: File) {
     if (!current()) return;
@@ -85,6 +100,7 @@ function TargetQuickReply({ pane, scope, generation, sessionKey }: { pane: PaneI
     } finally { done(); }
   }
   return <div className="mobile-quick-reply" role="form" aria-label="Quick reply to focused terminal">
+    {pane.state === 'choice-prompt' && <MobileApprovalBar sessionKey={sessionKey} capture={capture} />}
     <Composer inputRef={inputRef} draft={text} onDraftChange={changeDraft}
       placeholder={`Reply to ${label}${pane.state === 'choice-prompt' ? ' — y / n / number' : ''}…`}
       voiceHint={`Hold to talk · or reply to ${label}…`}

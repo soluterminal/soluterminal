@@ -121,7 +121,7 @@ async function fulfillBuiltApp(route, dist) {
   if (pathname === '/api/panes') return json(contextPackEvidenceFixture.panes);
   if (pathname === '/api/workspaces') return json(contextPackEvidenceFixture.workspaces);
   if (pathname === '/api/orchestrator-hosts') return json(orchestratorHostsAllAvailable());
-  if (pathname === '/api/ports' || pathname === '/api/schedules' || pathname === '/api/todos') return json([]);
+  if (pathname === '/api/ports' || pathname === '/api/schedules') return json([]);
   if (pathname.startsWith('/api/panes/') && pathname.endsWith('/native/history')) return json([]);
   if (pathname.startsWith('/api/')) return json({ error: 'fixture endpoint unavailable' }, 404);
   if (!['GET', 'HEAD'].includes(request.method())) return route.fulfill({ status: 405, body: '' });

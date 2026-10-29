@@ -77,3 +77,12 @@ describe('resolveCombo overrides', () => {
     expect(resolveCombo('alt+g', overrides)).toBeNull();
   });
 });
+
+describe('removed actions', () => {
+  it('drops Quick todo capture and ignores a saved override for it', () => {
+    expect(actionById('todo.quickAdd')).toBeUndefined();
+    expect(REBINDABLE_ACTIONS.some((a) => /todo/i.test(`${a.id} ${a.label} ${a.hint}`))).toBe(false);
+    expect(resolveCombo('alt+t', {})).toBeNull();
+    expect(resolveCombo('alt+t', { 'todo.quickAdd': 'alt+t' })).toBeNull();
+  });
+});

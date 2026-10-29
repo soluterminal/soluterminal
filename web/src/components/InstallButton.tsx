@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useIsMobileView } from './useIsMobileView';
+import { TopbarPopover } from './TopbarPopover';
+import { IOS_ADD_TO_HOME_SCREEN_STEPS, isIosDevice } from '../lib/iosPush';
 
 // Chrome/Edge fire `beforeinstallprompt` when the site passes all PWA
 // installability checks (manifest + service worker + offline-capable +
@@ -65,13 +67,13 @@ function isStandalone(): boolean {
   return !!(window.navigator as unknown as { standalone?: boolean }).standalone;
 }
 
-function isIosWebKit(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  const ua = navigator.userAgent;
-  const platform = navigator.platform;
-  const iOS = /iPad|iPhone|iPod/.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  return iOS && /WebKit/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
-}
+// Every iOS browser gets the Home Screen help, not just Safari. Chrome, Edge
+// and Firefox on iOS are WebKit underneath: they never fire
+// `beforeinstallprompt`, so the Chrome-style "Install…" pill and its
+// engagement-heuristic / three-dot-menu advice never apply there. Since iOS
+// 16.4 they offer Add to Home Screen in their own Share menu, and a web app
+// added from them gets push like one added from Safari — so iOS wording is
+// correct for them, and hiding the pill would drop the only install hint.
 
 export function InstallButton() {
   const isMobile = useIsMobileView();
@@ -164,7 +166,7 @@ export function InstallButton() {
     if (isTauri()) return { kind: 'hidden' };
     if (!isMobile) return { kind: 'hidden' };
     if (isStandalone()) return { kind: 'hidden' };
-    if (isIosWebKit()) return { kind: 'ios-help' };
+    if (isIosDevice()) return { kind: 'ios-help' };
     if (deferred) return { kind: 'prompt-ready' };
     if (sw === 'missing' || sw === 'unsupported') return { kind: 'sw-missing', sw };
     return { kind: 'criteria-not-met', sw };
@@ -198,13 +200,28 @@ export function InstallButton() {
   }
 
   if (ui.kind === 'ios-help') {
+    // Touch screens never show a hover tooltip, so the explanation opens on
+    // tap in the shared chrome popover.
     return (
-      <span
-        className="install-btn diagnostic dim"
-        title="On iPhone or iPad, use Safari's Share button, then choose Add to Home Screen."
+      <TopbarPopover
+        align="right"
+        trigger={({ open, toggle }) => (
+          <button
+            type="button"
+            className="install-btn diagnostic dim"
+            onClick={toggle}
+            aria-expanded={open}
+            aria-haspopup="dialog"
+          >
+            Add to Home Screen
+          </button>
+        )}
       >
-        Add to Home Screen
-      </span>
+        <div className="install-help" role="dialog" aria-label="Add SoluTerminal to your Home Screen">
+          <p>{IOS_ADD_TO_HOME_SCREEN_STEPS}</p>
+          <p>Then open SoluTerminal from its Home Screen icon. It runs full screen there, and you can turn on alerts from the Alerts bell.</p>
+        </div>
+      </TopbarPopover>
     );
   }
 

@@ -62,12 +62,7 @@ type apiServer struct {
 	// Edit/Write hooks). Backs GET /api/recent-files. See recentfiles.go.
 	recentFiles *recentFilesRing
 	scheds      *ScheduleStore
-	todos       *TodoStore
-	// todoNormalizeInFlight deduplicates best-effort model enrichment for a
-	// newly-created todo. It is intentionally in-memory and non-durable.
-	todoNormalizeMu       sync.Mutex
-	todoNormalizeInFlight map[string]bool
-	updater               *Updater
+	updater     *Updater
 	// fleet inventories this Manager's daemon/pane agent binaries for the
 	// debug endpoint only. Nil on unsupported/degraded test servers.
 	fleet *fleetBinaryInspector
@@ -660,6 +655,7 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	// Scheduled prompt injection + built-in agent runs (`Schedules` feature).
 	mux.HandleFunc("GET /api/schedules", a.listSchedules)
 	mux.HandleFunc("GET /api/schedules/preview", a.previewSchedule)
+	mux.HandleFunc("GET /api/schedules/{id}", a.getSchedule)
 	mux.HandleFunc("POST /api/schedules", a.createSchedule)
 	mux.HandleFunc("PUT /api/schedules/{id}", a.updateSchedule)
 	mux.HandleFunc("DELETE /api/schedules/{id}", a.deleteSchedule)
@@ -670,13 +666,10 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/schedules/{id}/read", a.markScheduleRead)
 	mux.HandleFunc("GET /api/schedules/{id}/runlog", a.scheduleRunLog)
 
-	// Todo backlog (left-panel inbox). Global, not per-workspace —
-	// see daemon/todos.go for rationale. Claude Code can add via the
-	// `add_todo` MCP tool (with auto-tagged workspace).
-	mux.HandleFunc("GET /api/todos", a.listTodos)
-	mux.HandleFunc("POST /api/todos", a.createTodo)
-	mux.HandleFunc("PATCH /api/todos/{id}", a.updateTodo)
-	mux.HandleFunc("DELETE /api/todos/{id}", a.deleteTodo)
+	// Todos was removed; every old route answers 410 Gone for one release
+	// (daemon/todos_removed.go).
+	mux.HandleFunc("/api/todos", a.todosRemoved)
+	mux.HandleFunc("/api/todos/", a.todosRemoved)
 
 	// Inject raw bytes into a pane's PTY. Powers "Fire now" in the
 	// Schedules UI and is a general-purpose primitive for any future

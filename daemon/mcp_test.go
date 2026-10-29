@@ -6,70 +6,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
-
-func TestMCPTodoSchemaCompatibility(t *testing.T) {
-	for _, tool := range mcpTools() {
-		switch tool.Name {
-		case "add_todo":
-			var schema struct {
-				Properties           map[string]json.RawMessage `json:"properties"`
-				Required             []string                   `json:"required"`
-				AdditionalProperties bool                       `json:"additionalProperties"`
-			}
-			if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
-				t.Fatal(err)
-			}
-			if _, ok := schema.Properties["taskId"]; !ok {
-				t.Fatal("add_todo schema is missing optional taskId")
-			}
-			if !slices.Equal(schema.Required, []string{"text"}) || schema.AdditionalProperties {
-				t.Fatalf("add_todo compatibility changed: required=%v additionalProperties=%v", schema.Required, schema.AdditionalProperties)
-			}
-		case "list_todos":
-			if !strings.Contains(tool.Description, "createdAt") {
-				t.Error("list_todos description does not document createdAt")
-			}
-			var schema struct {
-				Properties           map[string]json.RawMessage `json:"properties"`
-				Required             []string                   `json:"required"`
-				AdditionalProperties bool                       `json:"additionalProperties"`
-			}
-			if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
-				t.Fatal(err)
-			}
-			for _, name := range []string{"done", "workspace", "query", "limit", "includeArchived"} {
-				if _, ok := schema.Properties[name]; !ok {
-					t.Errorf("list_todos schema is missing optional %s", name)
-				}
-			}
-			if len(schema.Required) != 0 || schema.AdditionalProperties {
-				t.Fatalf("list_todos compatibility changed: required=%v additionalProperties=%v", schema.Required, schema.AdditionalProperties)
-			}
-		case "update_todo":
-			var schema struct {
-				Properties           map[string]json.RawMessage `json:"properties"`
-				Required             []string                   `json:"required"`
-				AdditionalProperties bool                       `json:"additionalProperties"`
-			}
-			if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
-				t.Fatal(err)
-			}
-			if _, ok := schema.Properties["taskId"]; !ok {
-				t.Fatal("update_todo schema is missing optional taskId")
-			}
-			if !slices.Equal(schema.Required, []string{"id"}) {
-				t.Fatalf("update_todo required = %v, want [id]", schema.Required)
-			}
-			if schema.AdditionalProperties {
-				t.Fatal("update_todo must keep additionalProperties:false")
-			}
-		}
-	}
-}
 
 func TestMCPCallerPaneHeader(t *testing.T) {
 	tests := []struct {
@@ -131,7 +70,7 @@ func TestMCPMutationPolicyDeniesConfiguredMutators(t *testing.T) {
 		"send_input", "spawn_pane", "create_schedule", "cancel_schedule", "write_file_line",
 		// Gated in the Warden hardening pass — before it, `deny` still left
 		// these callable (including kill_pane).
-		"kill_pane", "rename_pane", "set_pane_flag", "switch_workspace", "preview_file", "add_todo", "update_todo", "delete_todo", "answer_prompt",
+		"kill_pane", "rename_pane", "set_pane_flag", "switch_workspace", "preview_file", "answer_prompt",
 	} {
 		text, isErr := mcpResultText(t, mcpCallForTest(t, tool, map[string]any{}))
 		if !isErr {

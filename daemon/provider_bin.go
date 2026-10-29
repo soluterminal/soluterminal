@@ -84,8 +84,20 @@ func resolveProviderBin(runtimeID string) (string, error) {
 			return p, nil
 		}
 	}
-	return "", errors.New(spec.NotFoundMsg)
+	return "", &providerBinNotFoundError{msg: spec.NotFoundMsg}
 }
+
+// errProviderBinNotFound matches (errors.Is) a resolver miss: the CLI is not
+// installed anywhere the resolver looks. Callers that poll a runtime use it to
+// tell "not installed here" from a broken install.
+var errProviderBinNotFound = errors.New("provider binary not found")
+
+// providerBinNotFoundError keeps the manifest's exact wording (the failure
+// classifier matches it) while still answering errors.Is for the sentinel.
+type providerBinNotFoundError struct{ msg string }
+
+func (e *providerBinNotFoundError) Error() string        { return e.msg }
+func (e *providerBinNotFoundError) Is(target error) bool { return target == errProviderBinNotFound }
 
 // providerBinUnderLocalAppData checks the vendor's fixed Windows install
 // folders. %LOCALAPPDATA% falls back to %USERPROFILE%\AppData\Local (or the

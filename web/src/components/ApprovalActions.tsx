@@ -4,9 +4,9 @@ import { useStore } from '../store';
 // in `choice-prompt` (Claude has a numbered menu up). One-tap sends the
 // corresponding key without the user having to focus the pane and type.
 //
-// Scope: desktop only — mobile already covers this via MobileKeyBar's
-// 1/2/3/Esc row, which is always visible and hits the focused pane.
-// Duplicating here would crowd the phone UI.
+// Scope: desktop. Phones answer from MobileApprovalBar (inside the mobile
+// quick-reply bar); while it is up, CSS hides this strip so the same keys
+// are not offered twice.
 //
 // The strip deliberately stays key-literal (1/2/3/Y/N/Enter/Esc) rather
 // than trying to parse Claude's menu text out of scrollback. Menu

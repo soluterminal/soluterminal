@@ -381,7 +381,6 @@ const ambientAppListResponses = new Set([
 // version or one equal to the served /webdist.json. The old 0.0.990 literal
 // caused a packaged-mismatch banner against every real capture build.
 export function createServer(dist, state = {}) {
-  const todoText = 'Review the release recovery checklist';
   const workflowObjectResponses = buildServiceObjectResponses();
   const ambientAppObjectResponses = buildAmbientAppObjectResponses(state.healthVersion ?? 'dev');
   return http.createServer((req, res) => {
@@ -563,13 +562,6 @@ export function createServer(dist, state = {}) {
       preview: null,
       events: [],
     });
-    if (req.method === 'GET' && url.pathname === '/api/todos') return json(res, [{
-      id: 'todo_visual_delegate',
-      text: todoText,
-      done: false,
-      createdAt: Date.parse('2026-08-01T09:00:00Z'),
-      source: 'user',
-    }]);
     // The Autonomy overview is an OBJECT, not a list — it must be answered
     // before the array catch-all below, which would otherwise hand the section
     // a `[]` whose `.policies` is undefined. Representative rather than empty:

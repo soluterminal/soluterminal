@@ -382,7 +382,8 @@ export function cleanupScopeLabel(status: SystemStatus): string {
 }
 
 export function automationLine(status: SystemStatus): string {
-  return `${status.automation.agents.running} agents running · ${status.automation.agents.paused} paused · ${status.automation.schedules.enabled} schedules enabled`;
+  // Managed agents were removed; the built-in agents are schedules.
+  return `${status.automation.schedules.enabled} schedules enabled · ${status.automation.schedules.running} running`;
 }
 
 export function releaseLine(status: SystemStatus): string {

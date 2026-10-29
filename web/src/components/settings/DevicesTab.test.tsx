@@ -31,6 +31,8 @@ import { CHECKIN_HINT } from './CheckinSetting';
 import { useEntitlements } from '../../entitlements';
 import { useCloud } from '../../cloud';
 import { api } from '../../api';
+import { useStore } from '../../store';
+import type { UpdateStatus } from '../../types';
 
 beforeEach(() => {
   useEntitlements.setState({ loaded: true, team: true, operator: true, account: true });
@@ -271,5 +273,56 @@ describe('DevicesTab usage statistics and crash reports', () => {
     fireEvent.click(box);
     expect(await screen.findByText(/Couldn't save the crash report setting/)).toBeInTheDocument();
     expect(box).toBeChecked();
+  });
+});
+
+// On public the channel default pauses the unattended installer restart, so
+// "Restart when idle" would do nothing there: the row hides, and the saved
+// choice stays as it is. Only an explicit pause hides it.
+describe('DevicesTab desktop app restarts', () => {
+  const initial = useStore.getState();
+  const status = (extra: Partial<UpdateStatus>): UpdateStatus => ({
+    current: '0.0.1226', available: false, updateChannel: 'public', ...extra,
+  });
+
+  beforeEach(() => {
+    useStore.setState({ updateSettings: { autoApply: 'off', shellAutoApply: 'when-idle' } });
+  });
+
+  afterEach(() => {
+    useStore.setState({ updateStatus: initial.updateStatus, updateSettings: initial.updateSettings });
+  });
+
+  it('hides the row and leaves the saved choice alone while the channel pauses it', () => {
+    const setShell = vi.fn(async () => {});
+    useStore.setState({
+      setUpdateShellAutoApply: setShell,
+      updateStatus: status({
+        shellAutoApplyPaused: true,
+        shellAutoApplyPausedReason: 'automatic desktop restarts are not enabled for this channel yet',
+      }),
+    });
+    render(<DevicesTab />);
+    expect(screen.getByText('Automatic updates')).toBeInTheDocument();
+    expect(screen.queryByText('Desktop app restarts')).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Restart when idle' })).not.toBeInTheDocument();
+    expect(setShell).not.toHaveBeenCalled();
+    expect(useStore.getState().updateSettings?.shellAutoApply).toBe('when-idle');
+    useStore.setState({ setUpdateShellAutoApply: initial.setUpdateShellAutoApply });
+  });
+
+  it('shows the row with the saved choice when the channel allows it', () => {
+    useStore.setState({ updateStatus: status({ updateChannel: 'team', shellAutoApplyPaused: false }) });
+    render(<DevicesTab />);
+    expect(screen.getByText('Desktop app restarts')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Restart when idle' })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Restart when idle')).toBeInTheDocument();
+  });
+
+  it('shows the row as before when an older daemon leaves the field out', () => {
+    useStore.setState({ updateStatus: status({}) });
+    render(<DevicesTab />);
+    expect(screen.getByText('Desktop app restarts')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Restart when idle')).toBeInTheDocument();
   });
 });

@@ -55,15 +55,15 @@ describe('SidebarCustomizer', () => {
     render(<SidebarCustomizer />);
     expect(screen.queryByRole('checkbox', { name: MIDDLE_SECTION_LABELS.owners })).toBeNull();
     expect(screen.queryByRole('checkbox', { name: MIDDLE_SECTION_LABELS.agents })).toBeNull();
-    // Todos, Files and Localhost ports start hidden for a public install, and
-    // can be switched back on here.
+    // Files and Localhost ports start hidden for a public install, and can be
+    // switched back on here. Todos was removed and is not offered at all.
     expect(screen.getByRole('checkbox', { name: MIDDLE_SECTION_LABELS.files })).not.toBeChecked();
-    expect(screen.getByRole('checkbox', { name: MIDDLE_SECTION_LABELS.todos })).not.toBeChecked();
+    expect(screen.queryByRole('checkbox', { name: /todo/i })).toBeNull();
     expect(screen.getByRole('checkbox', { name: MIDDLE_SECTION_LABELS.ports })).not.toBeChecked();
     expect(screen.getByRole('checkbox', { name: MIDDLE_SECTION_LABELS.schedules })).toBeChecked();
     fireEvent.click(screen.getByRole('checkbox', { name: MIDDLE_SECTION_LABELS.ports }));
     expect(usePrefs.getState().prefs.sidebar?.hidden).not.toContain('ports');
-    expect(usePrefs.getState().prefs.sidebar?.hidden).toEqual(expect.arrayContaining(['todos', 'files']));
+    expect(usePrefs.getState().prefs.sidebar?.hidden).toEqual(expect.arrayContaining(['files']));
   });
 
   it('unchecking a visible section records it as hidden in prefs', () => {
