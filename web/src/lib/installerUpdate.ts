@@ -1,5 +1,6 @@
 import type { UpdateStatus } from '../types';
 import { isCloudLaunchMode, isVersionNewer } from './useCloudShellUpdate';
+import { installerNeedsLocalMode } from './shellUpdateRoute';
 
 // One answer to "is there a desktop-installer update this click can install?"
 // shared by the banner, the version popover and the status-bar chip, so they
@@ -17,13 +18,19 @@ import { isCloudLaunchMode, isVersionNewer } from './useCloudShellUpdate';
 //   brought the button back after the daemon update and refused the click.
 //   In cloud launch mode the status belongs to a remote daemon, so it says
 //   nothing about this computer; the app's own updater decides there.
-// actionable: newer, not held by a rollback, and not blocked.
+// localModeOnly: the desktop app is showing another computer's team daemon
+//   (shellUpdateRoute.ts installerNeedsLocalMode) and its installer is newer
+//   than this app. That installer is the other computer's, so no button here
+//   installs it; the surfaces offer the switch to Local mode instead.
+// actionable: newer, not held by a rollback, not blocked, and installable
+//   from this window.
 export interface InstallerUpdate {
   latest: string | null;
   current: string | null;
   newer: boolean;
   held: boolean;
   blockedByDaemon: boolean;
+  localModeOnly: boolean;
   actionable: boolean;
 }
 
@@ -40,12 +47,14 @@ export function installerUpdate(
   const held = !!latest && status?.holdVersion === latest;
   const installedDaemon = isCloudLaunchMode() ? '' : (status?.current ?? '');
   const blockedByDaemon = newer && !!latest && !!installedDaemon && isVersionNewer(installedDaemon, latest);
+  const localModeOnly = newer && installerNeedsLocalMode(status);
   return {
     latest,
     current,
     newer,
     held,
     blockedByDaemon,
-    actionable: newer && !held && !blockedByDaemon,
+    localModeOnly,
+    actionable: newer && !held && !blockedByDaemon && !localModeOnly,
   };
 }

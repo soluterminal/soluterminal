@@ -16,9 +16,16 @@ const mock = vi.hoisted(() => ({
   nativeCalls: 0,
   nativeForces: [] as boolean[],
   revealed: [] as string[],
+  invoked: [] as Array<[string, unknown]>,
 }));
 vi.mock('../tauri-browser', () => ({
   isDesktopApp: () => mock.isDesktop,
+  tauriInvoke: () => (mock.isDesktop
+    ? (command: string, args?: unknown) => {
+      mock.invoked.push([command, args]);
+      return Promise.resolve(undefined);
+    }
+    : null),
   browserPanePing: () => Promise.resolve(mock.pingVersion),
   getShellVersion: () => Promise.resolve(mock.pingVersion),
   openExternalWindow: (url: string) => {
@@ -61,6 +68,7 @@ describe('ShellUpdateBanner', () => {
     mock.nativeCalls = 0;
     mock.nativeForces = [];
     mock.revealed = [];
+    mock.invoked = [];
     localStorage.clear();
     setLaunchMode('cloud');
     useStore.setState({ updateStatus: { shellLatest: '0.0.835' } as never, applyAllUpdates: realApplyAllUpdates });
@@ -171,6 +179,41 @@ describe('ShellUpdateBanner', () => {
       'https://soluterminal.com/download/',
     ]));
     expect(screen.queryByRole('button', { name: 'Show in folder' })).not.toBeInTheDocument();
+  });
+
+  // 2026-10-29: a public 0.0.1225 app in cloud launch mode viewing a team
+  // computer (team 0.0.1226). "Update now" ran the app's updater, which reads
+  // public releases only, and fell back to the public download page.
+  it('on a team computer, offers Local mode and never runs the app updater or the download page', async () => {
+    const realOpenDialog = useStore.getState().openDialog;
+    useStore.setState({
+      updateStatus: { current: '0.0.1226', shellLatest: '0.0.1226', shellAvailable: true, updateChannel: 'team' } as never,
+      openDialog: (d: { resolve: (v: unknown) => void }) => d.resolve(true),
+    } as never);
+    mock.pingVersion = '0.0.1225';
+    try {
+      render(<ShellUpdateBanner />);
+      expect(await screen.findByText(/Update this computer's desktop app in Local mode/)).toBeInTheDocument();
+      expect(screen.getByText(/the installer shown here belongs to the computer you're viewing/)).toBeInTheDocument();
+      expect(screen.queryByText(/newer desktop app/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Update now' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Switch to Local' }));
+
+      await waitFor(() => expect(mock.invoked).toEqual([['desktop_set_launch_mode', { mode: 'local' }]]));
+      expect(mock.nativeCalls).toBe(0);
+      expect(mock.opened).toEqual([]);
+    } finally {
+      useStore.setState({ openDialog: realOpenDialog });
+    }
+  });
+
+  it('on a public computer, keeps the app updater', async () => {
+    mock.nativeOk = true;
+    useStore.setState({ updateStatus: { shellLatest: '0.0.835', updateChannel: 'public' } as never });
+    render(<ShellUpdateBanner />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Update now' }));
+    await waitFor(() => expect(mock.nativeCalls).toBe(1));
+    expect(screen.queryByRole('button', { name: 'Switch to Local' })).not.toBeInTheDocument();
   });
 
   it('does NOT show in local mode (the daemon handles the badge there)', async () => {

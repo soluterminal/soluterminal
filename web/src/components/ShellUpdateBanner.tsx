@@ -3,6 +3,8 @@ import { useCloudShellUpdate } from '../lib/useCloudShellUpdate';
 import { useStore } from '../store';
 import { applyShellUpdateNative, revealShellInstallerNative } from '../tauri-browser';
 import { fallBackToDownloadPage } from '../lib/shellUpdateFallback';
+import { installerNeedsLocalMode } from '../lib/shellUpdateRoute';
+import { switchDesktopLaunchMode } from '../lib/launchModeSwitch';
 
 // Cloud-mode installer-update nudge. The daemon-driven update chip can't see a
 // stale LOCAL shell in cloud mode (no local daemon — see useCloudShellUpdate),
@@ -14,6 +16,12 @@ import { fallBackToDownloadPage } from '../lib/shellUpdateFallback';
 // and falls back to opening the download page for a manual install on shells
 // that predate that command (which is how a currently-stranded shell bootstraps
 // onto the first shell that HAS one-click).
+//
+// On a team machine the reported installer is that computer's team build,
+// which nothing in this window can install here (shellUpdateRoute.ts
+// installerNeedsLocalMode), and the download page would hand this computer
+// the public one. The banner then offers the switch to Local mode, where this
+// computer's own daemon fetches and verifies its installer.
 
 function dismissKey(version: string): string {
   return `solu.shellUpdateBannerDismissed.${version}`;
@@ -26,8 +34,10 @@ export function ShellUpdateBanner() {
   const [launchFailure, setLaunchFailure] = useState<{ path: string; error?: string } | null>(null);
   const [downgradeRefusal, setDowngradeRefusal] = useState<{ installed?: string; installer?: string; message?: string } | null>(null);
   const [updateHoldRefusal, setUpdateHoldRefusal] = useState<string | null>(null);
+  const [switchingToLocal, setSwitchingToLocal] = useState(false);
   const toast = useStore((s) => s.toast);
   const applyAllUpdates = useStore((s) => s.applyAllUpdates);
+  const localModeOnly = useStore((s) => installerNeedsLocalMode(s.updateStatus));
 
   if (!available || !latest || !releaseUrl) return null;
 
@@ -49,8 +59,14 @@ export function ShellUpdateBanner() {
     setSessionDismissed(latest);
   };
 
+  const switchToLocal = async () => {
+    if (switchingToLocal) return;
+    const switched = await switchDesktopLaunchMode('local', toast, () => setSwitchingToLocal(true));
+    if (!switched) setSwitchingToLocal(false);
+  };
+
   const update = async () => {
-    if (applying) return;
+    if (applying || localModeOnly) return;
     setApplying(true);
     const applyNative = async () => {
       // Try the native one-click first; fall back to the manual release page
@@ -113,6 +129,11 @@ export function ShellUpdateBanner() {
             <span aria-hidden>⚠</span> Installer downloaded but didn't open — open it manually
             <code className="shell-update-banner-path">{launchFailure.path}</code>
           </>
+        ) : localModeOnly ? (
+          <>
+            <span aria-hidden>⬆</span> Update this computer's desktop app in Local mode
+            <span className="shell-update-banner-sub"> · the installer shown here belongs to the computer you're viewing</span>
+          </>
         ) : (
           <>
             <span aria-hidden>⬆</span> A newer desktop app (v{latest}) is available
@@ -122,7 +143,16 @@ export function ShellUpdateBanner() {
         )}
       </span>
       <span className="shell-update-banner-actions">
-        {updateHoldRefusal || downgradeRefusal ? null : launchFailure ? (
+        {updateHoldRefusal || downgradeRefusal ? null : localModeOnly ? (
+          <button
+            type="button"
+            className="shell-update-banner-btn primary"
+            disabled={switchingToLocal}
+            onClick={() => void switchToLocal()}
+          >
+            {switchingToLocal ? 'Switching…' : 'Switch to Local'}
+          </button>
+        ) : launchFailure ? (
           <button type="button" className="shell-update-banner-btn primary" onClick={() => void reveal()}>
             Show in folder
           </button>

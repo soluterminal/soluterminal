@@ -8665,6 +8665,24 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
   -webkit-user-select: none;
 }
 .mobile-approval-key.danger { color: var(--danger); }
+/* Enter with the highlighted option's text on a small second line. The
+   label adds no width of its own (width 0 / min-width 100%), so it can never
+   push a key onto a second row: it takes the key's width, which Enter grows
+   into from the row's spare room, and ellipsizes past that. */
+.mobile-approval-key.has-option {
+  flex-grow: 8;
+  line-height: 1.15;
+}
+.mobile-approval-option {
+  display: block;
+  width: 0;
+  min-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.8;
+}
 /* 320px phones: keep the key, drop its meaning word (still in aria-label). */
 @media (max-width: 359px) {
   .mobile-approval-meaning { display: none; }

@@ -40,10 +40,14 @@ fn should_reveal<S: AsRef<str>>(argv: &[S]) -> bool {
 fn reveal_main_window<R: Runtime>(app: &AppHandle<R>) {
     use std::sync::atomic::Ordering;
 
-    // The first instance may still be in .setup() (daemon start, first-run
-    // wizard) — no main window yet. Nothing to reveal; the window shows
-    // itself when setup finishes.
+    // The first instance may still be starting its backends (or in the
+    // first-run wizard) — no main window yet. Bring the startup window forward
+    // if it is showing; the main window shows itself when startup finishes.
     let Some(window) = app.get_webview_window("main") else {
+        if let Some(startup) = app.get_webview_window(crate::startup_screen::LABEL) {
+            let _ = startup.unminimize();
+            let _ = startup.set_focus();
+        }
         return;
     };
     let maximize = app

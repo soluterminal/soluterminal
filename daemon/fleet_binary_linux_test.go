@@ -106,6 +106,9 @@ func TestFleetBinarySameAndDeletedInodeClassification(t *testing.T) {
 	installed := filepath.Join(dir, "solud")
 	fleetTestCopyExecutable(t, sleepPath, installed)
 	cmd := exec.Command(installed, "30")
+	// Multi-call coreutils (uutils, BusyBox) pick the applet from argv[0], and
+	// the copy is named solud: keep argv[0] as sleep so the helper stays alive.
+	cmd.Args[0] = filepath.Base(sleepPath)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

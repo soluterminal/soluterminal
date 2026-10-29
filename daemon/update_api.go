@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -114,7 +115,12 @@ func (a *apiServer) updateApplyShell(w http.ResponseWriter, r *http.Request) {
 	var path string
 	var err error
 	if silent {
-		path, err = a.updater.ApplyShellSilent(r.Context(), a.dataDir)
+		appPid, pidErr := silentAppPidFromRequest(w, r)
+		if pidErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"code": "shell_silent_bad_app_pid", "message": pidErr.Error()})
+			return
+		}
+		path, err = a.updater.ApplyShellSilent(r.Context(), a.dataDir, appPid)
 	} else {
 		path, err = a.updater.ApplyShell(r.Context(), a.dataDir, forceDowngrade)
 	}
@@ -123,6 +129,15 @@ func (a *apiServer) updateApplyShell(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &paused) {
 			writeJSON(w, http.StatusConflict, map[string]any{
 				"code": "shell_silent_paused", "paused": true, "reason": paused.reason, "message": err.Error(),
+			})
+			return
+		}
+		if errors.Is(err, errSilentAppNotFound) {
+			// The courier started, found no desktop app to wait for and installed
+			// nothing. Its own code, so the page can retry sooner than after a
+			// real failure.
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"code": "shell_silent_app_not_found", "message": redactUpdateURLs(err.Error()),
 			})
 			return
 		}
@@ -158,6 +173,33 @@ func (a *apiServer) updateApplyShell(w http.ResponseWriter, r *http.Request) {
 	// ordinary request, opens the installer window and omits it, and the page
 	// then must not close the app as if nothing were left to do.
 	writeJSON(w, 200, map[string]any{"applying": true, "installerPath": path, "silent": silent})
+}
+
+// silentAppPidFromRequest reads the optional {"appPid": N} body of a silent
+// request: the desktop app's own process id, which the courier then waits on
+// instead of matching by name. No body (an app too old to know its pid) is 0.
+// Anything other than a whole number in 1..2^31-1 is refused, never guessed.
+func silentAppPidFromRequest(w http.ResponseWriter, r *http.Request) (int, error) {
+	if r.Body == nil {
+		return 0, nil
+	}
+	var body struct {
+		AppPid *int64 `json:"appPid"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	if err := dec.Decode(&body); err != nil {
+		if errors.Is(err, io.EOF) {
+			return 0, nil
+		}
+		return 0, errors.New("the request body must be {\"appPid\": <the app's process id>}")
+	}
+	if body.AppPid == nil {
+		return 0, nil
+	}
+	if *body.AppPid < 1 || *body.AppPid > maxSilentAppPid {
+		return 0, errors.New("appPid must be a process id between 1 and 2147483647")
+	}
+	return int(*body.AppPid), nil
 }
 
 // refuseInstallerOverRelay answers 403 and reports true when r arrived over

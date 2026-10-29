@@ -3,10 +3,14 @@ import { api, ApiError } from './api';
 import { useCloud } from './cloud';
 import {
   noteUserActivity,
+  SHELL_AUTO_APP_NOT_FOUND_PER_DAY,
+  SHELL_AUTO_APP_NOT_FOUND_RETRY_MS,
   SHELL_AUTO_COUNTDOWN_MS,
   SHELL_AUTO_HOLD_MS,
   SHELL_AUTO_QUIET_MS,
   shellAutoApplyNeedsManual,
+  shellAutoApplyWaitReason,
+  shellAutoWaitLine,
   useStore,
 } from './store';
 import type { PaneInfo, UpdateStatus } from './types';
@@ -18,12 +22,14 @@ const native = vi.hoisted(() => ({
   outcome: { ok: true } as { ok: boolean; staged?: string; error?: string },
   apply: vi.fn(),
   exit: vi.fn(),
+  appPid: null as number | null,
 }));
-const drafts = vi.hoisted(() => ({ present: false }));
+const drafts = vi.hoisted(() => ({ present: false, paneId: undefined as string | undefined }));
 
 vi.mock('./tauri-browser', () => ({
   isDesktopApp: () => native.desktop,
   getShellVersion: () => Promise.resolve(native.installed),
+  getAppProcessId: () => Promise.resolve(native.appPid),
   applyShellUpdateSilentNative: () => {
     native.apply();
     return Promise.resolve(native.outcome);
@@ -36,6 +42,7 @@ vi.mock('./tauri-browser', () => ({
 
 vi.mock('./native/useNativePane', () => ({
   hasAnyUnsentDraft: () => drafts.present,
+  unsentDraftPaneId: () => (drafts.present ? drafts.paneId ?? 'draft-pane' : undefined),
 }));
 
 const pane = (over: Partial<PaneInfo> & { id: string }): PaneInfo => over as PaneInfo;
@@ -76,6 +83,8 @@ describe('desktop shell auto-apply', () => {
     native.apply.mockClear();
     native.exit.mockClear();
     drafts.present = false;
+    drafts.paneId = undefined;
+    native.appPid = null;
     resetUnsentInputForTests();
     delete (window as unknown as { __SOLU_BACKEND__?: unknown }).__SOLU_BACKEND__;
     useCloud.setState({ mode: 'local', isLocal: false });
@@ -388,6 +397,71 @@ describe('desktop shell auto-apply', () => {
       expect(native.exit).not.toHaveBeenCalled();
       expect(useStore.getState().toasts.map((t) => t.message).join(' ')).toMatch(/could not start/);
     });
+
+    it('passes the app’s own pid so the courier waits on exactly this process', async () => {
+      native.appPid = 4242;
+      const viaDaemon = vi.spyOn(api, 'applyShellUpdate').mockResolvedValue({ applying: true, silent: true });
+      await becomeQuiet();
+      await arm();
+      await vi.advanceTimersByTimeAsync(SHELL_AUTO_COUNTDOWN_MS);
+      expect(viaDaemon).toHaveBeenCalledWith(false, { silent: true, appPid: 4242 });
+    });
+
+    // #739: the courier started but found no app. Nothing was installed, so
+    // it is retried in 15 minutes and is not one of the two attempts, but only
+    // a few times a day: then it counts, and the two-attempt cap ends it.
+    it('retries "app not found" after 15 minutes, a bounded number of times a day', async () => {
+      const notFound = () => new ApiError(409, 'not found', { code: 'shell_silent_app_not_found', message: 'the desktop app is not running in this session' });
+      const viaDaemon = vi.spyOn(api, 'applyShellUpdate').mockImplementation(async () => { throw notFound(); });
+      const tryOnce = async () => {
+        await becomeQuiet();
+        await arm();
+        await vi.advanceTimersByTimeAsync(SHELL_AUTO_COUNTDOWN_MS + 2000);
+      };
+
+      await tryOnce();
+      expect(viaDaemon).toHaveBeenCalledTimes(1);
+      expect(native.exit).not.toHaveBeenCalled();
+      expect(shellAutoApplyNeedsManual(version)).toBe(false);
+      expect(useStore.getState().toasts.map((t) => t.message).join(' ')).toMatch(/tries again in 15 minutes/);
+      expect(shellAutoApplyWaitReason()).toMatchObject({ kind: 'retry', lastError: 'the last try did not find the app' });
+
+      // Not before the 15 minutes are up.
+      useStore.getState().maybeAutoApplyShellUpdate();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useStore.getState().shellAutoRestart).toBeNull();
+
+      for (let i = 2; i <= SHELL_AUTO_APP_NOT_FOUND_PER_DAY; i++) {
+        await vi.advanceTimersByTimeAsync(SHELL_AUTO_APP_NOT_FOUND_RETRY_MS);
+        await tryOnce();
+        expect(viaDaemon).toHaveBeenCalledTimes(i);
+        expect(shellAutoApplyNeedsManual(version)).toBe(false);
+      }
+      // One more the same day counts as a real failed attempt (6 h cooldown).
+      await vi.advanceTimersByTimeAsync(SHELL_AUTO_APP_NOT_FOUND_RETRY_MS);
+      await tryOnce();
+      expect(viaDaemon).toHaveBeenCalledTimes(SHELL_AUTO_APP_NOT_FOUND_PER_DAY + 1);
+      expect(shellAutoApplyNeedsManual(version)).toBe(true);
+      await vi.advanceTimersByTimeAsync(SHELL_AUTO_APP_NOT_FOUND_RETRY_MS);
+      useStore.getState().maybeAutoApplyShellUpdate();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useStore.getState().shellAutoRestart).toBeNull();
+
+      // However long it runs, the total stays bounded: the second counted
+      // failure ends it for this version.
+      for (let day = 0; day < 4; day++) {
+        await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+        useStore.getState().maybeAutoApplyShellUpdate();
+        await vi.advanceTimersByTimeAsync(0);
+        if (useStore.getState().shellAutoRestart) {
+          await vi.advanceTimersByTimeAsync(SHELL_AUTO_COUNTDOWN_MS + 2000);
+        } else {
+          await tryOnce().catch(() => {});
+        }
+      }
+      expect(viaDaemon.mock.calls.length).toBeLessThanOrEqual(SHELL_AUTO_APP_NOT_FOUND_PER_DAY + 2);
+      expect(shellAutoApplyWaitReason()).toMatchObject({ kind: 'gave-up', reason: 'gave up after 2 tries' });
+    });
   });
 
   it('waits for a daemon-first update when the installer does not carry it', async () => {
@@ -417,4 +491,86 @@ describe('desktop shell auto-apply', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(useStore.getState().shellAutoRestart?.version).toBe('0.0.916');
   });
+
+  describe('why it is still waiting (version menu)', () => {
+    const at = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    it('names the quiet time, then whatever holds it, with the pane', async () => {
+      expect(shellAutoApplyWaitReason()).toEqual({ kind: 'waiting', reason: 'quiet time left' });
+      useStore.setState({ panes: { p: pane({ id: 'p', title: 'Claude 2', pendingApproval: { requestId: 'r', toolName: 'Bash' } }) } });
+      expect(shellAutoApplyWaitReason()?.reason).toBe('approval or question waiting in Claude 2');
+      useStore.setState({ panes: { q: pane({ id: 'q', title: 'shell', titleOverride: 'Reviewer', attention: 'needs-user' }) } });
+      expect(shellAutoApplyWaitReason()?.reason).toBe('approval or question waiting in Reviewer');
+      useStore.setState({ panes: { n: pane({ id: 'n', kind: 'native', title: 'Codex', agentMidTurn: true }) } });
+      expect(shellAutoApplyWaitReason()?.reason).toBe('agent working in Codex');
+      useStore.setState({ panes: { d: pane({ id: 'd', title: 'Notes' }) } });
+      drafts.present = true;
+      drafts.paneId = 'd';
+      expect(shellAutoApplyWaitReason()?.reason).toBe('unsent text in Notes');
+      drafts.present = false;
+      reportUnsentInput('broadcast', 'tell every pane');
+      expect(shellAutoApplyWaitReason()?.reason).toBe('unsent text in a message box');
+      reportUnsentInput('broadcast', '');
+      useStore.setState({ panes: {}, updateStatus: update({ workflowInflight: 1 }) });
+      expect(shellAutoApplyWaitReason()?.reason).toBe('workflow running');
+      useStore.setState({ updateStatus: update() });
+      await becomeQuiet();
+      expect(shellAutoApplyWaitReason()).toBeNull();
+      expect(shellAutoWaitLine(shellAutoApplyWaitReason(), true)).toBe('↻ Restarts automatically when idle');
+    });
+
+    it('says paused, postponed, cooldown and gave up, and stops promising a restart once a try failed', async () => {
+      // The operator paused it: shell_auto_apply_paused, or the global pause.
+      for (const reason of ['automatic desktop restarts paused by operator', 'updates paused by operator']) {
+        useStore.setState({ updateStatus: update({ shellAutoApplyPaused: true, shellAutoApplyPausedReason: reason }) });
+        expect(shellAutoApplyWaitReason()).toEqual({ kind: 'paused', reason: 'paused' });
+        expect(shellAutoWaitLine(shellAutoApplyWaitReason(), false)).toBe('Automatic restart is paused — use Update now');
+      }
+
+      useStore.setState({ updateStatus: update() });
+      await becomeQuiet();
+      await arm();
+      useStore.getState().postponeShellAutoRestart();
+      expect(shellAutoApplyWaitReason()?.reason).toBe(`postponed until ${at(Date.now() + SHELL_AUTO_HOLD_MS)}`);
+      await vi.advanceTimersByTimeAsync(SHELL_AUTO_HOLD_MS + 1000);
+
+      native.outcome = { ok: false, error: 'unknown command' };
+      await becomeQuiet();
+      await arm();
+      const failedAt = Date.now();
+      await useStore.getState().restartShellNowForUpdate();
+      useStore.setState({
+        updateStatus: update({ shellLaunch: { state: 'launch-failed', error: 'installer did not start' } }),
+      });
+      const retry = shellAutoApplyWaitReason();
+      expect(retry).toEqual({ kind: 'retry', reason: `cooldown until ${at(failedAt + 6 * 60 * 60 * 1000)}`, lastError: 'installer did not start' });
+      const line = shellAutoWaitLine(retry, true);
+      expect(line).toBe(`Automatic restart did not work — waiting: cooldown until ${at(failedAt + 6 * 60 * 60 * 1000)} · installer did not start`);
+      expect(line).not.toMatch(/Restarts automatically when idle/);
+
+      await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+      await arm();
+      await useStore.getState().restartShellNowForUpdate();
+      const gaveUp = shellAutoApplyWaitReason();
+      expect(gaveUp).toMatchObject({ kind: 'gave-up', reason: 'gave up after 2 tries' });
+      expect(shellAutoWaitLine(gaveUp, true)).toBe('Automatic restart gave up after 2 tries — use Update now · installer did not start');
+    });
+
+    // Public's default pause is not news: no automatic-restart line at all,
+    // as the setting itself is hidden there (#749). Nor for an older daemon
+    // that gives no reason.
+    it.each([
+      ['the channel default (public)', 'automatic desktop restarts are not enabled for this channel yet'],
+      ['no reason (older daemon)', undefined],
+    ])('shows no automatic-restart line for a pause that is %s', (_name, reason) => {
+      useStore.setState({ updateStatus: update({ shellAutoApplyPaused: true, shellAutoApplyPausedReason: reason }) });
+      expect(shellAutoApplyWaitReason()).toBeNull();
+      expect(shellAutoWaitLine(shellAutoApplyWaitReason(), false)).toBe('');
+    });
+
+    it('waits with the quiet reason in the version line', () => {
+      expect(shellAutoWaitLine(shellAutoApplyWaitReason(), true)).toBe('↻ Restarts automatically when idle — waiting: quiet time left');
+    });
+  });
 });
+

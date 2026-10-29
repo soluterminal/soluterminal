@@ -25,6 +25,7 @@
     "core:window:allow-is-maximized",
     "allow-desktop-set-backend-mode",
     "allow-apply-shell-update-silent",
+    "allow-app-process-id",
     "allow-exit-for-update",
     "allow-open-external-window",
     "allow-open-workspace-window",

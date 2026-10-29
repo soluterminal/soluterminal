@@ -63,6 +63,11 @@
       "sha256": "b4db8aa76a19d1ff335113a45ec955da86a91f9228539da12f4bd23812c42727",
       "approvedBy": "CMO",
       "date": "2026-10-29"
+    },
+    "0.0.1228": {
+      "sha256": "d7dc55db8031a8efec1d71a955d326e36089558e538295ff71a7a4d203c786f0",
+      "approvedBy": "CMO",
+      "date": "2026-10-29"
     }
   }
 }

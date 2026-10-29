@@ -391,7 +391,7 @@ type Updater struct {
 	launchShell func(path, shellPlatform string, lg *shellLaunchLog) (launchResult, error)
 	// launchShellSilent is the unattended counterpart (updater_shell_silent.go):
 	// it starts the courier that installs with /S after the app exits.
-	launchShellSilent func(path, shellPlatform, sha256 string, lg *shellLaunchLog) (launchResult, error)
+	launchShellSilent func(path, shellPlatform, sha256 string, appPid int, lg *shellLaunchLog) (launchResult, error)
 	// The last silent courier this daemon started, so a second app window's
 	// countdown cannot start another one while the first is waiting. Guarded by mu.
 	shellSilentVersion string
@@ -587,7 +587,7 @@ func NewUpdater(current, shellCurrent, shellPlatform string, bus *uiBus, metrics
 		launchShell = func(path, shellPlatform string, lg *shellLaunchLog) (launchResult, error) {
 			return launchResult{}, fmt.Errorf("%w: forced by SOLU_SHELL_LAUNCH_FORCE_FAIL", errLaunchNotObserved)
 		}
-		launchShellSilent = func(path, shellPlatform, _ string, lg *shellLaunchLog) (launchResult, error) {
+		launchShellSilent = func(path, shellPlatform, _ string, _ int, lg *shellLaunchLog) (launchResult, error) {
 			return launchShell(path, shellPlatform, lg)
 		}
 	}

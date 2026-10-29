@@ -2,7 +2,7 @@ import { PreviewChannelSection } from './PreviewChannelSection';
 import { useEffect, useRef, useState } from 'react';
 import { IconAlertTriangle } from './ui/icons';
 import { createPortal } from 'react-dom';
-import { useStore } from '../store';
+import { shellAutoApplyWaitReason, shellAutoWaitLine, useStore } from '../store';
 import { api, ApiError, apiErrorCode } from '../api';
 import { deriveRollbackPresentation, deriveUpdateHoldPresentation, type RollbackTarget, type UpdateStatus } from '../types';
 import { userFacingNotes } from '../lib/releaseNotes';
@@ -11,7 +11,8 @@ import { isPreviewBuild } from '../previewBoot';
 import { installerUpdate } from '../lib/installerUpdate';
 import { applyShellUpdateNative, browserPanePing, isDesktopApp, revealShellInstallerNative } from '../tauri-browser';
 import { fallBackToDownloadPage } from '../lib/shellUpdateFallback';
-import { daemonOnThisComputer, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
+import { daemonOnThisComputer, installerNeedsLocalMode, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
+import { switchDesktopLaunchMode } from '../lib/launchModeSwitch';
 import { UPDATE_CHECK_FAILED } from '../lib/updateErrors';
 import { useIsMobileDevice } from './useIsMobileView';
 import { useDismiss } from './useDismiss';
@@ -83,6 +84,7 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   const [shellNativeApplying, setShellNativeApplying] = useState(false);
   const [nativeLaunchFailure, setNativeLaunchFailure] = useState<{ path: string; error?: string } | null>(null);
   const [downgradeRefusal, setDowngradeRefusal] = useState<{ installed?: string; installer?: string; message?: string } | null>(null);
+  const [switchingToLocal, setSwitchingToLocal] = useState(false);
   useEffect(() => {
     if (!isDesktopApp()) return;
     let alive = true;
@@ -147,7 +149,12 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   // can't see the shell (a WSL/Linux daemon under a Windows shell, or cloud).
   const shellCur = desktopVersion || (shellCurrent !== '?' ? shellCurrent : null);
   const installer = installerUpdate(status, shellCur);
-  const shellUpd = !!(shellLatest && shellCur && installer.newer);
+  // Another computer's team installer (installer.localModeOnly) is not this
+  // app's update: it gets no "Installer update available", no version pair
+  // and no install button, only the way to update this computer's app. It
+  // waits for the app's own version so the line never names the remote's.
+  const shellUpd = !!(shellLatest && shellCur && installer.newer) && !installer.localModeOnly;
+  const localModeUpdate = installer.localModeOnly && !!desktopVersion && !isMobileDevice;
   const shellHeld = installer.held;
   // The carried installer is older than the installed daemon, so every launch
   // path would refuse it. Say why instead of offering a button that comes back
@@ -253,8 +260,8 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
     // One click, two steps: the installer relaunches the app, and the new app
     // finishes the daemon update itself (store continueUpdateAfterInstaller).
     buttonSub = `Installer first · the app finishes v${latest} after it restarts`;
-  } else if (shellAutoApply === 'when-idle' && shellUpdatable && shellAutoApplyEnabled(status)) {
-    buttonSub = '↻ Restarts automatically when idle';
+  } else if (shellAutoApply === 'when-idle' && shellUpdatable) {
+    buttonSub = shellAutoWaitLine(shellAutoApplyWaitReason(), shellAutoApplyEnabled(status));
   }
 
   // The local daemon's ApplyShell: download + SHA-verify + launch (WMI/explorer
@@ -292,6 +299,9 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   // On the team channel the daemon goes alone (shellUpdateRoute.ts): the team
   // installer comes only through it, and the native step reads public releases.
   async function applyShellNative() {
+    // Another computer's team installer: neither the app's updater, the
+    // remote daemon nor the download page installs it on this computer.
+    if (installerNeedsLocalMode(status)) return;
     setShellNativeApplying(true);
     setNativeLaunchFailure(null);
     setDowngradeRefusal(null);
@@ -396,6 +406,12 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
     }
   }
 
+  async function onSwitchToLocal() {
+    if (switchingToLocal) return;
+    const switched = await switchDesktopLaunchMode('local', toast, () => setSwitchingToLocal(true));
+    if (!switched) setSwitchingToLocal(false);
+  }
+
   async function onSkipInstaller() {
     if (anyApplying) return;
     try {
@@ -492,6 +508,22 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
         >
           {checking ? 'Checking…' : 'Check now'}
         </button>
+      )}
+
+      {localModeUpdate && (
+        <>
+          <div className="vp-summary" data-testid="vp-installer-local-mode">
+            {`Desktop app v${desktopVersion} · updates for this computer run in Local mode`}
+          </div>
+          <button
+            type="button"
+            className="vp-check"
+            onClick={() => void onSwitchToLocal()}
+            disabled={switchingToLocal}
+          >
+            {switchingToLocal ? 'Switching to Local…' : "Switch to Local to update this computer's desktop app"}
+          </button>
+        </>
       )}
 
       {confirmForce && (

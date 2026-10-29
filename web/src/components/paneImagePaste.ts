@@ -33,12 +33,16 @@ export function attachPaneImagePasteHandlers({
 }: AttachPaneImagePasteHandlersOpts): () => void {
   let disposed = false;
   const capture = () => { const valid = captureGuard?.() ?? (()=>true); return () => !disposed && ownedRef.current === true && valid(); };
-  const uploadAndInjectImage = async (file: File, valid = capture()) => {
+  // Images and other dropped files share one upload path; only the endpoint
+  // and the toast wording differ. The daemon picks the saved name either way.
+  const uploadAndInject = async (file: File, kind: 'image' | 'file', valid = capture()) => {
     if (!valid()) return;
     const release = beginInteraction?.();
     if (beginInteraction && !release) return;
     try {
-      const { path } = await api.pasteImage(paneId, file, scope);
+      const { path } = kind === 'image'
+        ? await api.pasteImage(paneId, file, scope)
+        : await api.pasteFile(paneId, file, scope);
       if (!valid()) return;
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -46,16 +50,34 @@ export function attachPaneImagePasteHandlers({
         ws.send(encoder.encode(imageInjectText(path, atMention)));
       }
       useStore.getState().toast(
-        `Pasted image: ${path.split(/[\\/]/).pop()}`,
+        `Pasted ${kind}: ${path.split(/[\\/]/).pop()}`,
         { kind: 'info', ttlMs: 2500 },
       );
     } catch (err) {
       if (!valid()) return;
       useStore.getState().toast(
-        `Paste image failed: ${(err as Error).message}`,
+        `Paste ${kind} failed: ${(err as Error).message}`,
         { kind: 'error', ttlMs: 4000 },
       );
     } finally { release?.(); }
+  };
+  const uploadAndInjectImage = (file: File, valid = capture()) => uploadAndInject(file, 'image', valid);
+
+  const firstFile = (
+    files: FileList | null | undefined,
+    items?: DataTransferItemList | null,
+  ): File | null => {
+    if (files && files.length > 0) return files[0];
+    if (items) {
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        if (it.kind === 'file') {
+          const f = it.getAsFile();
+          if (f) return f;
+        }
+      }
+    }
+    return null;
   };
 
   const firstImageFile = (
@@ -158,15 +180,22 @@ export function attachPaneImagePasteHandlers({
     if (!hasFiles(e.dataTransfer)) return;
     e.preventDefault();
     e.stopPropagation();
-    const file = firstImageFile(e.dataTransfer?.files, e.dataTransfer?.items);
+    // An image anywhere in the drop keeps the image path; otherwise the first
+    // file goes through paste-file, which refuses types it doesn't allow.
+    const image = firstImageFile(e.dataTransfer?.files, e.dataTransfer?.items);
+    if (image) {
+      void uploadAndInject(image, 'image');
+      return;
+    }
+    const file = firstFile(e.dataTransfer?.files, e.dataTransfer?.items);
     if (!file) {
       useStore.getState().toast(
-        'Drop: no image file found',
+        'Drop: no file found',
         { kind: 'warn', ttlMs: 2500 },
       );
       return;
     }
-    void uploadAndInjectImage(file);
+    void uploadAndInject(file, 'file');
   };
 
   // Attach at the host element in capture phase so we run before xterm's

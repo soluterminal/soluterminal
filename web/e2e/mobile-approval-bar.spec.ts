@@ -6,7 +6,7 @@ import type { PaneInfo, Workspace } from '../src/types';
 // writes the bare key (no Enter after it) to the pane's socket.
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-async function openMenuPane(page: import('playwright/test').Page) {
+async function openMenuPane(page: import('playwright/test').Page, focus = 1) {
   const pane = { id: 'phone-menu', title: 'Claude', cwd: '/repo', cmd: ['claude'], status: 'running',
     pid: 31, cols: 44, rows: 30, state: 'choice-prompt', hasClaude: true,
     createdAt: '2026-10-28T00:00:00Z', lastActivityMs: 0 } as PaneInfo;
@@ -23,9 +23,9 @@ async function openMenuPane(page: import('playwright/test').Page) {
       '', '● Bash(rm -rf build)', '',
       ' Bash command', '   rm -rf build', '   Remove old build output', '',
       ' Do you want to proceed?',
-      ' ❯ 1. Yes',
-      "   2. Yes, and don't ask again for rm",
-      '   3. No, and tell Claude what to do',
+      ` ${focus === 1 ? '❯' : ' '} 1. Yes`,
+      ` ${focus === 2 ? '❯' : ' '} 2. Yes, and don't ask again for rm`,
+      ` ${focus === 3 ? '❯' : ' '} 3. No, and tell Claude what to do`,
       '      differently (esc)', '',
     ].join('\r\n')));
     ws.onMessage(data => {
@@ -55,7 +55,8 @@ test('phone answers a terminal choice prompt with one tap', async ({ page }, tes
   await expect(terminal.locator('.xterm')).toBeVisible();
   const bar = page.getByRole('group', { name: 'Answer terminal prompt' });
   await expect(bar).toBeVisible();
-  await expect(bar.getByRole('button')).toHaveText(['1', '2', '3', '⏎ Enter', 'Esc · Cancel']);
+  // Enter shows the highlighted option's own text from the live screen.
+  await expect(bar.getByRole('button')).toHaveText(['1', '2', '3', '⏎ Enter\nYes', 'Esc · Cancel'], { useInnerText: true });
   // Desktop strip is not shown alongside the phone bar.
   await expect(page.locator('.approval-actions')).toBeHidden();
 
@@ -100,12 +101,26 @@ test.describe('narrowest phones', () => {
     await openMenuPane(page);
     const bar = page.getByRole('group', { name: 'Answer terminal prompt' });
     await expect(bar).toBeVisible();
-    await expect(bar.getByRole('button')).toHaveText(['1', '2', '3', '⏎', 'Esc'], { useInnerText: true });
+    await expect(bar.getByRole('button')).toHaveText(['1', '2', '3', '⏎\nYes', 'Esc'], { useInnerText: true });
     await expectKeysOnScreen(bar, 320);
     // One row: all keys share the first key's top edge.
     const tops = await bar.getByRole('button').evaluateAll(els => els.map(el => Math.round(el.getBoundingClientRect().top)));
     expect(new Set(tops).size).toBe(1);
     await page.screenshot({ path: testInfo.outputPath('mobile-approval-bar-320x568.png') });
     if (process.env.SOLU_E2E_SCREENSHOT) await page.screenshot({ path: process.env.SOLU_E2E_SCREENSHOT.replace(/390x844\.png$/, '320x568.png') });
+  });
+
+  test('a long highlighted option is cut short, not pushed to a second row', async ({ page }, testInfo) => {
+    await openMenuPane(page, 3);
+    const bar = page.getByRole('group', { name: 'Answer terminal prompt' });
+    const enter = bar.getByRole('button', { name: 'Press Enter — confirm the highlighted option: No, and tell Claude what to do' });
+    await expect(enter).toBeVisible();
+    await expectKeysOnScreen(bar, 320);
+    const tops = await bar.getByRole('button').evaluateAll(els => els.map(el => Math.round(el.getBoundingClientRect().top)));
+    expect(new Set(tops).size).toBe(1);
+    // The label ellipsizes inside the key.
+    const option = enter.locator('.mobile-approval-option');
+    expect(await option.evaluate(el => el.scrollWidth > el.clientWidth && getComputedStyle(el).textOverflow === 'ellipsis')).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('mobile-approval-bar-long-320x568.png') });
   });
 });

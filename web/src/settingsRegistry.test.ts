@@ -92,6 +92,17 @@ describe('settingsRegistry', () => {
     if (firstControl) expect(first?.control?.id).toBe(firstControl);
   });
 
+  it('leaves out Desktop app restarts while shell auto-apply is paused, as Devices does', () => {
+    const ids = (paused?: boolean) => searchSettings('desktop app restarts', { mobile: false, shellAutoApplyPaused: paused })
+      .map((hit) => hit.control?.id);
+    expect(ids()).toContain('devices.updates.desktopRestarts');
+    expect(ids(false)).toContain('devices.updates.desktopRestarts');
+    expect(ids(true)).not.toContain('devices.updates.desktopRestarts');
+    // The rest of the section stays searchable.
+    expect(searchSettings('automatic updates', { mobile: false, shellAutoApplyPaused: true })[0]?.control?.id)
+      .toBe('devices.updates.automaticUpdates');
+  });
+
   it('returns no results for an empty query or a hidden mobile category', () => {
     expect(searchSettings('', { mobile: false })).toEqual([]);
     expect(searchSettings('phone', { mobile: true })).toEqual([]);

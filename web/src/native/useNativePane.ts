@@ -215,8 +215,18 @@ const draftSubsByPane = new Map<string, Set<(v: string) => void>>();
 export function getDraft(paneId: string): string {
   return draftByPane.get(paneId) ?? '';
 }
-export function hasAnyUnsentDraft(): boolean {
-  return Array.from(draftByPane.values()).some((draft) => draft.length > 0);
+// The first pane among livePanes holding a draft with more than whitespace.
+// Only panes that still exist count: a draft restored from sessionStorage for
+// a pane that has since closed (or lives on the other backend) is never
+// swept, and must not hold the unattended updates for the life of the app.
+export function unsentDraftPaneId(livePanes: Record<string, unknown>): string | undefined {
+  for (const [paneId, draft] of draftByPane) {
+    if (draft.trim().length > 0 && Object.prototype.hasOwnProperty.call(livePanes, paneId)) return paneId;
+  }
+  return undefined;
+}
+export function hasAnyUnsentDraft(livePanes: Record<string, unknown>): boolean {
+  return unsentDraftPaneId(livePanes) !== undefined;
 }
 export function setDraft(paneId: string, v: string): void {
   if (v) draftByPane.set(paneId, v);

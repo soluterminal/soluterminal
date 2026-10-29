@@ -5,7 +5,7 @@ import { useIsMobileDevice, useIsMobileView } from './useIsMobileView';
 import { applyShellUpdateNative, isDesktopApp, revealShellInstallerNative } from '../tauri-browser';
 import { apiErrorCode } from '../api';
 import { fallBackToDownloadPage } from '../lib/shellUpdateFallback';
-import { daemonOnThisComputer, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
+import { daemonOnThisComputer, installerNeedsLocalMode, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
 import { useShellUpdate } from '../lib/useCloudShellUpdate';
 import { installerUpdate } from '../lib/installerUpdate';
 import { VersionPopover } from './VersionPopover';
@@ -94,7 +94,9 @@ export function UpdateBanner() {
   // Only an install with the desktop app has an installer to update. The
   // daemon also flags one when it has never seen a desktop shell (a plain
   // install.sh daemon, shellCurrent empty), so a browser tab on such an
-  // install must not offer it.
+  // install must not offer it. Another computer's team installer is not
+  // actionable here (installer.localModeOnly): ShellUpdateBanner and the
+  // version popover offer Local mode for it instead.
   const hasDesktopShell = isDesktopApp() || !!updateStatus?.shellCurrent;
   const shellActionable = installer.actionable && !isMobile && hasDesktopShell;
   const actionable = available || shellActionable || !!shellAutoRestart;
@@ -200,6 +202,9 @@ export function UpdateBanner() {
     bump();
     try {
       const applyManualShellFallback = async () => {
+        // Another computer's team installer: nothing here installs it, and
+        // the download page would hand this computer the public one.
+        if (installerNeedsLocalMode(updateStatus)) return;
         // Team channel: only the local daemon can fetch and verify the team
         // installer; the app's own step reads public releases (shellUpdateRoute.ts).
         if (shellUpdateNeedsDaemon(updateStatus)) {

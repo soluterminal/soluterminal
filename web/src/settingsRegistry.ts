@@ -278,7 +278,18 @@ export interface SettingsSearchHit {
   score: number;
 }
 
-export function searchSettings(query: string, options: { mobile: boolean }): SettingsSearchHit[] {
+// Controls Settings › Devices leaves out while the desktop app's unattended
+// update restart is paused (updateStatus.shellAutoApplyPaused === true, as on
+// the public channel by default), so search does not land on a missing row.
+const HIDDEN_WHILE_SHELL_AUTO_APPLY_PAUSED = new Set(['devices.updates.desktopRestarts']);
+
+export interface SettingsSearchOptions {
+  mobile: boolean;
+  /** Pass `updateStatus?.shellAutoApplyPaused === true`, as DevicesTab does. */
+  shellAutoApplyPaused?: boolean;
+}
+
+export function searchSettings(query: string, options: SettingsSearchOptions): SettingsSearchHit[] {
   const tokens = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return [];
 
@@ -289,7 +300,8 @@ export function searchSettings(query: string, options: { mobile: boolean }): Set
     if (options.mobile && category.mobile === false) continue;
     const candidates: Array<SettingsControlDef | undefined> = [
       undefined,
-      ...SETTINGS_CONTROLS.filter((control) => control.section === section.id),
+      ...SETTINGS_CONTROLS.filter((control) => control.section === section.id
+        && !(options.shellAutoApplyPaused && HIDDEN_WHILE_SHELL_AUTO_APPLY_PAUSED.has(control.id))),
     ];
     for (const control of candidates) {
       const label = (control?.label ?? section.title).toLocaleLowerCase();

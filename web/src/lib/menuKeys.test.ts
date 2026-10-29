@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { focusedMenuOption, isMenuKeyReply, menuFingerprint, menuNeedsSubmit, menuTail, MENU_SUBMIT_SETTLE_MS, paneScreen, sendMenuKey } from './menuKeys';
+import { focusedMenuLabel, focusedMenuOption, isMenuKeyReply, menuFingerprint, menuNeedsSubmit, menuTail, MENU_SUBMIT_SETTLE_MS, paneScreen, sendMenuKey } from './menuKeys';
 
 const CLAUDE_MENU = [
   ' Bash command',
@@ -30,6 +30,26 @@ describe('menu screen parsing', () => {
     expect(focusedMenuOption(CODEX_SUBMIT_MENU(2))).toBe('2');
     expect(menuNeedsSubmit(CLAUDE_MENU)).toBe(false);
     expect(focusedMenuOption(CLAUDE_MENU)).toBe('1');
+  });
+
+  it('reads the highlighted option text from the bottom-most menu', () => {
+    expect(focusedMenuLabel(CLAUDE_MENU)).toBe('Yes');
+    expect(focusedMenuLabel(CODEX_SUBMIT_MENU(2))).toBe('Cancel');
+    // An older menu higher on the screen does not count.
+    expect(focusedMenuLabel(`${CODEX_SUBMIT_MENU(2)}\nlater output\n${CLAUDE_MENU}`)).toBe('Yes');
+    // Repaint glitch without the dot, trailing padding trimmed.
+    expect(focusedMenuLabel(' Proceed?\n ❯ 1  Yes, allow     \n   2  No')).toBe('Yes, allow');
+  });
+
+  it('reads no option text when it cannot tell which option is highlighted', () => {
+    expect(focusedMenuLabel('')).toBe('');
+    expect(focusedMenuLabel('no menu here')).toBe('');
+    // A menu with no focus marker, two markers, or a marker on an empty row.
+    expect(focusedMenuLabel(' Proceed?\n   1. Yes\n   2. No')).toBe('');
+    expect(focusedMenuLabel(' Proceed?\n ❯ 1. Yes\n ❯ 2. No')).toBe('');
+    expect(focusedMenuLabel(' Proceed?\n ❯ 1.\n   2. No')).toBe('');
+    // The marker must sit in the bottom-most menu, not in output above it.
+    expect(focusedMenuLabel(' ❯ 2. Old choice\nlater output\n Proceed?\n   1. Yes\n   2. No')).toBe('');
   });
 
   it('treats a single digit or y/n as a menu key, anything longer as text', () => {

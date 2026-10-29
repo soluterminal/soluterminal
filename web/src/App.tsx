@@ -125,7 +125,7 @@ import { StatusBar } from './components/StatusBar';
 import { ToastHost } from './components/ToastHost';
 import { DialogHost } from './components/DialogHost';
 import { HotkeyHelp } from './components/HotkeyHelp';
-import { agentLabel, effectivePaneAgent } from './lib/agentKind';
+import { agentLabel, waitingAgentKind } from './lib/agentKind';
 import { paneRolesAvailable, roleHostSupport, slotList, uiEventHandler, type GlobalKeys } from './extensions';
 import type { OrchestratorHostInfo } from './types';
 import { WelcomeOverlay } from './components/WelcomeOverlay';
@@ -1577,9 +1577,7 @@ export default function App() {
         const prev = st.lastState;
         const prevAttention = st.lastAttention;
         const label = pane.title || pane.cmd[0];
-        const waitingAgent = agentLabel(
-          effectivePaneAgent(pane) ?? (pane.hasCodex && !pane.hasClaude ? 'codex' : 'claude'),
-        );
+        const waitingAgent = agentLabel(waitingAgentKind(pane));
         // Shared location grammar: "<workspace> · <pane>", workspace omitted
         // when the pane isn't in a named one. Same string sw.js/FCM render.
         const ws = wsByPane.get(pane.id);

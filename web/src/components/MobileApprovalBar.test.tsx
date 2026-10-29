@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../store';
-import { MobileApprovalBar, MOBILE_APPROVAL_DEBOUNCE_MS } from './MobileApprovalBar';
+import { MobileApprovalBar, MOBILE_APPROVAL_DEBOUNCE_MS, MOBILE_APPROVAL_LABEL_POLL_MS } from './MobileApprovalBar';
 
 const always = () => () => true;
 
@@ -32,6 +32,41 @@ describe('MobileApprovalBar', () => {
       'Press Esc — cancel',
     ]);
     expect(group.textContent).not.toMatch(/approve|allow|yes/i);
+  });
+
+  it('shows the highlighted option next to Enter, read from the live screen', () => {
+    vi.useFakeTimers();
+    let live = ' Do you want to proceed?\n ❯ 1. Yes\n   2. No';
+    const snapshot = vi.fn((opts?: { screen?: boolean }) => (opts?.screen ? live : 'scrollback ❯ 1. Stale'));
+    useStore.setState({ senders: { k: vi.fn() }, paneSnapshots: { k: snapshot } });
+    render(<MobileApprovalBar sessionKey="k" capture={always} />);
+    const enter = screen.getByRole('button', { name: 'Press Enter — confirm the highlighted option: Yes' });
+    expect(enter.textContent).toBe('⏎ EnterYes');
+    expect(enter.querySelector('.mobile-approval-option')?.textContent).toBe('Yes');
+    expect(snapshot).toHaveBeenCalledWith({ screen: true });
+    expect(snapshot).not.toHaveBeenCalledWith();
+
+    // Focus moves (arrow keys): the label follows on the next read.
+    live = ' Do you want to proceed?\n   1. Yes\n ❯ 2. No';
+    act(() => { vi.advanceTimersByTime(MOBILE_APPROVAL_LABEL_POLL_MS); });
+    expect(screen.getByRole('button', { name: 'Press Enter — confirm the highlighted option: No' })).toBeInTheDocument();
+
+    // Unreadable (no focus marker): back to a plain Enter.
+    live = ' Do you want to proceed?\n   1. Yes\n   2. No';
+    act(() => { vi.advanceTimersByTime(MOBILE_APPROVAL_LABEL_POLL_MS); });
+    const plain = screen.getByRole('button', { name: 'Press Enter — confirm the highlighted option' });
+    expect(plain.textContent).toBe('⏎ Enter');
+    expect(plain.querySelector('.mobile-approval-option')).toBeNull();
+  });
+
+  it('caps a long option label', () => {
+    const long = `Yes, and don't ask again for ${'x'.repeat(100)}`;
+    useStore.setState({ senders: { k: vi.fn() }, paneSnapshots: { k: () => ` Proceed?\n ❯ 1. ${long}\n   2. No` } });
+    render(<MobileApprovalBar sessionKey="k" capture={always} />);
+    const label = document.querySelector('.mobile-approval-option')!.textContent!;
+    expect(label.length).toBe(60);
+    expect(label.endsWith('…')).toBe(true);
+    expect(long.startsWith(label.slice(0, -1))).toBe(true);
   });
 
   it('hides the desktop strip while shown', () => {

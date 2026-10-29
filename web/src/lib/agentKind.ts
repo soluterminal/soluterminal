@@ -39,7 +39,22 @@ export function effectivePaneAgent(
   return pane.kind === 'native' ? 'claude' : null;
 }
 
+// The agent a pane's "is waiting" alert names. Past the pane's own identity it
+// falls back to the live process flags (Claude wins when both Claude and Codex
+// are seen, as before), and to null for a CLI the app doesn't recognise, so
+// the alert says "Agent" instead of assuming Claude.
+export function waitingAgentKind(
+  pane: Pick<PaneInfo, 'agent' | 'cmd' | 'kind' | 'codexThreadId' | 'hasClaude' | 'hasCodex' | 'hasMuse'>,
+): AgentKind | null {
+  const known = effectivePaneAgent(pane);
+  if (known) return known;
+  if (pane.hasClaude) return 'claude';
+  if (pane.hasCodex) return 'codex';
+  if (pane.hasMuse) return 'muse';
+  return null;
+}
+
 export function agentLabel(agent: AgentKind | null): string {
   if (agent === 'muse') return 'Muse';
-  return agent === 'codex' ? 'Codex' : agent === 'claude' ? 'Claude' : 'agent';
+  return agent === 'codex' ? 'Codex' : agent === 'claude' ? 'Claude' : 'Agent';
 }

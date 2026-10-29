@@ -109,6 +109,11 @@ func runRouter() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// The router logs no /api traffic, so an installer update request left
+		// no trace of which daemon got it (#739). One line each; they are rare.
+		if backend := routerShellApplyBackend(r.Method, r.URL.Path); backend != "" {
+			log.Printf("router: %s %s -> %s daemon", r.Method, r.URL.Path, backend)
+		}
 		switch {
 		case r.URL.Path == routerPreviewOriginPath:
 			w.Header().Set("Content-Type", "application/json")
@@ -163,6 +168,21 @@ func runRouter() {
 const routerPreviewOriginPath = "/router/preview-origin"
 
 // isRouterPreviewPath reports whether path is a backend's preview proxy route.
+// routerShellApplyBackend names the daemon a POST to the installer update
+// (/api/update/apply-shell) goes to, or "" for any other request.
+func routerShellApplyBackend(method, path string) string {
+	if method != http.MethodPost {
+		return ""
+	}
+	switch path {
+	case "/b/wsl/api/update/apply-shell", "/api/update/apply-shell":
+		return "wsl"
+	case "/b/win/api/update/apply-shell":
+		return "win"
+	}
+	return ""
+}
+
 func isRouterPreviewPath(path string) bool {
 	return strings.HasPrefix(path, "/b/wsl/api/proxy/") || strings.HasPrefix(path, "/b/win/api/proxy/")
 }

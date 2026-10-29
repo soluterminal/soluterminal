@@ -409,6 +409,72 @@ describe('UpdateBanner shell auto-restart states', () => {
     expect(JSON.stringify(invoke.mock.calls)).not.toContain('github.com');
   });
 
+  // 2026-10-29: a public 0.0.1225 app in cloud launch mode viewing a team
+  // computer (team 0.0.1226). Its installer is that computer's; "Update now"
+  // ran the app's updater (public releases only) into the download page.
+  describe('cloud launch mode on a team computer', () => {
+    // Versions above every app version this file pings: the app's version
+    // is cached per test run (tauri-browser getShellVersion), so the remote
+    // installer must read as newer than whichever one is cached.
+    const teamRemote = (available: boolean): UpdateStatus => ({
+      current: '3.0.0', latest: available ? '3.0.1' : '3.0.0', available,
+      shellCurrent: '3.0.0', shellLatest: '3.0.0', shellAvailable: true, updateChannel: 'team',
+    });
+    beforeEach(() => {
+      Object.defineProperty(window, '__SOLU_BACKEND__', { value: { launchMode: 'cloud' }, configurable: true });
+      useCloud.setState({ mode: 'cloud', isLocal: false });
+    });
+    const { applyUpdate: realApplyUpdate, applyShellUpdate: realApplyShellUpdate } = useStore.getState();
+    afterEach(() => {
+      delete (window as unknown as { __SOLU_BACKEND__?: unknown }).__SOLU_BACKEND__;
+      useCloud.setState({ mode: 'detecting', isLocal: false });
+      useStore.setState({ applyUpdate: realApplyUpdate, applyShellUpdate: realApplyShellUpdate });
+    });
+
+    it('offers no installer of its own (the Local-mode prompt carries it)', async () => {
+      const invoke = nativeFailure(() => ({ launched: true }));
+      useStore.setState({ updateStatus: teamRemote(false) });
+      const { container } = render(<UpdateBanner />);
+      await act(async () => { await Promise.resolve(); });
+      expect(container).toBeEmptyDOMElement();
+      expect(invoke.mock.calls.some(([command]) => command === 'apply_shell_update')).toBe(false);
+    });
+
+    it('a daemon update with the remote installer is a plain daemon update, with no download page', async () => {
+      const invoke = nativeFailure(() => {
+        throw new Error('update manifest is not for the public build');
+      });
+      const applyUpdate = vi.fn().mockResolvedValue(undefined);
+      const applyShellUpdate = vi.fn().mockResolvedValue(undefined);
+      useStore.setState({
+        updateStatus: teamRemote(true),
+        applyUpdate: applyUpdate as never,
+        applyShellUpdate: applyShellUpdate as never,
+      });
+      render(<UpdateBanner />);
+      expect(screen.getByText('soluterminal v3.0.1 is ready')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
+
+      await waitFor(() => expect(applyUpdate).toHaveBeenCalledOnce());
+      expect(applyShellUpdate).not.toHaveBeenCalled();
+      expect(invoke.mock.calls.some(([command]) => command === 'apply_shell_update')).toBe(false);
+      expect(invoke.mock.calls.some(([command]) => command === 'plugin:opener|open_url')).toBe(false);
+    });
+  });
+
+  it('in a browser on a relayed team session, is unchanged', () => {
+    useCloud.setState({ mode: 'cloud', isLocal: false });
+    try {
+      useStore.setState({ updateStatus: { ...shellStatus(), updateChannel: 'team' } });
+      render(<UpdateBanner />);
+      expect(screen.getByText('Desktop installer update ready')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Update now' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Switch to Local/ })).not.toBeInTheDocument();
+    } finally {
+      useCloud.setState({ mode: 'detecting', isLocal: false });
+    }
+  });
+
   it('shows the downloaded installer when it was staged but did not open', async () => {
     const staged = 'C:\\Users\\x\\AppData\\Local\\soluterminal\\shell-update\\soluterminal_0.0.1202_x64-setup.exe';
     const invoke = nativeFailure(() => ({

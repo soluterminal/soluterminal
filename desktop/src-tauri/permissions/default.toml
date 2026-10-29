@@ -12,6 +12,7 @@ permissions = [
     "allow-desktop-set-autostart",
     "allow-apply-shell-update",
     "allow-apply-shell-update-silent",
+    "allow-app-process-id",
     "allow-exit-for-update",
     "allow-reveal-shell-installer",
     "allow-global-hotkey-owned",
@@ -57,6 +58,11 @@ commands.allow = ["apply_shell_update"]
 identifier = "allow-apply-shell-update-silent"
 description = "Allow the app UI to stage a verified silent shell update courier."
 commands.allow = ["apply_shell_update_silent"]
+
+[[permission]]
+identifier = "allow-app-process-id"
+description = "Allow the app UI to read the app's own process id, which it passes to the daemon's unattended installer update so its courier waits on this process."
+commands.allow = ["app_process_id"]
 
 [[permission]]
 identifier = "allow-exit-for-update"

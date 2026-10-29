@@ -162,6 +162,21 @@ export async function applyShellUpdateSilentNative(forceDowngrade = false): Prom
   }
 }
 
+// The desktop app's own process id (app_process_id, #739), which the page
+// passes with the daemon's silent installer update so its courier waits on
+// exactly this process. null outside the app and on an app built before the
+// command, which then falls back to the courier's name match.
+export async function getAppProcessId(): Promise<number | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  try {
+    const pid = await invoke('app_process_id');
+    return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && pid <= 2_147_483_647 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function exitForUpdateNative(): Promise<boolean> {
   const invoke = tauriInvoke();
   if (!invoke) return false;

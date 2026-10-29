@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -46,8 +47,29 @@ const (
 	silentCourierWindow      = silentCourierAppExitWait + 15*time.Second
 	silentCourierStartWait   = 10 * time.Second
 	silentCourierObserveFor  = 15 * time.Minute
-	silentAppProcessName     = "soluterminal"
 )
+
+// silentAppProcessNames are the process names the desktop app runs under,
+// used only when the page could not say which process it is (an app built
+// before app_process_id). The Cargo binary is soluterminal-desktop.exe; the
+// installer's productName "soluterminal" names only the installer and the
+// install folder, but older or hand-built shells may run under it.
+var silentAppProcessNames = []string{"soluterminal-desktop", "soluterminal"}
+
+// silentCourierAppNotFound is the detail the courier writes on its failed
+// line when no desktop app process matched, so the daemon can tell that
+// apart from every other courier failure.
+const silentCourierAppNotFound = "app-not-found"
+
+// errSilentAppNotFound: the courier started but found no desktop app to wait
+// for in its session (wrong pid, or no process of the app's name), so it
+// installed nothing and exited. The page may retry sooner than after a real
+// failure.
+var errSilentAppNotFound = errors.New("the desktop app is not running in this session")
+
+// maxSilentAppPid bounds the app pid the page may pass: Windows process ids
+// are DWORDs but in practice far below 2^31, and the courier casts to [int].
+const maxSilentAppPid = 1<<31 - 1
 
 // silentShellPausedError: the signed control file (or the channel's default)
 // has the unattended installer restart off. A state, not a failure.
@@ -129,8 +151,10 @@ func (u *Updater) observeSilentCourierLocked() {
 // ApplyShellSilent stages the verified installer and starts the courier.
 // It returns once the courier has reported that it is running; the caller then
 // lets the desktop app exit.
-func (u *Updater) ApplyShellSilent(ctx context.Context, dataDir string) (string, error) {
-	return u.applyShell(ctx, dataDir, false, true)
+// appPid is the desktop app's own process id when the page knows it (0 when
+// not); the courier then waits on exactly that process.
+func (u *Updater) ApplyShellSilent(ctx context.Context, dataDir string, appPid int) (string, error) {
+	return u.applyShell(ctx, dataDir, false, true, appPid)
 }
 
 // psSingleQuoted renders s as a PowerShell single-quoted literal.
@@ -146,29 +170,58 @@ func windowsDir(path string) string {
 	return path
 }
 
+// psStringArray renders values as a PowerShell array of single-quoted
+// literals.
+func psStringArray(values []string) string {
+	quoted := make([]string, len(values))
+	for i, v := range values {
+		quoted[i] = psSingleQuoted(v)
+	}
+	return "@(" + strings.Join(quoted, ",") + ")"
+}
+
 // silentCourierScript is the PowerShell the courier runs. Every value is a
-// single-quoted literal; nothing in it comes from the network except the
-// installer, which applyShell has already SHA-verified against the signed
-// manifest.
-func silentCourierScript(installer, logPath, attempt, sha256, appName string, appExitWait time.Duration) string {
+// single-quoted literal (the app pid too, cast back to [int] in the script);
+// nothing in it comes from the network except the installer, which applyShell
+// has already SHA-verified against the signed manifest.
+//
+// The app to wait for: with appPid > 0, that one process, and only if it is in
+// the courier's session and carries one of appNames (so a stale or reused pid
+// never makes the courier wait on, or restart, some other program). With
+// appPid 0 (an app too old to say), every process of those names in the
+// courier's session. Either way the courier restarts only the exe paths of
+// the processes it matched.
+func silentCourierScript(installer, logPath, attempt, sha256 string, appPid int, appNames []string, appExitWait time.Duration) string {
+	if appPid < 0 || appPid > maxSilentAppPid {
+		appPid = 0
+	}
 	return fmt.Sprintf(`$ErrorActionPreference='Stop'
 $installer = %s
 $logPath = %s
 $attempt = %s
-$appName = %s
+$appPid = [int]%s
+$appNames = %s
 $expectedSha = %s
 function ConvertTo-LaunchJsonString([string]$v) { if ($null -eq $v) { return '' }; return $v.Replace('\','\\').Replace('"','\"').Replace("`+"`r"+`",'\r').Replace("`+"`n"+`",'\n') }
 function Write-LaunchLog([string]$ev,[string]$processId,[string]$detail,[string]$err) {
   try {
     $line = '{"ts":"' + (Get-Date).ToUniversalTime().ToString('o') + '","event":"' + (ConvertTo-LaunchJsonString $ev) + '","path":"' + (ConvertTo-LaunchJsonString $installer) + '","method":"silent-courier","pid":"' + (ConvertTo-LaunchJsonString $processId) + '","attempt":"' + (ConvertTo-LaunchJsonString $attempt) + '","detail":"' + (ConvertTo-LaunchJsonString $detail) + '","err":"' + (ConvertTo-LaunchJsonString $err) + '"}'
-    Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
-  } catch {}
+  } catch { return }
+  # A reader polling the log can hold it for an instant, and Add-Content then
+  # fails; try again rather than lose the line.
+  for ($try = 0; $try -lt 20; $try++) {
+    try { Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8; return } catch { Start-Sleep -Milliseconds 50 }
+  }
 }
 $session = (Get-Process -Id $PID).SessionId
-$apps = @(Get-Process -Name $appName -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session })
+if ($appPid -gt 0) {
+  $apps = @(Get-Process -Id $appPid -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session -and $appNames -contains $_.ProcessName })
+} else {
+  $apps = @(Get-Process -Name $appNames -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session })
+}
 $appPaths = @($apps | Where-Object { $_.Path } | ForEach-Object { $_.Path } | Select-Object -Unique)
 $appIds = @($apps | ForEach-Object { $_.Id })
-if ($appPaths.Count -eq 0) { Write-LaunchLog 'failed' ([string]$PID) '' 'the desktop app is not running in this session'; exit 1 }
+if ($appPaths.Count -eq 0) { Write-LaunchLog 'failed' ([string]$PID) %s 'the desktop app is not running in this session'; exit 1 }
 Write-LaunchLog 'courier-started' ([string]$PID) ($appPaths -join ';') ''
 try {
   $deadline = (Get-Date).AddSeconds(%d)
@@ -201,7 +254,7 @@ try {
 # since exited, installed or not. One that never exited (the page stayed open)
 # is still running and is left alone.
 foreach ($appExe in $appPaths) {
-  if (Get-Process -Name $appName -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $appExe }) { continue }
+  if (Get-Process -Name $appNames -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $appExe }) { continue }
   try {
     $relaunched = Start-Process -FilePath $appExe -PassThru
     Write-LaunchLog 'relaunched' ([string]$relaunched.Id) $appExe ''
@@ -209,8 +262,8 @@ foreach ($appExe in $appPaths) {
     Write-LaunchLog 'failed' '' $appExe ('relaunch: ' + $_.Exception.Message)
   }
 }
-`, psSingleQuoted(installer), psSingleQuoted(logPath), psSingleQuoted(attempt), psSingleQuoted(appName),
-		psSingleQuoted(sha256), int(appExitWait/time.Second))
+`, psSingleQuoted(installer), psSingleQuoted(logPath), psSingleQuoted(attempt), psSingleQuoted(strconv.Itoa(appPid)),
+		psStringArray(appNames), psSingleQuoted(sha256), psSingleQuoted(silentCourierAppNotFound), int(appExitWait/time.Second))
 }
 
 // encodedPowerShell is the -EncodedCommand form of script (base64 UTF-16LE),
@@ -242,7 +295,7 @@ func silentCmdScript(courierPath string) string {
 // launchSilentInstaller starts the courier for the staged installer at
 // installerPath (its Windows spelling) and waits until the courier reports it
 // is running. lg's file is the launch log the courier appends to.
-func launchSilentInstaller(installerPath, shellPlatform, sha256 string, lg *shellLaunchLog) (launchResult, error) {
+func launchSilentInstaller(installerPath, shellPlatform, sha256 string, appPid int, lg *shellLaunchLog) (launchResult, error) {
 	if !silentShellSupported(shellPlatform) {
 		return launchResult{}, errSilentShellUnsupported
 	}
@@ -255,7 +308,7 @@ func launchSilentInstaller(installerPath, shellPlatform, sha256 string, lg *shel
 	if !fromWSL {
 		winLog = lg.path
 	}
-	script := silentCourierScript(installerPath, winLog, attempt, sha256, silentAppProcessName, silentCourierAppExitWait)
+	script := silentCourierScript(installerPath, winLog, attempt, sha256, appPid, silentAppProcessNames, silentCourierAppExitWait)
 	psExe, err := resolvePowerShell()
 	if err != nil {
 		return launchResult{}, err
@@ -315,8 +368,11 @@ func launchSilentInstaller(installerPath, shellPlatform, sha256 string, lg *shel
 func waitForSilentCourier(logPath, attempt string, wait time.Duration) (string, error) {
 	deadline := time.Now().Add(wait)
 	for {
-		if pid, failure, found := silentCourierOutcome(logPath, attempt); found {
+		if pid, failure, detail, found := silentCourierOutcome(logPath, attempt); found {
 			if failure != "" {
+				if detail == silentCourierAppNotFound {
+					return "", fmt.Errorf("%w: silent update courier: %w", errLaunchNotObserved, errSilentAppNotFound)
+				}
 				return "", fmt.Errorf("%w: silent update courier: %s", errLaunchNotObserved, failure)
 			}
 			return pid, nil
@@ -364,10 +420,10 @@ func silentCourierEntries(logPath, attempt string) []map[string]string {
 	return out
 }
 
-func silentCourierOutcome(logPath, attempt string) (pid, failure string, found bool) {
+func silentCourierOutcome(logPath, attempt string) (pid, failure, detail string, found bool) {
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
-		return "", "", false
+		return "", "", "", false
 	}
 	// The courier writes UTF-8 with a BOM on a new file; drop it line by line.
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -378,10 +434,10 @@ func silentCourierOutcome(logPath, attempt string) (pid, failure string, found b
 		}
 		switch entry["event"] {
 		case "courier-started":
-			return entry["pid"], "", true
+			return entry["pid"], "", "", true
 		case "failed":
-			return "", entry["err"], true
+			return "", entry["err"], entry["detail"], true
 		}
 	}
-	return "", "", false
+	return "", "", "", false
 }

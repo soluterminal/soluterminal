@@ -22,8 +22,8 @@ import { isEmbedded } from './embed';
 import { type NativeMetaBarFields, NATIVE_METABAR_DEFAULTS, sanitizeMetaBarFields } from './native/metaBarFields';
 import { clearVitalsSnapshot } from './native/vitalsSnapshot';
 import { prettyModelName } from './native/modelInfo';
-import { hasAnyUnsentDraft } from './native/useNativePane';
-import { applyShellUpdateSilentNative, exitForUpdateNative, getShellVersion, isDesktopApp, type ShellUpdateNativeResult } from './tauri-browser';
+import { hasAnyUnsentDraft, unsentDraftPaneId } from './native/useNativePane';
+import { applyShellUpdateSilentNative, exitForUpdateNative, getAppProcessId, getShellVersion, isDesktopApp, type ShellUpdateNativeResult } from './tauri-browser';
 import { isCloudLaunchMode, isVersionNewer } from './lib/useCloudShellUpdate';
 import { daemonOnThisComputer, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from './lib/shellUpdateRoute';
 import { hasRegisteredUnsentInput } from './lib/unsentInput';
@@ -299,11 +299,26 @@ export const SHELL_AUTO_QUIET_MS = 120_000;
 export const SHELL_AUTO_COUNTDOWN_MS = 60_000;
 export const SHELL_AUTO_HOLD_MS = 3_600_000;
 const SHELL_AUTO_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
-const SHELL_AUTO_MAX_ATTEMPTS = 2;
+export const SHELL_AUTO_MAX_ATTEMPTS = 2;
+// The daemon's courier started but found no desktop app to wait for
+// (shell_silent_app_not_found, #739): nothing was installed and nothing was
+// closed, so that try is not one of the SHELL_AUTO_MAX_ATTEMPTS. It is retried
+// after SHELL_AUTO_APP_NOT_FOUND_RETRY_MS, at most
+// SHELL_AUTO_APP_NOT_FOUND_PER_DAY times a day per version; past that it
+// counts as an ordinary failed attempt, so a lasting mismatch cannot loop.
+export const SHELL_AUTO_APP_NOT_FOUND_RETRY_MS = 15 * 60 * 1000;
+export const SHELL_AUTO_APP_NOT_FOUND_PER_DAY = 3;
+const SHELL_AUTO_DAY_MS = 24 * 60 * 60 * 1000;
 const SHELL_AUTO_APPLIED_KEY = 'solu.shellUpdate.autoApplied';
 const SHELL_AUTO_HOLD_KEY = 'solu.shellUpdate.holdUntil';
+// The last unattended attempt that failed, so its reason can still be read in
+// the version menu after the toast is gone.
+const SHELL_AUTO_OUTCOME_KEY = 'solu.shellUpdate.lastOutcome';
 
-interface ShellAttemptStamp { version: string; at: number; attempts: number }
+// retryAt overrides at + SHELL_AUTO_RETRY_COOLDOWN_MS; appNotFoundAt holds the
+// times the courier found no app (for the daily bound).
+interface ShellAttemptStamp { version: string; at: number; attempts: number; retryAt?: number; appNotFoundAt?: number[] }
+interface ShellAutoOutcome { version: string; at: number; code: string; error?: string }
 interface ShellHoldStamp { version: string; until: number }
 let shellAttemptStampMem: ShellAttemptStamp | null = null;
 let shellHoldStampMem: ShellHoldStamp | null = null;
@@ -330,6 +345,33 @@ function clearShellAttemptStamp(version: string): void {
   if (!current || current.version !== version) return;
   shellAttemptStampMem = null;
   try { localStorage.removeItem(SHELL_AUTO_APPLIED_KEY); } catch { /* memory already cleared */ }
+}
+
+// Whether the attempt stamp holds back an unattended try of version now.
+function shellAttemptBlocked(stamp: ShellAttemptStamp | null, version: string, now: number): 'gave-up' | 'cooldown' | null {
+  if (!stamp || stamp.version !== version) return null;
+  if (stamp.attempts >= SHELL_AUTO_MAX_ATTEMPTS) return 'gave-up';
+  if (now < shellAttemptRetryAt(stamp)) return 'cooldown';
+  return null;
+}
+
+function shellAttemptRetryAt(stamp: ShellAttemptStamp): number {
+  return typeof stamp.retryAt === 'number' ? stamp.retryAt : stamp.at + SHELL_AUTO_RETRY_COOLDOWN_MS;
+}
+
+function readShellAutoOutcome(): ShellAutoOutcome | null {
+  try {
+    const value = localStorage.getItem(SHELL_AUTO_OUTCOME_KEY);
+    if (value) return JSON.parse(value) as ShellAutoOutcome;
+  } catch { /* none */ }
+  return null;
+}
+
+function writeShellAutoOutcome(outcome: ShellAutoOutcome | null): void {
+  try {
+    if (outcome) localStorage.setItem(SHELL_AUTO_OUTCOME_KEY, JSON.stringify(outcome));
+    else localStorage.removeItem(SHELL_AUTO_OUTCOME_KEY);
+  } catch { /* not kept */ }
 }
 
 function readShellHoldStamp(): ShellHoldStamp | null {
@@ -407,7 +449,7 @@ function disarmShellAutoRestart(): void {
 // unattended updates wait for it: the daemon swap reloads the page and the
 // installer update restarts the app.
 export function hasUnsentInput(): boolean {
-  return hasAnyUnsentDraft() || hasRegisteredUnsentInput();
+  return hasAnyUnsentDraft(useStore.getState().panes) || hasRegisteredUnsentInput();
 }
 
 // The desktop app's installer update runs only for the app on this computer,
@@ -422,12 +464,15 @@ function shellAutoApplyAllowedHere(): boolean {
 // only the local daemon can fetch and verify the team installer; it stages it
 // and a courier installs it with no window once the app exits. Elsewhere the
 // app's own updater does the same from the public releases.
-type SilentShellOutcome = ShellUpdateNativeResult & { interactiveLaunched?: boolean; paused?: boolean };
+type SilentShellOutcome = ShellUpdateNativeResult & { interactiveLaunched?: boolean; paused?: boolean; appNotFound?: boolean };
 
 async function applyShellUpdateSilently(status: UpdateStatus | null): Promise<SilentShellOutcome> {
   if (!shellUpdateNeedsDaemon(status)) return applyShellUpdateSilentNative(false);
   try {
-    const accepted = await api.applyShellUpdate(false, { silent: true });
+    // The courier waits on this exact process; an app too old to say leaves
+    // it to the courier's name match.
+    const appPid = await getAppProcessId();
+    const accepted = await api.applyShellUpdate(false, appPid ? { silent: true, appPid } : { silent: true });
     // A daemon without the silent mode opened the installer window instead.
     // Closing the app now would leave the user with a half-finished wizard.
     if (accepted.silent !== true) return { ok: false, interactiveLaunched: true };
@@ -440,6 +485,10 @@ async function applyShellUpdateSilently(status: UpdateStatus | null): Promise<Si
     // Paused by the operator between the last status read and now: a state,
     // not a failure.
     if (code === 'shell_silent_paused') return { ok: false, paused: true };
+    // The courier found no desktop app to wait for; nothing was installed.
+    if (code === 'shell_silent_app_not_found') {
+      return { ok: false, appNotFound: true, error: typeof body.message === 'string' ? body.message : undefined };
+    }
     return {
       ok: false,
       // A typed refusal gets the caller's own copy, not the raw HTTP text.
@@ -465,20 +514,116 @@ function shellHoldCopy(reason: string | undefined): string {
   }
 }
 
-function shellUpdateSafetyGate(): { idle: boolean; reason?: string } {
+// paneId names the pane that holds the update, when one does.
+function shellUpdateSafetyGate(): { idle: boolean; reason?: string; paneId?: string } {
   const state = useStore.getState();
-  if (nativePaneBusy(state.panes)) return { idle: false, reason: 'agent mid-turn' };
-  if (Object.values(state.panes).some((pane) => !!pane.pendingApproval)) {
-    return { idle: false, reason: 'approval pending' };
-  }
-  if (Object.values(state.panes).some((pane) => pane.attention === 'needs-user')) {
-    return { idle: false, reason: 'pane needs user input' };
-  }
+  const busy = nativeBusyPaneId(state.panes);
+  if (busy) return { idle: false, reason: 'agent mid-turn', paneId: busy };
+  const approval = Object.values(state.panes).find((pane) => !!pane.pendingApproval);
+  if (approval) return { idle: false, reason: 'approval pending', paneId: approval.id };
+  const asking = Object.values(state.panes).find((pane) => pane.attention === 'needs-user');
+  if (asking) return { idle: false, reason: 'pane needs user input', paneId: asking.id };
   if (state.updateStatus?.workflowDeferred || (state.updateStatus?.workflowInflight ?? 0) > 0) {
     return { idle: false, reason: 'workflow invocation in flight' };
   }
-  if (hasUnsentInput()) return { idle: false, reason: 'unsent draft' };
+  const draftPane = unsentDraftPaneId(state.panes);
+  if (draftPane) return { idle: false, reason: 'unsent draft', paneId: draftPane };
+  if (hasRegisteredUnsentInput()) return { idle: false, reason: 'unsent draft' };
   return { idle: true };
+}
+
+function shellWaitPaneName(paneId: string | undefined): string {
+  const pane = paneId ? useStore.getState().panes[paneId] : undefined;
+  return pane?.titleOverride?.trim() || pane?.title?.trim() || 'a pane';
+}
+
+function shellClock(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Whether the restart is paused by the operator (the signed control file's
+// shell_auto_apply_paused, or its global pause) rather than by the channel's
+// default. The daemon's reasons (UpdateControl.shellAutoApplyPaused) end in
+// "by operator" exactly for those two; the default reads "... not enabled for
+// this channel yet". Anything else, or no reason (an older daemon), is not
+// treated as an operator pause, so the line stays hidden.
+export function shellAutoApplyPausedByOperator(status: UpdateStatus | null | undefined): boolean {
+  return status?.shellAutoApplyPaused === true && /\bby operator$/.test(status.shellAutoApplyPausedReason ?? '');
+}
+
+export interface ShellAutoApplyWait {
+  // waiting: it will restart by itself once this clears. retry: a try failed
+  // and the next one waits for the cooldown. gave-up / paused: it will not
+  // restart by itself; Update now still works.
+  kind: 'waiting' | 'retry' | 'gave-up' | 'paused';
+  reason: string;
+  // The last failed try's reason, when one is known.
+  lastError?: string;
+}
+
+// Why the unattended installer update has not run yet: the first of the
+// checks maybeAutoApplyShellUpdate makes, in the same order, that holds it
+// back, in plain words for the version menu. null when nothing holds it (or
+// it does not apply here at all).
+export function shellAutoApplyWaitReason(now = Date.now()): ShellAutoApplyWait | null {
+  const state = useStore.getState();
+  const status = state.updateStatus;
+  if (!shellAutoApplyAllowedHere()) return null;
+  if (state.updateSettings?.shellAutoApply !== 'when-idle') return null;
+  if (!status?.shellLatest || status.shellApplying || status.applying || state.shellAutoRestart) return null;
+  const version = status.shellLatest;
+  if (!shellAutoApplyEnabled(status)) {
+    // Only an operator's pause is news. The channel's own default (public,
+    // where automatic restarts are not on yet and the setting is hidden) says
+    // nothing at all.
+    return shellAutoApplyPausedByOperator(status) ? { kind: 'paused', reason: 'paused' } : null;
+  }
+  if (shellUpdateNeedsDaemon(status) && !status.shellAvailable) return { kind: 'waiting', reason: 'installer not ready yet' };
+  if (status.holdVersion && status.holdVersion === version) return null;
+  const hold = readShellHoldStamp();
+  if (hold && hold.version === version && hold.until > now) {
+    return { kind: 'waiting', reason: `postponed until ${shellClock(hold.until)}` };
+  }
+  const attempt = readShellAttemptStamp();
+  const blocked = shellAttemptBlocked(attempt, version, now);
+  if (blocked && attempt) {
+    const outcome = readShellAutoOutcome();
+    const launch = status.shellLaunch?.state === 'launch-failed' ? status.shellLaunch.error : undefined;
+    const lastError = outcome?.version === version && outcome.code === 'shell_silent_app_not_found'
+      ? 'the last try did not find the app'
+      : launch || (outcome?.version === version ? outcome.error : undefined);
+    if (blocked === 'gave-up') return { kind: 'gave-up', reason: `gave up after ${SHELL_AUTO_MAX_ATTEMPTS} tries`, lastError };
+    return { kind: 'retry', reason: `cooldown until ${shellClock(shellAttemptRetryAt(attempt))}`, lastError };
+  }
+  const gate = shellUpdateSafetyGate();
+  if (!gate.idle) {
+    switch (gate.reason) {
+      case 'agent mid-turn': return { kind: 'waiting', reason: `agent working in ${shellWaitPaneName(gate.paneId)}` };
+      case 'approval pending':
+      case 'pane needs user input':
+        return { kind: 'waiting', reason: `approval or question waiting in ${shellWaitPaneName(gate.paneId)}` };
+      case 'workflow invocation in flight': return { kind: 'waiting', reason: 'workflow running' };
+      case 'unsent draft':
+        return { kind: 'waiting', reason: `unsent text in ${gate.paneId ? shellWaitPaneName(gate.paneId) : 'a message box'}` };
+      default: return { kind: 'waiting', reason: gate.reason ?? 'active work' };
+    }
+  }
+  if (now - lastUserInputMs < SHELL_AUTO_QUIET_MS) return { kind: 'waiting', reason: 'quiet time left' };
+  return null;
+}
+
+// The version menu's line for the "install when idle" desktop update: what it
+// is waiting for, and once a try failed or it gave up, no promise that it
+// restarts by itself (#739).
+export function shellAutoWaitLine(wait: ShellAutoApplyWait | null, enabled: boolean): string {
+  const withError = (line: string) => (wait?.lastError ? `${line} · ${wait.lastError}` : line);
+  if (!wait) return enabled ? '↻ Restarts automatically when idle' : '';
+  switch (wait.kind) {
+    case 'waiting': return `↻ Restarts automatically when idle — waiting: ${wait.reason}`;
+    case 'retry': return withError(`Automatic restart did not work — waiting: ${wait.reason}`);
+    case 'gave-up': return withError(`Automatic restart ${wait.reason} — use Update now`);
+    case 'paused': return 'Automatic restart is paused — use Update now';
+  }
 }
 
 export function shellUpdateIdleGate(): { idle: boolean; reason?: string } {
@@ -4785,11 +4930,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
     const now = Date.now();
     const hold = readShellHoldStamp();
     if (hold && hold.version === status.shellLatest && hold.until > now) return;
-    const attempt = readShellAttemptStamp();
-    if (attempt && attempt.version === status.shellLatest) {
-      if (attempt.attempts >= SHELL_AUTO_MAX_ATTEMPTS) return;
-      if (now - attempt.at < SHELL_AUTO_RETRY_COOLDOWN_MS) return;
-    }
+    if (shellAttemptBlocked(readShellAttemptStamp(), status.shellLatest, now)) return;
     if (!shellUpdateIdleGate().idle) return;
 
     shellAutoCheckInFlight = true;
@@ -4808,11 +4949,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
         if (fresh.current && isVersionNewer(fresh.current, fresh.shellLatest)) return;
         const freshHold = readShellHoldStamp();
         if (freshHold && freshHold.version === fresh.shellLatest && freshHold.until > Date.now()) return;
-        const freshAttempt = readShellAttemptStamp();
-        if (freshAttempt && freshAttempt.version === fresh.shellLatest) {
-          if (freshAttempt.attempts >= SHELL_AUTO_MAX_ATTEMPTS) return;
-          if (Date.now() - freshAttempt.at < SHELL_AUTO_RETRY_COOLDOWN_MS) return;
-        }
+        if (shellAttemptBlocked(readShellAttemptStamp(), fresh.shellLatest, Date.now())) return;
         if (!shellUpdateIdleGate().idle) return;
 
         shellAutoRestartArmedAtMs = Date.now();
@@ -4876,10 +5013,12 @@ export const useStore = create<State>((set, get, storeApi) => ({
     }
     disarmShellAutoRestart();
     const previous = readShellAttemptStamp();
+    const sameVersion = previous && previous.version === version ? previous : null;
     writeShellAttemptStamp({
       version,
       at: Date.now(),
-      attempts: previous && previous.version === version ? previous.attempts + 1 : 1,
+      attempts: sameVersion ? sameVersion.attempts + 1 : 1,
+      ...(sameVersion?.appNotFoundAt ? { appNotFoundAt: sameVersion.appNotFoundAt } : {}),
     });
 
     set((current) => ({
@@ -4912,6 +5051,35 @@ export const useStore = create<State>((set, get, storeApi) => ({
           ? { ...current.updateStatus, shellApplying: false }
           : current.updateStatus,
       }));
+      const failedAt = Date.now();
+      if (outcome.appNotFound) {
+        writeShellAutoOutcome({ version, at: failedAt, code: 'shell_silent_app_not_found', ...(outcome.error ? { error: outcome.error } : {}) });
+        const notFound = [...(sameVersion?.appNotFoundAt ?? []).filter((at) => failedAt - at < SHELL_AUTO_DAY_MS), failedAt];
+        if (notFound.length <= SHELL_AUTO_APP_NOT_FOUND_PER_DAY) {
+          // Nothing was installed or closed: not one of the attempts. Try
+          // again in a quarter of an hour.
+          writeShellAttemptStamp({
+            version,
+            at: failedAt,
+            attempts: sameVersion?.attempts ?? 0,
+            retryAt: failedAt + SHELL_AUTO_APP_NOT_FOUND_RETRY_MS,
+            appNotFoundAt: notFound,
+          });
+          get().toast('Automatic desktop update did not start. It tries again in 15 minutes.', {
+            kind: 'info', icon: '↑', ttlMs: 8000,
+          });
+          return;
+        }
+        // Too many today: this one counts as a failed attempt.
+        writeShellAttemptStamp({ version, at: failedAt, attempts: (sameVersion?.attempts ?? 0) + 1, appNotFoundAt: notFound });
+      } else {
+        writeShellAutoOutcome({
+          version,
+          at: failedAt,
+          code: outcome.downgradeRefused ? 'shell_daemon_downgrade_refused' : outcome.updateHeld ? 'update_held' : outcome.interactiveLaunched ? 'interactive' : 'failed',
+          ...(outcome.error ? { error: outcome.error } : {}),
+        });
+      }
       const message = outcome.downgradeRefused
         ? `Desktop update refused: installed daemon ${outcome.installedVersion ?? 'unknown'} is newer than bundled daemon ${outcome.installerVersion ?? version}. Automatic updates never force a downgrade.`
         : outcome.updateHeld
@@ -4923,6 +5091,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
       return;
     }
 
+    writeShellAutoOutcome(null);
     get().toast('Restarting to finish the update…', { kind: 'info', icon: '↑', ttlMs: 6000 });
     window.setTimeout(() => {
       const exitGate = opts?.userInitiated ? shellUpdateSafetyGate() : shellUpdateIdleGate();

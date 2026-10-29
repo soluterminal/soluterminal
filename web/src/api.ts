@@ -4078,7 +4078,21 @@ const coreApi = {
       body: blob,
     }).then(j<{ path: string; bytes: number }>),
 
-  listWorkspaces: () => apiFetch('/api/workspaces').then(j<Workspace[]>),
+  // Upload a dropped non-image file (daemon paste_file.go). Body is the raw
+  // bytes; X-Filename (URL-encoded) only supplies the extension, which the
+  // daemon checks against its allowlist (415 otherwise). The saved file gets
+  // a random name under ~/.soluterminal/pastes/ and the absolute path comes back.
+  pasteFile: (id: string, file: File, scope?: RoutingScope) =>
+    workflowFetch(scope, `/api/panes/${id}/paste-file`, {
+      method: 'POST',
+      headers: {
+        'content-type': file.type || 'application/octet-stream',
+        'X-Filename': encodeURIComponent(file.name),
+      },
+      body: file,
+    }).then(j<{ path: string; bytes: number }>),
+
+  listWorkspaces:() => apiFetch('/api/workspaces').then(j<Workspace[]>),
   listWorkspaceSummaries: () => apiFetch('/api/workspaces?summary=1').then(j<WorkspaceSummary[]>),
 
   /**
@@ -4932,11 +4946,16 @@ const coreApi = {
   // daemon stages the same verified installer, then a courier installs it with
   // no window once this app exits; the answer carries silent:true. It never
   // combines with a forced downgrade.
-  applyShellUpdate: (forceDowngrade = false, opts?: { silent?: boolean }) => {
+  applyShellUpdate: (forceDowngrade = false, opts?: { silent?: boolean; appPid?: number | null }) => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), SHELL_APPLY_TIMEOUT_MS);
     const query = opts?.silent ? '?silent=1' : forceDowngrade ? '?force=1' : '';
-    return apiFetch(`/api/update/apply-shell${query}`, { method: 'POST', signal: ctrl.signal })
+    // The silent update's courier waits on the app's own process when the
+    // page knows it; the query stays exact, so an older daemon ignores it.
+    const init: RequestInit = opts?.silent && opts.appPid
+      ? { method: 'POST', signal: ctrl.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appPid: opts.appPid }) }
+      : { method: 'POST', signal: ctrl.signal };
+    return apiFetch(`/api/update/apply-shell${query}`, init)
       .then(j<{ applying: boolean; installerPath?: string; silent?: boolean }>)
       .finally(() => clearTimeout(timer));
   },

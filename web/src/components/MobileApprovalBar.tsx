@@ -1,6 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
-import { paneScreen, sendMenuKey } from '../lib/menuKeys';
+import { focusedMenuLabel, paneScreen, sendMenuKey } from '../lib/menuKeys';
 
 // Phone answer row for a terminal pane at `choice-prompt`. It renders inside
 // MobileQuickReply's bar, above the reply field, so the bar's measured
@@ -10,7 +10,10 @@ import { paneScreen, sendMenuKey } from '../lib/menuKeys';
 // Like the desktop ApprovalActions strip it stays key-literal: menus differ
 // (Claude's option 1 is not always "Yes"), so buttons name the key and only
 // the meaning every menu shares. Keys go through the same per-session sender
-// with the caller's gesture guard, as typed keys would.
+// with the caller's gesture guard, as typed keys would. The one exception is
+// Enter, which also shows the highlighted option's own text as read from the
+// live screen (not a guess), so a single tap is legible; when that can't be
+// read reliably it stays a plain "⏎ Enter".
 
 interface Key {
   label: string;
@@ -33,6 +36,17 @@ const KEYS: Key[] = [
 // usually has not repainted yet, so it would answer whatever comes next.
 export const MOBILE_APPROVAL_DEBOUNCE_MS = 500;
 
+// How often the highlighted option is re-read while the bar is shown (the
+// menu's focus moves with arrow keys typed elsewhere), and the longest label
+// kept; CSS ellipsizes it further to the key's width.
+export const MOBILE_APPROVAL_LABEL_POLL_MS = 250;
+const MAX_OPTION_LABEL = 60;
+
+function readFocusedLabel(sessionKey: string): string {
+  const label = focusedMenuLabel(paneScreen(useStore.getState().paneSnapshots[sessionKey]) ?? '');
+  return label.length > MAX_OPTION_LABEL ? `${label.slice(0, MAX_OPTION_LABEL - 1)}…` : label;
+}
+
 export function MobileApprovalBar({ sessionKey, capture }: {
   sessionKey: string;
   // Returns a validity check bound to this tap's target, process and view.
@@ -40,11 +54,19 @@ export function MobileApprovalBar({ sessionKey, capture }: {
 }) {
   const sender = useStore((s) => s.senders[sessionKey]);
   const lastTap = useRef(0);
+  const [focusedLabel, setFocusedLabel] = useState(() => readFocusedLabel(sessionKey));
   useEffect(() => {
     if (!sender) return;
     document.body.classList.add('mobile-approval-visible');
     return () => document.body.classList.remove('mobile-approval-visible');
   }, [sender]);
+  useEffect(() => {
+    if (!sender) return;
+    const read = () => setFocusedLabel(readFocusedLabel(sessionKey));
+    read();
+    const id = setInterval(read, MOBILE_APPROVAL_LABEL_POLL_MS);
+    return () => clearInterval(id);
+  }, [sender, sessionKey]);
   if (!sender) return null;
   const press = (key: Key) => {
     const now = Date.now();
@@ -57,20 +79,25 @@ export function MobileApprovalBar({ sessionKey, capture }: {
   };
   return (
     <div className="mobile-approval-bar" role="group" aria-label="Answer terminal prompt">
-      {KEYS.map((k) => (
-        <button
-          key={k.label}
-          type="button"
-          className={`mobile-approval-key${k.kind ? ` ${k.kind}` : ''}`}
-          aria-label={k.name}
-          title={k.name}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={(e) => { e.stopPropagation(); press(k); }}
-        >
-          {k.label}
-          {k.meaning && <span className="mobile-approval-meaning">{k.meaning}</span>}
-        </button>
-      ))}
+      {KEYS.map((k) => {
+        const option = k.bytes === '\r' ? focusedLabel : '';
+        const name = option ? `${k.name}: ${option}` : k.name;
+        return (
+          <button
+            key={k.label}
+            type="button"
+            className={`mobile-approval-key${k.kind ? ` ${k.kind}` : ''}${option ? ' has-option' : ''}`}
+            aria-label={name}
+            title={name}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => { e.stopPropagation(); press(k); }}
+          >
+            {k.label}
+            {k.meaning && <span className="mobile-approval-meaning">{k.meaning}</span>}
+            {option && <span className="mobile-approval-option">{option}</span>}
+          </button>
+        );
+      })}
     </div>
   );
 }

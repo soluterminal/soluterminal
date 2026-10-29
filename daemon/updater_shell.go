@@ -101,7 +101,7 @@ func shellDowngradeAdmission(target, currentDaemon, currentShell string, forceDo
 // dialog. We don't currently resume — sha mismatch = re-download —
 // but the path is stable for future improvement.
 func (u *Updater) ApplyShell(ctx context.Context, dataDir string, forceDowngrade bool) (string, error) {
-	return u.applyShell(ctx, dataDir, forceDowngrade, false)
+	return u.applyShell(ctx, dataDir, forceDowngrade, false, 0)
 }
 
 // applyShell is ApplyShell with an unattended mode. silent stages and verifies
@@ -110,7 +110,7 @@ func (u *Updater) ApplyShell(ctx context.Context, dataDir string, forceDowngrade
 // no installer window once the desktop app exits, and relaunches the app (see
 // updater_shell_silent.go). The two modes never combine with a forced
 // downgrade: an unattended update must not override that refusal.
-func (u *Updater) applyShell(ctx context.Context, dataDir string, forceDowngrade, silent bool) (string, error) {
+func (u *Updater) applyShell(ctx context.Context, dataDir string, forceDowngrade, silent bool, appPid int) (string, error) {
 	if silent && forceDowngrade {
 		return "", errors.New("a silent installer update never forces a downgrade")
 	}
@@ -284,7 +284,7 @@ func (u *Updater) applyShell(ctx context.Context, dataDir string, forceDowngrade
 	var launchErr error
 	if silent {
 		// The courier checks this digest again right before it installs.
-		result, launchErr = u.launchShellSilent(displayPath, shellPlatform, platform.SHA256, lg)
+		result, launchErr = u.launchShellSilent(displayPath, shellPlatform, platform.SHA256, appPid, lg)
 	} else {
 		result, launchErr = u.launchShell(displayPath, shellPlatform, lg)
 	}

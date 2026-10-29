@@ -4,7 +4,7 @@
 // unsubscribe.
 
 import { describe, it, expect, vi } from 'vitest';
-import { getDraft, setDraft, subscribeDraft } from './useNativePane';
+import { getDraft, hasAnyUnsentDraft, setDraft, subscribeDraft, unsentDraftPaneId } from './useNativePane';
 
 describe('draft bridge (edit & resend plumbing)', () => {
   it('persists and clears a draft', () => {
@@ -55,5 +55,22 @@ describe('draft survives a page reload (sessionStorage write-through)', () => {
     expect(fresh.getDraft('pane-reload')).toBe('typed before the swap');
     fresh.setDraft('pane-reload', '');
     expect(sessionStorage.getItem('solu.native.draft.pane-reload')).toBeNull();
+  });
+});
+
+// #739: a whitespace-only draft, or one left behind by a pane that has since
+// closed, must not hold the unattended updates for the life of the app.
+describe('unsent drafts that hold an update', () => {
+  it('counts only drafts with text, and only for panes that still exist', () => {
+    setDraft('pane-ws', '  \n\t');
+    setDraft('pane-gone', 'typed, then the pane closed');
+    expect(unsentDraftPaneId({ 'pane-ws': {} })).toBeUndefined();
+    expect(hasAnyUnsentDraft({ 'pane-ws': {} })).toBe(false);
+    expect(unsentDraftPaneId({})).toBeUndefined();
+    expect(unsentDraftPaneId({ 'pane-gone': {} })).toBe('pane-gone');
+    expect(hasAnyUnsentDraft({ 'pane-gone': {}, other: {} })).toBe(true);
+    setDraft('pane-ws', '');
+    setDraft('pane-gone', '');
+    expect(unsentDraftPaneId({ 'pane-gone': {} })).toBeUndefined();
   });
 });

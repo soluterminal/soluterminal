@@ -556,6 +556,51 @@ func TestTaskNotRetriedWhenToolUseCannotBeRuledOut(t *testing.T) {
 	}
 }
 
+// A data dir whose path the hook's shell could expand inside "..." gets no
+// marker hooks at all (so the run is never retried), not a hook command
+// carrying that path.
+func TestTaskMarkerHooksSkippedForUnsafeDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("these characters are not valid in Windows file names")
+	}
+	for _, name := range []string{`quote"dir`, `dollar$HOME`, "tick`id`", `back\slash`, "new\nline", "carriage\rreturn"} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), name)
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			s, err := NewScheduleStore(root, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(s.Stop)
+			dir, settings := s.prepareTaskMarkers("sched_x")
+			if dir != "" || settings != "" {
+				t.Fatalf("prepareTaskMarkers under %q = (%q, %q), want no markers", root, dir, settings)
+			}
+			if _, err := os.Stat(filepath.Join(s.taskRunDir("sched_x"), ".attempt")); !os.IsNotExist(err) {
+				t.Errorf("marker folder made anyway (stat err %v)", err)
+			}
+			if tr := readTaskMarkers(dir); tr.safeToRetry() {
+				t.Errorf("no markers = %+v, want not safe to retry", tr)
+			}
+		})
+	}
+	// Ordinary unusual characters (space, apostrophe, parentheses) keep them.
+	root := filepath.Join(t.TempDir(), "Ben's data (2)")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewScheduleStore(root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Stop)
+	if dir, settings := s.prepareTaskMarkers("sched_x"); dir == "" || settings == "" {
+		t.Fatalf("prepareTaskMarkers under %q gave no markers", root)
+	}
+}
+
 func TestTaskMarkerHooksSettings(t *testing.T) {
 	s := newTestScheduleStore(t)
 	dir, settings := s.prepareTaskMarkers("sched_x")

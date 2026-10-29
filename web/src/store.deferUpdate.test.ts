@@ -458,6 +458,8 @@ describe('maybeAutoApplyUpdate', () => {
     const applySpy = vi.fn().mockResolvedValue(undefined);
     useStore.setState({
       deferredUpdate: null,
+      // A draft holds the update only while its pane exists.
+      panes: { 'p-draft': { id: 'p-draft' } as never },
       updateSettings: { autoApply: 'when-idle' },
       updateStatus: status({ latest, available: true }),
       applyUpdate: applySpy as never,
@@ -475,6 +477,31 @@ describe('maybeAutoApplyUpdate', () => {
     } finally {
       type('');
       resetUnsentInputForTests();
+      useStore.setState({ panes: {} });
+    }
+  });
+
+  // #739: a whitespace-only draft, or one left by a pane that has closed, is
+  // not unsent text and must not hold the update for the life of the app.
+  it.each([
+    ['whitespace only', '4.1.3', { 'p-draft': { id: 'p-draft' } }, '  \n'],
+    ['a pane that has closed', '4.1.4', {}, 'typed, then the pane closed'],
+  ])('does not wait for a draft that is %s', (_name, latest, panes, text) => {
+    const applySpy = vi.fn().mockResolvedValue(undefined);
+    useStore.setState({
+      deferredUpdate: null,
+      panes: panes as never,
+      updateSettings: { autoApply: 'when-idle' },
+      updateStatus: status({ latest, available: true }),
+      applyUpdate: applySpy as never,
+    });
+    try {
+      setDraft('p-draft', text);
+      useStore.getState().maybeAutoApplyUpdate();
+      expect(applySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      setDraft('p-draft', '');
+      useStore.setState({ panes: {} });
     }
   });
 });

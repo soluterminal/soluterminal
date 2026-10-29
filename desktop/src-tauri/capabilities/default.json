@@ -30,6 +30,7 @@
     "allow-desktop-set-autostart",
     "allow-apply-shell-update",
     "allow-apply-shell-update-silent",
+    "allow-app-process-id",
     "allow-exit-for-update",
     "allow-reveal-shell-installer",
     "allow-global-hotkey-owned",

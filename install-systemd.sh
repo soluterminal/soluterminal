@@ -15,8 +15,27 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 UNIT_SRC="$ROOT/systemd/soluterminal.service"
 UNIT_DST="$HOME/.config/systemd/user/soluterminal.service"
 
-if [ ! -x "$ROOT/solud" ]; then
-  echo "error: $ROOT/solud not found. Run ./build.sh first."
+# The README's build puts the daemon at daemon/solud; ./build.sh (where the
+# checkout has one) puts it at the repository root. With both present, take
+# the newer one, so a stale build left in either place is never installed.
+if [ -x "$ROOT/daemon/solud" ] && [ -x "$ROOT/solud" ]; then
+  if [ "$ROOT/daemon/solud" -nt "$ROOT/solud" ]; then
+    DAEMON_BIN="$ROOT/daemon/solud"
+  else
+    DAEMON_BIN="$ROOT/solud"
+  fi
+  echo "using $DAEMON_BIN (newer of the two)"
+elif [ -x "$ROOT/daemon/solud" ]; then
+  DAEMON_BIN="$ROOT/daemon/solud"
+elif [ -x "$ROOT/solud" ]; then
+  DAEMON_BIN="$ROOT/solud"
+else
+  echo "error: no solud binary found at $ROOT/daemon/solud or $ROOT/solud."
+  if [ -f "$ROOT/build.sh" ]; then
+    echo "Run ./build.sh, or follow the build steps in README.md."
+  else
+    echo "Follow the build steps in README.md."
+  fi
   exit 1
 fi
 
@@ -24,7 +43,7 @@ mkdir -p "$(dirname "$UNIT_DST")"
 cp "$UNIT_SRC" "$UNIT_DST"
 
 # Point the unit at the actual binary location (in case the repo was moved).
-sed -i "s|%h/wsl-projects/soluterminal/solud|$ROOT/solud|" "$UNIT_DST"
+sed -i -E "s|%h/wsl-projects/soluterminal/(daemon/)?solud|$DAEMON_BIN|" "$UNIT_DST"
 
 systemctl --user daemon-reload
 # Clear any prior `failed` state (e.g. a tripped start-limit from a bad

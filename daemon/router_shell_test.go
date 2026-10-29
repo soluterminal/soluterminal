@@ -124,3 +124,19 @@ func TestRouterPreviewShellTimesOutToWindows(t *testing.T) {
 		t.Fatalf("fallback took %v", d)
 	}
 }
+
+// #739: one router log line per installer update request, naming the daemon.
+func TestRouterShellApplyBackend(t *testing.T) {
+	for _, tc := range []struct{ method, path, want string }{
+		{http.MethodPost, "/b/wsl/api/update/apply-shell", "wsl"},
+		{http.MethodPost, "/api/update/apply-shell", "wsl"},
+		{http.MethodPost, "/b/win/api/update/apply-shell", "win"},
+		{http.MethodGet, "/b/wsl/api/update/apply-shell", ""},
+		{http.MethodPost, "/b/wsl/api/update/status", ""},
+		{http.MethodPost, "/b/wsl/api/update/apply-shell/x", ""},
+	} {
+		if got := routerShellApplyBackend(tc.method, tc.path); got != tc.want {
+			t.Fatalf("%s %s = %q, want %q", tc.method, tc.path, got, tc.want)
+		}
+	}
+}

@@ -65,6 +65,19 @@ export function focusedMenuOption(screen: string): string {
   return focused;
 }
 
+// focusedMenuLabel returns the text of the highlighted option in the
+// bottom-most menu on a live screen (never scrollback) — what a bare Enter
+// would confirm. '' when that can't be read reliably: no menu, no focus
+// marker, more than one marker in the menu, or a marker row with no text.
+// Only the marker row itself is read; a label wrapped onto the next line
+// shows its first line.
+const FOCUS_LABEL_RE = /^[\s\p{Zs}]*[❯❭›▶][\s\p{Zs}]*[0-9]+(?:[.)]|[\s\p{Zs}]{2,})[\s\p{Zs}]*(\S.*?)[\s\p{Zs}]*$/u;
+export function focusedMenuLabel(screen: string): string {
+  const rows = menuTail(screen).split('\n').filter((l) => FOCUS_ROW_RE.test(l));
+  if (rows.length !== 1) return '';
+  return FOCUS_LABEL_RE.exec(rows[0])?.[1] ?? '';
+}
+
 // isMenuKeyReply reports whether a typed reply is a single menu key: one
 // digit, or y / n (Codex approval shortcuts). At a choice-prompt these must
 // not get the usual trailing Enter.

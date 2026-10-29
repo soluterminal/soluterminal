@@ -22,6 +22,7 @@ mod shell_update;
 mod shell_update_manifest;
 #[cfg(desktop)]
 mod single_instance;
+mod startup_screen;
 mod tray_icon;
 mod tray_notice;
 mod window_geometry;
@@ -96,6 +97,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        // The startup window's page (startup_screen.rs), served by the shell
+        // itself so it shows before any daemon is up.
+        .register_uri_scheme_protocol(startup_screen::SCHEME, |_ctx, request| {
+            startup_screen::respond(request.uri().path())
+        })
         .invoke_handler(tauri::generate_handler![
             autostart::desktop_get_autostart,
             autostart::desktop_set_autostart,
@@ -106,6 +112,7 @@ pub fn run() {
             hotkey_probe::global_hotkey_owned,
             shell_update::apply_shell_update,
             shell_update::apply_shell_update_silent,
+            shell_update::app_process_id,
             shell_update::reveal_shell_installer,
             browser::open_external_window,
             workspace_window::open_workspace_window,
@@ -163,580 +170,44 @@ pub fn run() {
             // may have removed the Run value while leaving the preference.
             autostart::reconcile();
 
-            let started = match desktop_mode {
-                launch_mode::LaunchMode::Cloud => daemon::DaemonStart::single(
-                    daemon::SidecarGuard::empty(),
-                    launch_mode::cloud_web_url()
-                        .expect("cloud launch mode resolves only in a build with a hosted cloud")
-                        .into(),
-                ),
-                launch_mode::LaunchMode::Local => {
-                    let chosen = chosen.expect("local desktop mode should resolve a backend");
-                    // Drop ~/.solu/shell-info.json so a daemon launched
-                    // outside of Tauri can still discover the installed
-                    // shell version. Best-effort — failures are logged
-                    // and ignored.
-                    let shell_ver = env!("SOLU_SHELL_VERSION");
-                    let shell_plat = daemon::host_shell_platform();
-                    #[cfg(windows)]
+            // Start the backends off the main thread. Setup used to block on
+            // them, so nothing was on screen until they were up: two minutes
+            // and more when the WSL daemon could not start (2026-10-28, an
+            // older daemon in a second distro held its port). The startup
+            // window says what is happening meanwhile; the main window is
+            // built, exactly as before, once the backends are known.
+            if interactive_startup && matches!(desktop_mode, launch_mode::LaunchMode::Local) {
+                startup_screen::open(&app_handle);
+            }
+            let worker = app_handle.clone();
+            std::thread::Builder::new()
+                .name("backend-startup".into())
+                .spawn(move || {
+                    let started = start_backends(&worker, desktop_mode, chosen, interactive_startup);
+                    if startup_screen::has_notice()
+                        && worker.get_webview_window(startup_screen::LABEL).is_some()
                     {
-                        match chosen {
-                            backend::Backend::Wsl => {
-                                shell_info::write_wsl(shell_ver, "windows-amd64");
-                            }
-                            backend::Backend::HostNative => {
-                                shell_info::write_host(shell_ver, shell_plat);
-                            }
-                            backend::Backend::Dual => {
-                                shell_info::write_host(shell_ver, shell_plat);
-                                shell_info::write_wsl(shell_ver, "windows-amd64");
-                            }
-                        }
+                        // Leave the fallback notice readable before the
+                        // workspace replaces it.
+                        std::thread::sleep(std::time::Duration::from_secs(3));
                     }
-                    #[cfg(not(windows))]
-                    {
-                        let _ = chosen;
-                        shell_info::write_host(shell_ver, shell_plat);
-                    }
-
-                    {
-                        #[cfg(windows)]
+                    startup_screen::step("Opening your workspace");
+                    let main = worker.clone();
+                    let posted = worker.run_on_main_thread(move || {
+                        if let Err(e) =
+                            finish_startup(&main, started, desktop_mode, chosen, started_by_autostart)
                         {
-                            match chosen {
-                                backend::Backend::Wsl => daemon::ensure_daemon_running_wsl(&app_handle)
-                                    .or_else(|err| {
-                                        daemon::launch_log(&format!("WSL backend FAILED: {err}"));
-                                        daemon::launch_log("falling back to host-native");
-                                        // Surface the fallback with cause-specific copy. Without
-                                        // this the user picked the WSL backend but silently gets
-                                        // PowerShell panes and no WSL — with zero indication WHY,
-                                        // so they assume the app is broken (and generic "fix WSL"
-                                        // advice is wrong/misleading for an incomplete install or
-                                        // a port already held). Non-blocking so startup isn't
-                                        // stalled; launch.log still holds the full error.
-                                        if interactive_startup {
-                                            use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-                                            let (title, body) = classify_wsl_fallback(&err);
-                                            app_handle
-                                                .dialog()
-                                                .message(body)
-                                                .title(title)
-                                                .kind(MessageDialogKind::Warning)
-                                                .show(|_| {});
-                                        }
-                                        daemon::ensure_daemon_running(daemon::BACKEND_ID_HOST)
-                                    }),
-                                backend::Backend::HostNative => daemon::ensure_daemon_running(daemon::BACKEND_ID_HOST),
-                                backend::Backend::Dual => {
-                                    // Spawn BOTH backends. Then spawn a Go
-                                    // `solud router` that multiplexes both
-                                    // behind 127.0.0.1:28787.
-                                    daemon::launch_log("Dual: spawning WSL + Windows-native + router");
-                                    // Circuit-breaker: WSL is attempted EXACTLY ONCE per launch.
-                                    // On failure we fall through to Windows-only below — we never
-                                    // retry WSL in a loop within a single launch (a flapping WSL
-                                    // VM otherwise stalled startup retrying the 45s spawn-wait).
-                                    let wsl = daemon::ensure_daemon_running_wsl(&app_handle);
-                                    // The Windows backend takes its own port: WSL's localhost
-                                    // forwarding already owns Windows' 127.0.0.1:8787 (see
-                                    // daemon::DUAL_WIN_ADDR).
-                                    let host = daemon::ensure_daemon_running_on(
-                                        daemon::BACKEND_ID_WIN,
-                                        daemon::DUAL_WIN_ADDR,
-                                        true,
-                                    );
-                                    match (wsl, host) {
-                                        (Ok(w), Ok(h)) => {
-                                            // Both daemons are up but each has its
-                                            // OWN claim.json on its OWN filesystem.
-                                            // Web-UI pairing only pairs the one that
-                                            // served the request, leaving the other
-                                            // daemon unpaired → it never pulls the
-                                            // team-credential set → team auto-switch
-                                            // never fires on that backend. Mirror the
-                                            // claim between both so both connect and
-                                            // provision. See daemon::start_dual_claim_mirror.
-                                            daemon::start_dual_claim_mirror();
-                                            const ROUTER_ADDR: &str = "127.0.0.1:28787";
-                                            const ROUTER_URL: &str = "http://127.0.0.1:28787";
-                                            const WSL_UPSTREAM: &str = "http://127.0.0.1:18787";
-                                            let win_upstream = format!("http://{}", daemon::DUAL_WIN_ADDR);
-                                            let wsl_tok = daemon::read_wsl_token()
-                                                .unwrap_or_else(|e| {
-                                                    daemon::launch_log(&format!("router: read WSL token err: {e}"));
-                                                    String::new()
-                                                });
-                                            let win_tok = daemon::read_win_token()
-                                                .unwrap_or_else(|e| {
-                                                    daemon::launch_log(&format!("router: read Win token err: {e}"));
-                                                    String::new()
-                                                });
-                                            match daemon::ensure_router_running(
-                                                ROUTER_ADDR, WSL_UPSTREAM, &win_upstream,
-                                                &wsl_tok, &win_tok,
-                                            ) {
-                                                Ok(router_guard) => {
-                                                    let merged = daemon::merge_guards(
-                                                        daemon::merge_guards(w.guard, h.guard),
-                                                        router_guard,
-                                                    );
-                                                    let initial_url =
-                                                        format!("{ROUTER_URL}/?solu_router=1");
-                                                    Ok(daemon::DaemonStart {
-                                                        guard: merged,
-                                                        initial_url,
-                                                        alt_url: None,
-                                                    })
-                                                }
-                                                Err(e) => {
-                                                    daemon::launch_log(&format!(
-                                                        "Dual: router failed ({e}); falling back to switcher-pill mode"
-                                                    ));
-                                                    let merged = daemon::merge_guards(w.guard, h.guard);
-                                                    Ok(daemon::DaemonStart {
-                                                        guard: merged,
-                                                        initial_url: w.initial_url,
-                                                        alt_url: Some(h.initial_url),
-                                                    })
-                                                }
-                                            }
-                                        }
-                                        (Ok(w), Err(e)) => {
-                                            daemon::launch_log(&format!(
-                                                "Dual: Windows-native failed ({e}), falling to WSL-only"
-                                            ));
-                                            Ok(w)
-                                        }
-                                        (Err(e), Ok(h)) => {
-                                            daemon::launch_log(&format!(
-                                                "Dual: WSL failed ({e}), falling to Windows-only"
-                                            ));
-                                            if interactive_startup {
-                                                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-                                                let (title, body) = classify_wsl_fallback(&e);
-                                                app_handle.dialog().message(body).title(title)
-                                                    .kind(MessageDialogKind::Warning).show(|_| {});
-                                            }
-                                            // WSL is often only late (a busy or
-                                            // just-booted VM). Keep watching so the
-                                            // user can reconnect in one click.
-                                            let watcher = app_handle.clone();
-                                            daemon::watch_for_wsl_recovery(move || {
-                                                offer_wsl_reconnect(&watcher)
-                                            });
-                                            Ok(h)
-                                        }
-                                        (Err(e1), Err(e2)) => Err(format!(
-                                            "both backends failed: WSL={e1}; Windows={e2}"
-                                        )),
-                                    }
-                                }
-                            }
+                            eprintln!("desktop: startup failed: {e}");
+                            #[cfg(windows)]
+                            daemon::launch_log(&format!("startup failed: {e}"));
+                            main.exit(1);
                         }
-                        #[cfg(not(windows))]
-                        {
-                            let _ = app_handle;
-                            daemon::ensure_daemon_running(daemon::BACKEND_ID_HOST)
-                        }
+                        startup_screen::close(&main);
+                    });
+                    if let Err(e) = posted {
+                        eprintln!("desktop: could not finish startup on the main thread: {e}");
                     }
-                    .unwrap_or_else(|err| {
-                        eprintln!("desktop: {err}");
-                        eprintln!("desktop: continuing without sidecar — window will fail to load until you start solud manually");
-                        daemon::DaemonStart::single(
-                            daemon::SidecarGuard::empty(),
-                            "http://127.0.0.1:8787".into(),
-                        )
-                    })
-                }
-            };
-            app.manage(std::sync::Mutex::new(started.guard));
-
-            // Create the main window programmatically AFTER the daemon
-            // is up, with the correct URL (including ?token= for the
-            // WSL backend). A static window config would start loading
-            // http://127.0.0.1:8787 before our proxy is listening and
-            // land the webview in an error state Chromium can't cleanly
-            // recover from via navigate(). This way the webview's
-            // first-ever load points at a working daemon.
-            //
-            // Dual mode: embed BOTH backend URLs (with their tokens) as
-            // query params on the initial load. The daemon's auth gate
-            // strips `token=` on its redirect but leaves other query
-            // params alone, so `solu_primary` and `solu_alt` survive to
-            // the frontend. Frontend uses them to switch between
-            // backends without losing the ability to come back.
-            let url_string = match &started.alt_url {
-                Some(alt) => {
-                    let sep = if started.initial_url.contains('?') { "&" } else { "?" };
-                    format!(
-                        "{}{}solu_primary={}&solu_alt={}",
-                        started.initial_url,
-                        sep,
-                        urlencode(&started.initial_url),
-                        urlencode(alt),
-                    )
-                }
-                None => started.initial_url.clone(),
-            };
-            let url = match url_string.parse() {
-                Ok(u) => WebviewUrl::External(u),
-                Err(_) => WebviewUrl::External("http://127.0.0.1:8787".parse().unwrap()),
-            };
-            // The daemon origins the app's windows may load (nav_guard.rs).
-            let mut daemon_urls = vec![started.initial_url.clone()];
-            daemon_urls.extend(started.alt_url.clone());
-            if url_string.parse::<tauri::Url>().is_err() {
-                daemon_urls.push("http://127.0.0.1:8787".to_string()); // the fallback above
-            }
-            app.manage(nav_guard::AllowedLocalOrigins::from_urls(daemon_urls.iter().map(String::as_str)));
-
-            // Backend signal for the web (status chip + fallback banner +
-            // sidebar mode switcher).
-            // SHARED CONTRACT: window.__SOLU_BACKEND__ = { requested,
-            // actual, fallback, hostPlatform, launchMode }. "requested"
-            // is the backend the user wanted (resolved from their
-            // saved/first-run choice); "actual" is what actually started
-            // this session. fallback is true when the user wanted wsl/dual
-            // but we ended up on host. hostPlatform/launchMode let the web
-            // hide Windows-only local controls in Cloud mode and on
-            // macOS/Linux desktop shells.
-            // "requested" comes from the SAVED pref, not from `chosen`
-            // (resolve_backend's output): when a saved WSL/Dual pref fails
-            // validation, resolve folds it into HostNative, and deriving
-            // "requested" from that made "user chose Windows" and "user
-            // chose WSL but WSL is broken" indistinguishable — fallback
-            // under-reported exactly when the UI most needed to say "you
-            // are not on the backend you picked". No saved pref (first
-            // run) falls back to what the wizard resolved this session.
-            let requested_backend = if matches!(desktop_mode, launch_mode::LaunchMode::Cloud) {
-                // Cloud mode runs no local daemon; the chip is moot, so
-                // report a neutral host/host with no fallback.
-                "host"
-            } else {
-                #[cfg(windows)]
-                {
-                    match backend::saved_pref() {
-                        Some(backend::Backend::Wsl) => "wsl",
-                        Some(backend::Backend::Dual) => "dual",
-                        Some(backend::Backend::HostNative) => "host",
-                        None => match chosen {
-                            Some(backend::Backend::Wsl) => "wsl",
-                            Some(backend::Backend::Dual) => "dual",
-                            _ => "host",
-                        },
-                    }
-                }
-                #[cfg(not(windows))]
-                {
-                    "host"
-                }
-            };
-            // Detect what actually came up from the initial URL: the WSL
-            // proxy serves :18787, the Dual router :28787, host-native
-            // :8787. A wsl/dual request landing on :8787 means we fell
-            // back to host-native (the WSL .or_else branch above).
-            let actual_backend = if matches!(desktop_mode, launch_mode::LaunchMode::Cloud) {
-                "host"
-            } else if started.initial_url.contains(":18787") {
-                "wsl"
-            } else if started.initial_url.contains(":28787") {
-                "dual"
-            } else {
-                "host"
-            };
-            let fallback = matches!(requested_backend, "wsl" | "dual") && actual_backend == "host";
-            let host_platform = if cfg!(windows) {
-                "windows"
-            } else if cfg!(target_os = "macos") {
-                "macos"
-            } else {
-                "linux"
-            };
-            let launch_mode_value = match desktop_mode {
-                launch_mode::LaunchMode::Local => "local",
-                launch_mode::LaunchMode::Cloud => "cloud",
-            };
-            // `version` is the shell/installer version (tauri.conf.json), so the
-            // web UI can tell an old installer apart from a packaging bug without
-            // waiting on the async browser_pane_ping round-trip.
-            let shell_version = app.handle().package_info().version.to_string();
-            let backend_script = format!(
-                "window.__SOLU_BACKEND__ = {{ requested: \"{requested_backend}\", \
-                 actual: \"{actual_backend}\", fallback: {fallback}, \
-                 hostPlatform: \"{host_platform}\", launchMode: \"{launch_mode_value}\", \
-                 version: \"{shell_version}\" }};"
-            );
-
-            // Restore the main window's saved geometry (position, size,
-            // maximized) — but only if it still lands on a live monitor, so an
-            // unplugged display falls back to the default instead of stranding
-            // the window off-screen.
-            let monitors = app.handle().available_monitors().unwrap_or_default();
-            let restore = window_geometry::load()
-                .filter(|g| window_geometry::visible_on_monitors(g, &monitors));
-            // A maximized restore builds at the DEFAULT size so a later
-            // restore-down isn't monitor-filling; the maximize() below
-            // re-establishes the maximized state.
-            let (init_w, init_h) = match restore {
-                Some(g) if !g.maximized => (g.width as f64, g.height as f64),
-                _ => (1280.0, 800.0),
-            };
-            let window_plan = startup_window_plan(
-                restore.is_some(),
-                restore.is_some_and(|geometry| geometry.maximized),
-                started_by_autostart,
-            );
-
-            let mut main_builder = WebviewWindowBuilder::new(app, "main", url)
-                .title("soluterminal")
-                .inner_size(init_w, init_h)
-                .min_inner_size(600.0, 400.0)
-                .resizable(true)
-                // Custom title bar lives inside the React app (Topbar.tsx)
-                // and is themed to match the rest of the chrome. The OS
-                // bar would be a glaring white strip. Frontend renders
-                // its own min/max/close on Windows/Linux; macOS keeps
-                // the native traffic lights via title_bar_style below.
-                .decorations(false)
-                // Dedicated Tauri-webview flag for the web code. Our
-                // frontend is served from the daemon's HTTP server rather
-                // than bundled Tauri assets, so Tauri's default
-                // `window.__TAURI__` injection isn't always present. This
-                // runs before any page script on every load, so
-                // `window.__SOLU_TAURI__` is a reliable signal that the
-                // web is inside the desktop app (vs. a browser tab).
-                .initialization_script("window.__SOLU_TAURI__ = true;")
-                // Backend signal (requested/actual/fallback) per the
-                // SHARED CONTRACT. Separate script so it runs before any
-                // page code, same as __SOLU_TAURI__.
-                .initialization_script(&backend_script)
-                // Per-window identity (multi-monitor). The main window is
-                // the primary; secondary windows (workspace_*) inject their
-                // own label in workspace_window.rs. The frontend keys
-                // per-window storage off this so each window restores its
-                // own workspace across reloads. Primary keeps the legacy
-                // un-suffixed storage key (backward compat).
-                .initialization_script(
-                    "window.__SOLU_WINDOW__ = { label: \"main\", role: \"primary\" };",
-                )
-                .devtools(cfg!(debug_assertions))
-                // WebView2's native drag/drop handler swallows HTML5 DnD
-                // events inside the page (e.g. sidebar workspace reorder).
-                // Disabling the native handler restores in-page DnD.
-                .disable_drag_drop_handler()
-                .on_navigation(nav_guard::guard(app.handle().clone()));
-
-            // Build hidden, then show once the webview exists (see
-            // StartupWindowPlan::start_hidden for the deadlock this avoids).
-            // When restoring, set the PHYSICAL position before showing — the
-            // builder's .position() is logical and would misplace across
-            // mixed-DPI monitors (same pattern as workspace_window.rs).
-            // Maximize AFTER show (maximizing a hidden window is unreliable).
-            if window_plan.start_hidden {
-                main_builder = main_builder.visible(false);
-            }
-            let main_window = main_builder.build()?;
-            if let Some(g) = restore {
-                let _ = main_window.set_position(tauri::PhysicalPosition::new(g.x, g.y));
-            }
-            if window_plan.show_after_build {
-                let _ = main_window.show(); // always show, even if positioning errored
-                if restore.is_some_and(|g| g.maximized) {
-                    let _ = main_window.maximize();
-                }
-                let _ = main_window.set_focus();
-            }
-            let maximize_on_first_show = std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(window_plan.maximize_on_first_show),
-            );
-            #[cfg(desktop)]
-            app.manage(single_instance::MainWindowReveal(maximize_on_first_show.clone()));
-
-            // Capture the composed URL + backend signal so the
-            // `open_workspace_window` command can spawn additional full-app
-            // windows that load identically (same daemon URL, token, and
-            // backend) without re-running launch-mode resolution. Read-only
-            // managed state — never mutated, so no Mutex. Multi-window is
-            // gated to Local launch mode (Cloud needs a per-machine prefix +
-            // JWT we don't compose for MVP).
-            app.manage(workspace_window::WorkspaceSpawnTemplate {
-                url_string: url_string.clone(),
-                backend_script: backend_script.clone(),
-                supported: matches!(desktop_mode, launch_mode::LaunchMode::Local),
-            });
-
-            // Tray icon + right-click menu. Gives the user a way to
-            // re-open the window after closing it and a real "Quit" that
-            // actually exits (vs. hiding).
-            //
-            // Public beta: no "Pair with cloud…" item (phone access/pairing
-            // is team-only and lives in the web UI, which gates it on the
-            // daemon's entitlements) and no "Switch to connecting to
-            // computers you set up" in Local mode. A Cloud-mode install
-            // still gets the way back to running projects on this PC.
-            let show = MenuItem::with_id(app, "show", "Show soluterminal", true, None::<&str>)?;
-            let hide = MenuItem::with_id(app, "hide", "Hide window", true, None::<&str>)?;
-            let switch_to_local = MenuItem::with_id(
-                app,
-                "switch_launch_mode",
-                format!(
-                    "Switch to running projects on this computer ({})",
-                    launch_mode::label(launch_mode::LaunchMode::Local)
-                ),
-                true,
-                None::<&str>,
-            )?;
-
-            // "Switch backend" tray entry (Windows only). Label shows
-            // what you'd switch TO — "Switch to Windows-native" if
-            // currently on WSL, and vice versa. Clicking saves the new
-            // preference and restarts the app so the new backend comes
-            // up cleanly (rather than trying to swap daemons live,
-            // which would orphan the webview's state).
-            #[cfg(windows)]
-            let switch = {
-                let target = backend::other(chosen.unwrap_or(backend::Backend::HostNative));
-                let label = format!("Switch to {}", backend::label(target));
-                MenuItem::with_id(app, "switch_backend", &label, true, None::<&str>)?
-            };
-
-            // "Repair setup" (Windows, Local only): clears the saved
-            // backend choice + transient WSL artifacts and restarts so
-            // detection + the first-run wizard re-fire. The in-app escape
-            // hatch for a botched WSL setup that a reinstall wouldn't fix
-            // (prefs live in %LOCALAPPDATA%, untouched by the uninstaller).
-            #[cfg(windows)]
-            let repair =
-                MenuItem::with_id(app, "repair_reset", "Repair setup (re-detect Linux/Windows)", true, None::<&str>)?;
-
-            let sep = PredefinedMenuItem::separator(app)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-
-            #[cfg(windows)]
-            let menu = if matches!(desktop_mode, launch_mode::LaunchMode::Local) {
-                Menu::with_items(app, &[&show, &hide, &switch, &repair, &sep, &quit])?
-            } else {
-                Menu::with_items(app, &[&show, &hide, &switch_to_local, &sep, &quit])?
-            };
-            #[cfg(not(windows))]
-            let menu = if matches!(desktop_mode, launch_mode::LaunchMode::Local) {
-                Menu::with_items(app, &[&show, &hide, &sep, &quit])?
-            } else {
-                Menu::with_items(app, &[&show, &hide, &switch_to_local, &sep, &quit])?
-            };
-
-            let maximize_from_menu = maximize_on_first_show.clone();
-            let maximize_from_tray = maximize_on_first_show.clone();
-            let _tray = TrayIconBuilder::with_id("main")
-                .tooltip("soluterminal")
-                .icon(
-                    tray_icon::image()
-                        .unwrap_or_else(|| app.default_window_icon().unwrap().clone()),
-                )
-                .menu(&menu)
-                .show_menu_on_left_click(false) // left-click toggles, right-click opens menu
-                .on_menu_event(move |app, event| match event.id.as_ref() {
-                    "show" => {
-                        show_main_window(app, &maximize_from_menu);
-                    }
-                    "hide" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            dispatch_desktop_will_background_event(&w, "tray-hide");
-                            let _ = w.hide();
-                        }
-                    }
-                    "switch_launch_mode" => {
-                        // Only offered in Cloud mode now, and always back to
-                        // Local: never flip a Local install into Cloud.
-                        if let Err(e) = launch_mode::set_pref(launch_mode::LaunchMode::Local) {
-                            eprintln!("desktop: set launch mode failed: {e}");
-                        }
-                        restart_from_main_thread(app);
-                    }
-                    #[cfg(windows)]
-                    "switch_backend" => {
-                        // Flip to the opposite of the currently-SAVED
-                        // backend, persist, and restart. We read the saved
-                        // pref (not resolve_backend) so this never triggers
-                        // the WSL re-validation/repair dialog — switching is
-                        // an explicit user action, not a health check.
-                        // Restart cleanly stops the current daemon/proxy via
-                        // SidecarGuard drop and re-runs .setup().
-                        let target = backend::other(backend::saved_or_default());
-                        if let Err(e) = backend::set_pref(target) {
-                            eprintln!("desktop: set_pref failed: {e}");
-                        }
-                        restart_from_main_thread(app);
-                    }
-                    #[cfg(windows)]
-                    "repair_reset" => {
-                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-                        let ok = app
-                            .dialog()
-                            .message(
-                                "Reset soluterminal's Windows/Linux setup and re-detect from \
-                                 scratch? The app will restart and ask how you want it to run \
-                                 (and offer to set up Linux/WSL if needed).",
-                            )
-                            .title("Repair setup")
-                            .kind(MessageDialogKind::Warning)
-                            .buttons(MessageDialogButtons::OkCancel)
-                            .blocking_show();
-                        if ok {
-                            backend::reset_setup();
-                            restart_from_main_thread(app);
-                        }
-                    }
-                    "quit" => {
-                        // Persist main-window geometry before a hard exit —
-                        // the blur/close flushes don't fire on app.exit(0).
-                        persist_main_window_geometry(app);
-                        app.exit(0)
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(move |tray, event| {
-                    // Left-click on the icon = always bring main forward.
-                    // Previously this toggled visibility, but that broke
-                    // the common "close app, re-open from tray" flow
-                    // when the main window was already visible behind
-                    // something else (e.g. a browser popout took focus):
-                    // is_visible() returned true, tray-click would then
-                    // HIDE main, and the user saw nothing. Toggle via
-                    // tray also fought with native child webviews that
-                    // refuse to unhide cleanly in some Windows DPI /
-                    // compositor states. Hide is still available via
-                    // the tray context menu's "Hide window" item.
-                    // Only act on the Up edge so a click isn't double-
-                    // handled across press and release.
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        show_main_window(app, &maximize_from_tray);
-                    }
-                })
-                .build(app)?;
-
-            // First-launch: NO auto-fired native pair dialog anymore.
-            //
-            // Pairing now lives inside the embedded web UI: a dismissible
-            // "Set up phone access" banner driven by live cloud status
-            // (POST /api/cloud/pair/start + GET /api/cloud/status). First
-            // launch should open straight to a working local terminal, not
-            // a modal wall. The old 800ms auto-dialog stacked an OS modal
-            // over a half-painted webview and dead-ended on dismiss
-            // (confusion points #12 / #13 in PLAN-onboarding-ux-2026-06-24).
-            //
-            // The native pair wizard (pair::run_pair_wizard) is KEPT as a
-            // fallback but is no longer auto-invoked, and the tray no longer
-            // carries a pairing item (public beta: pairing is team-only and
-            // lives in the web UI). `pair::any_claim_exists` is likewise no longer
-            // called here; both remain public helpers (see #[allow(dead_code)]
-            // notes in pair.rs) so the native flow can be re-wired if needed.
+                })?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -790,6 +261,620 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Start the daemon(s) for this launch: the slow part of startup, run on its
+/// own thread while the startup window is up. Never fails: a backend that
+/// cannot start falls back as before, ending at a URL the window can load.
+fn start_backends(
+    app_handle: &tauri::AppHandle,
+    desktop_mode: launch_mode::LaunchMode,
+    chosen: Option<backend::Backend>,
+    interactive_startup: bool,
+) -> daemon::DaemonStart {
+    match desktop_mode {
+        launch_mode::LaunchMode::Cloud => daemon::DaemonStart::single(
+            daemon::SidecarGuard::empty(),
+            launch_mode::cloud_web_url()
+                .expect("cloud launch mode resolves only in a build with a hosted cloud")
+                .into(),
+        ),
+        launch_mode::LaunchMode::Local => {
+            let chosen = chosen.expect("local desktop mode should resolve a backend");
+            // Drop ~/.solu/shell-info.json so a daemon launched
+            // outside of Tauri can still discover the installed
+            // shell version. Best-effort — failures are logged
+            // and ignored.
+            let shell_ver = env!("SOLU_SHELL_VERSION");
+            let shell_plat = daemon::host_shell_platform();
+            #[cfg(windows)]
+            {
+                match chosen {
+                    backend::Backend::Wsl => {
+                        shell_info::write_wsl(shell_ver, "windows-amd64");
+                    }
+                    backend::Backend::HostNative => {
+                        shell_info::write_host(shell_ver, shell_plat);
+                    }
+                    backend::Backend::Dual => {
+                        shell_info::write_host(shell_ver, shell_plat);
+                        shell_info::write_wsl(shell_ver, "windows-amd64");
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = chosen;
+                shell_info::write_host(shell_ver, shell_plat);
+            }
+
+            {
+                #[cfg(windows)]
+                {
+                    match chosen {
+                        backend::Backend::Wsl => {
+                            startup_screen::step("Connecting to the WSL background service");
+                            daemon::ensure_daemon_running_wsl(app_handle)
+                            .or_else(|err| {
+                                daemon::launch_log(&format!("WSL backend FAILED: {err}"));
+                                daemon::launch_log("falling back to host-native");
+                                startup_screen::wsl_fell_back(&err);
+                                startup_screen::step("Starting the Windows background service");
+                                // Surface the fallback with cause-specific copy. Without
+                                // this the user picked the WSL backend but silently gets
+                                // PowerShell panes and no WSL — with zero indication WHY,
+                                // so they assume the app is broken (and generic "fix WSL"
+                                // advice is wrong/misleading for an incomplete install or
+                                // a port already held). Non-blocking so startup isn't
+                                // stalled; launch.log still holds the full error.
+                                if interactive_startup {
+                                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                                    let (title, body) = classify_wsl_fallback(&err);
+                                    app_handle
+                                        .dialog()
+                                        .message(body)
+                                        .title(title)
+                                        .kind(MessageDialogKind::Warning)
+                                        .show(|_| {});
+                                }
+                                daemon::ensure_daemon_running(daemon::BACKEND_ID_HOST)
+                            })
+                        }
+                        backend::Backend::HostNative => {
+                            startup_screen::step("Starting the Windows background service");
+                            daemon::ensure_daemon_running(daemon::BACKEND_ID_HOST)
+                        }
+                        backend::Backend::Dual => {
+                            // Spawn BOTH backends. Then spawn a Go
+                            // `solud router` that multiplexes both
+                            // behind 127.0.0.1:28787.
+                            daemon::launch_log("Dual: spawning WSL + Windows-native + router");
+                            // Circuit-breaker: WSL is attempted EXACTLY ONCE per launch.
+                            // On failure we fall through to Windows-only below — we never
+                            // retry WSL in a loop within a single launch (a flapping WSL
+                            // VM otherwise stalled startup retrying the 45s spawn-wait).
+                            startup_screen::step("Connecting to the WSL background service");
+                            let wsl = daemon::ensure_daemon_running_wsl(app_handle);
+                            if let Err(e) = &wsl {
+                                startup_screen::wsl_fell_back(e);
+                            }
+                            startup_screen::step("Starting the Windows background service");
+                            // The Windows backend takes its own port: WSL's localhost
+                            // forwarding already owns Windows' 127.0.0.1:8787 (see
+                            // daemon::DUAL_WIN_ADDR).
+                            let host = daemon::ensure_daemon_running_on(
+                                daemon::BACKEND_ID_WIN,
+                                daemon::DUAL_WIN_ADDR,
+                                true,
+                            );
+                            match (wsl, host) {
+                                (Ok(w), Ok(h)) => {
+                                    // Both daemons are up but each has its
+                                    // OWN claim.json on its OWN filesystem.
+                                    // Web-UI pairing only pairs the one that
+                                    // served the request, leaving the other
+                                    // daemon unpaired → it never pulls the
+                                    // team-credential set → team auto-switch
+                                    // never fires on that backend. Mirror the
+                                    // claim between both so both connect and
+                                    // provision. See daemon::start_dual_claim_mirror.
+                                    daemon::start_dual_claim_mirror();
+                                    startup_screen::step("Connecting the WSL and Windows services");
+                                    const ROUTER_ADDR: &str = "127.0.0.1:28787";
+                                    const ROUTER_URL: &str = "http://127.0.0.1:28787";
+                                    const WSL_UPSTREAM: &str = "http://127.0.0.1:18787";
+                                    let win_upstream = format!("http://{}", daemon::DUAL_WIN_ADDR);
+                                    let wsl_tok = daemon::read_wsl_token()
+                                        .unwrap_or_else(|e| {
+                                            daemon::launch_log(&format!("router: read WSL token err: {e}"));
+                                            String::new()
+                                        });
+                                    let win_tok = daemon::read_win_token()
+                                        .unwrap_or_else(|e| {
+                                            daemon::launch_log(&format!("router: read Win token err: {e}"));
+                                            String::new()
+                                        });
+                                    match daemon::ensure_router_running(
+                                        ROUTER_ADDR, WSL_UPSTREAM, &win_upstream,
+                                        &wsl_tok, &win_tok,
+                                    ) {
+                                        Ok(router_guard) => {
+                                            let merged = daemon::merge_guards(
+                                                daemon::merge_guards(w.guard, h.guard),
+                                                router_guard,
+                                            );
+                                            let initial_url =
+                                                format!("{ROUTER_URL}/?solu_router=1");
+                                            Ok(daemon::DaemonStart {
+                                                guard: merged,
+                                                initial_url,
+                                                alt_url: None,
+                                            })
+                                        }
+                                        Err(e) => {
+                                            daemon::launch_log(&format!(
+                                                "Dual: router failed ({e}); falling back to switcher-pill mode"
+                                            ));
+                                            let merged = daemon::merge_guards(w.guard, h.guard);
+                                            Ok(daemon::DaemonStart {
+                                                guard: merged,
+                                                initial_url: w.initial_url,
+                                                alt_url: Some(h.initial_url),
+                                            })
+                                        }
+                                    }
+                                }
+                                (Ok(w), Err(e)) => {
+                                    daemon::launch_log(&format!(
+                                        "Dual: Windows-native failed ({e}), falling to WSL-only"
+                                    ));
+                                    Ok(w)
+                                }
+                                (Err(e), Ok(h)) => {
+                                    daemon::launch_log(&format!(
+                                        "Dual: WSL failed ({e}), falling to Windows-only"
+                                    ));
+                                    if interactive_startup {
+                                        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                                        let (title, body) = classify_wsl_fallback(&e);
+                                        app_handle.dialog().message(body).title(title)
+                                            .kind(MessageDialogKind::Warning).show(|_| {});
+                                    }
+                                    // WSL is often only late (a busy or
+                                    // just-booted VM). Keep watching so the
+                                    // user can reconnect in one click.
+                                    let watcher = app_handle.clone();
+                                    daemon::watch_for_wsl_recovery(move || {
+                                        offer_wsl_reconnect(&watcher)
+                                    });
+                                    Ok(h)
+                                }
+                                (Err(e1), Err(e2)) => Err(format!(
+                                    "both backends failed: WSL={e1}; Windows={e2}"
+                                )),
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = (app_handle, interactive_startup);
+                    startup_screen::step("Starting the background service");
+                    daemon::ensure_daemon_running(daemon::BACKEND_ID_HOST)
+                }
+            }
+            .unwrap_or_else(|err| {
+                eprintln!("desktop: {err}");
+                eprintln!("desktop: continuing without sidecar — window will fail to load until you start solud manually");
+                daemon::DaemonStart::single(
+                    daemon::SidecarGuard::empty(),
+                    "http://127.0.0.1:8787".into(),
+                )
+            })
+        }
+    }
+}
+
+/// Everything setup did after the backends were up: managed state, the main
+/// window and the tray. Runs on the main thread.
+fn finish_startup(
+    app: &tauri::AppHandle,
+    started: daemon::DaemonStart,
+    desktop_mode: launch_mode::LaunchMode,
+    chosen: Option<backend::Backend>,
+    started_by_autostart: bool,
+) -> tauri::Result<()> {
+    #[cfg(not(windows))]
+    let _ = chosen;
+    app.manage(std::sync::Mutex::new(started.guard));
+
+    // Create the main window programmatically AFTER the daemon
+    // is up, with the correct URL (including ?token= for the
+    // WSL backend). A static window config would start loading
+    // http://127.0.0.1:8787 before our proxy is listening and
+    // land the webview in an error state Chromium can't cleanly
+    // recover from via navigate(). This way the webview's
+    // first-ever load points at a working daemon.
+    //
+    // Dual mode: embed BOTH backend URLs (with their tokens) as
+    // query params on the initial load. The daemon's auth gate
+    // strips `token=` on its redirect but leaves other query
+    // params alone, so `solu_primary` and `solu_alt` survive to
+    // the frontend. Frontend uses them to switch between
+    // backends without losing the ability to come back.
+    let url_string = match &started.alt_url {
+        Some(alt) => {
+            let sep = if started.initial_url.contains('?') { "&" } else { "?" };
+            format!(
+                "{}{}solu_primary={}&solu_alt={}",
+                started.initial_url,
+                sep,
+                urlencode(&started.initial_url),
+                urlencode(alt),
+            )
+        }
+        None => started.initial_url.clone(),
+    };
+    let url = match url_string.parse() {
+        Ok(u) => WebviewUrl::External(u),
+        Err(_) => WebviewUrl::External("http://127.0.0.1:8787".parse().unwrap()),
+    };
+    // The daemon origins the app's windows may load (nav_guard.rs).
+    let mut daemon_urls = vec![started.initial_url.clone()];
+    daemon_urls.extend(started.alt_url.clone());
+    if url_string.parse::<tauri::Url>().is_err() {
+        daemon_urls.push("http://127.0.0.1:8787".to_string()); // the fallback above
+    }
+    app.manage(nav_guard::AllowedLocalOrigins::from_urls(daemon_urls.iter().map(String::as_str)));
+
+    // Backend signal for the web (status chip + fallback banner +
+    // sidebar mode switcher).
+    // SHARED CONTRACT: window.__SOLU_BACKEND__ = { requested,
+    // actual, fallback, hostPlatform, launchMode }. "requested"
+    // is the backend the user wanted (resolved from their
+    // saved/first-run choice); "actual" is what actually started
+    // this session. fallback is true when the user wanted wsl/dual
+    // but we ended up on host. hostPlatform/launchMode let the web
+    // hide Windows-only local controls in Cloud mode and on
+    // macOS/Linux desktop shells.
+    // "requested" comes from the SAVED pref, not from `chosen`
+    // (resolve_backend's output): when a saved WSL/Dual pref fails
+    // validation, resolve folds it into HostNative, and deriving
+    // "requested" from that made "user chose Windows" and "user
+    // chose WSL but WSL is broken" indistinguishable — fallback
+    // under-reported exactly when the UI most needed to say "you
+    // are not on the backend you picked". No saved pref (first
+    // run) falls back to what the wizard resolved this session.
+    let requested_backend = if matches!(desktop_mode, launch_mode::LaunchMode::Cloud) {
+        // Cloud mode runs no local daemon; the chip is moot, so
+        // report a neutral host/host with no fallback.
+        "host"
+    } else {
+        #[cfg(windows)]
+        {
+            match backend::saved_pref() {
+                Some(backend::Backend::Wsl) => "wsl",
+                Some(backend::Backend::Dual) => "dual",
+                Some(backend::Backend::HostNative) => "host",
+                None => match chosen {
+                    Some(backend::Backend::Wsl) => "wsl",
+                    Some(backend::Backend::Dual) => "dual",
+                    _ => "host",
+                },
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            "host"
+        }
+    };
+    // Detect what actually came up from the initial URL: the WSL
+    // proxy serves :18787, the Dual router :28787, host-native
+    // :8787. A wsl/dual request landing on :8787 means we fell
+    // back to host-native (the WSL .or_else branch above).
+    let actual_backend = if matches!(desktop_mode, launch_mode::LaunchMode::Cloud) {
+        "host"
+    } else if started.initial_url.contains(":18787") {
+        "wsl"
+    } else if started.initial_url.contains(":28787") {
+        "dual"
+    } else {
+        "host"
+    };
+    let fallback = matches!(requested_backend, "wsl" | "dual") && actual_backend == "host";
+    let host_platform = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let launch_mode_value = match desktop_mode {
+        launch_mode::LaunchMode::Local => "local",
+        launch_mode::LaunchMode::Cloud => "cloud",
+    };
+    // `version` is the shell/installer version (tauri.conf.json), so the
+    // web UI can tell an old installer apart from a packaging bug without
+    // waiting on the async browser_pane_ping round-trip.
+    let shell_version = app.package_info().version.to_string();
+    let backend_script = format!(
+        "window.__SOLU_BACKEND__ = {{ requested: \"{requested_backend}\", \
+         actual: \"{actual_backend}\", fallback: {fallback}, \
+         hostPlatform: \"{host_platform}\", launchMode: \"{launch_mode_value}\", \
+         version: \"{shell_version}\" }};"
+    );
+
+    // Restore the main window's saved geometry (position, size,
+    // maximized) — but only if it still lands on a live monitor, so an
+    // unplugged display falls back to the default instead of stranding
+    // the window off-screen.
+    let monitors = app.available_monitors().unwrap_or_default();
+    let restore = window_geometry::load()
+        .filter(|g| window_geometry::visible_on_monitors(g, &monitors));
+    // A maximized restore builds at the DEFAULT size so a later
+    // restore-down isn't monitor-filling; the maximize() below
+    // re-establishes the maximized state.
+    let (init_w, init_h) = match restore {
+        Some(g) if !g.maximized => (g.width as f64, g.height as f64),
+        _ => (1280.0, 800.0),
+    };
+    let window_plan = startup_window_plan(
+        restore.is_some(),
+        restore.is_some_and(|geometry| geometry.maximized),
+        started_by_autostart,
+    );
+
+    let mut main_builder = WebviewWindowBuilder::new(app, "main", url)
+        .title("soluterminal")
+        .inner_size(init_w, init_h)
+        .min_inner_size(600.0, 400.0)
+        .resizable(true)
+        // Custom title bar lives inside the React app (Topbar.tsx)
+        // and is themed to match the rest of the chrome. The OS
+        // bar would be a glaring white strip. Frontend renders
+        // its own min/max/close on Windows/Linux; macOS keeps
+        // the native traffic lights via title_bar_style below.
+        .decorations(false)
+        // Dedicated Tauri-webview flag for the web code. Our
+        // frontend is served from the daemon's HTTP server rather
+        // than bundled Tauri assets, so Tauri's default
+        // `window.__TAURI__` injection isn't always present. This
+        // runs before any page script on every load, so
+        // `window.__SOLU_TAURI__` is a reliable signal that the
+        // web is inside the desktop app (vs. a browser tab).
+        .initialization_script("window.__SOLU_TAURI__ = true;")
+        // Backend signal (requested/actual/fallback) per the
+        // SHARED CONTRACT. Separate script so it runs before any
+        // page code, same as __SOLU_TAURI__.
+        .initialization_script(&backend_script)
+        // Per-window identity (multi-monitor). The main window is
+        // the primary; secondary windows (workspace_*) inject their
+        // own label in workspace_window.rs. The frontend keys
+        // per-window storage off this so each window restores its
+        // own workspace across reloads. Primary keeps the legacy
+        // un-suffixed storage key (backward compat).
+        .initialization_script(
+            "window.__SOLU_WINDOW__ = { label: \"main\", role: \"primary\" };",
+        )
+        .devtools(cfg!(debug_assertions))
+        // WebView2's native drag/drop handler swallows HTML5 DnD
+        // events inside the page (e.g. sidebar workspace reorder).
+        // Disabling the native handler restores in-page DnD.
+        .disable_drag_drop_handler()
+        .on_navigation(nav_guard::guard(app.clone()));
+
+    // Build hidden, then show once the webview exists (see
+    // StartupWindowPlan::start_hidden for the deadlock this avoids).
+    // When restoring, set the PHYSICAL position before showing — the
+    // builder's .position() is logical and would misplace across
+    // mixed-DPI monitors (same pattern as workspace_window.rs).
+    // Maximize AFTER show (maximizing a hidden window is unreliable).
+    if window_plan.start_hidden {
+        main_builder = main_builder.visible(false);
+    }
+    let main_window = main_builder.build()?;
+    if let Some(g) = restore {
+        let _ = main_window.set_position(tauri::PhysicalPosition::new(g.x, g.y));
+    }
+    if window_plan.show_after_build {
+        let _ = main_window.show(); // always show, even if positioning errored
+        if restore.is_some_and(|g| g.maximized) {
+            let _ = main_window.maximize();
+        }
+        let _ = main_window.set_focus();
+    }
+    let maximize_on_first_show = std::sync::Arc::new(
+        std::sync::atomic::AtomicBool::new(window_plan.maximize_on_first_show),
+    );
+    #[cfg(desktop)]
+    app.manage(single_instance::MainWindowReveal(maximize_on_first_show.clone()));
+
+    // Capture the composed URL + backend signal so the
+    // `open_workspace_window` command can spawn additional full-app
+    // windows that load identically (same daemon URL, token, and
+    // backend) without re-running launch-mode resolution. Read-only
+    // managed state — never mutated, so no Mutex. Multi-window is
+    // gated to Local launch mode (Cloud needs a per-machine prefix +
+    // JWT we don't compose for MVP).
+    app.manage(workspace_window::WorkspaceSpawnTemplate {
+        url_string: url_string.clone(),
+        backend_script: backend_script.clone(),
+        supported: matches!(desktop_mode, launch_mode::LaunchMode::Local),
+    });
+
+    // Tray icon + right-click menu. Gives the user a way to
+    // re-open the window after closing it and a real "Quit" that
+    // actually exits (vs. hiding).
+    //
+    // Public beta: no "Pair with cloud…" item (phone access/pairing
+    // is team-only and lives in the web UI, which gates it on the
+    // daemon's entitlements) and no "Switch to connecting to
+    // computers you set up" in Local mode. A Cloud-mode install
+    // still gets the way back to running projects on this PC.
+    let show = MenuItem::with_id(app, "show", "Show soluterminal", true, None::<&str>)?;
+    let hide = MenuItem::with_id(app, "hide", "Hide window", true, None::<&str>)?;
+    let switch_to_local = MenuItem::with_id(
+        app,
+        "switch_launch_mode",
+        format!(
+            "Switch to running projects on this computer ({})",
+            launch_mode::label(launch_mode::LaunchMode::Local)
+        ),
+        true,
+        None::<&str>,
+    )?;
+
+    // "Switch backend" tray entry (Windows only). Label shows
+    // what you'd switch TO — "Switch to Windows-native" if
+    // currently on WSL, and vice versa. Clicking saves the new
+    // preference and restarts the app so the new backend comes
+    // up cleanly (rather than trying to swap daemons live,
+    // which would orphan the webview's state).
+    #[cfg(windows)]
+    let switch = {
+        let target = backend::other(chosen.unwrap_or(backend::Backend::HostNative));
+        let label = format!("Switch to {}", backend::label(target));
+        MenuItem::with_id(app, "switch_backend", &label, true, None::<&str>)?
+    };
+
+    // "Repair setup" (Windows, Local only): clears the saved
+    // backend choice + transient WSL artifacts and restarts so
+    // detection + the first-run wizard re-fire. The in-app escape
+    // hatch for a botched WSL setup that a reinstall wouldn't fix
+    // (prefs live in %LOCALAPPDATA%, untouched by the uninstaller).
+    #[cfg(windows)]
+    let repair =
+        MenuItem::with_id(app, "repair_reset", "Repair setup (re-detect Linux/Windows)", true, None::<&str>)?;
+
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+
+    #[cfg(windows)]
+    let menu = if matches!(desktop_mode, launch_mode::LaunchMode::Local) {
+        Menu::with_items(app, &[&show, &hide, &switch, &repair, &sep, &quit])?
+    } else {
+        Menu::with_items(app, &[&show, &hide, &switch_to_local, &sep, &quit])?
+    };
+    #[cfg(not(windows))]
+    let menu = if matches!(desktop_mode, launch_mode::LaunchMode::Local) {
+        Menu::with_items(app, &[&show, &hide, &sep, &quit])?
+    } else {
+        Menu::with_items(app, &[&show, &hide, &switch_to_local, &sep, &quit])?
+    };
+
+    let maximize_from_menu = maximize_on_first_show.clone();
+    let maximize_from_tray = maximize_on_first_show.clone();
+    let _tray = TrayIconBuilder::with_id("main")
+        .tooltip("soluterminal")
+        .icon(
+            tray_icon::image()
+                .unwrap_or_else(|| app.default_window_icon().unwrap().clone()),
+        )
+        .menu(&menu)
+        .show_menu_on_left_click(false) // left-click toggles, right-click opens menu
+        .on_menu_event(move |app, event| match event.id.as_ref() {
+            "show" => {
+                show_main_window(app, &maximize_from_menu);
+            }
+            "hide" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    dispatch_desktop_will_background_event(&w, "tray-hide");
+                    let _ = w.hide();
+                }
+            }
+            "switch_launch_mode" => {
+                // Only offered in Cloud mode now, and always back to
+                // Local: never flip a Local install into Cloud.
+                if let Err(e) = launch_mode::set_pref(launch_mode::LaunchMode::Local) {
+                    eprintln!("desktop: set launch mode failed: {e}");
+                }
+                restart_from_main_thread(app);
+            }
+            #[cfg(windows)]
+            "switch_backend" => {
+                // Flip to the opposite of the currently-SAVED
+                // backend, persist, and restart. We read the saved
+                // pref (not resolve_backend) so this never triggers
+                // the WSL re-validation/repair dialog — switching is
+                // an explicit user action, not a health check.
+                // Restart cleanly stops the current daemon/proxy via
+                // SidecarGuard drop and re-runs .setup().
+                let target = backend::other(backend::saved_or_default());
+                if let Err(e) = backend::set_pref(target) {
+                    eprintln!("desktop: set_pref failed: {e}");
+                }
+                restart_from_main_thread(app);
+            }
+            #[cfg(windows)]
+            "repair_reset" => {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                let ok = app
+                    .dialog()
+                    .message(
+                        "Reset soluterminal's Windows/Linux setup and re-detect from \
+                         scratch? The app will restart and ask how you want it to run \
+                         (and offer to set up Linux/WSL if needed).",
+                    )
+                    .title("Repair setup")
+                    .kind(MessageDialogKind::Warning)
+                    .buttons(MessageDialogButtons::OkCancel)
+                    .blocking_show();
+                if ok {
+                    backend::reset_setup();
+                    restart_from_main_thread(app);
+                }
+            }
+            "quit" => {
+                // Persist main-window geometry before a hard exit —
+                // the blur/close flushes don't fire on app.exit(0).
+                persist_main_window_geometry(app);
+                app.exit(0)
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(move |tray, event| {
+            // Left-click on the icon = always bring main forward.
+            // Previously this toggled visibility, but that broke
+            // the common "close app, re-open from tray" flow
+            // when the main window was already visible behind
+            // something else (e.g. a browser popout took focus):
+            // is_visible() returned true, tray-click would then
+            // HIDE main, and the user saw nothing. Toggle via
+            // tray also fought with native child webviews that
+            // refuse to unhide cleanly in some Windows DPI /
+            // compositor states. Hide is still available via
+            // the tray context menu's "Hide window" item.
+            // Only act on the Up edge so a click isn't double-
+            // handled across press and release.
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                show_main_window(app, &maximize_from_tray);
+            }
+        })
+        .build(app)?;
+
+    // First-launch: NO auto-fired native pair dialog anymore.
+    //
+    // Pairing now lives inside the embedded web UI: a dismissible
+    // "Set up phone access" banner driven by live cloud status
+    // (POST /api/cloud/pair/start + GET /api/cloud/status). First
+    // launch should open straight to a working local terminal, not
+    // a modal wall. The old 800ms auto-dialog stacked an OS modal
+    // over a half-painted webview and dead-ended on dismiss
+    // (confusion points #12 / #13 in PLAN-onboarding-ux-2026-06-24).
+    //
+    // The native pair wizard (pair::run_pair_wizard) is KEPT as a
+    // fallback but is no longer auto-invoked, and the tray no longer
+    // carries a pairing item (public beta: pairing is team-only and
+    // lives in the web UI). `pair::any_claim_exists` is likewise no longer
+    // called here; both remain public helpers (see #[allow(dead_code)]
+    // notes in pair.rs) so the native flow can be re-wired if needed.
+    Ok(())
 }
 
 /// `app.restart()` from a tray handler (main thread). Frees the
@@ -1124,6 +1209,20 @@ fn classify_wsl_fallback(err: &str) -> (&'static str, String) {
                  Try `wsl --shutdown` in a terminal then reopen soluterminal, or use \
                  \"Repair setup\" in the tray menu.\n\n\
                  Reason: {err}"
+            ),
+        );
+    }
+    // The WSL port is held by a SoluTerminal daemon start-wsl.sh will not
+    // replace — typically an older one in another WSL distro, which shares
+    // the network. The message names the distro and a command to stop it.
+    if let Some(detail) = err.strip_prefix("WSL port held: ") {
+        return (
+            "WSL didn't start: port 8787 is in use",
+            format!(
+                "{detail}\n\n\
+                 SoluTerminal is using Windows only for now. Once the port is free, the WSL \
+                 background service starts by itself; restart SoluTerminal, or accept its \
+                 offer to reconnect, to get your WSL panes back."
             ),
         );
     }

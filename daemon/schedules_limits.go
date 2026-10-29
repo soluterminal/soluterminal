@@ -277,6 +277,14 @@ const (
 	taskMarkerTool    = "tool"
 )
 
+// unsafeMarkerPathChars are the characters a marker hook command never
+// carries: the path sits inside "..." in a shell command (sh, Git Bash or
+// PowerShell), where a quote ends the string, $ and ` expand, \ escapes, and a
+// newline ends the command.
+// A data dir containing one gets no marker hooks rather than a command the
+// shell might expand.
+const unsafeMarkerPathChars = "\"$`\\\n\r"
+
 type taskAttemptTrace struct {
 	hooksRan    bool
 	toolStarted bool
@@ -294,10 +302,15 @@ func (t taskAttemptTrace) whyNoRetry() string {
 // prepareTaskMarkers empties the schedule's marker folder (task runs are
 // single-flight per schedule, so one fixed folder is enough and run logs stay
 // byte-identical across runs) and returns it with the --settings JSON.
-// Returns "" when the folder cannot be made: the run then goes ahead
-// without retry evidence, and so is never retried.
+// Returns "" when the folder cannot be made, or when its path holds a
+// character the hook's shell could expand inside the double quotes (see
+// unsafeMarkerPathChars): the run then goes ahead without retry evidence,
+// and so is never retried.
 func (s *ScheduleStore) prepareTaskMarkers(schedID string) (dir, settings string) {
 	dir = filepath.Join(s.taskRunDir(schedID), ".attempt")
+	if strings.ContainsAny(filepath.ToSlash(dir), unsafeMarkerPathChars) {
+		return "", ""
+	}
 	_ = os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", ""

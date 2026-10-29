@@ -824,6 +824,15 @@ async fn apply_shell_update_inner(
     }
 }
 
+/// This app's own process id. The page passes it with the daemon's unattended
+/// installer update (POST /api/update/apply-shell?silent=1), so the daemon's
+/// courier waits on exactly this process instead of matching by name (#739:
+/// the name it matched, "soluterminal", was not this exe's).
+#[tauri::command]
+pub fn app_process_id() -> u32 {
+    std::process::id()
+}
+
 /// Stage the verified current-user NSIS installer, launch an out-of-job courier
 /// through explorer.exe, and wait until its first log event proves it survived.
 /// The web layer exits only after this command succeeds.

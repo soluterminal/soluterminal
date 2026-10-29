@@ -1,4 +1,24 @@
 {
+  "0.0.1228": [
+    "Security: SoluTerminal’s background service now refuses to start the desktop installer, or open its folder, when the request comes through your SoluTerminal account’s cloud connection (for example from your phone). Only the computer itself can start it.",
+    "Todos has been removed. If you used it, your todos are saved in a file named todos-export.md in SoluTerminal’s .solu folder, and the original files are kept. To mark something to come back to, right-click its pane and choose “Flag for attention…”.",
+    "Managed agents have been removed. The Agents section is gone and their schedules are switched off; if you had any, they were saved to a file named agents-export.md in SoluTerminal’s .solu folder, and the original files are kept. If you see Agents in the status bar, “Pause all…” is there now.",
+    "On your phone, a terminal asking you to choose now shows answer keys under it (1, 2, 3, Enter and Esc), so you can answer with one tap instead of typing.",
+    "On iPhone and iPad, the Alerts bell and the “Add to Home Screen” button now explain how to get notifications: add SoluTerminal to your Home Screen from your browser’s Share menu, open it from there, and turn on Notifications.",
+    "In the desktop app, “Update now (app + installer)” now finishes in one click: the installer runs first, and when the app restarts it completes the rest of the update by itself.",
+    "When the newest desktop installer contains an older background service than the one you already have, SoluTerminal no longer offers it. The update popover says it will update with the next desktop release.",
+    "The Inbox now shows one row per automation, with its newest report and “+N earlier” for older unread ones; counts above 50 show as “50+”. The Inbox chip in the status bar is gone: open the Inbox from its button in the top bar.",
+    "On your phone, tapping a notification from a Claude task automation now opens its report in the Inbox.",
+    "Claude task automations now see how their last report began, and keep “Needs you” for what’s new since then.",
+    "An automation that types into a pane now turns itself off when that pane is gone. It alerts you once and shows “paused: its target pane is gone” in Automations; pick another pane and turn it back on to resume.",
+    "A “Run a Claude task” automation that hits a temporary Claude error before it has used any tools now tries again once, 2 minutes later.",
+    "When a Claude task automation hits your Claude usage limit, task automations wait until the limit resets. Recurring runs are skipped until then, and a one-time task moves to just after the reset. Run now tries again straight away.",
+    "Fixed: in the desktop app, “Update installer” (and the banner’s “Update now”) now installs the team desktop installer through SoluTerminal’s background service, instead of failing and opening the download page.",
+    "Fixed: on your phone, answering a terminal menu with a single number (or y / n) no longer also presses Enter, which could answer the next question too.",
+    "Fixed: with Settings › Devices › Updates › “Automatic updates” set to “Install when idle”, an update no longer reloads the window while a message box holds text you haven’t sent.",
+    "Fixed: the “new” count on Automations now counts only automations that are turned on, so it can go back to zero.",
+    "Fixed: when the Codex engine behind a pane stops, the pane now says so (“Codex engine stopped”, with how it ended) instead of blaming its sign-in."
+  ],
   "0.0.1227": [
     "Security: SoluTerminal’s background service now refuses to start the desktop installer, or open its folder, when the request comes through your SoluTerminal account’s cloud connection (for example from your phone). Only the computer itself can start it.",
     "Todos has been removed. If you used it, your todos are saved in a file named todos-export.md in SoluTerminal’s .solu folder, and the original files are kept. To mark something to come back to, right-click its pane and choose “Flag for attention…”.",
