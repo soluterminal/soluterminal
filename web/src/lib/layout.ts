@@ -1,6 +1,10 @@
 import type { Layout } from '../types';
 import type { DropZone } from './paneDnd';
 
+export interface InsertLeafOptions {
+  rebalance?: boolean;
+}
+
 export function leafId(n: Layout): string | null {
   if (n.type === 'pane') return n.paneId;
   if (n.type === 'browser') return n.browserId;
@@ -21,9 +25,15 @@ export function insertPane(layout: Layout | null, paneId: string, direction: 'ho
   return insertLeaf(layout, { type: 'pane', paneId }, direction, target);
 }
 
-export function insertLeaf(layout: Layout | null, leaf: Layout, direction: 'horizontal' | 'vertical' | null, target: string | null): Layout {
+export function insertLeaf(
+  layout: Layout | null,
+  leaf: Layout,
+  direction: 'horizontal' | 'vertical' | null,
+  target: string | null,
+  options?: InsertLeafOptions,
+): Layout {
   if (!layout || !target || !direction) return leaf;
-  return mapLayout(layout, (node) => {
+  const next = mapLayout(layout, (node) => {
     if (leafId(node) === target) {
       return {
         type: 'split',
@@ -35,6 +45,68 @@ export function insertLeaf(layout: Layout | null, leaf: Layout, direction: 'hori
     }
     return node;
   });
+  return options?.rebalance ? (rebalanceLayout(next) ?? next) : next;
+}
+
+// Check whether a node or its children contain a browser leaf.
+export function containsBrowserLeaf(node: Layout | null): boolean {
+  if (!node) return false;
+  if (node.type === 'browser') return true;
+  if (node.type !== 'split') return false;
+  return containsBrowserLeaf(node.a) || containsBrowserLeaf(node.b);
+}
+
+// Count leaves along a specific split dimension. Orthogonal splits count as 1 slot.
+export function dimensionLeafCount(node: Layout | null, direction: 'horizontal' | 'vertical'): number {
+  if (!node) return 0;
+  if (node.type !== 'split') return 1;
+  if (node.direction !== direction) return 1;
+  return dimensionLeafCount(node.a, direction) + dimensionLeafCount(node.b, direction);
+}
+
+// Rebalance split ratios so that leaves along the same direction receive equal shares.
+export function rebalanceLayout(layout: Layout | null): Layout | null {
+  if (!layout) return null;
+  if (layout.type !== 'split') return layout;
+
+  const a = rebalanceLayout(layout.a)!;
+  const b = rebalanceLayout(layout.b)!;
+
+  // Browser splits maintain deliberate user/default width (e.g. 0.6/0.4).
+  if (containsBrowserLeaf(layout.a) || containsBrowserLeaf(layout.b)) {
+    return { ...layout, a, b };
+  }
+
+  const countA = dimensionLeafCount(a, layout.direction);
+  const countB = dimensionLeafCount(b, layout.direction);
+  const total = countA + countB;
+  const ratio = total > 0 ? countA / total : 0.5;
+
+  return {
+    ...layout,
+    ratio,
+    a,
+    b,
+  };
+}
+
+// Calculate the fractional share (0..1) of each leaf in the layout along the split chain.
+export function computeLeafShares(layout: Layout | null): Map<string, number> {
+  const shares = new Map<string, number>();
+  if (!layout) return shares;
+
+  function walk(node: Layout, weight: number) {
+    if (node.type !== 'split') {
+      const id = leafId(node);
+      if (id) shares.set(id, weight);
+      return;
+    }
+    walk(node.a, weight * node.ratio);
+    walk(node.b, weight * (1 - node.ratio));
+  }
+
+  walk(layout, 1.0);
+  return shares;
 }
 
 // movePaneInLayout handles drag-to-move semantics:

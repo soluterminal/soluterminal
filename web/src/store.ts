@@ -3095,7 +3095,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
       const target = anchorPaneId ?? s.focusedPaneId ?? null;
       const leaf: Layout = { type: 'file', fileId: id };
       const nextLayout = s.layout
-        ? insertLeaf(s.layout, leaf, target ? direction : null, target)
+        ? insertLeaf(s.layout, leaf, target ? direction : null, target, { rebalance: true })
         : leaf;
       // Maintain LRU-ish recent list (max 15).
       const recent = [path, ...s.recentFilePaths.filter((p) => p !== path)].slice(0, 15);
