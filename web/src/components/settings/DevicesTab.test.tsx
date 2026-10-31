@@ -27,11 +27,15 @@ vi.mock('../../tauri-browser', async (importOriginal) => {
 });
 
 import { DevicesTab } from './DevicesTab';
+import { AccountTab } from './AccountTab';
+import { PrivacySecurityTab } from './PrivacySecurityTab';
 import { CHECKIN_HINT } from './CheckinSetting';
 import { useEntitlements } from '../../entitlements';
 import { useCloud } from '../../cloud';
 import { api } from '../../api';
 import { useStore } from '../../store';
+import { setExtensionsForTests } from '../../extensions';
+import { NotificationsVoiceTab } from './NotificationsVoiceTab';
 import type { UpdateStatus } from '../../types';
 
 beforeEach(() => {
@@ -180,13 +184,13 @@ describe('DevicesTab install command', () => {
   });
 });
 
-describe('DevicesTab account tiers', () => {
+describe('AccountTab and DevicesTab account tiers', () => {
   it('no account: hides phone access and offers sign-in for the phone', () => {
     useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
     useCloud.setState({ withoutAccount: true, session: null });
     const requestSignIn = vi.fn();
     useCloud.setState({ requestSignIn });
-    render(<DevicesTab />);
+    render(<><AccountTab /><DevicesTab /></>);
     expect(screen.queryByText('Phone access')).toBeNull();
     expect(screen.getByText('Not signed in')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Create free account or sign in' }));
@@ -196,7 +200,7 @@ describe('DevicesTab account tiers', () => {
   it('signed in: shows who and offers sign out', () => {
     useEntitlements.setState({ loaded: true, team: false, operator: false, account: true });
     useCloud.setState({ withoutAccount: false, session: { user: { email: 'pat@example.com' } } as never });
-    render(<DevicesTab />);
+    render(<><AccountTab /><DevicesTab /></>);
     expect(screen.getByText('Signed in as pat@example.com')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
     useCloud.setState({ session: null });
@@ -205,16 +209,16 @@ describe('DevicesTab account tiers', () => {
   it('free account: shows phone access and the install one-liner', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
     useEntitlements.setState({ loaded: true, team: false, operator: false, account: true });
-    render(<DevicesTab />);
+    render(<><AccountTab /><DevicesTab /></>);
     expect(screen.getByText('Phone access')).toBeInTheDocument();
     expect(screen.getByText('Desktop app')).toBeInTheDocument();
     expect(screen.queryByText('Not signed in')).toBeNull();
   });
 });
 
-describe('DevicesTab anonymous check-in', () => {
+describe('PrivacySecurityTab anonymous check-in', () => {
   it('stays hidden on a daemon without the endpoint', async () => {
-    render(<DevicesTab />);
+    render(<PrivacySecurityTab />);
     await waitFor(() => expect(api.getCheckinSettings).toHaveBeenCalled());
     expect(screen.queryByText(/anonymous daily check-in/i)).toBeNull();
   });
@@ -222,7 +226,7 @@ describe('DevicesTab anonymous check-in', () => {
   it('shows the daemon preference and saves a change', async () => {
     vi.mocked(api.getCheckinSettings).mockResolvedValue({ enabled: true });
     const put = vi.spyOn(api, 'setCheckinSettings').mockResolvedValue({ enabled: false });
-    render(<DevicesTab />);
+    render(<PrivacySecurityTab />);
     const box = await screen.findByLabelText('Send an anonymous daily check-in');
     expect(box).toBeChecked();
     expect(
@@ -234,7 +238,7 @@ describe('DevicesTab anonymous check-in', () => {
   });
 });
 
-describe('DevicesTab usage statistics and crash reports', () => {
+describe('PrivacySecurityTab usage statistics and crash reports', () => {
   const privacy = {
     usageUpload: false,
     usageUploadEnvDisabled: false,
@@ -244,7 +248,7 @@ describe('DevicesTab usage statistics and crash reports', () => {
 
   it('shows usage off and crash reports on, with a privacy link', async () => {
     vi.mocked(api.getPrivacySettings).mockResolvedValue(privacy);
-    render(<DevicesTab />);
+    render(<PrivacySecurityTab />);
     expect(await screen.findByLabelText('Share usage statistics')).not.toBeChecked();
     expect(screen.getByLabelText('Send crash reports')).toBeChecked();
     expect(screen.getByRole('link', { name: 'Privacy policy' })).toHaveAttribute(
@@ -258,7 +262,7 @@ describe('DevicesTab usage statistics and crash reports', () => {
     const put = vi
       .spyOn(api, 'setPrivacySettings')
       .mockResolvedValue({ ...privacy, usageUpload: true });
-    render(<DevicesTab />);
+    render(<PrivacySecurityTab />);
     const box = await screen.findByLabelText('Share usage statistics');
     fireEvent.click(box);
     await waitFor(() => expect(put).toHaveBeenCalledWith({ usageUpload: true }));
@@ -268,7 +272,7 @@ describe('DevicesTab usage statistics and crash reports', () => {
   it('rolls back and explains when saving fails', async () => {
     vi.mocked(api.getPrivacySettings).mockResolvedValue(privacy);
     vi.spyOn(api, 'setPrivacySettings').mockRejectedValue(new Error('403'));
-    render(<DevicesTab />);
+    render(<PrivacySecurityTab />);
     const box = await screen.findByLabelText('Send crash reports');
     fireEvent.click(box);
     expect(await screen.findByText(/Couldn't save the crash report setting/)).toBeInTheDocument();
@@ -324,5 +328,58 @@ describe('DevicesTab desktop app restarts', () => {
     render(<DevicesTab />);
     expect(screen.getByText('Desktop app restarts')).toBeInTheDocument();
     expect(screen.getByDisplayValue('Restart when idle')).toBeInTheDocument();
+  });
+});
+
+// Settings › Devices was split (2026-10-31): Devices & updates keeps only the
+// installer, phone pairing, startup and update rows, and Privacy & security
+// leads with the two switches that most change what can act on this computer.
+describe('Devices split', () => {
+  it('leaves account and privacy rows out of Devices & updates', async () => {
+    useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
+    useCloud.setState({ withoutAccount: true, session: null });
+    vi.mocked(api.getCheckinSettings).mockResolvedValue({ enabled: true });
+    render(<DevicesTab />);
+    await waitFor(() => expect(screen.getByText('Automatic updates')).toBeInTheDocument());
+    expect(screen.queryByText('Not signed in')).toBeNull();
+    expect(screen.queryByText('Send an anonymous daily check-in')).toBeNull();
+    expect(api.getCheckinSettings).not.toHaveBeenCalled();
+    expect(api.getAgentAuthority).not.toHaveBeenCalled();
+  });
+
+  it('puts agent permissions first and remote devices second in Privacy & security', async () => {
+    vi.mocked(api.getCheckinSettings).mockResolvedValue({ enabled: true });
+    vi.mocked(api.getAgentAuthority).mockResolvedValue({ panes: false, active: false });
+    vi.mocked(api.listRemoteDevices).mockResolvedValue({ policy: 'any', devices: [] });
+    vi.spyOn(api, 'getAgentIntegration').mockResolvedValue({
+      state: 'on', source: 'existing', effective: 'on', needsAnswer: false,
+      noticePending: false, operatorDefault: false, changes: [],
+    });
+    const { container } = render(<PrivacySecurityTab />);
+    await screen.findByText('Agent permissions');
+    await screen.findByText('Remote devices');
+    await screen.findByLabelText('Let Claude Code and Codex use SoluTerminal');
+    await screen.findByLabelText('Send an anonymous daily check-in');
+    const titles = [...container.querySelectorAll('.settings-group-title')].map((el) => el.textContent);
+    expect(titles).toEqual(['Agent permissions', 'Remote devices', 'Claude Code and Codex', 'Privacy']);
+  });
+});
+
+// A feature module's section shows only while it is offered: voice registers
+// its group with the same account check as the mic.
+describe('NotificationsVoiceTab feature sections', () => {
+  afterEach(() => setExtensionsForTests(null));
+
+  it('renders a section only while its visibility hook allows it', () => {
+    const visible = { on: false };
+    setExtensionsForTests([{
+      settingsSections: [{ tab: 'notifications', useVisible: () => visible.on, Component: () => <div>VOICE_GROUP</div> }],
+    }]);
+    const { unmount } = render(<NotificationsVoiceTab />);
+    expect(screen.queryByText('VOICE_GROUP')).toBeNull();
+    unmount();
+    visible.on = true;
+    render(<NotificationsVoiceTab />);
+    expect(screen.getByText('VOICE_GROUP')).toBeInTheDocument();
   });
 });

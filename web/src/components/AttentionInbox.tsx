@@ -1,3 +1,4 @@
+import { isPromptForUser } from '../lib/paneStatus';
 import { useMemo } from 'react';
 import { useStore, ariaObservationFingerprint, ARIA_DISMISSAL_TTL_MS, type AriaTail } from '../store';
 import { isActionable } from '../lib/actionability';
@@ -69,25 +70,6 @@ export interface AttentionItem {
   risk?: string;
   /** Suggested next step accompanying `summary`. */
   action?: string;
-}
-
-// needsUser: does the daemon's attention engine say a HUMAN is required?
-// 'auto-pending' (auto-approval is expected to act) is excluded — such panes
-// surface as the quiet "⚡ auto-approving" chip on the pane header and the
-// countdown rows in the ARIA panel, never as an alert. 'none' is excluded
-// too: the state filter above already established a prompt is open, so a
-// 'none' record simply predates the prompt (the engine's 2s tick hasn't
-// caught up, or a pre-0.0.881 daemon built the DTO between ticks) — counting
-// it flashed "1 needs you" for the beat before auto-approval acted, the
-// exact noise the attention signal exists to kill. undefined = a daemon
-// without the engine at all: count it, nothing gets silently swallowed.
-function needsUser(p: PaneInfo): boolean {
-  return p.attention === undefined || p.attention === 'needs-user';
-}
-
-/** An open prompt the daemon says a human must answer. */
-function isPromptForUser(p: PaneInfo): boolean {
-  return (p.state === 'choice-prompt' || p.state === 'awaiting-input') && needsUser(p);
 }
 
 // Shared selector. Memoized on the inputs so Bell + Panel + Sidebar

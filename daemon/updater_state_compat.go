@@ -63,7 +63,11 @@ func onDiskStateReaderRequirements(dataDir string) map[string]int {
 func probeCandidateCapabilities(ctx context.Context, binPath string) (candidateCapabilities, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(probeCtx, binPath, "--update-capabilities").Output()
+	cmd := exec.CommandContext(probeCtx, binPath, "--update-capabilities")
+	// Staged candidates have a .rollback suffix. Explicitly invoke daemon
+	// mode rather than letting that filename be interpreted as a pane shim.
+	cmd.Args[0] = "solud"
+	out, err := cmd.Output()
 	if err != nil {
 		return candidateCapabilities{}, fmt.Errorf("run rollback capability probe: %w", err)
 	}

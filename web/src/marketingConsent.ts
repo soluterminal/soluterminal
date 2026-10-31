@@ -41,6 +41,6 @@ export async function recordSignupConsent(consent: boolean, source: MarketingCon
   try {
     await api.postMarketingConsent({ consent, source, wording_version: MARKETING_CONSENT_WORDING }, token);
   } catch {
-    // Settings › Devices › Account shows and changes it later.
+    // Settings › Account shows and changes it later.
   }
 }

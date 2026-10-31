@@ -57,3 +57,23 @@ describe('onRoutingScopeChange', () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('backend-scoped sidebar preferences', () => {
+  it('uses the viewed Cloud machine and backend for GET/PUT and refuses stale saves', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response('{"prefs":{}}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    configureApi({ prefix: '/m/A' });
+    setBackend('wsl');
+    const scope = currentRoutingScope();
+    await api.getUIPrefs(scope);
+    await api.putUIPrefs({ sidebar: { hidden: [] } }, scope);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      '/m/A/b/wsl/api/settings/ui', '/m/A/b/wsl/api/settings/ui',
+    ]);
+    expect(fetchMock.mock.calls[1][1]?.body).toBe('{"sidebar":{"hidden":[]}}');
+    configureApi({ prefix: '/m/B' });
+    await expect(api.putUIPrefs({ sidebar: { hidden: [] } }, scope)).rejects.toBeInstanceOf(ApiError);
+    await expect(api.getUIPrefs(scope)).rejects.toBeInstanceOf(ApiError);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});

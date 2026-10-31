@@ -1,3 +1,4 @@
+import { workspaceViewLayout } from '../lib/workspaceView';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import type { ImperativePanelGroupHandle } from 'react-resizable-panels';
@@ -5,6 +6,8 @@ import { SessionClaimOverlay } from './SessionClaimOverlay';
 import { leafCount, useStore } from '../store';
 import { isMobileViewport } from '../lib/mobile';
 import { collectLeaves } from '../lib/layout';
+import { createViewportLayoutTracker } from '../lib/autoLayout';
+import { currentRoutingScope } from '../api';
 import type { Layout, PaneInfo } from '../types';
 import { PaneRecovery } from './PaneRecovery';
 import { PaneSlot } from './PaneSlot';
@@ -69,31 +72,11 @@ function LayoutNode({ node, paneIndexById }: { node: Layout; paneIndexById: Reco
   const file = useStore((s) => (node.type === 'file' ? s.files[node.fileId] : null));
   const setLayout = useStore((s) => s.setLayout);
   const presentationActive = useStore(s=>s.mainPresentation.kind === 'workspace');
-  const layoutMode = useStore((s) => s.paneLayoutMode);
+  const temporaryView = useStore(s => !!s.workspaceView);
+  const userResizing = useRef(false);
   const groupRef = useRef<ImperativePanelGroupHandle>(null);
 
-  // In auto mode the on-screen ratio is computed from leaf counts so
-  // every cell has the same area, regardless of how the binary tree
-  // happens to be nested. File and diff tiles take part in that: they
-  // are opened by splitting whichever leaf has focus (stored ratio 0.5),
-  // so without equalising they land at half their anchor's slot — ~1/6
-  // of the window next to three even columns. Only BROWSERS opt out:
-  // that split keeps its stored ratio so the user-chosen browser width
-  // (default 0.6/0.4 from openBrowserHere) is preserved, and it stays
-  // draggable in auto mode — every other gutter is locked.
-  const splitTouchesBrowser = node.type === 'split'
-    && (containsBrowserLeaf(node.a) || containsBrowserLeaf(node.b));
-  const autoRatio = node.type === 'split'
-    ? leafCount(node.a) / Math.max(1, leafCount(node))
-    : null;
-  const splitRatio = node.type === 'split'
-    ? (layoutMode === 'auto' && !splitTouchesBrowser ? autoRatio! : node.ratio)
-    : null;
-  // Lock the handle only when this split is the equalised kind in
-  // auto mode. Browser-touching splits are draggable in both modes.
-  const handleLocked = node.type === 'split'
-    && layoutMode === 'auto'
-    && !splitTouchesBrowser;
+  const splitRatio = node.type === 'split' ? node.ratio : null;
   // react-resizable-panels only applies `defaultSize` on initial mount.
   // When a workspace switch changes `node.ratio`, React reuses the same
   // PanelGroup instance in the same tree position — so the library
@@ -132,17 +115,15 @@ function LayoutNode({ node, paneIndexById }: { node: Layout; paneIndexById: Reco
   const initialA = (splitRatio ?? node.ratio) * 100;
 
   const onLayout = (sizes: number[]) => {
-    if (!presentationActive || useStore.getState().mainPresentation.kind !== 'workspace') return;
+    if (!presentationActive || useStore.getState().mainPresentation.kind !== 'workspace' || useStore.getState().workspaceView) return;
     // Read at event time instead of subscribing: a per-node rootLayout
     // subscription meant every LayoutNode re-ran its selector (and
     // re-rendered) on every drag-frame setLayout, at every tree depth.
     const rootLayout = useStore.getState().layout;
     if (!rootLayout || sizes.length < 2) return;
-    // Auto mode + equalised split: the handle is locked so the only
-    // "drag" is the library settling pixels at mount time. Skip the
-    // save so we don't overwrite the stored ratio that free mode
-    // might rely on later.
-    if (layoutMode === 'auto' && !splitTouchesBrowser) return;
+    // Mount-time and imperative layout settling are not user edits. Only
+    // a pointer/keyboard resize can opt the workspace into custom mode.
+    if (!userResizing.current) return;
     const newRatio = sizes[0] / (sizes[0] + sizes[1]);
     // Ignore rounding / pixel-snap drift (<0.5%) — those come from
     // mount-time layout settling and would otherwise save a slightly
@@ -158,22 +139,22 @@ function LayoutNode({ node, paneIndexById }: { node: Layout; paneIndexById: Reco
       <Panel defaultSize={initialA} minSize={5}>
         <LayoutNode node={node.a} paneIndexById={paneIndexById} />
       </Panel>
-      <PanelResizeHandle disabled={handleLocked} className={handleLocked ? 'pane-resize-handle locked' : undefined} />
+      <PanelResizeHandle
+        disabled={temporaryView}
+        onDragging={(dragging) => {
+          userResizing.current = dragging;
+          if (dragging) useStore.getState().beginCustomLayout();
+        }}
+        onKeyDownCapture={(event) => {
+          if (event.key.startsWith('Arrow')) { userResizing.current = true; useStore.getState().beginCustomLayout(); }
+        }}
+        onKeyUp={() => { userResizing.current = false; }}
+      />
       <Panel defaultSize={100 - initialA} minSize={5}>
         <LayoutNode node={node.b} paneIndexById={paneIndexById} />
       </Panel>
     </PanelGroup>
   );
-}
-
-// Does this subtree contain a browser leaf? Used by auto mode to decide
-// whether a split should be equalised (the default — panes, file, diff
-// and tasks tiles alike) or left alone with its stored ratio (the
-// browser column, whose width is deliberate).
-function containsBrowserLeaf(node: Layout): boolean {
-  if (node.type === 'browser') return true;
-  if (node.type !== 'split') return false;
-  return containsBrowserLeaf(node.a) || containsBrowserLeaf(node.b);
 }
 
 function replaceNode(root: Layout, target: Layout, replacement: Layout): Layout {
@@ -188,14 +169,45 @@ function replaceNode(root: Layout, target: Layout, replacement: Layout): Layout 
 
 
 export function PaneGrid() {
-  const layout = useStore((s) => s.layout);
+  const savedLayout = useStore((s) => s.layout);
+  const view = useStore((s) => s.workspaceView);
+  const panes = useStore((s) => s.panes);
+  const workspaces = useStore((s) => s.workspaces);
+  const activeWorkspace = useStore((s) => s.activeWorkspace);
+  const activeBackend = useStore((s) => s.activeBackend);
+  const layout = useMemo(() => workspaceViewLayout({ layout: savedLayout, workspaceView: view, panes, workspaces, activeWorkspace, activeBackend }), [savedLayout, view, panes, workspaces, activeWorkspace, activeBackend]);
   const zoomedPaneId = useStore((s) => s.zoomedPaneId);
   const isMobile = useIsMobile();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const viewportChanged = useRef(createViewportLayoutTracker());
+  const mode = useStore(s => s.paneLayoutMode);
+  const count = leafCount(layout);
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || isMobile || view) return;
+    let timer = 0;
+    const measure = () => {
+      const bounds = root.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+      const state = useStore.getState();
+      const saved = state.workspaces.find(w => w.name === state.activeWorkspace && (!w.backend || w.backend === state.activeBackend));
+      const key = `${currentRoutingScope().key}:${state.activeWorkspace}`;
+      if (viewportChanged.current(key, bounds.width, bounds.height, !!saved?.layoutMode && !!saved.layoutColumns)) {
+        state.updateLayoutViewport(bounds.width, bounds.height);
+      }
+    };
+    measure();
+    const observer = new ResizeObserver(() => {
+      window.clearTimeout(timer); timer = window.setTimeout(measure, 100);
+    });
+    observer.observe(root);
+    return () => { observer.disconnect(); window.clearTimeout(timer); };
+  }, [activeWorkspace, count, mode, isMobile, view]);
   // Which leaf to show in "single-leaf" mode. On mobile we always run in
   // this mode (pane switching is via tab bar); on desktop we only hit it
   // when the user explicitly hit Alt+Z to zoom.
   const mobileFallbackId = useStore((s) => {
-    const leaves = collectLeaves(s.layout);
+    const leaves = collectLeaves(workspaceViewLayout(s));
     const ids = leaves.flatMap((leaf) => {
       if (leaf.type === 'pane') return [leaf.paneId];
       if (leaf.type === 'browser') return [leaf.browserId];
@@ -216,7 +228,7 @@ export function PaneGrid() {
   // unchanged), so this selector doesn't churn React.
   const singleDiff = useStore((s) => {
     if (!singleId) return null;
-    const leaf = collectLeaves(s.layout).find((l) => l.type === 'diff' && l.diffId === singleId);
+    const leaf = collectLeaves(workspaceViewLayout(s)).find((l) => l.type === 'diff' && l.diffId === singleId);
     return leaf && leaf.type === 'diff' ? leaf : null;
   });
   const paneIndexById = useMemo(() => {
@@ -226,12 +238,14 @@ export function PaneGrid() {
     }
     return out;
   }, [layout]);
-  if (!layout) return null;
+  if (!layout) return view?.kind === 'leads' ? <div className="pane-empty">
+    No live leads. <button type="button" onClick={() => useStore.getState().returnWorkspaceLayout()}>Show full workspace</button>
+  </div> : null;
   // Render only one leaf — either because of zoom (desktop) or because
   // we're on mobile where split rendering isn't useful on small screens.
   if (singleId) {
     return (
-      <div style={{ width: '100%', height: '100%', position: 'relative' }} className="zoomed">
+      <div ref={rootRef} style={{ width: '100%', height: '100%', position: 'relative' }} className="zoomed workspace-pane-grid">
         {singlePane ? renderPaneLeaf(singlePane, paneIndexById[singlePane.id] ?? 0)
           : singleBrowser ? <BrowserPane info={singleBrowser} />
           : singleFile ? <FileTile info={singleFile} />
@@ -242,7 +256,7 @@ export function PaneGrid() {
     );
   }
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div ref={rootRef} className="workspace-pane-grid" style={{ width: '100%', height: '100%', position: 'relative' }}>
       <LayoutNode node={layout} paneIndexById={paneIndexById} />
       <SessionClaimOverlay />
     </div>

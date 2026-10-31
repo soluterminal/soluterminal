@@ -810,7 +810,7 @@ if [ -f "$claim_file" ]; then
   say "  • Open $CLOUD in a browser to access your machine from anywhere"
   say "    A new install accepts only devices you approve. The first time a phone or"
   say "    browser asks, approve it on this computer in http://localhost:8787 →"
-  say "    Settings → Devices, after checking the codes match. On a machine without"
+  say "    Settings → Privacy & security, after checking the codes match. On a machine without"
   say "    a screen: ssh -L 8787:127.0.0.1:8787 <this-machine>, then open"
   say "    http://localhost:8787 on your own computer."
 else

@@ -554,6 +554,10 @@ func mcpCoreTools() []mcpTool {
 						"type": "string",
 						"description": "Optional first message for the new agent, sent once it is ready for input."
 					},
+					"show": {
+						"type": "boolean",
+						"description": "Scroll the new pane into view in clients displaying its workspace, without moving keyboard focus. Defaults to false. Other workspaces are not switched. At most one reveal every 10 seconds per calling pane; additional panes still spawn, with the skipped reveal reported in the result."
+					},
 					"wait_ready": {
 						"type": "boolean",
 						"description": "Wait for the agent to be ready before returning. Defaults to true for claude/codex."
@@ -1121,7 +1125,7 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 		// interactive agent needs the person's grant for that.
 		if scope == nil && !a.agentAuthority.active(time.Now()) {
 			if target, ok := a.mgr.Get(mcpArgString(p.Arguments, "pane_id")); ok && target.Snapshot().Kind != "native" && target.computeStateCached() == StateChoicePrompt {
-				return toolErr("pane " + target.ID + " is showing a permission prompt. Agents can't answer it on their own; the person can answer it in the SoluTerminal app, or turn on Settings → Devices → Agent permissions.")
+				return toolErr("pane " + target.ID + " is showing a permission prompt. Agents can't answer it on their own; the person can answer it in the SoluTerminal app, or turn on Settings → Privacy & security → Agent permissions.")
 			}
 		}
 		return a.noteCrossPaneTool(crossPane, a.mcpToolSendInput(p.Arguments, callerPane))
@@ -1130,7 +1134,7 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 		// interactive agents and need the person's agent-permissions grant; a
 		// managed agent's scope already carries the grant a person gave it.
 		if scope == nil && !a.agentAuthority.active(time.Now()) {
-			return toolErr("Agents can't answer prompts on their own. The person can answer it in the SoluTerminal app, or turn on Settings → Devices → Agent permissions to let agents in panes do it.")
+			return toolErr("Agents can't answer prompts on their own. The person can answer it in the SoluTerminal app, or turn on Settings → Privacy & security → Agent permissions to let agents in panes do it.")
 		}
 		return a.noteCrossPaneTool(crossPane, a.mcpToolAnswerPrompt(p.Arguments))
 	case "spawn_pane":
@@ -1562,10 +1566,15 @@ func (a *apiServer) mcpToolSendInput(args map[string]any, callers ...string) any
 	// Split body + trailing-Enter so a submitted line is written as a
 	// separate CR frame after the standard gap — see pty_submit.go.
 	body, submit := splitTrailingEnter(text)
+	policy := p.autoModePolicy()
+	recordPrompt := !(p.computeStateCached() == StateChoicePrompt || isObviousMenuReply(body) || (submit && body == ""))
+	write := func(b []byte) (int, error) {
+		return p.writeWithAutoModePolicy(b, recordPrompt, policy, time.Now().Add(ariaJevTimeout))
+	}
 	hasClaude := p.HasClaudeDescendant()
 	wrote := 0
 	if body != "" {
-		n, err := p.Write([]byte(body))
+		n, err := write([]byte(body))
 		if err != nil {
 			return toolErr("write to pane " + paneID + " failed: " + err.Error())
 		}
@@ -1575,7 +1584,7 @@ func (a *apiServer) mcpToolSendInput(args map[string]any, callers ...string) any
 		if body != "" {
 			time.Sleep(EnterGap(hasClaude))
 		}
-		n, err := p.Write([]byte("\r"))
+		n, err := write([]byte("\r"))
 		if err != nil {
 			return toolErr(fmt.Sprintf("wrote %d bytes but submit-Enter failed: %v", wrote, err))
 		}
@@ -1700,7 +1709,7 @@ func (a *apiServer) mcpToolSpawnPane(args map[string]any, callerPane string, aut
 		TitleOverride:   snap.TitleOverride,
 		Origin:          snap.Origin.clone(),
 		Identity:        snap.Identity.clone(),
-	}, "", ""); err != nil {
+	}, "horizontal", callerPane); err != nil {
 		a.rollbackSpawnedPane(p)
 		return toolErr("workspace attach failed: " + err.Error())
 	}
@@ -1710,7 +1719,21 @@ func (a *apiServer) mcpToolSpawnPane(args map[string]any, callerPane string, aut
 		resp["number"] = slot.Number
 		number = slot.Number
 	}
-	a.announcePaneSpawn(p, paneOrigin, spawnTitle, workspace, number)
+	show, _ := args["show"].(bool)
+	if show {
+		// Unresolved caller claims share a bucket, so rotating nonexistent
+		// pane IDs cannot evade the limit on untraceable connections.
+		revealCaller := ""
+		if creator != nil {
+			revealCaller = creator.ID
+		}
+		show = a.spawnReveals.allow(revealCaller, time.Now())
+		resp["show"] = show
+		if !show {
+			resp["show_skipped"] = "Pane spawned, but reveal skipped: at most one reveal every 10 seconds per calling pane."
+		}
+	}
+	a.announcePaneSpawn(p, paneOrigin, spawnTitle, workspace, number, show)
 	for k, v := range a.spawnFollowUp(p, cmd, args) {
 		resp[k] = v
 	}

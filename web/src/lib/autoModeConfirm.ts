@@ -44,13 +44,14 @@ export function captureAutoModeTarget(pane: Pick<PaneInfo, 'id' | 'createdAt'>):
     const now = st.panes[id];
     return currentRoutingScope().key === scopeKey
       && st.navigationGeneration === generation
-      && !!now && now.createdAt === createdAt;
+      && !!now && now.createdAt === createdAt && !now.neverAutoAnswer;
   };
 }
 
 // The store-backed apply used by the header chip and the palette: confirm a
 // move into Always approve, then apply only if the captured target still holds.
-export async function applyAutoModeChange(pane: Pick<PaneInfo, 'id' | 'createdAt' | 'title' | 'autoMode'>, to: PaneAutoMode): Promise<boolean> {
+export async function applyAutoModeChange(pane: Pick<PaneInfo, 'id' | 'createdAt' | 'title' | 'autoMode' | 'neverAutoAnswer'>, to: PaneAutoMode): Promise<boolean> {
+  if (pane.neverAutoAnswer) return false;
   const from = (pane.autoMode ?? '') as PaneAutoMode;
   if (from === to) return false;
   const stillValid = captureAutoModeTarget(pane);

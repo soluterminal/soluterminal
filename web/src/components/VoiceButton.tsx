@@ -488,13 +488,15 @@ export function VoiceButton({ headless = false, extraClass }: { headless?: boole
 // list can still be added by the user editing localStorage directly.
 // "" = auto-detect (Whisper guesses). Adding an option here just means
 // hinting Whisper — downstream Claude cleanup prompt is language-agnostic.
-const VOICE_LANGS: Array<{ code: string; label: string }> = [
-  { code: '', label: 'Auto' },
-  { code: 'en', label: 'EN' },
-  { code: 'zh', label: '中' },
-  { code: 'ms', label: 'MS' },
-  { code: 'ja', label: '日' },
-  { code: 'es', label: 'ES' },
+// `label` is the compact form for the mic menu; `name` is the full one for
+// Settings.
+export const VOICE_LANGS: Array<{ code: string; label: string; name: string }> = [
+  { code: '', label: 'Auto', name: 'Auto-detect' },
+  { code: 'en', label: 'EN', name: 'English' },
+  { code: 'zh', label: '中', name: 'Chinese (中文)' },
+  { code: 'ms', label: 'MS', name: 'Malay (Bahasa Melayu)' },
+  { code: 'ja', label: '日', name: 'Japanese (日本語)' },
+  { code: 'es', label: 'ES', name: 'Spanish (Español)' },
 ];
 
 // Compact language selector next to the mic. Persists via store

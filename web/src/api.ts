@@ -4138,7 +4138,7 @@ const coreApi = {
     workflowFetch(scope,'/api/workspaces', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(w),
+      body: JSON.stringify({ ...w, layoutBaseVersion: w.layoutVersion ?? 0 }),
     }).then(j<Workspace>),
 
   movePaneToWorkspace: (source: string, paneId: string, destination: string, paneMoveVersion: number, scope?: RoutingScope) =>
@@ -5064,9 +5064,14 @@ const coreApi = {
       paused: boolean;
       auto_fires_hr: number;
     }>),
-  // Cloud-synced per-user UI preferences (sidebar layout etc). The cloud
-  // serves these itself (rootFetch — no per-machine relay). Returns an empty
-  // {} + null timestamp when the user has nothing saved yet.
+  // UI layout follows the currently viewed daemon, including Cloud relay.
+  getUIPrefs: (scope: RoutingScope) =>
+    apiFetchScoped(scope, '/api/settings/ui').then(j<{ prefs: import('./prefs').UserPrefs | null }>),
+  putUIPrefs: (prefs: import('./prefs').UserPrefs, scope: RoutingScope) =>
+    apiFetchScoped(scope, '/api/settings/ui', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(prefs),
+    }).then(j<{ prefs: import('./prefs').UserPrefs }>),
+  // Legacy account layout, read only for a one-time import into the daemon.
   getUserPrefs: () =>
     rootFetch('/api/user/prefs').then(j<{ prefs: Record<string, unknown>; updated_at: string | null }>),
   putUserPrefs: (prefs: Record<string, unknown>) =>

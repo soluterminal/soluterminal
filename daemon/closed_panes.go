@@ -161,6 +161,10 @@ func reopenSpawnOpts(e closedPaneEntry, liveCols, liveRows uint16) SpawnOpts {
 			opts.DimsUnverified = true
 		}
 	}
+	// Reopen creates a new pane: retain the lock, but never enable auto-mode
+	// as a side effect of this otherwise ungated lifecycle action.
+	opts.AutoMode = ""
+	opts.NeverAutoAnswer = snap.NeverAutoAnswer
 	opts.ID = "" // a new pane; the closed id may still be referenced elsewhere
 	return opts
 }

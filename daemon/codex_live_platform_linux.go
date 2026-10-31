@@ -38,6 +38,7 @@ func codexLiveSpawnCommand(self, dir, daemonURL string, cmd []string, brokerOver
 	}
 	args = append(args, "--")
 	args = append(args, cmd...)
+	args = daemonCommandArgv(args[0], args[1:]...)
 	for i := range args {
 		args[i] = shellSingleQuote(args[i])
 	}

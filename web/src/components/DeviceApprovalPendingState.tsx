@@ -5,7 +5,7 @@
 // after the wrong cause.
 export const APPROVAL_PENDING_TITLE = 'Waiting for this browser to be approved';
 export const APPROVAL_PENDING_DETAIL =
-  'This computer only accepts devices approved on it. On the computer, open Settings › Devices, check that ' +
+  'This computer only accepts devices approved on it. On the computer, open Settings › Privacy & security, check that ' +
   'the code matches the one shown here, and approve this browser. The page reloads once it is approved.';
 
 export function DeviceApprovalPendingState({ onRetry }: { onRetry: () => void | Promise<void> }) {

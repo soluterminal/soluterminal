@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PaneInfo, Schedule } from '../types';
 import { PaneHeader } from './PaneHeader';
@@ -521,5 +521,87 @@ describe('PaneHeaderBadges context pack chip', () => {
   it('shows no chip without a context pack', () => {
     render(<PaneHeaderBadges pane={pane} paneIndex={1} />);
     expect(screen.queryByText('pack')).toBeNull();
+  });
+});
+
+
+describe('renderer switch confirmation visibility', () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  function setup(available: number) {
+    let resize = () => {};
+    vi.stubGlobal('ResizeObserver', class { constructor(cb: () => void) { resize = cb; } observe() {} disconnect() {} });
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => available);
+    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 80, height: 20, top: 0, left: 0, right: 80, bottom: 20, x: 0, y: 0, toJSON() {} });
+    const onSwitchMode = vi.fn();
+    const switchPaneMode = vi.spyOn(useStore.getState(), 'switchPaneMode').mockResolvedValue(null);
+    const terminalKeys = vi.fn();
+    render(<>
+      <PaneHeader pane={{ ...pane, hasCodex: true, cmd: ['codex'], state: 'busy' }}
+        paneIndex={1} activityClass="busy" editingTitle={false} titleDraft={pane.title}
+        unread={false} connStatus="open" setTitleDraft={vi.fn()} setEditingTitle={vi.fn()}
+        onDragStart={vi.fn()} onDragEnd={vi.fn()} onRename={vi.fn()} onClose={vi.fn()}
+        isZoomed={false} canZoom={false} onToggleZoom={vi.fn()} onSwitchMode={onSwitchMode} />
+      <textarea aria-label="Terminal input" onKeyDown={e => terminalKeys(e.key, e.defaultPrevented)} />
+    </>);
+    return { onSwitchMode, switchPaneMode, terminalKeys, resize: (width: number) => act(() => { available = width; resize(); }) };
+  }
+
+  function typeInTerminal(terminalKeys: ReturnType<typeof vi.fn>) {
+    const terminal = screen.getByRole('textbox', { name: 'Terminal input' });
+    terminal.focus();
+    expect(fireEvent.keyDown(terminal, { key: 'Enter' })).toBe(true);
+    expect(fireEvent.keyDown(terminal, { key: 'Escape' })).toBe(true);
+    expect(terminalKeys.mock.calls).toEqual([['Enter', false], ['Escape', false]]);
+  }
+
+  it('cancels an inline confirm when its trigger folds, without consuming terminal keys', async () => {
+    const { resize, terminalKeys, switchPaneMode, onSwitchMode } = setup(1200);
+    fireEvent.click(screen.getByRole('button', { name: 'Focus renderer' }));
+    expect(screen.getByRole('alertdialog')).toBeVisible();
+    resize(320);
+    await screen.findByRole('button', { name: /more pane details/ });
+    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
+    typeInTerminal(terminalKeys);
+    expect(switchPaneMode).not.toHaveBeenCalled();
+    expect(onSwitchMode).not.toHaveBeenCalled();
+    resize(1200);
+    await waitFor(() => expect(screen.queryByRole('button', { name: /more pane details/ })).toBeNull());
+    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
+  });
+
+  it('cancels a popover confirm on close and does not restore it when reopened', () => {
+    const { terminalKeys, switchPaneMode, onSwitchMode } = setup(320);
+    const more = screen.getByRole('button', { name: /more pane details/ });
+    fireEvent.click(more);
+    fireEvent.click(screen.getByRole('button', { name: 'Focus renderer' }));
+    expect(screen.getByRole('alertdialog')).toBeVisible();
+    fireEvent.click(more);
+    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
+    typeInTerminal(terminalKeys);
+    expect(switchPaneMode).not.toHaveBeenCalled();
+    expect(onSwitchMode).not.toHaveBeenCalled();
+    fireEvent.click(more);
+    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
+  });
+
+  it('handles Enter and Escape only while focus is inside the confirmation', () => {
+    const { terminalKeys, switchPaneMode, onSwitchMode } = setup(1200);
+    fireEvent.click(screen.getByRole('button', { name: 'Focus renderer' }));
+    typeInTerminal(terminalKeys);
+    expect(screen.getByRole('alertdialog')).toBeVisible();
+    expect(switchPaneMode).not.toHaveBeenCalled();
+    expect(onSwitchMode).not.toHaveBeenCalled();
+    const confirm = screen.getByRole('button', { name: 'Switch when done' });
+    confirm.focus();
+    fireEvent.keyDown(confirm, { key: 'Escape' });
+    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Focus renderer' }));
+    const reopened = screen.getByRole('button', { name: 'Switch when done' });
+    reopened.focus();
+    fireEvent.keyDown(reopened, { key: 'Enter' });
+    expect(switchPaneMode).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
   });
 });

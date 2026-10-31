@@ -23,6 +23,7 @@ mod shell_update_manifest;
 #[cfg(desktop)]
 mod single_instance;
 mod startup_screen;
+mod this_computer_update;
 mod tray_icon;
 mod tray_notice;
 mod window_geometry;
@@ -135,6 +136,7 @@ pub fn run() {
             shell_update::apply_shell_update_silent,
             shell_update::app_process_id,
             shell_update::reveal_shell_installer,
+            this_computer_update::desktop_update_this_computer,
             browser::open_external_window,
             workspace_window::open_workspace_window,
             browser_pane::browser_pane_ping,
@@ -553,6 +555,10 @@ fn finish_startup(
         if let Some(route) = shell_update::LocalDaemonRoute::from_window_url(&started.initial_url) {
             app.manage(route);
         }
+    } else {
+        // Cloud launch mode: the page may ask this computer's own daemon to
+        // install this computer's desktop update (this_computer_update.rs).
+        app.manage(this_computer_update::CloudLaunch);
     }
 
     // Backend signal for the web (status chip + fallback banner +
@@ -625,11 +631,20 @@ fn finish_startup(
     // web UI can tell an old installer apart from a packaging bug without
     // waiting on the async browser_pane_ping round-trip.
     let shell_version = app.package_info().version.to_string();
+    // updateThisComputer: this shell has desktop_update_this_computer and it
+    // applies to this launch (Cloud mode), so the page offers a real Update
+    // for this computer instead of "Switch to Local". Older shells omit it.
+    let update_this_computer = matches!(desktop_mode, launch_mode::LaunchMode::Cloud);
+    // shellFlavor: this app's build ("team" or "public"). A team build's
+    // installer comes only through this computer's daemon, whatever computer
+    // the window shows, so the page routes its update there too.
+    let shell_flavor = if env!("SOLU_SHELL_FLAVOR") == "team" { "team" } else { "public" };
     let backend_script = format!(
         "window.__SOLU_BACKEND__ = {{ requested: \"{requested_backend}\", \
          actual: \"{actual_backend}\", fallback: {fallback}, \
          hostPlatform: \"{host_platform}\", launchMode: \"{launch_mode_value}\", \
-         version: \"{shell_version}\" }};"
+         version: \"{shell_version}\", updateThisComputer: {update_this_computer}, \
+         shellFlavor: \"{shell_flavor}\" }};"
     );
 
     // Restore the main window's saved geometry (position, size,

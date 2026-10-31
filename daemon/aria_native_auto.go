@@ -334,10 +334,13 @@ func nativeCautiousAutoDenyReason(ap *NativeApproval) string {
 // "always" with no standing order.
 func (a *Aria) directAutoFireNative(ctx context.Context, paneID, paneTitle string) {
 	const orderID = "automode_always_direct"
-	_ = ctx
 	start := time.Now()
 	p, ok := a.mgr.Get(paneID)
 	if !ok {
+		return
+	}
+	ctx, policy := withAriaAutoModePolicy(ctx, p)
+	if !policy.matches(p) {
 		return
 	}
 	emit := a.autoEmitter(paneID, paneTitle, orderID, 0)
@@ -415,7 +418,7 @@ func (a *Aria) directAutoFireNative(ctx context.Context, paneID, paneTitle strin
 			emit(map[string]any{"type": "confirm_resolved", "id": confirmID, "request_id": ap.RequestID, "approved": true, "error": "approval no longer pending"})
 			continue
 		}
-		resolved, err := p.resolveApproval(ap.RequestID, true, "")
+		resolved, err := p.resolveAutomaticApprovalForPolicy(ap.RequestID, policy.policy)
 		if err != nil || resolved == nil {
 			errMsg := "approval already resolved"
 			if err != nil {
@@ -464,6 +467,7 @@ func (a *Aria) evaluateNativeObservation(ctx context.Context, paneID, paneTitle 
 	if p == nil {
 		return
 	}
+	ctx, _ = withAriaAutoModePolicy(ctx, p)
 	// Cap / pause gate up front so a paused or capped ARIA never burns an LLM
 	// call. (Per-turn budget is still enforced again at confirm time.)
 	if allowed, capReason := a.autoAllowed(); !allowed {
@@ -655,6 +659,10 @@ func (a *Aria) toolResolvePermission(ctx context.Context, toolUseID, paneID, req
 	if !ok {
 		return fmt.Sprintf("error: no pane with id %q", paneID)
 	}
+	ctx, policy := withAriaAutoModePolicy(ctx, p)
+	if !policy.matches(p) {
+		return "skipped: auto-approval policy changed during evaluation"
+	}
 	ap := p.peekNativePending(reqID)
 	if ap == nil {
 		return "skipped: that permission request is no longer pending (already resolved, cancelled, or the turn ended). No action needed."
@@ -693,7 +701,7 @@ func (a *Aria) toolResolvePermission(ctx context.Context, toolUseID, paneID, req
 		emit(map[string]any{"type": "confirm_resolved", "id": confirmID, "request_id": reqID, "approved": true, "auto": auto, "error": "approval no longer pending"})
 		return "skipped: the approval was resolved by something else before ARIA could act. No action needed."
 	}
-	resolved, err := p.resolveApproval(reqID, true, "")
+	resolved, err := p.resolveAutomaticApprovalForPolicy(reqID, policy.policy)
 	if err != nil {
 		emit(map[string]any{"type": "confirm_resolved", "id": confirmID, "request_id": reqID, "approved": true, "auto": auto, "error": err.Error()})
 		if errors.Is(err, errNoPendingApproval) {

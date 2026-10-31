@@ -584,8 +584,11 @@ func (a *Aria) toolSendInputWithJevProof(ctx context.Context, toolUseID, paneID,
 		return fmt.Sprintf("error: no pane with id %q", paneID)
 	}
 	var policy ariaAutoModePolicy
+	ctx, policy = withAriaAutoModePolicy(ctx, p)
+	if p.Snapshot().NeverAutoAnswer {
+		return "skipped: pane is locked against automatic answers"
+	}
 	if autonomousCautious {
-		ctx, policy = withAriaAutoModePolicy(ctx, p)
 		if policy.policy.mode != "cautious" || !policy.matches(p) {
 			emit(map[string]any{"type": "auto-hold", "pane_id": paneID, "reason": "approval policy changed"})
 			return "skipped: auto-approval policy changed during evaluation"
@@ -749,7 +752,7 @@ func (a *Aria) toolSendInputWithJevProof(ctx context.Context, toolUseID, paneID,
 			return a.writeJevEnter(ctx, p, proof)
 		}
 	}
-	if auto && autonomousCautious {
+	if auto {
 		write := writeInput
 		writeInput = func(b []byte) (int, error) {
 			if err := ctx.Err(); err != nil {

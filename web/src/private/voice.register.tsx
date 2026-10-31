@@ -1,6 +1,6 @@
 // Voice dictation (soluvoice): the mic in the top bar and the phone bar, the
 // global recorder and its status, the Alt+S / Alt+C / Esc shortcuts, dictation
-// in the composer and into terminal panes, and its Settings › Devices section.
+// in the composer and into terminal panes, and its Settings › Notifications & voice section.
 // Public since 2026-10-27 (soluvoice is Apache-2.0).
 import type { WebExtension } from '../extensions';
 import { useAccountFeatures } from '../entitlements';
@@ -8,7 +8,7 @@ import { useStore } from '../store';
 import { VoiceButton, VoiceAutoSendToggle, VoiceLanguageSelect } from '../components/VoiceButton';
 import { VoiceConfigMenu } from '../components/VoiceConfigMenu';
 import { VoiceSessionStatus } from '../components/VoiceSessionStatus';
-import { VoiceCleanupSetting } from '../components/settings/VoiceCleanupSetting';
+import { VOICE_SETTINGS_TAB, VoiceCleanupSetting } from '../components/settings/VoiceCleanupSetting';
 import { useComposerVoice } from '../components/composer/useComposerVoice';
 import { notePaneTyped } from '../lib/voiceGuards';
 import { ComposerVoiceRecording } from './ComposerVoiceRecording';
@@ -79,7 +79,8 @@ const voice: WebExtension = {
   rootOverlays: [VoiceRoot],
   topbarItems: [TopbarVoice],
   mobileBarItems: [MobileBarVoice],
-  settingsSections: [{ tab: 'devices', Component: VoiceCleanupSetting }],
+  // The Settings voice group, like the mic, needs an account.
+  settingsSections: [{ tab: VOICE_SETTINGS_TAB, useVisible: useAccountFeatures, Component: VoiceCleanupSetting }],
   shortcutGroups: [{
     title: 'Voice',
     items: [

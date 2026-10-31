@@ -18,10 +18,14 @@ impl AsRef<tauri::Webview<tauri::test::MockRuntime>> for AsWebview<'_> {
 }
 
 fn ask(webview: &tauri::Webview<tauri::test::MockRuntime>, origin: &str) -> bool {
+    ask_cmd(webview, origin, "plugin:app|version")
+}
+
+fn ask_cmd(webview: &tauri::Webview<tauri::test::MockRuntime>, origin: &str, cmd: &str) -> bool {
     get_ipc_response(
         &AsWebview(webview),
         InvokeRequest {
-            cmd: "plugin:app|version".into(),
+            cmd: cmd.into(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
             url: origin.parse().unwrap(),
@@ -35,7 +39,48 @@ fn ask(webview: &tauri::Webview<tauri::test::MockRuntime>, origin: &str) -> bool
 
 // One expansion of generate_context!() for the tests (run() has the other).
 fn app() -> tauri::App<tauri::test::MockRuntime> {
-    mock_builder().build(tauri::generate_context!()).unwrap()
+    mock_builder()
+        .invoke_handler(tauri::generate_handler![desktop_update_this_computer])
+        .build(tauri::generate_context!())
+        .unwrap()
+}
+
+// Stands in for this_computer_update::desktop_update_this_computer under the
+// same name, so the ACL decision is tested without starting a daemon.
+#[tauri::command]
+fn desktop_update_this_computer() -> &'static str {
+    "ok"
+}
+
+// Only the main window may ask this computer's daemon to install its update.
+// Workspace windows, pop-out browsers and browser panes are refused, from the
+// cloud page's origin as from a local one.
+#[test]
+fn only_the_main_window_may_update_this_computer() {
+    let app = app();
+    let cloud = "https://soluterminal-cloud.onrender.com/";
+    for (label, allowed) in [("main", true), ("workspace_2", false), ("browser_1", false)] {
+        let window = WebviewWindowBuilder::new(&app, label, WebviewUrl::External(cloud.parse().unwrap()))
+            .build()
+            .unwrap();
+        assert_eq!(
+            ask_cmd(window.as_ref(), cloud, "desktop_update_this_computer"),
+            allowed,
+            "{label}"
+        );
+        let pane = window
+            .as_ref()
+            .window()
+            .add_child(
+                WebviewBuilder::new(format!("bpane_{label}"), WebviewUrl::External(cloud.parse().unwrap())),
+                LogicalPosition::new(0.0, 0.0),
+                LogicalSize::new(100.0, 100.0),
+            )
+            .unwrap();
+        assert!(!ask_cmd(&pane, cloud, "desktop_update_this_computer"), "bpane_{label}");
+        // Any other origin, even in the main window, gets nothing.
+        assert!(!ask_cmd(window.as_ref(), "https://evil.example/", "desktop_update_this_computer"));
+    }
 }
 
 #[test]

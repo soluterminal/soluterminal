@@ -148,11 +148,17 @@ func runVersionCommand(out io.Writer) int {
 }
 
 func main() {
+	// Dispatch argv0 before even offline subcommands. A retained shim from
+	// another build must never enter daemon startup, regardless of its args.
+	name := filepath.Base(os.Args[0])
+	if name != "solud" && name != "solud.exe" && !strings.HasPrefix(name, "solud-") {
+		if run, ok := paneShimCommand(name); ok {
+			os.Exit(run(os.Args[1:]))
+		}
+		os.Exit(runUnknownPaneShim(os.Args[0], os.Args[1:]))
+	}
 	if len(os.Args) >= 2 && os.Args[1] == capabilityCommand {
 		os.Exit(runCapabilityCommand(os.Args[2:], os.Stdout))
-	}
-	if run, ok := paneShimCommand(filepath.Base(os.Args[0])); ok && os.Getenv(codexInlineShimEnvKey) != "" {
-		os.Exit(run(os.Args[1:]))
 	}
 	// Offline diagnostics must run before logging or daemon initialization.
 	if len(os.Args) >= 2 && os.Args[1] == "support-bundle" {
@@ -241,6 +247,12 @@ func main() {
 	// (an honest record — and Go opens files O_CLOEXEC, so no fd leaks
 	// across the exec). See durable_log.go.
 	attachDurableLog()
+
+	// A daemon started only to install this computer's desktop update never
+	// runs the normal boot below (update_only_boot.go).
+	if updateOnlyDaemon() {
+		os.Exit(runUpdateOnlyBoot(os.Args[1:]))
+	}
 
 	// Self-clean: if this daemon was launched from inside a Claude Code
 	// session it inherited CLAUDE_CODE_SESSION_ID + CLAUDE_CODE_CHILD_SESSION,
@@ -1256,6 +1268,7 @@ func main() {
 		return team
 	})
 	activePrivacy.Store(api.privacy)
+	api.uiPrefs = newUIPrefsStore(*dataDir)
 	api.naming = newPaneNaming(*dataDir)
 	autoNamer := api.maybeAutoNamePane
 	paneAutoNamer.Store(&autoNamer)

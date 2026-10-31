@@ -16,7 +16,7 @@ import type { Health } from './types';
 // computer (daemon/agent_integration.go). Asked once on the desktop after the
 // welcome tour; "Not now" is a real "off" that the daemon keeps, so it is never
 // asked again automatically. An install that already had the registration
-// keeps it and gets a one-time notice instead. Settings → Devices holds the
+// keeps it and gets a one-time notice instead. Settings → Privacy & security holds the
 // switch.
 
 // Panes SoluTerminal starts always get its tools per process
@@ -34,14 +34,14 @@ export const AGENT_INTEGRATION_BODY = [
 ].join('\n\n');
 export const AGENT_INTEGRATION_NOTICE =
   'SoluTerminal is set up in Claude Code and Codex everywhere on this PC, including ones started outside ' +
-  'SoluTerminal (four entries in their settings files). Turning this off in Settings → Devices removes them.';
+  'SoluTerminal (four entries in their settings files). Turning this off in Settings → Privacy & security removes them.';
 export const AGENT_INTEGRATION_ON_TOAST =
-  'Done. Claude Code and Codex started outside SoluTerminal can now use it. You can turn this off in Settings → Devices.';
+  'Done. Claude Code and Codex started outside SoluTerminal can now use it. You can turn this off in Settings → Privacy & security.';
 export const AGENT_INTEGRATION_OFF_TOAST =
-  "Nothing was added. Agents you start in SoluTerminal still work together. You can turn this on in Settings → Devices.";
+  "Nothing was added. Agents you start in SoluTerminal still work together. You can turn this on in Settings → Privacy & security.";
 
 function openAgentIntegrationSettings(): void {
-  useSettings.getState().openSettings('devices');
+  useSettings.getState().openSettings('privacy');
 }
 
 let asked = false;

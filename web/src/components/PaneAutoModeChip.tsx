@@ -14,6 +14,7 @@ const EDGE_MARGIN = 8;
 // double-click can open the menu, never pick from it.
 export function PaneAutoModeChip({ pane }: { pane: PaneInfo }) {
   const cur = (pane.autoMode ?? '') as PaneAutoMode;
+  const locked = pane.neverAutoAnswer === true;
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
@@ -58,6 +59,7 @@ export function PaneAutoModeChip({ pane }: { pane: PaneInfo }) {
   }, [open]);
 
   const choose = (mode: PaneAutoMode) => {
+    if (locked) return;
     setOpen(false);
     void applyAutoModeChange(pane, mode);
   };
@@ -80,23 +82,24 @@ export function PaneAutoModeChip({ pane }: { pane: PaneInfo }) {
       <button
         ref={btnRef}
         type="button"
-        className={`pane-automode-badge pane-automode-${cur || 'off'}`}
-        aria-label={`Auto-approve: ${autoModeMenuLabel(cur)}. Change auto-approve`}
+        className={`pane-automode-badge pane-automode-${locked ? 'locked' : cur || 'off'}`}
+        disabled={locked}
+        aria-label={locked ? 'Auto-approve: locked' : `Auto-approve: ${autoModeMenuLabel(cur)}. Change auto-approve`}
         aria-haspopup="menu"
         aria-expanded={open}
-        title={`Auto-approve — ${autoModeDescription(cur)}\nClick to change`}
+        title={locked ? 'Automatic answers are locked. Only a person can clear the pane lock.' : `Auto-approve — ${autoModeDescription(cur)}\nClick to change`}
         onMouseDownCapture={stop}
         onDoubleClick={stop}
         onClick={(e) => {
           e.stopPropagation();
           // The second click of a double-click: leave the menu as it is.
-          if (e.detail > 1) return;
+          if (locked || e.detail > 1) return;
           setOpen((v) => !v);
         }}
       >
-        {autoModeBadgeLabel(cur)}
+        {locked ? 'locked' : autoModeBadgeLabel(cur)}
       </button>
-      {open && createPortal(
+      {open && !locked && createPortal(
         <div
           ref={menuRef}
           className="pane-ctx-menu pane-automode-menu"
@@ -122,7 +125,7 @@ export function PaneAutoModeChip({ pane }: { pane: PaneInfo }) {
                 title={autoModeDescription(mode)}
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (e.detail > 1) return;
+                  if (locked || e.detail > 1) return;
                   choose(mode);
                 }}
               >

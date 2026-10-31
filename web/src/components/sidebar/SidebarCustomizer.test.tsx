@@ -5,7 +5,11 @@ vi.mock('../../cloud', () => ({
   useCloud: { subscribe: vi.fn(), getState: () => ({ session: null }) },
 }));
 vi.mock('../../api', () => ({
+  currentRoutingScope: () => ({ prefix: '', backendPrefix: '', key: 'local' }),
+  onRoutingScopeChange: vi.fn(),
   api: {
+    getUIPrefs: vi.fn().mockResolvedValue({ prefs: null }),
+    putUIPrefs: vi.fn().mockResolvedValue({}),
     getUserPrefs: vi.fn().mockResolvedValue({ prefs: {}, updated_at: null }),
     putUserPrefs: vi.fn().mockResolvedValue({ prefs: {}, updated_at: '2026-07-04T00:00:00.000Z' }),
   },

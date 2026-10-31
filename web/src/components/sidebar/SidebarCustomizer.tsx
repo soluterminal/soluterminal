@@ -13,7 +13,7 @@ import {
 import { useOperatorFeatures, usePersonalView, useTeamFeatures } from '../../entitlements';
 
 // Reusable "customize sidebar sections" panel: drag to reorder, check to
-// show/hide. Writes straight to the cloud-synced prefs store, so it's live —
+// show/hide. Writes straight to the daemon-backed prefs store, so it's live —
 // no separate Save. Rendered in a lightweight dialog from the sidebar's
 // right-click menu today, and embedded as a Settings tab (Phase 4). Content
 // only — the caller supplies any surrounding modal chrome.

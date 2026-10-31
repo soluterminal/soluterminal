@@ -1,3 +1,4 @@
+import * as paneStatus from '../../lib/paneStatus';
 import { act, createEvent, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../../store';
@@ -82,6 +83,7 @@ function renderWorkspaceSection(overrides: Partial<Parameters<typeof WorkspaceSe
 
 describe('WorkspaceSection', () => {
   beforeEach(() => {
+    localStorage.clear();
     dialogMocks.confirmDialog.mockReset();
     vi.useFakeTimers();
     vi.setSystemTime(now);
@@ -219,4 +221,71 @@ describe('WorkspaceSection', () => {
     expect(dialogMocks.confirmDialog).toHaveBeenLastCalledWith({ message: `Delete workspace "${name}"?`, confirmLabel: 'Delete', danger: true });
     expect(onDeleteWorkspace).not.toHaveBeenCalled();
   });
+  it('persists collapsed branches, bubbles attention, and navigates visible rows', () => {
+    const lead = pane({ id: 'lead', title: 'Lead', state: 'idle' });
+    const worker = pane({ id: 'worker', title: 'Worker', state: 'choice-prompt', attention: 'needs-user', origin: { source: 'agent', byPaneId: 'lead', at: 1 } });
+    const props = { named: [workspace({ name: 'Project', paneIds: ['lead'] })], panes: { lead, worker }, activeWorkspace: 'Project' };
+    const first = renderWorkspaceSection(props);
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Lead' }));
+    expect(screen.getByRole('treeitem', { name: 'Lead' })).toHaveTextContent('1 worker');
+    expect(screen.queryByRole('treeitem', { name: 'Worker' })).not.toBeInTheDocument();
+    expect(first.container.querySelector('.workspace-pane-row .pane-tree-dot')).toHaveClass('is-needs-you');
+    expect(first.container.querySelector('.ws-row .pane-tree-dot')).toHaveClass('is-needs-you');
+    first.unmount();
+    renderWorkspaceSection(props);
+    const row = screen.getByRole('treeitem', { name: 'Lead' });
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+    act(() => row.focus());
+    fireEvent.keyDown(row, { key: 'ArrowRight' });
+    fireEvent.keyDown(row, { key: 'ArrowDown' });
+    expect(screen.getByRole('treeitem', { name: 'Worker' })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' });
+    expect(row).toHaveFocus();
+  });
+
+  it('confirms the finished-worker close and respects cancellation', async () => {
+    const worker = pane({ id: 'worker', title: 'Finished worker', state: 'idle', origin: { source: 'agent', byPaneId: 'lead', at: 1 }, turn: { active: false, count: 1, last: { n: 1, startedMs: 1, endedMs: 2, files: 0, added: 0, removed: 0 } } });
+    const killPane = vi.fn();
+    act(() => useStore.setState({ killPane }));
+    renderWorkspaceSection({ panes: { worker }, named: [workspace({ paneIds: ['worker'] })] });
+    expect(screen.getByText('finished')).toBeVisible();
+    dialogMocks.confirmDialog.mockResolvedValue(false);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Close Finished worker' })));
+    expect(killPane).not.toHaveBeenCalled();
+    dialogMocks.confirmDialog.mockResolvedValue(true);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Close Finished worker' })));
+    expect(dialogMocks.confirmDialog).toHaveBeenLastCalledWith(expect.objectContaining({ message: 'Close "Finished worker"?', danger: true }));
+    expect(killPane).toHaveBeenCalledWith('worker');
+  });
+
+  it('keeps the current-workspace row out of saved-workspace management', () => {
+    const { container, rerender, props } = renderWorkspaceSection({ named: [workspace({ name: '_current', protected: true })], activeWorkspace: '_current' });
+    const name = screen.getByText('Current workspace');
+    fireEvent.doubleClick(name);
+    expect(container.querySelector('.ws-rename-input')).toBeNull();
+    expect(name.closest('.ws-row')).toHaveAttribute('draggable', 'false');
+    rerender(<WorkspaceSection {...props} ctxMenu={{ x: 0, y: 0, wsName: '_current' }} />);
+    expect(screen.queryByRole('menuitem', { name: 'Rename' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Context pack…' })).not.toBeInTheDocument();
+  });
+
+  it('keeps tree and status summaries cached while split ratios change', () => {
+    const lead = pane({ id: 'lead', title: 'Lead', state: 'idle' });
+    const worker = pane({ id: 'worker', title: 'Worker', state: 'idle', origin: { source: 'agent', byPaneId: 'lead', at: 1 } });
+    const layout = { type: 'split' as const, direction: 'horizontal' as const, ratio: 0.3,
+      a: { type: 'pane' as const, paneId: 'lead' }, b: { type: 'pane' as const, paneId: 'worker' } };
+    const named = [workspace({ name: 'Project', layout, paneIds: ['lead', 'worker'] })];
+    const status = vi.spyOn(paneStatus, 'paneRowStatus');
+    const { rerender, props, container } = renderWorkspaceSection({ named, panes: { lead, worker }, activeWorkspace: 'Project', layout });
+    status.mockClear();
+    for (const ratio of [0.4, 0.6, 0.7]) {
+      const resized = { ...layout, ratio };
+      rerender(<WorkspaceSection {...props} layout={resized} named={[{ ...named[0], layout: resized }]} />);
+    }
+    expect(status).not.toHaveBeenCalled();
+    rerender(<WorkspaceSection {...props} panes={{ lead, worker: { ...worker, state: 'busy' } }} />);
+    expect(status).toHaveBeenCalled();
+    expect(container.querySelector('.ws-row .pane-tree-dot')).toHaveClass('is-busy');
+  });
+
 });

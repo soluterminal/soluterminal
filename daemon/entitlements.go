@@ -389,12 +389,7 @@ func (e *teamEntitlements) refresh(ctx context.Context, accountToken string) {
 		base, machineToken = e.cloud()
 	}
 	if base != "" && machineToken != "" {
-		v, err := e.fetch(ctx, base, machineToken)
-		if err == nil {
-			e.store(recordFromVerdict(v, "machine", "", e.now()).withTeamUpdates(v.TeamUpdates, base))
-		} else if !errors.Is(err, errEntitlementsUnsupported) {
-			log.Printf("entitlements: machine check failed: %v", err)
-		}
+		e.refreshMachine(ctx, base, machineToken)
 		return
 	}
 	if accountToken == "" {
@@ -408,6 +403,17 @@ func (e *teamEntitlements) refresh(ctx context.Context, accountToken string) {
 		return
 	}
 	e.store(recordFromVerdict(v, "account", jwtSubject(accountToken), e.now()))
+}
+
+// refreshMachine asks the paired cloud about this machine with its machine
+// token. The update-only boot (update_only_boot.go) calls it once.
+func (e *teamEntitlements) refreshMachine(ctx context.Context, base, machineToken string) {
+	v, err := e.fetch(ctx, base, machineToken)
+	if err == nil {
+		e.store(recordFromVerdict(v, "machine", "", e.now()).withTeamUpdates(v.TeamUpdates, base))
+	} else if !errors.Is(err, errEntitlementsUnsupported) {
+		log.Printf("entitlements: machine check failed: %v", err)
+	}
 }
 
 // stale reports whether the cached verdict should be re-checked for a caller
@@ -447,6 +453,7 @@ func (e *teamEntitlements) refreshAsync(accountToken string) {
 const entitlementsFirstVerdictRetry = 30 * time.Second
 
 func (e *teamEntitlements) run(ctx context.Context) {
+	requireNormalBootEngine("entitlements.run")
 	for {
 		// Taken before the refresh so a pairing that lands during it still
 		// wakes the next wait.

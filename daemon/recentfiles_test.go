@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -85,16 +86,40 @@ func TestHookEditedPath(t *testing.T) {
 // The endpoint must surface agent-touched paths locally, but never reveal
 // secret/credential file paths over the cloud relay.
 func TestRecentFilesEndpointRelayHidesSecrets(t *testing.T) {
-	t.Parallel()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv(relayFileRootsEnv, "")
+	t.Setenv(relayFileConfinementEnv, "")
+	for _, key := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "MUSE_AUTH_PATH"} {
+		t.Setenv(key, "")
+	}
+
 	ring := newRecentFilesRing()
-	repo := t.TempDir()
+	repo := filepath.Join(home, "repo")
 	mainPath := filepath.Join(repo, "src", "main.go")
 	envPath := filepath.Join(repo, ".env")
-	outsidePath := filepath.Join(t.TempDir(), "notes.md")
+	outsidePath := filepath.Join(home, "other", "notes.md")
+	// Stop gitTopLevel at the fixture's repository, even if a host ancestor
+	// (such as /tmp) has a .git entry that would also admit outsidePath.
+	for _, dir := range []string{filepath.Join(repo, ".git"), filepath.Dir(mainPath), filepath.Dir(outsidePath)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{mainPath, envPath, outsidePath} {
+		if err := os.WriteFile(path, []byte("fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ring.record(touch(mainPath, 1))
 	ring.record(touch(envPath, 2))
 	ring.record(touch(outsidePath, 3))
-	a := &apiServer{recentFiles: ring, relayPaneDirsForTest: []string{repo}}
+	a := &apiServer{
+		recentFiles:          ring,
+		dataDir:              filepath.Join(home, ".solu"),
+		relayPaneDirsForTest: []string{repo},
+	}
 
 	decode := func(req *http.Request) []recentFileTouch {
 		t.Helper()

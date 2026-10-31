@@ -94,6 +94,6 @@ describe('remoteDevicePendingText', () => {
     const text = remoteDevicePendingText('Pixel 8a');
     expect(text).toContain('“Pixel 8a”');
     expect(text).toContain('same code');
-    expect(text).toContain('Settings → Devices');
+    expect(text).toContain('Settings → Privacy & security');
   });
 });

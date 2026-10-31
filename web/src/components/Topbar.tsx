@@ -167,6 +167,7 @@ export function Topbar({
           {/* View — arrange / repair what's on screen. */}
           <div className="topbar-group">
             <GridLayoutPicker />
+            <WorkspaceLayoutControl />
             {/* Refresh view (realign + reflow) is a repair tool, so it stays out
                 of the public top bar; Alt+R, the palette and the pane menu
                 still reach it. Team installs keep the button. */}
@@ -251,4 +252,11 @@ export function Topbar({
       )}
     </div>
   );
+}
+
+function WorkspaceLayoutControl() {
+  const custom = useStore(s => s.mainPresentation.kind === 'workspace' && s.paneLayoutMode === 'free');
+  const retile = useStore(s => s.retilePanes);
+  if (!custom) return null;
+  return <button type="button" className="workspace-retile" onClick={retile} aria-label="Re-tile panes" title="Arrange panes evenly and enable auto layout">Custom layout · Re-tile</button>;
 }

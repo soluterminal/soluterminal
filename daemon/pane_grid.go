@@ -270,6 +270,9 @@ func (p *Pane) SetAutoMode(mode string) {
 	if p.AutoMode != mode {
 		p.autoModeGeneration++
 	}
+	if p.NeverAutoAnswer {
+		mode = ""
+	}
 	p.AutoMode = mode
 	p.mu.Unlock()
 	p.autoModeMu.Unlock()

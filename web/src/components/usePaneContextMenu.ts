@@ -174,7 +174,7 @@ export function usePaneContextMenu({
         }));
       },
       setAutoMode: (mode: PaneAutoMode) => {
-        if (!actionGuard()) return;
+        if (pane.neverAutoAnswer || useStore.getState().panes[pane.id]?.neverAutoAnswer || !actionGuard()) return;
       setCtxMenu(null);
         // Always approve asks first, the same as the header chip and palette.
         // The view/scope guard is captured at the click and checked again
@@ -184,7 +184,7 @@ export function usePaneContextMenu({
         const valid = captureGuard?.() ?? (() => actionGuard() && originScope.key === currentRoutingScope().key
           && generation === useStore.getState().navigationGeneration);
         void confirmAutoModeChange((pane.autoMode ?? '') as PaneAutoMode, mode, pane.title).then((ok) => {
-          if (ok && valid()) void updatePane(()=>api.setPaneAutoMode(pane.id,mode,originScope));
+          if (ok && valid() && !useStore.getState().panes[pane.id]?.neverAutoAnswer) void updatePane(()=>api.setPaneAutoMode(pane.id,mode,originScope));
         });
       },
       toggleAnnounceDelegation: () => {

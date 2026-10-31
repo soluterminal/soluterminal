@@ -2,7 +2,7 @@ import { sidebarSectionSlot } from '../../extensions';
 
 // Registry for the middle-zone sidebar sections. The live sidebar and the
 // customizer both derive their ordering/visibility from these pure helpers,
-// so the two can never disagree. User order + hidden set live in cloud-synced
+// so the two can never disagree. User order + hidden set live in daemon-backed
 // prefs (see prefs.ts → UserPrefs.sidebar); this module owns the defaults and
 // the reconciliation rules (new sections default visible, in default position;
 // unknown keys are dropped).
@@ -17,7 +17,6 @@ import { sidebarSectionSlot } from '../../extensions';
 // are unknown keys too and get dropped the same way.
 export type MiddleKey =
   | 'owners'
-  | 'agentPanes'
   | 'files'
   | 'ports'
   | 'background'
@@ -30,7 +29,6 @@ export type MiddleKey =
 // assistant surfaces (credentials, mcp) trail and default hidden (see
 // DEFAULT_HIDDEN) so a new user isn't greeted by a wall of power-user panels.
 export const DEFAULT_MIDDLE_ORDER: MiddleKey[] = [
-  'agentPanes',
   'files',
   'ports',
   'background',
@@ -104,7 +102,6 @@ export const MIDDLE_SECTION_LABELS: Record<MiddleKey, string> = {
   files: 'Files',
   ports: 'Services',
   background: 'Detached sessions',
-  agentPanes: 'Started by agents',
   credentials: 'Credentials',
   schedules: 'Automations',
   agents: 'Agents',

@@ -188,6 +188,7 @@ var claudeMcpRegMu sync.Mutex
 // LAN-bound daemon, in a fight with this file's repair. It is gone; every
 // path now funnels here and only the loopback-normalized URL is ever written.
 func ensureClaudeMcpRegistration(listenAddr string) {
+	requireNormalBootEngine("claude_mcp_register.ensureClaudeMcpRegistration")
 	if os.Getenv("SOLU_SKIP_MCP_REGISTER") == "1" {
 		return
 	}

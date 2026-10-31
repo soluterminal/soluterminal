@@ -17,6 +17,10 @@ import { useSettings } from '../settings';
 import { SettingsModal } from './SettingsModal';
 import { useEntitlements } from '../entitlements';
 import { setExtensionsForTests } from '../extensions';
+import { useCloud } from '../cloud';
+import voice from '../private/voice.register';
+import { VoiceConfigMenu } from './VoiceConfigMenu';
+import { api } from '../api';
 
 describe('SettingsModal', () => {
   beforeEach(() => {
@@ -41,7 +45,7 @@ describe('SettingsModal', () => {
       'aria-selected',
       'true',
     );
-    for (const label of ['Appearance', 'Terminal & panes', 'Sidebar', 'Devices', 'Warden', 'Services']) {
+    for (const label of ['Appearance', 'Terminal & panes', 'Sidebar', 'Privacy & security', 'Devices & updates', 'Warden', 'Services']) {
       expect(screen.getByRole('tab', { name: label })).toBeInTheDocument();
     }
     expect(screen.getByText('Color theme')).toBeInTheDocument();
@@ -94,6 +98,90 @@ describe('SettingsModal', () => {
     render(<SettingsModal />);
     expect(screen.queryByRole('tab', { name: 'Feature tab' })).toBeNull();
     expect(screen.queryByText('FEATURE_TAB')).toBeNull();
+  });
+
+  // Settings › Devices was split into Account · Notifications & voice ·
+  // Privacy & security · Devices & updates (2026-10-31).
+  it('shows the split Devices tabs in order, each only when it has rows', () => {
+    useCloud.setState({ withoutAccount: false, session: null });
+    useEntitlements.setState({ loaded: true, team: false, operator: false, teamCredentials: false, real: { team: false, operator: false } } as never);
+    const { unmount } = render(<SettingsModal />);
+    act(() => useSettings.getState().openSettings());
+    let labels = screen.getAllByRole('tab').map((t) => t.textContent);
+    // No sign-in state, no personal view and no voice module: no Account or
+    // Notifications & voice tab.
+    expect(labels).toEqual(['Appearance', 'Terminal & panes', 'Sidebar', 'Privacy & security', 'Devices & updates']);
+    unmount();
+
+    useCloud.setState({ withoutAccount: true, session: null });
+    setExtensionsForTests([{ settingsSections: [{ tab: 'notifications', Component: () => <div>VOICE_GROUP</div> }] }]);
+    render(<SettingsModal />);
+    labels = screen.getAllByRole('tab').map((t) => t.textContent);
+    expect(labels).toEqual([
+      'Appearance', 'Terminal & panes', 'Sidebar', 'Account', 'Notifications & voice', 'Privacy & security', 'Devices & updates',
+    ]);
+    fireEvent.click(screen.getByRole('tab', { name: 'Notifications & voice' }));
+    expect(screen.getByText('VOICE_GROUP')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Account' }));
+    expect(screen.getByText('Not signed in')).toBeInTheDocument();
+    useCloud.setState({ withoutAccount: false });
+  });
+
+  it('hides Notifications & voice when its only section is not offered', () => {
+    setExtensionsForTests([{
+      settingsSections: [{ tab: 'notifications', useVisible: () => false, Component: () => <div>VOICE_GROUP</div> }],
+    }]);
+    render(<SettingsModal />);
+    act(() => useSettings.getState().openSettings('notifications'));
+    expect(screen.queryByRole('tab', { name: 'Notifications & voice' })).toBeNull();
+    expect(screen.queryByText('VOICE_GROUP')).toBeNull();
+  });
+
+  it('opens the single account-gated Voice group from the mic menu after the split', () => {
+    const originalEntitlements = useEntitlements.getState();
+    const local = vi.spyOn(api, 'getVoiceLocal').mockResolvedValue(null);
+    const words = vi.spyOn(api, 'getVoiceWords').mockResolvedValue(null);
+    setExtensionsForTests([voice]);
+    useEntitlements.setState({ account: true, team: false, operator: false });
+    const { unmount } = render(<><VoiceConfigMenu /><SettingsModal /></>);
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Voice settings' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Voice settings…' }));
+      expect(screen.getByRole('tab', { name: 'Notifications & voice' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getAllByRole('heading', { name: 'Voice' })).toHaveLength(1);
+      expect(screen.getByLabelText('Send dictation automatically')).toBeInTheDocument();
+      expect(screen.getByRole('combobox', { name: 'Voice language' })).toBeInTheDocument();
+      act(() => useEntitlements.setState({ account: false }));
+      expect(screen.queryByRole('tab', { name: 'Notifications & voice' })).toBeNull();
+      expect(screen.queryByRole('heading', { name: 'Voice' })).toBeNull();
+    } finally {
+      unmount();
+      useEntitlements.setState(originalEntitlements, true);
+      local.mockRestore();
+      words.mockRestore();
+    }
+  });
+
+  it('opens Privacy & security from its deep link and keeps old Devices links on Devices & updates', () => {
+    render(<SettingsModal />);
+    act(() => useSettings.getState().openSettings('privacy'));
+    expect(screen.getByRole('tab', { name: 'Privacy & security' })).toHaveAttribute('aria-selected', 'true');
+    act(() => useSettings.getState().openSettings('devices'));
+    expect(screen.getByRole('tab', { name: 'Devices & updates' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Automatic updates')).toBeInTheDocument();
+  });
+
+  it('reopens on the split tab last viewed, not the first tab of its category', () => {
+    render(<SettingsModal />);
+    for (const label of ['Privacy & security', 'Devices & updates', 'Sidebar', 'Terminal & panes']) {
+      act(() => useSettings.getState().openSettings());
+      fireEvent.click(screen.getByRole('tab', { name: label }));
+      fireEvent.keyDown(window, { key: 'Escape' });
+      act(() => useSettings.getState().openSettings());
+      expect(screen.getByRole('tab', { name: label })).toHaveAttribute('aria-selected', 'true');
+      fireEvent.keyDown(window, { key: 'Escape' });
+    }
+    expect(localStorage.getItem('solu.settings.lastSection')).toBe('workspace.panes');
   });
 
   it('remembers the last-viewed tab across close/reopen', () => {

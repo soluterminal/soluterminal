@@ -13,6 +13,7 @@ import { applyShellUpdateNative, browserPanePing, isDesktopApp, revealShellInsta
 import { fallBackToDownloadPage } from '../lib/shellUpdateFallback';
 import { daemonOnThisComputer, installerNeedsLocalMode, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
 import { switchDesktopLaunchMode } from '../lib/launchModeSwitch';
+import { canUpdateThisComputerHere, THIS_COMPUTER_PHASE_LABEL, updateThisComputer, useUpdateThisComputer } from '../lib/updateThisComputer';
 import { UPDATE_CHECK_FAILED } from '../lib/updateErrors';
 import { useIsMobileDevice } from './useIsMobileView';
 import { useDismiss } from './useDismiss';
@@ -85,6 +86,7 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   const [nativeLaunchFailure, setNativeLaunchFailure] = useState<{ path: string; error?: string } | null>(null);
   const [downgradeRefusal, setDowngradeRefusal] = useState<{ installed?: string; installer?: string; message?: string } | null>(null);
   const [switchingToLocal, setSwitchingToLocal] = useState(false);
+  const thisComputer = useUpdateThisComputer();
   useEffect(() => {
     if (!isDesktopApp()) return;
     let alive = true;
@@ -155,6 +157,10 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   // waits for the app's own version so the line never names the remote's.
   const shellUpd = !!(shellLatest && shellCur && installer.newer) && !installer.localModeOnly;
   const localModeUpdate = installer.localModeOnly && !!desktopVersion && !isMobileDevice;
+  // A shell that can update this computer from Cloud mode does it in place
+  // (lib/updateThisComputer.ts); Switch to Local stays for older shells and
+  // as the fallback when that fails.
+  const updateHere = localModeUpdate && canUpdateThisComputerHere();
   const shellHeld = installer.held;
   // The carried installer is older than the installed daemon, so every launch
   // path would refuse it. Say why instead of offering a button that comes back
@@ -510,11 +516,34 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
         </button>
       )}
 
-      {localModeUpdate && (
+      {updateHere && (
         <>
-          <div className="vp-summary" data-testid="vp-installer-local-mode">
-            {`Desktop app v${desktopVersion} · updates for this computer run in Local mode`}
+          <div className="vp-summary" data-testid="vp-installer-this-computer">
+            {`Desktop app v${desktopVersion} · this computer's own app checks and installs its update`}
           </div>
+          {thisComputer.failure && !thisComputer.running && (
+            <div className="vp-summary" role="alert" data-testid="vp-installer-this-computer-failed">
+              {`Couldn't update from here: ${thisComputer.failure}`}
+            </div>
+          )}
+          <button
+            type="button"
+            className="vp-check"
+            onClick={() => void updateThisComputer(toast)}
+            disabled={thisComputer.running || switchingToLocal}
+          >
+            {thisComputer.running
+              ? THIS_COMPUTER_PHASE_LABEL[thisComputer.phase ?? 'starting']
+              : "Update this computer's desktop app"}
+          </button>
+        </>
+      )}
+
+      {localModeUpdate && (!updateHere || (thisComputer.failure && !thisComputer.running)) && (
+        <>
+          {!updateHere && <div className="vp-summary" data-testid="vp-installer-local-mode">
+            {`Desktop app v${desktopVersion} · updates for this computer run in Local mode`}
+          </div>}
           <button
             type="button"
             className="vp-check"

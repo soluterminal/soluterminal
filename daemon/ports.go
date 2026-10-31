@@ -54,10 +54,12 @@ type PortRegistry struct {
 }
 
 func NewPortRegistry(m *Manager) *PortRegistry {
+	requireNormalBootEngine("ports.NewPortRegistry")
 	return &PortRegistry{mgr: m, seen: map[string]*Port{}}
 }
 
 func (pr *PortRegistry) Start(interval time.Duration) {
+	requireNormalBootEngine("ports.Start")
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()

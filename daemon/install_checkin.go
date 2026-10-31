@@ -81,6 +81,7 @@ type installCheckin struct {
 }
 
 func newInstallCheckin(dataDir, version string, base func() string, signedIn func() bool) *installCheckin {
+	requireNormalBootEngine("install_checkin.newInstallCheckin")
 	c := &installCheckin{
 		dataDir:  dataDir,
 		version:  version,
@@ -267,6 +268,7 @@ func checkinJitter(max time.Duration) time.Duration {
 // day. It never blocks boot and gives up silently on errors until the next
 // round.
 func (c *installCheckin) run(ctx context.Context) {
+	requireNormalBootEngine("install_checkin.run")
 	if c == nil {
 		return
 	}

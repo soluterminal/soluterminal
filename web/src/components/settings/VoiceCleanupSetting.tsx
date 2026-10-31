@@ -1,9 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../api';
 import type { VoiceLocalSettings } from '../../private/voice.api';
-import { SettingsCheck, SettingsGroup } from './SettingsRow';
+import { SettingsCheck, SettingsGroup, SettingsRow } from './SettingsRow';
 import { useStore } from '../../store';
 import { VoiceWordsSetting } from './VoiceWordsSetting';
+import { VOICE_LANGS } from '../VoiceButton';
+import type { SettingsTab } from '../../settings';
+
+// The Settings tab holding the Voice group. The mic menu's "Voice settings…"
+// link opens it, so the two can't drift apart.
+export const VOICE_SETTINGS_TAB: SettingsTab = 'notifications';
+
+export const VOICE_AUTO_SEND_LABEL = 'Send dictation automatically';
+export const VOICE_AUTO_SEND_HINT =
+  'On: in Claude Code and Codex panes, what you say is typed and Enter is pressed for you. ' +
+  'In a shell it is only typed, so a command never runs unchecked. Off: it is typed for you to ' +
+  'check, and you press Enter.';
+export const VOICE_LANGUAGE_LABEL = 'Language';
+export const VOICE_LANGUAGE_HINT =
+  'The language you usually speak, so short clips aren’t mistaken for another one. ' +
+  'Auto-detect guesses each time.';
 
 export const VOICE_LOCAL_LABEL = 'Clean up dictation with my Claude plan';
 export const VOICE_KEEP_MIC_LABEL =
@@ -35,8 +51,12 @@ export function voiceLocalHint(s: VoiceLocalSettings): string {
   );
 }
 
-// The daemon owns this choice (it runs the cleanup). A daemon without the
-// endpoint answers 404 and the row stays hidden.
+// Settings › Voice: every voice preference in one group — auto-send and
+// language (also quick toggles in the mic menu), keeping the mic warm, the
+// ready tick, cleanup and words to recognise. The voice module registers it
+// only while voice is available (an account), like the mic itself.
+// The cleanup choice is the daemon's (it runs the cleanup); a daemon without
+// the endpoint answers 404 and that row stays hidden.
 export function VoiceCleanupSetting() {
   const [settings, setSettings] = useState<VoiceLocalSettings | null>(null);
   const [pending, setPending] = useState(false);
@@ -46,6 +66,15 @@ export function VoiceCleanupSetting() {
   const setKeepWarm = useStore((s) => s.setVoiceKeepWarm);
   const readyTick = useStore((s) => s.voiceReadyTick);
   const setReadyTick = useStore((s) => s.setVoiceReadyTick);
+  const autoSend = useStore((s) => s.voiceAutoSend);
+  const setAutoSend = useStore((s) => s.setVoiceAutoSend);
+  const language = useStore((s) => s.voiceLanguage);
+  const setLanguage = useStore((s) => s.setVoiceLanguage);
+  // A language set outside this list (by editing local storage) stays
+  // selectable rather than showing as Auto-detect.
+  const languages = VOICE_LANGS.some((l) => l.code === language)
+    ? VOICE_LANGS
+    : [...VOICE_LANGS, { code: language, label: language, name: language }];
 
   useEffect(() => {
     let mounted = true;
@@ -82,6 +111,24 @@ export function VoiceCleanupSetting() {
 
   return (
     <SettingsGroup title="Voice">
+      <SettingsCheck
+        label={VOICE_AUTO_SEND_LABEL}
+        checked={autoSend}
+        onChange={setAutoSend}
+        hint={VOICE_AUTO_SEND_HINT}
+      />
+      <SettingsRow label={VOICE_LANGUAGE_LABEL} hint={VOICE_LANGUAGE_HINT}>
+        <select
+          className="settings-select"
+          value={language}
+          onChange={(e) => setLanguage(e.target.value)}
+          aria-label="Voice language"
+        >
+          {languages.map((l) => (
+            <option key={l.code || 'auto'} value={l.code}>{l.name}</option>
+          ))}
+        </select>
+      </SettingsRow>
       <SettingsCheck
         label={VOICE_KEEP_MIC_LABEL}
         checked={keepWarmMs > 0}

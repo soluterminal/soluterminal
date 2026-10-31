@@ -113,7 +113,8 @@ func (a *apiServer) answerNativePrompt(p *Pane, option string) any {
 	if !allow {
 		denyReason = "declined via answer_prompt"
 	}
-	resolved, err := p.resolveApproval(pending.RequestID, allow, denyReason)
+	policy := p.autoModePolicy()
+	resolved, err := p.resolveApprovalWithPolicy(pending.RequestID, allow, denyReason, &policy)
 	if err != nil {
 		if err == errNoPendingApproval {
 			return toolErr("the approval was already resolved (someone else answered it)")
@@ -161,11 +162,15 @@ func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string) any {
 		return toolErr(fmt.Sprintf("option %q is not on pane %s's menu. Presented options: %s",
 			option, paneID, describeOptions(opts)))
 	}
+	policy := p.autoModePolicy()
+	writeAnswer := func(b []byte) (int, error) {
+		return p.writeWithAutoModePolicy(b, false, policy, time.Now().Add(ariaJevTimeout))
+	}
 	// Write the bare digit — Claude/Codex numbered menus action the keypress
 	// immediately (ARIA auto-mode convention: no Enter). WriteNoPromptRecord,
 	// like every menu-choice reply: the digit is a control answer, not a user
 	// prompt, and must stay out of the prompt-recorder strip.
-	if _, err := p.WriteNoPromptRecord([]byte(option)); err != nil {
+	if _, err := writeAnswer([]byte(option)); err != nil {
 		return toolErr("write to pane " + paneID + " failed: " + err.Error())
 	}
 	// Codex's submit-style menus ("enter to submit") can treat the digit as
@@ -178,7 +183,7 @@ func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string) any {
 				if focusedMenuOption(menuRegion(text)) != option {
 					return toolErr(fmt.Sprintf("pressed %s on pane %s but the menu's selection did not move to it; nothing was confirmed. Read the pane and try again, or tell the user.", option, paneID))
 				}
-				if _, err := p.WriteNoPromptRecord([]byte("\r")); err != nil {
+				if _, err := writeAnswer([]byte("\r")); err != nil {
 					return toolErr("confirm on pane " + paneID + " failed: " + err.Error())
 				}
 			}

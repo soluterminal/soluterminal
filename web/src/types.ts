@@ -128,6 +128,7 @@ export interface PaneReview {
 }
 
 export interface PaneInfo {
+  neverAutoAnswer?: boolean;
   unsentMessage?: { id: string; sender: string };
 	// Current live-auth evidence, distinct from selection captured at launch.
 	codexAuth?: {
@@ -663,6 +664,7 @@ export type Layout =
 // workspaces saved before v0.2 won't have this and simply won't restore
 // panes that have since been killed.
 export interface PaneDef {
+  neverAutoAnswer?: boolean;
   identityBlocked?: boolean;
   id: string;          // pane id at save time (may no longer exist)
   cwd: string;
@@ -699,6 +701,14 @@ export interface PaneDef {
 }
 
 export interface Workspace {
+  layoutMode?: 'auto' | 'free';
+  layoutColumns?: number;
+  layoutAspect?: number;
+  layoutVersion?: number;
+  /** Request-only observation set; lets saves preserve unseen server additions. */
+  knownPaneIds?: string[];
+  /** Server-owned record of closed panes; stale layouts must discard them. */
+  removedPaneIds?: string[];
   name: string;
   /** Layout generation bound to pane reassignment; rejects stale autosaves. */
   paneMoveVersion?: number;
@@ -729,7 +739,10 @@ export interface Workspace {
 }
 
 export interface WorkspaceSummary {
+  layoutMode?: 'auto' | 'free';
+  layoutVersion?: number;
   name: string;
+  removedPaneIds?: string[];
   paneMoveVersion?: number;
   paneIds: string[];
   activeAt: string;
@@ -1099,6 +1112,7 @@ export function deriveUpdateHoldPresentation(
 }
 
 export interface CreatePaneReq {
+  neverAutoAnswer?: boolean;
   restore?: boolean;
   /** "user" when the person opened the pane from the app; the daemon records other callers as "api". */
   startedBy?: 'user';

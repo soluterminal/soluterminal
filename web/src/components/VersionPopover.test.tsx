@@ -5,6 +5,7 @@ import type { UpdateStatus } from '../types';
 import { VersionPopover } from './VersionPopover';
 import { api } from '../api';
 import { useCloud } from '../cloud';
+import { resetUpdateThisComputerForTest } from '../lib/updateThisComputer';
 
 const anchors: HTMLElement[] = [];
 const realApplyUpdate = useStore.getState().applyUpdate;
@@ -548,6 +549,115 @@ describe('VersionPopover installer route', () => {
     expect(invoke.mock.calls.some(([command]) => command === 'apply_shell_update')).toBe(false);
     expect(invoke.mock.calls.some(([command]) => command === 'plugin:opener|open_url')).toBe(false);
     expect(applyShellUpdate).not.toHaveBeenCalled();
+  });
+
+  describe('with a shell that updates this computer from Cloud mode', () => {
+    function cloudLaunchModeWithUpdateHere() {
+      Object.defineProperty(window, '__SOLU_BACKEND__', { value: { launchMode: 'cloud', updateThisComputer: true }, configurable: true });
+    }
+    afterEach(() => resetUpdateThisComputerForTest());
+
+    it('on a team computer, Update runs desktop_update_this_computer and stays in Cloud mode', async () => {
+      cloudLaunchModeWithUpdateHere();
+      useCloud.setState({ mode: 'cloud', isLocal: false });
+      const invoke = desktop((command) => (command === 'desktop_update_this_computer' ? { state: 'launched', installerVersion: '0.0.1226' } : undefined));
+      const applyShellUpdate = vi.fn().mockResolvedValue(undefined);
+      const status = installerStatus('team');
+      useStore.setState({ updateStatus: status, applyShellUpdate: applyShellUpdate as never, applyAllUpdates: realApplyAllUpdates });
+      renderPopover(status);
+
+      expect(await screen.findByTestId('vp-installer-this-computer'))
+        .toHaveTextContent("Desktop app v0.0.1225 · this computer's own app checks and installs its update");
+      expect(screen.queryByTestId('vp-installer-local-mode')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Switch to Local/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Update installer' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: "Update this computer's desktop app" }));
+
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_update_this_computer'));
+      // No arguments reach the shell.
+      expect(invoke.mock.calls.find(([command]) => command === 'desktop_update_this_computer')).toEqual(['desktop_update_this_computer']);
+      expect(invoke.mock.calls.some(([command]) => command === 'desktop_set_launch_mode')).toBe(false);
+      expect(invoke.mock.calls.some(([command]) => command === 'apply_shell_update')).toBe(false);
+      expect(invoke.mock.calls.some(([command]) => command === 'plugin:opener|open_url')).toBe(false);
+      expect(applyShellUpdate).not.toHaveBeenCalled();
+    });
+
+    it('offers Switch to Local only after the update failed', async () => {
+      cloudLaunchModeWithUpdateHere();
+      useCloud.setState({ mode: 'cloud', isLocal: false });
+      autoConfirm();
+      const invoke = desktop((command) => (command === 'desktop_update_this_computer'
+        ? { state: 'refused', code: 'update_held', message: 'This version is on hold on this computer after a rollback, so nothing was installed.' }
+        : undefined));
+      const status = installerStatus('team');
+      useStore.setState({ updateStatus: status, applyAllUpdates: realApplyAllUpdates });
+      renderPopover(status);
+
+      fireEvent.click(await screen.findByRole('button', { name: "Update this computer's desktop app" }));
+      expect(await screen.findByTestId('vp-installer-this-computer-failed'))
+        .toHaveTextContent("Couldn't update from here: This version is on hold on this computer after a rollback, so nothing was installed.");
+      fireEvent.click(screen.getByRole('button', { name: "Switch to Local to update this computer's desktop app" }));
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_set_launch_mode', { mode: 'local' }));
+    });
+
+    it('on a public computer, keeps the app updater and never calls the command', async () => {
+      cloudLaunchModeWithUpdateHere();
+      useCloud.setState({ mode: 'cloud', isLocal: false });
+      const invoke = desktop((command) => (command === 'apply_shell_update' ? { launched: true, path: 'C:\\setup.exe' } : undefined));
+      const status = installerStatus('public');
+      useStore.setState({ updateStatus: status, applyAllUpdates: realApplyAllUpdates });
+      renderPopover(status);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Update installer' }));
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('apply_shell_update', { forceDowngrade: false }));
+      expect(screen.queryByTestId('vp-installer-this-computer')).not.toBeInTheDocument();
+      expect(invoke.mock.calls.some(([command]) => command === 'desktop_update_this_computer')).toBe(false);
+    });
+
+    it('a team-build app viewing a public computer updates through the command too', async () => {
+      Object.defineProperty(window, '__SOLU_BACKEND__', {
+        value: { launchMode: 'cloud', updateThisComputer: true, shellFlavor: 'team' },
+        configurable: true,
+      });
+      useCloud.setState({ mode: 'cloud', isLocal: false });
+      const invoke = desktop((command) => (command === 'desktop_update_this_computer' ? { state: 'launched' } : undefined));
+      const status = installerStatus('public');
+      useStore.setState({ updateStatus: status, applyAllUpdates: realApplyAllUpdates });
+      renderPopover(status);
+
+      expect(screen.queryByRole('button', { name: 'Update installer' })).not.toBeInTheDocument();
+      fireEvent.click(await screen.findByRole('button', { name: "Update this computer's desktop app" }));
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_update_this_computer'));
+      expect(invoke.mock.calls.some(([command]) => command === 'apply_shell_update')).toBe(false);
+      expect(invoke.mock.calls.some(([command]) => command === 'plugin:opener|open_url')).toBe(false);
+    });
+
+    it('a cancelled confirmation offers neither a failure nor Switch to Local', async () => {
+      cloudLaunchModeWithUpdateHere();
+      useCloud.setState({ mode: 'cloud', isLocal: false });
+      desktop((command) => (command === 'desktop_update_this_computer' ? { state: 'cancelled' } : undefined));
+      const status = installerStatus('team');
+      useStore.setState({ updateStatus: status, applyAllUpdates: realApplyAllUpdates });
+      renderPopover(status);
+      fireEvent.click(await screen.findByRole('button', { name: "Update this computer's desktop app" }));
+      expect(await screen.findByRole('button', { name: "Update this computer's desktop app" })).toBeEnabled();
+      expect(screen.queryByTestId('vp-installer-this-computer-failed')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Switch to Local/ })).not.toBeInTheDocument();
+    });
+
+    it('in Local mode on the team channel, keeps the local daemon install', async () => {
+      Object.defineProperty(window, '__SOLU_BACKEND__', { value: { launchMode: 'local', updateThisComputer: false }, configurable: true });
+      useCloud.setState({ mode: 'cloud', isLocal: true });
+      const invoke = desktop(() => undefined);
+      const applyShellUpdate = vi.fn().mockResolvedValue(undefined);
+      const status = installerStatus('team');
+      useStore.setState({ updateStatus: status, applyShellUpdate: applyShellUpdate as never, applyAllUpdates: realApplyAllUpdates });
+      renderPopover(status);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Update installer' }));
+      await vi.waitFor(() => expect(applyShellUpdate).toHaveBeenCalledOnce());
+      expect(invoke.mock.calls.some(([command]) => command === 'desktop_update_this_computer')).toBe(false);
+    });
   });
 
   it('never asks a remote team daemon and never opens the download page for it', async () => {

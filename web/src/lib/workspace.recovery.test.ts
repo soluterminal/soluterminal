@@ -11,6 +11,14 @@ const failed = () => failedPaneFromDef(def, new Error('working directory does no
 afterEach(() => { vi.restoreAllMocks(); useStore.setState({ activeWorkspace: undefined, layout: null, panes: {}, workspaces: [] }); });
 
 describe('workspace reboot recovery', () => {
+  it('preserves the human automatic-answer lock through saved workspace restore', () => {
+    const p = { ...failed(), neverAutoAnswer: true, autoMode: '' as const };
+    const saved = collectPaneDefs({ type: 'pane', paneId: p.id }, { [p.id]: p })[0];
+    expect(saved.neverAutoAnswer).toBe(true);
+    expect(paneRestoreRequest(saved)).toMatchObject({ restore: true, neverAutoAnswer: true });
+    expect(failedPaneFromDef(saved, new Error('offline')).neverAutoAnswer).toBe(true);
+  });
+
   it('saves a resume recipe for Codex started inside Bash', () => {
     const p = { ...failed(), status: 'running', recoveryError: undefined } as PaneInfo;
     const saved = collectPaneDefs({ type: 'pane', paneId: p.id }, { [p.id]: p })[0];

@@ -189,6 +189,7 @@ export function CommandPalette({
   });
   // Focused pane's auto-approve mode, subscribed so the palette action's
   // label stays live (mirrors isFocusedNative for the renderer toggle).
+  const focusedAutoLocked = useStore((s) => !!(s.focusedPaneId && s.panes[s.focusedPaneId]?.neverAutoAnswer));
   const focusedAutoMode = useStore((s) => {
     const p = s.focusedPaneId ? s.panes[s.focusedPaneId] : undefined;
     return (p?.autoMode ?? '') as PaneAutoMode;
@@ -307,6 +308,12 @@ export function CommandPalette({
     const list: Action[] = [
       startAgentAction('claude', 'claude code anthropic agent new session open launch run'),
       startAgentAction('codex', 'codex openai chatgpt agent new session open launch run'),
+      {
+        id: 'workspace.retile', label: 'Re-tile panes',
+        hint: 'Arrange panes evenly and enable auto layout for this workspace',
+        category: 'View', keywords: 'grid auto arrange balance layout equal evenly',
+        run: () => { onClose(); useStore.getState().retilePanes(); },
+      },
       {
         id: 'broadcast',
         label: 'Broadcast prompt to multiple panes',
@@ -675,7 +682,7 @@ export function CommandPalette({
     // Always back to Off); Always approve is its own action and asks first.
     // Gated on the broader auto-approve capability so Codex panes get it too
     // (the renderer toggle above stays Claude-only).
-    if (isFocusedAutoApproveCapable && focusedPaneId) {
+    if (isFocusedAutoApproveCapable && focusedPaneId && !focusedAutoLocked) {
       const nextMode = nextAutoMode(focusedAutoMode);
       list.push({
         id: 'pane.autoMode',
@@ -858,7 +865,7 @@ export function CommandPalette({
     return list.filter((a) => team || !TEAM_ONLY_ACTIONS.has(a.id));
     // `open` in the deps re-snapshots panes each time the palette opens
     // — see the unread-surface block above for why we don't subscribe.
-  }, [open, recentlyClosedPanes, focusedPaneId, focusedPaneCwd, focusEnabled, isFocusedNative, isFocusedAgentCapable, focusedAgentLabel, isFocusedAutoApproveCapable, focusedAutoMode, workspaces, wsOrder, activeWorkspace, onClose, onOpenHelp, onOpenNewPane, onOpenBroadcast, onOpenFeedback]);
+  }, [open, recentlyClosedPanes, focusedPaneId, focusedPaneCwd, focusEnabled, isFocusedNative, isFocusedAgentCapable, focusedAgentLabel, isFocusedAutoApproveCapable, focusedAutoMode, focusedAutoLocked, workspaces, wsOrder, activeWorkspace, onClose, onOpenHelp, onOpenNewPane, onOpenBroadcast, onOpenFeedback]);
 
   const actionHits = useMemo(() => {
     if (mode !== 'actions') return [];

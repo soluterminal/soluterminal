@@ -34,14 +34,15 @@ func denyLocalShinoque(next http.Handler) http.Handler {
 }
 
 type shinoqueTokenCache struct {
-	mu    sync.Mutex
-	path  string
-	mtime time.Time
-	size  int64
-	token string
+	discovery shinoqueDiscoveryCache
+	mu        sync.Mutex
+	path      string
+	mtime     time.Time
+	size      int64
+	token     string
 }
 
-func shinoqueTokenPath() string {
+func shinoqueTokenHome() string {
 	home := os.Getenv("SHINOQUE_HOME")
 	if home == "" {
 		userHome, err := os.UserHomeDir()
@@ -50,16 +51,24 @@ func shinoqueTokenPath() string {
 		}
 		home = filepath.Join(userHome, ".shinoque")
 	}
-	return filepath.Join(home, "relay-token")
+	return home
 }
 
 // Stat on every request so token rotation is picked up without restarting
 // solud. Cache the small file contents only while its mtime and size agree.
 func (c *shinoqueTokenCache) read() string {
-	path := shinoqueTokenPath()
-	if path == "" {
+	config, ok := c.discovery.resolve()
+	if !ok {
 		return ""
 	}
+	return c.readHome(config.home)
+}
+
+func (c *shinoqueTokenCache) readHome(home string) string {
+	if home == "" {
+		return ""
+	}
+	path := filepath.Join(home, "relay-token")
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
 		c.mu.Lock()
@@ -107,12 +116,17 @@ func newShinoqueRelayHandler(next http.Handler, tokens *shinoqueTokenCache) http
 			http.Error(w, "invalid relay prefix", http.StatusBadRequest)
 			return
 		}
-		token := tokens.read()
+		config, ok := tokens.discovery.resolve()
+		if !ok {
+			http.Error(w, shinoqueUnavailable, http.StatusServiceUnavailable)
+			return
+		}
+		token := tokens.readHome(config.home)
 		if token == "" {
 			http.Error(w, shinoqueUnavailable, http.StatusServiceUnavailable)
 			return
 		}
-		port := shinoquePort()
+		port := config.port
 		if port == "" {
 			http.Error(w, "invalid shinoque relay port", http.StatusServiceUnavailable)
 			return

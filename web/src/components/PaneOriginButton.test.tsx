@@ -58,6 +58,16 @@ describe('PaneOriginButton', () => {
     expect(livePaneLabel('gone', '#9 Codex', {}, [])).toBe('#9 Codex');
   });
 
+  it('uses the stable handle in the existing starter chip and details', () => {
+    const lead = pane({ id: 'lead', title: 'Planner', identity: { handle: 'release-lead' } });
+    useStore.setState({ panes: { lead }, layout: { type: 'pane', paneId: 'lead' } } as never);
+    render(<PaneOriginButton pane={pane({ origin: { source: 'agent', byPaneId: 'lead', leadPaneId: 'lead', at: 1 } })} />);
+    const chip = screen.getByLabelText('Worker · lead #1 @release-lead. Show details');
+    expect(chip.title).toBe('Started by #1 @release-lead');
+    fireEvent.click(chip);
+    expect(screen.getByText('Go to #1 @release-lead')).toBeTruthy();
+  });
+
   it('marks a pane you opened as the lead of the workers its agent started, and lists them', () => {
     const mine = pane({ id: 'mine', title: 'Planner', origin: { source: 'user', at: 1 } });
     const w1 = pane({ id: 'w1', title: 'Fix login', state: 'busy', origin: { source: 'agent', byPaneId: 'mine', leadPaneId: 'mine', at: 2 } });

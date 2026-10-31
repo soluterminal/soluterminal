@@ -6,6 +6,7 @@ import {
   LEGACY_TAB_TARGETS,
   SETTINGS_CATEGORIES,
   resolveSettingsTarget,
+  sectionById,
   type LegacySettingsTab,
   type SettingsCategory,
   type SettingsTarget,
@@ -45,23 +46,36 @@ const FALLBACK_TABS: Record<SettingsCategory, SettingsTab> = {
   devices: 'devices',
 };
 
-function readInitialCategory(): SettingsCategory {
+// The last-viewed tab is its category plus, for tabs that share a category
+// (Account, Notifications & voice, Privacy & security and Devices & updates;
+// Terminal & panes and Sidebar), its section.
+function readInitialTarget(): SettingsTarget {
   try {
     const saved = localStorage.getItem('solu.settings.lastCategory');
     const match = SETTINGS_CATEGORIES.find((category) => category.id === saved);
-    if (match) return match.id;
+    if (match) {
+      const section = sectionById(localStorage.getItem('solu.settings.lastSection') ?? '');
+      return section?.category === match.id ? { category: match.id, section: section.id } : { category: match.id };
+    }
   } catch {
     // Storage can be unavailable in privacy-restricted windows.
   }
-  return 'appearance';
+  return { category: 'appearance' };
 }
 
-function persistCategory(category: SettingsCategory): void {
+function persistTarget(target: SettingsTarget): void {
   try {
-    localStorage.setItem('solu.settings.lastCategory', category);
+    localStorage.setItem('solu.settings.lastCategory', target.category);
+    if (target.section) localStorage.setItem('solu.settings.lastSection', target.section);
+    else localStorage.removeItem('solu.settings.lastSection');
   } catch {
     // The in-memory destination remains authoritative when storage is blocked.
   }
+}
+
+/** The tab-level part of a destination: what reopening Settings returns to. */
+function tabTarget(target: SettingsTarget): SettingsTarget {
+  return target.section ? { category: target.category, section: target.section } : { category: target.category };
 }
 
 function sameTarget(left: SettingsTarget, right: SettingsTarget): boolean {
@@ -129,21 +143,22 @@ interface SettingsState {
   goBack: () => void;
 }
 
-const initialCategory = readInitialCategory();
+const initialTarget = readInitialTarget();
+const initialCategory = initialTarget.category;
 
 export const useSettings = create<SettingsState>((set) => ({
   open: false,
   category: initialCategory,
-  tab: legacyTabFor({ category: initialCategory }),
+  tab: legacyTabFor(initialTarget),
   pendingTarget: null,
-  currentTarget: { category: initialCategory },
+  currentTarget: initialTarget,
   section: null,
   modelRole: null,
   query: '',
   history: [],
   openSettings: (input, legacySection, modelRole) => set((state) => {
     const inputResolution = input === undefined
-      ? { target: { category: state.category } as SettingsTarget, legacy: false }
+      ? { target: tabTarget(state.currentTarget), legacy: false }
       : resolveStoreTarget(input);
     let target = { ...inputResolution.target };
 
@@ -165,7 +180,7 @@ export const useSettings = create<SettingsState>((set) => ({
     const history = state.open && !sameTarget(state.currentTarget, target)
       ? [...state.history, state.currentTarget].slice(-20)
       : state.history;
-    persistCategory(target.category);
+    persistTarget(target);
     return {
       open: true,
       category: target.category,
@@ -211,7 +226,7 @@ export const useSettings = create<SettingsState>((set) => ({
   }),
   setCategory: (category) => set((state) => {
     const target: SettingsTarget = { category };
-    persistCategory(category);
+    persistTarget(target);
     return {
       category,
       tab: legacyTabFor(target),
@@ -226,7 +241,7 @@ export const useSettings = create<SettingsState>((set) => ({
   }),
   setTab: (tab) => set((state) => {
     const target = { ...LEGACY_TAB_TARGETS[tab] };
-    persistCategory(target.category);
+    persistTarget(target);
     return {
       category: target.category,
       tab,
@@ -243,7 +258,7 @@ export const useSettings = create<SettingsState>((set) => ({
   goBack: () => set((state) => {
     const target = state.history.at(-1);
     if (!target) return state;
-    persistCategory(target.category);
+    persistTarget(target);
     return {
       category: target.category,
       tab: legacyTabFor(target),

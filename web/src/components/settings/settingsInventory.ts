@@ -12,7 +12,7 @@ export const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
   workspace: [
     'Pane layout', 'Arrange', 'Cols', 'Rows', 'Grid', 'Left+stack', 'Copy on select',
     'Middle-click paste', 'Name new agent panes with AI', 'Sidebar sections', 'Files', 'Localhost ports',
-    'Detached sessions', 'Started by agents', 'Credentials', 'Automations', 'Agents', 'MCP servers', 'Reset to default',
+    'Detached sessions', 'Credentials', 'Automations', 'Agents', 'MCP servers', 'Reset to default',
   ],
   sessions: [
     'New Claude sessions', 'After a restart', 'Suggest next prompt (Focus)',

@@ -84,7 +84,7 @@ export const CONNECT_PROMPT_BODY =
   "Turns on voice, smart approvals and phone access. Anyone signed into this account can then use this PC's terminals from their phone.";
 
 export const CONNECT_LATER_TOAST = "Not connected yet. We'll ask again next time SoluTerminal starts.";
-export const CONNECT_DECLINED_TOAST = 'Not connected. You can connect this PC any time from the mic or Settings → Devices.';
+export const CONNECT_DECLINED_TOAST = 'Not connected. You can connect this PC any time from the mic or Settings → Devices & updates.';
 
 const tried = new Set<string>();
 
@@ -142,7 +142,7 @@ async function connectAndReport(): Promise<void> {
   const toast = useStore.getState().toast;
   const result = await connectThisComputer({ force: true });
   if (result.status === 'connecting' || result.status === 'connected') {
-    toast('This PC is connected. You can disconnect it in Settings → Devices.', { kind: 'info', ttlMs: 7000 });
+    toast('This PC is connected. You can disconnect it in Settings → Devices & updates.', { kind: 'info', ttlMs: 7000 });
     refreshVerdictSoon();
   } else {
     toast(result.message || "Couldn't connect this PC.", { kind: 'warn', ttlMs: 10000 });

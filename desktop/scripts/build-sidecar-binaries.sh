@@ -127,6 +127,8 @@ fi
 # was stamped channel=local and differed; scripts/test-release-reproduce.sh
 # keeps the three in step).
 SOURCE_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+# Verify the committed resource before computing the clean-source stamp.
+node "$ROOT/scripts/windows-resources.mjs" "$VERSION" --check
 LDFLAGS="$(SOLU_BUILD_CHANNEL=release SOLU_SOURCE_SHA="$SOURCE_SHA" solu_daemon_ldflags "$VERSION")"
 export SOLU_SOURCE_SHA="$SOURCE_SHA"
 (

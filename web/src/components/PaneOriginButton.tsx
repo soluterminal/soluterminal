@@ -24,7 +24,7 @@ export function originSummary(o: PaneOrigin, starter = o.byPaneTitle): string {
 export function livePaneLabel(id: string | undefined, saved: string | undefined, panes: Record<string, PaneInfo>, order: string[]): string | undefined {
   const live = id ? panes[id] : undefined;
   if (!live) return saved;
-  const name = live.title || live.cmd.join(' ');
+  const name = live.identity?.handle ? `@${live.identity.handle}` : live.title || live.cmd.join(' ');
   const n = order.indexOf(live.id) + 1;
   return n > 0 ? `#${n} ${name}` : name;
 }

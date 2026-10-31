@@ -162,6 +162,10 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 		if inPolicy.kind == "" {
 			inPolicy.kind = "unclassified"
 		}
+		writeInput := p.Write
+		if !inPolicy.human {
+			writeInput = p.writeProgrammaticInput
+		}
 		heldInput := false
 		holdInput := func() bool {
 			if inputAllowed(p) {
@@ -435,7 +439,7 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 				if isUserKeypress(data) {
 					markInput()
 				}
-				if _, werr := p.Write(data); werr != nil {
+				if _, werr := writeInput(data); werr != nil {
 					goto cleanup
 				}
 			case websocket.TextMessage:
@@ -458,7 +462,7 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 					if isUserKeypress([]byte(msg.Data)) {
 						markInput()
 					}
-					if _, werr := p.Write([]byte(msg.Data)); werr != nil {
+					if _, werr := writeInput([]byte(msg.Data)); werr != nil {
 						goto cleanup
 					}
 				case "resize":

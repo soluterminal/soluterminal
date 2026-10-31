@@ -13,7 +13,7 @@ export const REMOTE_POLICY_HINT =
 // The prompt on this computer when a phone or browser asks to use it. The
 // name is the device's own claim, so the person is told to compare codes.
 export function remoteDevicePendingText(name: string): string {
-  return `“${name}” is asking to use this computer. Approve it only if it shows the same code as Settings → Devices.`;
+  return `“${name}” is asking to use this computer. Approve it only if it shows the same code as Settings → Privacy & security.`;
 }
 
 export const PRIVATE_RELAY_LABEL = "Encrypt this browser's connection end to end";

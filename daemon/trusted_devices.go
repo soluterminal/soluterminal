@@ -114,7 +114,7 @@ type trustedDevices struct {
 // newRequestAnnounceGap spaces announcements of new device requests:
 // enrolment needs no approval, so anyone who can reach the relay could
 // otherwise fill the computer's screen with prompts. Every request still
-// waits in Settings → Devices.
+// waits in Settings → Privacy & security.
 const newRequestAnnounceGap = 30 * time.Second
 
 // announceNewRequest reports whether a new device request should be shown on
@@ -690,14 +690,40 @@ func (a *apiServer) relayDeviceGate(next http.Handler) http.Handler {
 				}
 				writeJSON(w, http.StatusUnauthorized, map[string]any{
 					"error":   "device_not_approved",
-					"message": "This device isn't approved on that computer. Approve it there in Settings → Devices.",
+					"message": "This device isn't approved on that computer. Approve it there in Settings → Privacy & security.",
 				})
 				return
 			}
 			device = d.ID
 		}
+		if device != "" {
+			r = r.WithContext(context.WithValue(r.Context(), relayVerifiedDeviceKey{}, device))
+		}
 		a.serveRevocable(w, r, device, next)
 	})
+}
+
+type relayVerifiedDeviceKey struct{}
+
+// relayVerifiedDevice reports the device whose signature relayDeviceGate
+// verified on this very request, or "". Handlers that allow a narrow action
+// over the relay to approved devices only (remote account switching,
+// claudecreds_relay_switch.go) read it; it is never set from anything the
+// request itself carries.
+func relayVerifiedDevice(r *http.Request) string {
+	v, _ := r.Context().Value(relayVerifiedDeviceKey{}).(string)
+	return v
+}
+
+// approvedDeviceName returns the name of device id while it is approved.
+func (s *trustedDevices) approvedDeviceName(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.find(id)
+	if d == nil || d.Status != deviceStatusApproved {
+		return "", false
+	}
+	return d.Name, true
 }
 
 // relayAllowed reports whether a relayed connection opened by device ("" =

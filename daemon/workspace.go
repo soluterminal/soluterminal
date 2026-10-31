@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -18,6 +19,7 @@ type LayoutNode map[string]any
 // PaneDef is a minimal serializable pane description, saved inline in a
 // workspace so loading the workspace can respawn panes that have since died.
 type PaneDef struct {
+	NeverAutoAnswer bool     `json:"neverAutoAnswer,omitempty"`
 	IdentityBlocked bool     `json:"identityBlocked,omitempty"`
 	ID              string   `json:"id"`
 	Cwd             string   `json:"cwd"`
@@ -98,6 +100,25 @@ type FileTileInfoDef struct {
 }
 
 type Workspace struct {
+	// Missing mode is auto for older saved workspaces. Geometry is shared,
+	// rather than a browser preference; capacity/aspect drive server spawns.
+	LayoutMode    string  `json:"layoutMode,omitempty"`
+	LayoutColumns int     `json:"layoutColumns,omitempty"`
+	LayoutAspect  float64 `json:"layoutAspect,omitempty"`
+	// Revision of committed client layout decisions. Membership additions
+	// still merge through KnownPaneIDs, so a server spawn need not conflict.
+	LayoutVersion     uint64  `json:"layoutVersion,omitempty"`
+	LayoutBaseVersion *uint64 `json:"layoutBaseVersion,omitempty"`
+
+	// Request-only: the panes this view has observed, including ones it has
+	// intentionally removed. Unknown server additions must survive its save.
+	KnownPaneIDs *[]string `json:"knownPaneIds,omitempty"`
+	// Server-owned tombstones for explicitly closed panes. IDs are never reused;
+	// retain these across saves/restarts so an old window cannot restore a closed
+	// pane's layout leaf or launch recipe. Absence from PaneIds alone is ambiguous:
+	// a client may legitimately be saving a newly created local pane.
+	RemovedPaneIDs []string `json:"removedPaneIds,omitempty"`
+
 	Name     string            `json:"name"`
 	Layout   LayoutNode        `json:"layout"`
 	PaneIds  []string          `json:"paneIds"`
@@ -163,6 +184,8 @@ func (s *WorkspaceStore) load() error {
 }
 
 var errWorkspacePersistence = errors.New("workspace storage unavailable")
+var errWorkspaceInvalidLayout = errors.New("invalid workspace layout")
+var errWorkspaceLayoutConflict = errors.New("workspace layout changed in another view; reload the workspace and retry")
 var errWorkspaceMoveConflict = errors.New("workspace changed after a pane move; reload the workspace and retry")
 
 // commit publishes a candidate only after persistence succeeds. Callers hold
@@ -256,7 +279,7 @@ func (s *WorkspaceStore) AddPane(name string, pane PaneDef, direction, targetPan
 	}
 	w.Panes = appendPaneDef(w.Panes, pane)
 	if !migrated {
-		w.Layout = insertPaneIntoLayout(w.Layout, pane.ID, direction, targetPaneID)
+		addWorkspaceLayoutPane(w, pane.ID, direction, targetPaneID)
 	}
 	w.ActiveAt = time.Now().UTC()
 	next := s.candidate()
@@ -343,18 +366,20 @@ func (s *WorkspaceStore) MovePane(source, destination, paneID, direction, target
 	srcNext.PaneIds = removePaneID(srcNext.PaneIds, paneID)
 	srcNext.Panes = removePaneDef(srcNext.Panes, paneID)
 	var removed bool
-	srcNext.Layout, removed = removePaneFromLayout(srcNext.Layout, paneID)
+	removed = removeWorkspaceLayoutPane(srcNext, paneID)
 	if !removed {
 		return nil, nil, fmt.Errorf("pane %q is not in the source layout", paneID)
 	}
 	dstNext.PaneIds = append(dstNext.PaneIds, paneID)
 	dstNext.Panes = appendPaneDef(dstNext.Panes, def)
-	dstNext.Layout = insertPaneIntoLayout(dstNext.Layout, paneID, direction, targetPaneID)
+	addWorkspaceLayoutPane(dstNext, paneID, direction, targetPaneID)
 	now := time.Now().UTC()
 	srcNext.ActiveAt = now
 	dstNext.ActiveAt = now
 	srcNext.PaneMoveVersion++
 	dstNext.PaneMoveVersion++
+	srcNext.LayoutVersion++
+	dstNext.LayoutVersion++
 	next := s.candidate()
 	next[source] = srcNext
 	next[destination] = dstNext
@@ -379,13 +404,18 @@ func (s *WorkspaceStore) RemovePane(paneID string) error {
 		w := cloneWorkspace(original)
 		nextPaneIDs := removePaneID(w.PaneIds, paneID)
 		nextPanes := removePaneDef(w.Panes, paneID)
-		nextLayout, layoutChanged := removePaneFromLayout(w.Layout, paneID)
+		layoutChanged := removeWorkspaceLayoutPane(w, paneID)
+		nextLayout := w.Layout
 		if len(nextPaneIDs) == len(w.PaneIds) && len(nextPanes) == len(w.Panes) && !layoutChanged {
 			continue
 		}
 		w.PaneIds = nextPaneIDs
 		w.Panes = nextPanes
 		w.Layout = nextLayout
+		w.RemovedPaneIDs = append(w.RemovedPaneIDs, paneID)
+		if name != "_current" {
+			w.LayoutVersion++
+		}
 		w.ActiveAt = time.Now().UTC()
 		next[name] = w
 		changed = true
@@ -451,6 +481,20 @@ func (s *WorkspaceStore) Put(w *Workspace) error {
 	// Supplier can acquire workflow locks. It MUST run before WorkspaceStore.mu.
 	bindings := s.managedOwnerBindings()
 	next := sanitizeManagedOwnerWorkspace(cloneWorkspace(w), bindings)
+	baseVersion := next.LayoutBaseVersion
+	next.LayoutBaseVersion = nil
+	known := next.KnownPaneIDs
+	next.KnownPaneIDs = nil   // observation belongs to a view, never the saved workspace
+	next.RemovedPaneIDs = nil // only RemovePane/ReplacePane may author closed-pane tombstones
+	if next.LayoutMode != "" && next.LayoutMode != "auto" && next.LayoutMode != "free" {
+		return fmt.Errorf("%w: mode %q", errWorkspaceInvalidLayout, next.LayoutMode)
+	}
+	if baseVersion != nil {
+		if next.LayoutMode == "" {
+			next.LayoutMode = "auto"
+		}
+		next.LayoutColumns, next.LayoutAspect = workspaceLayoutConfig(next)
+	}
 	next.ActiveAt = time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -462,13 +506,37 @@ func (s *WorkspaceStore) Put(w *Workspace) error {
 			return errWorkspaceMoveConflict
 		}
 		prev := sanitizeManagedOwnerWorkspace(cloneWorkspace(original), bindings)
+		if next.Name != "_current" {
+			if (baseVersion != nil && *baseVersion != prev.LayoutVersion && !sameWorkspaceLayoutDecision(next, prev)) || (baseVersion == nil && prev.LayoutMode != "") {
+				return errWorkspaceLayoutConflict
+			}
+		}
+		// The revision and shared mode are daemon-owned for legacy writes.
+		next.LayoutVersion = prev.LayoutVersion
+		if baseVersion == nil {
+			next.LayoutMode, next.LayoutColumns, next.LayoutAspect = prev.LayoutMode, prev.LayoutColumns, prev.LayoutAspect
+		}
+		next.RemovedPaneIDs = cloneStringSlice(prev.RemovedPaneIDs)
+		for _, id := range next.RemovedPaneIDs {
+			removeWorkspaceLayoutPane(next, id)
+			next.PaneIds = removePaneID(next.PaneIds, id)
+			next.Panes = removePaneDef(next.Panes, id)
+		}
 		next.ContextPack = prev.ContextPack
 		next.Protected = prev.Protected
-		merger.mergeRecentAddsLocked(next, prev, next.ActiveAt)
+		mergeUnseenWorkspacePanes(next, prev, known)
+		if known == nil {
+			merger.mergeRecentAddsLocked(next, prev, next.ActiveAt)
+		}
 		next = sanitizeManagedOwnerWorkspace(next, bindings)
+		if baseVersion != nil && next.Name != "_current" && (!reflect.DeepEqual(next.Layout, prev.Layout) || next.LayoutMode != prev.LayoutMode || next.LayoutColumns != prev.LayoutColumns || next.LayoutAspect != prev.LayoutAspect) {
+			next.LayoutVersion++
+		}
 		if next.Name != "_current" && len(prev.PaneIds) > 0 && (next.Layout == nil || len(next.PaneIds) == 0) {
 			return fmt.Errorf("refusing to clear non-empty workspace %q without delete/clear intent", next.Name)
 		}
+	} else {
+		next.LayoutVersion = 0
 	}
 	pruneManagedOwnerAdds(adds, bindings)
 	candidate := s.candidate()
@@ -490,6 +558,7 @@ func cloneWorkspace(w *Workspace) *Workspace {
 	next := *w
 	next.Layout = cloneLayoutDeep(w.Layout)
 	next.PaneIds = cloneStringSlice(w.PaneIds)
+	next.RemovedPaneIDs = cloneStringSlice(w.RemovedPaneIDs)
 	next.Panes = clonePaneDefs(w.Panes)
 	next.Browsers = cloneBrowserInfoDefs(w.Browsers)
 	next.Files = cloneFileTileInfoDefs(w.Files)
@@ -640,12 +709,67 @@ func (s *WorkspaceStore) mergeRecentAddsLocked(next *Workspace, prev *Workspace,
 		}
 		next.PaneIds = append(next.PaneIds, paneID)
 		next.Panes = appendPaneDef(next.Panes, def)
-		next.Layout = insertPaneIntoLayout(next.Layout, paneID, "horizontal", "")
+		addWorkspaceLayoutPane(next, paneID, "horizontal", "")
 		nextIDs[paneID] = true
 		log.Printf("workspace.Put: preserved recently-created pane %s in %q from stale save", paneID, next.Name)
 	}
 	if len(adds) == 0 {
 		delete(s.recentAdds, next.Name)
+	}
+}
+
+// Merge against the committed membership under the store lock. Unlike the
+// legacy recent-add grace period this works after any delay or daemon restart.
+func mergeUnseenWorkspacePanes(next, prev *Workspace, known *[]string) {
+	// _current is the replaceable client scratchpad, including an explicit
+	// Clear layout. Agent spawns only attach to visible named workspaces.
+	if next.Name == "_current" {
+		return
+	}
+	seen := map[string]bool{}
+	if known != nil {
+		for _, id := range *known {
+			seen[id] = true
+		}
+	}
+	defs := map[string]PaneDef{}
+	for _, def := range prev.Panes {
+		defs[def.ID] = def
+	}
+	present := map[string]bool{}
+	var order []string
+	layoutPaneOrder(next.Layout, &order)
+	for _, id := range order {
+		present[id] = true
+	}
+	for _, id := range prev.PaneIds {
+		def, hasDef := defs[id]
+		// Older clients have no observation set. Conservatively retain agent
+		// additions; the updated client can explicitly remove observed panes.
+		if seen[id] || (known == nil && (!hasDef || def.Origin == nil || def.Origin.Source != "agent")) {
+			continue
+		}
+		if !present[id] {
+			target := ""
+			if def.Origin != nil {
+				target = def.Origin.ByPaneID
+			}
+			addWorkspaceLayoutPane(next, id, "horizontal", target)
+			present[id] = true
+		}
+		found := false
+		for _, candidate := range next.PaneIds {
+			if candidate == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			next.PaneIds = append(next.PaneIds, id)
+		}
+		if hasDef {
+			next.Panes = appendPaneDef(next.Panes, def)
+		}
 	}
 }
 
@@ -685,10 +809,22 @@ func insertPaneIntoLayout(existing LayoutNode, paneID, direction, targetPaneID s
 	return LayoutNode{
 		"type":      "split",
 		"direction": direction,
-		"ratio":     0.5,
+		"ratio":     float64(layoutLeafCount(existing)) / float64(layoutLeafCount(existing)+1),
 		"a":         existing,
 		"b":         leaf,
 	}
+}
+
+func layoutLeafCount(node LayoutNode) int {
+	if node == nil {
+		return 0
+	}
+	if node["type"] != "split" {
+		return 1
+	}
+	a, _ := layoutChild(node["a"])
+	b, _ := layoutChild(node["b"])
+	return layoutLeafCount(a) + layoutLeafCount(b)
 }
 
 func insertPaneAtTarget(node LayoutNode, leaf LayoutNode, direction, targetPaneID string) (LayoutNode, bool) {

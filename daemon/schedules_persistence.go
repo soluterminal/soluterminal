@@ -18,13 +18,24 @@ type scheduleFile struct {
 }
 
 func (s *ScheduleStore) saveUnlocked() error {
-	var list []*Schedule
+	var list []json.RawMessage
 	for _, id := range s.order {
 		if sched, ok := s.items[id]; ok {
-			list = append(list, sched)
+			raw, ok := s.opaqueSchedules[id]
+			if !ok {
+				var err error
+				raw, err = json.Marshal(sched)
+				if err != nil {
+					return err
+				}
+			}
+			list = append(list, raw)
 		}
 	}
-	data, err := json.MarshalIndent(scheduleFile{Schedules: list, Order: s.order}, "", "  ")
+	data, err := json.MarshalIndent(struct {
+		Schedules []json.RawMessage `json:"schedules"`
+		Order     []string          `json:"order"`
+	}{list, s.order}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -46,8 +57,20 @@ func (s *ScheduleStore) load() error {
 		quarantineCorruptState(s.path, err)
 		return nil
 	}
+	var rawFile struct {
+		Schedules []json.RawMessage `json:"schedules"`
+	}
+	if err := json.Unmarshal(data, &rawFile); err != nil {
+		return err
+	}
+	s.opaqueSchedules = make(map[string]json.RawMessage)
 	migrated := false
-	for _, sched := range f.Schedules {
+	for i, sched := range f.Schedules {
+		if !scheduleAvailable(sched) {
+			s.opaqueSchedules[sched.ID] = rawFile.Schedules[i]
+			s.items[sched.ID] = sched
+			continue
+		}
 		// Schedule task models target Claude today. A stale Pro identifier is
 		// therefore unsafe rather than recoverable; disable it before cron wiring
 		// instead of handing it to an unrelated provider CLI.

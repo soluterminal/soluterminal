@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -262,12 +263,14 @@ var cronParser = cron.NewParser(
 // ScheduleStore owns all schedules: persistence, the cron scheduler
 // goroutine, and the fire wiring. Lives for the daemon's lifetime.
 type ScheduleStore struct {
-	mu       sync.Mutex
-	path     string
-	items    map[string]*Schedule
-	order    []string // insertion order for stable listing
-	cron     *cron.Cron
-	entryIDs map[string]cron.EntryID // schedule ID → cron entry ID (for Remove)
+	mu    sync.Mutex
+	path  string
+	items map[string]*Schedule
+	// Preserve unsupported records, including fields unknown to this build.
+	opaqueSchedules map[string]json.RawMessage
+	order           []string // insertion order for stable listing
+	cron            *cron.Cron
+	entryIDs        map[string]cron.EntryID // schedule ID → cron entry ID (for Remove)
 	// One-time schedules use time.Timer instead of the cron library —
 	// cron can't represent "this exact instant, once" (any cron that
 	// matches the specific minute would also fire next year on the
@@ -332,7 +335,7 @@ type ScheduleStore struct {
 	// schedule fires (agents_run.go). Installed by main.go via SetAgentRunner
 	// so the scheduler holds a function, not the agent store — the runner is
 	// the ONLY thing this file knows about agents. Nil = no agent store on
-	// this daemon; a fire then records an error rather than panicking.
+	// this daemon; a fire is ignored without changing the schedule.
 	agentRunner func(agentID, triggerContext string) (string, string)
 
 	// ownedRunGate and ownedRunMirror are the two hooks an IMPORTED schedule
@@ -456,7 +459,24 @@ func (s *Schedule) kindLabel() string {
 	return s.Kind
 }
 
+// scheduleAvailable is a build capability check, not a runtime health check.
+// Unknown kinds must never fall through to prompt delivery or lifecycle edits.
+func scheduleAvailable(sched *Schedule) bool {
+	switch sched.Kind {
+	case "", "prompt", "task":
+		return true
+	default:
+		kind, ok := scheduleKinds[sched.Kind]
+		return ok && kind.fire != nil && (kind.available == nil || kind.available(*sched))
+	}
+}
+
+var errScheduleUnavailable = errors.New("schedule not available in this build")
+
 func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore, error) {
+	if updateOnlyDaemon() {
+		return nil, fmt.Errorf("scheduler: %s", updateOnlyRefusal)
+	}
 	s := &ScheduleStore{
 		path:            filepath.Join(dataDir, "schedules.json"),
 		items:           map[string]*Schedule{},
@@ -478,9 +498,10 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 	}
 	now := time.Now()
 	var catchUpIDs []string
+	dirty := false
 	for _, id := range s.order {
 		sched := s.items[id]
-		if !sched.Enabled {
+		if !sched.Enabled || !scheduleAvailable(sched) {
 			continue
 		}
 		// One-time schedules whose moment passed while the daemon was
@@ -489,6 +510,7 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 		if sched.oneTime() && sched.RunAt.Before(now) {
 			log.Printf("scheduler: one-time %q (%s) missed while daemon was down (runAt=%s)", sched.Name, sched.ID, sched.RunAt.Format(time.RFC3339))
 			sched.Enabled = false
+			dirty = true
 			sched.Runs = append([]ScheduleRun{{At: now, Status: "skipped", Detail: "missed while daemon was down"}}, sched.Runs...)
 			sched.SkipCount++
 			if len(sched.Runs) > maxRunHistory {
@@ -502,6 +524,7 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 		if !sched.oneTime() && sched.Until != nil && !sched.Until.After(now) {
 			log.Printf("scheduler: recurring %q (%s) past until=%s, disabling", sched.Name, sched.ID, sched.Until.Format(time.RFC3339))
 			sched.Enabled = false
+			dirty = true
 			continue
 		}
 		// Missed-run visibility: recurring fires lost to downtime used to
@@ -525,6 +548,7 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 					sched.Runs = sched.Runs[:maxRunHistory]
 				}
 				sched.SkipCount += missed
+				dirty = true
 				log.Printf("scheduler: recurring %q (%s): %s", sched.Name, sched.ID, detail)
 			}
 		}
@@ -533,11 +557,14 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 			// sees a problem in the UI instead of a silent no-op.
 			log.Printf("scheduler: disabling %q (%s): %v", sched.Name, sched.ID, err)
 			sched.Enabled = false
+			dirty = true
 		}
 	}
 	// Persist any auto-disables from the load sweep so the UI reflects
 	// reality on first fetch.
-	_ = s.saveUnlocked()
+	if dirty {
+		_ = s.saveUnlocked()
+	}
 	s.cron.Start()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -954,6 +981,10 @@ func (s *ScheduleStore) SetOwnedBy(schedID, agentID string) error {
 		s.mu.Unlock()
 		return errors.New("schedule not found")
 	}
+	if !scheduleAvailable(sched) {
+		s.mu.Unlock()
+		return errScheduleUnavailable
+	}
 	if sched.OwnedByAgentID != "" && sched.OwnedByAgentID != agentID {
 		owner := sched.OwnedByAgentID
 		s.mu.Unlock()
@@ -981,6 +1012,10 @@ func (s *ScheduleStore) ClearOwnedBy(schedID string) error {
 	if !ok {
 		s.mu.Unlock()
 		return errors.New("schedule not found")
+	}
+	if !scheduleAvailable(sched) {
+		s.mu.Unlock()
+		return errScheduleUnavailable
 	}
 	if sched.OwnedByAgentID == "" {
 		s.mu.Unlock()
@@ -1018,6 +1053,10 @@ func (s *ScheduleStore) Update(id string, in ScheduleInput) (*Schedule, error) {
 	if !ok {
 		s.mu.Unlock()
 		return nil, errors.New("schedule not found")
+	}
+	if !scheduleAvailable(sched) {
+		s.mu.Unlock()
+		return nil, errScheduleUnavailable
 	}
 	enabled := sched.Enabled
 	if in.Enabled != nil {
@@ -1076,6 +1115,10 @@ func (s *ScheduleStore) Delete(id string) error {
 		s.mu.Unlock()
 		return errors.New("schedule not found")
 	}
+	if !scheduleAvailable(sched) {
+		s.mu.Unlock()
+		return errScheduleUnavailable
+	}
 	isTask := sched.isTask()
 	s.unscheduleUnlocked(id)
 	delete(s.items, id)
@@ -1104,6 +1147,10 @@ func (s *ScheduleStore) MarkRead(id string, at time.Time) (*Schedule, error) {
 		s.mu.Unlock()
 		return nil, errors.New("schedule not found")
 	}
+	if !scheduleAvailable(sched) {
+		s.mu.Unlock()
+		return nil, errScheduleUnavailable
+	}
 	if sched.LastReadAt != nil && !at.After(*sched.LastReadAt) {
 		s.mu.Unlock()
 		return sched, nil
@@ -1127,6 +1174,10 @@ func (s *ScheduleStore) SetEnabled(id string, enabled bool) (*Schedule, error) {
 	if !ok {
 		s.mu.Unlock()
 		return nil, errors.New("schedule not found")
+	}
+	if !scheduleAvailable(sched) {
+		s.mu.Unlock()
+		return nil, errScheduleUnavailable
 	}
 	if sched.Enabled == enabled {
 		s.mu.Unlock()
@@ -1184,6 +1235,9 @@ func (s *ScheduleStore) SnoozeNext(id string) (*Schedule, error) {
 	if !ok {
 		return nil, errors.New("schedule not found")
 	}
+	if !scheduleAvailable(sched) {
+		return nil, errScheduleUnavailable
+	}
 	if sched.oneTime() {
 		return nil, errors.New("snooze only applies to recurring schedules")
 	}
@@ -1216,6 +1270,9 @@ func (s *ScheduleStore) FireNow(id string) (*Schedule, error) {
 	s.mu.Unlock()
 	if !ok {
 		return nil, errors.New("schedule not found")
+	}
+	if !scheduleAvailable(sched) {
+		return nil, errScheduleUnavailable
 	}
 	s.fire(sched.ID)
 	return sched, nil

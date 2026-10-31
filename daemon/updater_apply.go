@@ -894,6 +894,12 @@ func preflightUpdateSuccessorListenerWithListen(network, addr string, listen fun
 // later and release the port — see waitForBindableAddr in main.go for
 // the retry loop the successor runs.
 func spawnSuccessor(binPath, predecessorVersion, bootMarker string) (*os.Process, error) {
+	// An update-only daemon has no successor (update_only_boot.go): it never
+	// restarts into another version. If anything ever got here, exit.
+	if updateOnlyDaemon() {
+		log.Printf("update-only daemon: refusing to start a successor; exiting")
+		os.Exit(0)
+	}
 	args := os.Args[1:]
 	cmd := exec.Command(binPath, args...)
 	cmd.SysProcAttr = successorSysProcAttr()

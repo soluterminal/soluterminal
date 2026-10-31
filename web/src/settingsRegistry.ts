@@ -19,6 +19,9 @@ export type LegacySettingsTab =
   | 'claude'
   | 'sidebar'
   | 'team'
+  | 'account'
+  | 'notifications'
+  | 'privacy'
   | 'devices'
   | 'warden'
   | 'tasks'
@@ -110,6 +113,11 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   defineSection('credentials.team', 'credentials', 'Team pool health', 'Redacted team credential repair status.', { aliases: ['team repair', 're-auth'] }),
   defineSection('credentials.privacy', 'credentials', 'Screen-share safety', 'Mask identities across operator surfaces.', { aliases: ['screen share', 'privacy', 'mask'] }),
   defineSection('team.pool', 'team', 'Team pool', 'Membership and shared provider credentials.'),
+  // Settings › Devices split into four tabs (2026-10-31); the three new tabs
+  // are sections of the devices category so their links resolve exactly.
+  defineSection('devices.account', 'devices', 'Account', 'Sign-in, product emails and personal view.', { aliases: ['sign in', 'sign out', 'email'] }),
+  defineSection('devices.notifications', 'devices', 'Notifications & voice', 'Voice dictation settings.', { aliases: ['voice', 'dictation', 'mic'] }),
+  defineSection('devices.privacy', 'devices', 'Privacy & security', 'Agent permissions, remote devices, encryption, agent integration and telemetry.', { aliases: ['approve', 'permissions', 'remote', 'encryption', 'privacy'] }),
   defineSection('devices.pairing', 'devices', 'Pairing & desktop', 'Desktop installer, phone pairing and startup.', { aliases: ['phone', 'pair', 'qr'] }),
   defineSection('devices.updates', 'devices', 'Updates', 'Automatic daemon and desktop updates.', { aliases: ['update', 'auto-update'] }),
   defineSection('devices.diagnostics', 'devices', 'Diagnostics', 'Compatibility flags and privacy-safe local migration counters.'),
@@ -144,7 +152,6 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['workspace.sidebar', 'files', 'Files'],
   ['workspace.sidebar', 'ports', 'Localhost ports'],
   ['workspace.sidebar', 'background', 'Detached sessions'],
-  ['workspace.sidebar', 'agentPanes', 'Started by agents'],
   ['workspace.sidebar', 'credentials', 'Credentials'],
   ['workspace.sidebar', 'schedules', 'Automations'],
   ['workspace.sidebar', 'agents', 'Agents'],
@@ -191,8 +198,8 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['devices.pairing', 'launchStartup', 'Launch on startup'],
   ['devices.updates', 'automaticUpdates', 'Automatic updates', ['update', 'auto-update']],
   ['devices.updates', 'desktopRestarts', 'Desktop app restarts', [], 'app-restart'],
-  ['devices.diagnostics', 'anonymousCheckin', 'Send an anonymous daily check-in', ['check-in', 'telemetry', 'privacy', 'analytics']],
-  ['devices.diagnostics', 'agentIntegration', 'Let Claude Code and Codex use SoluTerminal', ['mcp', 'claude', 'codex', 'hooks', 'integration', 'uninstall']],
+  ['devices.privacy', 'anonymousCheckin', 'Send an anonymous daily check-in', ['check-in', 'telemetry', 'privacy', 'analytics']],
+  ['devices.privacy', 'agentIntegration', 'Let Claude Code and Codex use SoluTerminal', ['mcp', 'claude', 'codex', 'hooks', 'integration', 'uninstall']],
 ];
 
 export const SETTINGS_CONTROLS: SettingsControlDef[] = CONTROL_SEEDS.map(([
@@ -220,6 +227,9 @@ export const LEGACY_TAB_TARGETS: Record<LegacySettingsTab, SettingsTarget> = {
   claude: { category: 'sessions' },
   sidebar: { category: 'workspace', section: 'workspace.sidebar' },
   team: { category: 'team' },
+  account: { category: 'devices', section: 'devices.account' },
+  notifications: { category: 'devices', section: 'devices.notifications' },
+  privacy: { category: 'devices', section: 'devices.privacy' },
   devices: { category: 'devices' },
   warden: { category: 'agents', section: 'agents.warden' },
   tasks: { category: 'workflows' },
@@ -228,6 +238,9 @@ export const LEGACY_TAB_TARGETS: Record<LegacySettingsTab, SettingsTarget> = {
 };
 
 export const LEGACY_SECTION_TARGETS: Record<string, SettingsTarget> = {
+  // Preserve links to controls that moved with Privacy & security.
+  'devices.diagnostics.anonymousCheckin': { category: 'devices', section: 'devices.privacy', control: 'devices.privacy.anonymousCheckin' },
+  'devices.diagnostics.agentIntegration': { category: 'devices', section: 'devices.privacy', control: 'devices.privacy.agentIntegration' },
   // Max heavy operations went with the task engine; old links open the section.
   'tasks.resourceLimits.maxHeavyOps': { category: 'workflows', section: 'workflows.resources' },
   'tasks.modelsFallbacks': { category: 'workflows', section: 'workflows.modelsFallbacks' },

@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { IconMaximize, IconMinimize } from './ui/icons';
 import type { PaneInfo } from '../types';
-import { useStore } from '../store';
+import { effectiveVisiblePaneIds, useStore } from '../store';
 import { api } from '../api';
 import { firstImageFile, insertAttachToken, insertPlainPathToken, hasImagePayload } from '../native/composerAttach';
 import { DRAG_MIME, computeZone, type DropZone } from '../lib/paneDnd';
@@ -140,6 +140,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
   const paneAgentLabel = agentLabel(paneAgent);
   const setFocus = useStore((s) => s.setFocus);
   const focused = useStore((s) => s.focusedPaneId === pane.id);
+  const paneMovesAllowed = useStore(s => !s.workspaceView);
   const movePane = useStore((s) => s.movePaneInLayout);
   const setDraggingPane = useStore((s) => s.setDraggingPane);
   // Per-machine opt-in for Claude's "next-prompt" suggestions (default OFF).
@@ -175,7 +176,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
   // native pane keeps its DOM warm but drops the held-open HTTP/1.1 SSE so it
   // doesn't consume one of the browser's 6 connections to the local daemon
   // (see the SSE effect in useNativePane). Re-subscribes when shown again.
-  const inActiveLayout = useMemo(() => collectPaneIds(layout).includes(pane.id), [layout, pane.id]);
+  const inActiveLayout = useStore(s => effectiveVisiblePaneIds(s).includes(pane.id));
 
   // Font size / Line height (Preferences) drive BOTH renderers so Terminal and
   // Focus stay consistent. The terminal applies the px / ratio directly to xterm;
@@ -1721,7 +1722,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
       onPointerDownCapture={() => setFocus(pane.id)}
       onContextMenu={openContextMenu}
       onDragOver={(e) => {
-        if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+        if (useStore.getState().workspaceView || !e.dataTransfer.types.includes(DRAG_MIME)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         setDropZone(computeZone(e));
@@ -1731,7 +1732,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
         if (!e.currentTarget.contains(related)) setDropZone(null);
       }}
       onDrop={(e) => {
-        if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+        if (useStore.getState().workspaceView || !e.dataTransfer.types.includes(DRAG_MIME)) return;
         e.preventDefault();
         const src = e.dataTransfer.getData(DRAG_MIME);
         const zone = computeZone(e);
@@ -1741,7 +1742,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
     >
       <div
         className="pane-header native-header"
-        draggable
+        draggable={paneMovesAllowed}
         onContextMenu={openContextMenu}
         onDoubleClick={(e) => {
           if (!canZoom) return;
@@ -1749,6 +1750,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
           toggleZoom(pane.id);
         }}
         onDragStart={(e) => {
+          if (useStore.getState().workspaceView) { e.preventDefault(); return; }
           e.dataTransfer.setData(DRAG_MIME, pane.id);
           e.dataTransfer.effectAllowed = 'move';
           setBeingDragged(true);

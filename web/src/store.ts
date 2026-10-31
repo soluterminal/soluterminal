@@ -1,3 +1,6 @@
+import { workspaceViewLayout, type WorkspaceView } from './lib/workspaceView';
+import { appendAutoPane, balancedLayout, DEFAULT_LAYOUT_ASPECT, DEFAULT_LAYOUT_COLUMNS, MAX_LAYOUT_COLUMNS, MIN_AUTO_PANE_WIDTH, removeCustomPane, resizedGridConfig, splitLargestPane } from './lib/autoLayout';
+import { createWorkspaceSaveQueue } from './lib/workspaceSaveQueue';
 import { holdTerminalPlacement, reconcileConfirmedTerminalPanes } from './lib/terminalViewSessions';
 import { getMachineAccessState, subscribeMachineAccess } from './lib/machineAccess';
 import { clearOwnerURL, type MainPresentation, type WorkspaceReturnContext } from './lib/ownerView';
@@ -39,14 +42,14 @@ import {
   collectLeaves,
   collectPaneIds,
   insertLeaf,
-  insertPane,
   layoutHasLeaf,
   detachManagedOwnerPresentation,
   leafId,
+  leafCount,
   movePaneInLayoutImpl,
   pruneLayout,
   remapLayoutIds,
-  removePane,
+  removePane as removeLayoutPane,
   updateDiffLeaf,
   type LayoutPresetId,
 } from './lib/layout';
@@ -839,8 +842,21 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   managedOwnerBindings: ReadonlyMap<string,string>;
   detachOwnerPresentation: (bindings: ReadonlyMap<string,string>, scope: RoutingScope) => void;
   returnToWorkspace: () => void;
+  workspaceView: WorkspaceView | null;
+  showWorkspacePaneView: (paneId: string, team: boolean) => void;
+  toggleWorkspaceLeadsOnly: () => void;
+  returnWorkspaceLayout: () => void;
   activeWorkspace: string;
   activeWorkspaceMoveVersion: number;
+  activeWorkspaceLayoutVersion: number;
+  workspaceLayoutDirty: boolean;
+  layoutColumns: number;
+  layoutAspect: number;
+  retilePanes: () => void;
+  beginCustomLayout: () => void;
+  updateLayoutViewport: (width: number, height: number) => void;
+  activeWorkspaceKnownPaneIds: string[];
+  showSpawnedPane: (paneId: string, workspace: string) => void;
   focusedPaneId: string | null;
   // The pane the user most recently selected DELIBERATELY (click, keyboard nav,
   // command palette, reveal, or a fresh spawn the user asked for). Stamped by
@@ -922,11 +938,8 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   focusFontOffset: number;
   setFocusFontOffset: (px: number) => void;
 
-  // Pane layout mode. 'auto' = panes are equal-sized, computed from the
-  // tree shape; resize handles are disabled. 'free' = legacy behaviour,
-  // user drags handles to set ratios. Default 'auto' to sidestep the
-  // codex/ratatui resize corruption family of bugs for users who don't
-  // need fine-grained resizing.
+  // Shared workspace arrangement. Auto rebuilds a balanced grid when the
+  // visible tile count changes; free preserves the user's custom geometry.
   paneLayoutMode: 'auto' | 'free';
   setPaneLayoutMode: (m: 'auto' | 'free') => void;
   // Native bottom-bar "vitals" visibility — which read-only session indicators show
@@ -1532,6 +1545,11 @@ async function launchCmdHere(
 // On workspace switch we flush the pending save first (see flushAutosave)
 // so the outgoing workspace doesn't lose late edits.
 let saveTimer: number | null = null;
+const automaticViewportLayouts = new WeakSet<Layout>();
+const enqueueWorkspaceSave = createWorkspaceSaveQueue();
+function saveWorkspaceVersioned(w: Workspace, scope: RoutingScope) {
+  return enqueueWorkspaceSave(`${scope.key}:${w.name}`, w, candidate => api.saveWorkspace(candidate, scope));
+}
 const workspaceSaves = new Set<Promise<unknown>>();
 function trackWorkspaceSave<T>(save: Promise<T>): Promise<T> {
   workspaceSaves.add(save);
@@ -1546,7 +1564,14 @@ const refreshScheduleInFlight = new Map<string, Promise<void>>();
 const scheduleRowsDirty = new Set<string>();
 
 function scheduleAutosave(get: () => State) {
-  if (workspaceMovedTo(get().activeWorkspace)) return;
+  const s = get();
+  if (workspaceMovedTo(s.activeWorkspace)) return;
+  // A locally created/adopted pane is already visible to this view, even if
+  // the user closes it before the debounced save or next server refresh.
+  useStore.setState({ workspaceLayoutDirty: true });
+  const known = new Set(s.activeWorkspaceKnownPaneIds);
+  for (const id of collectPaneIds(s.layout)) known.add(id);
+  if (known.size !== s.activeWorkspaceKnownPaneIds.length) useStore.setState({ activeWorkspaceKnownPaneIds: [...known] });
   if (saveTimer) window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
     doAutosave(get);
@@ -1566,7 +1591,8 @@ function reportWorkspaceMoveConflict(get: () => State, name: string, version: nu
   if (!(error instanceof ApiError) || error.status !== 409 || scope.key !== currentRoutingScope().key) return;
   const state = get();
   if (state.activeWorkspace !== name || state.activeWorkspaceMoveVersion !== (version ?? 0)) return;
-  const message = `“${name}” changed after a pane move in another view. Layout changes here are not being saved. Reload the latest layout to continue.`;
+  const layoutConflict = error.message.includes("workspace layout changed");
+  const message = layoutConflict ? `“${name}” layout changed in another view. Your local layout has not been saved. Reload the latest layout to continue.` : `“${name}” changed after a pane move in another view. Layout changes here are not being saved. Reload the latest layout to continue.`;
   if (state.toasts.some((toast) => toast.message === message)) return;
   state.toast(message, {
     kind: 'warn', ttlMs: 0,
@@ -1585,7 +1611,7 @@ function reportWorkspaceMoveConflict(get: () => State, name: string, version: nu
         await get().refreshWorkspaces({ full: true });
         if (!valid()) return;
         const latest = pickWorkspaceByName(get().workspaces, name, get().activeBackend);
-        if (!latest || (latest.paneMoveVersion ?? 0) <= get().activeWorkspaceMoveVersion) {
+        if (!latest || ((latest.paneMoveVersion ?? 0) <= get().activeWorkspaceMoveVersion && (latest.layoutVersion ?? 0) <= get().activeWorkspaceLayoutVersion)) {
           get().toast('The latest layout could not be loaded. Please try again.', { kind: 'error' });
           return;
         }
@@ -1598,6 +1624,18 @@ function reportWorkspaceMoveConflict(get: () => State, name: string, version: nu
       });
     } },
   });
+}
+
+async function recoverViewportSaveConflict(get: () => State, name: string, layout: Layout | null, scope: RoutingScope, error: unknown): Promise<boolean> {
+  if (!(error instanceof ApiError) || error.status !== 409 || !error.message.includes('workspace layout changed')
+    || !layout || !automaticViewportLayouts.has(layout) || scope.key !== currentRoutingScope().key || get().activeWorkspace !== name) return false;
+  const current = get();
+  // A newer local gesture owns its own pending save; an obsolete automatic
+  // request must not replace it or warn about that unrelated edit.
+  if (current.paneLayoutMode !== 'auto' || !current.layout || !automaticViewportLayouts.has(current.layout)) return true;
+  useStore.setState({ workspaceLayoutDirty: false });
+  await get().refreshWorkspaces({ full: true });
+  return true;
 }
 
 function doAutosave(get: () => State) {
@@ -1618,9 +1656,12 @@ function doAutosave(get: () => State) {
   // with stale in-memory state. The post-update bootstrap re-pulls
   // everything anyway.
   if (s.updateStatus?.applying) return;
-  trackWorkspaceSave(api.saveWorkspace({
+  trackWorkspaceSave(saveWorkspaceVersioned({
     name: s.activeWorkspace,
     paneMoveVersion: s.activeWorkspaceMoveVersion,
+    layoutVersion: s.activeWorkspaceLayoutVersion,
+    layoutMode: s.paneLayoutMode, layoutColumns: s.layoutColumns, layoutAspect: s.layoutAspect,
+    knownPaneIds: s.activeWorkspaceKnownPaneIds,
     layout: s.layout,
     paneIds: collectPaneIds(s.layout),
     panes: collectPaneDefs(s.layout, s.panes),
@@ -1638,7 +1679,9 @@ function doAutosave(get: () => State) {
       get().mergeSavedWorkspaceIntoCache(saved);
       return get().refreshWorkspaces();
     })
-    .catch((error) => reportWorkspaceMoveConflict(get, s.activeWorkspace, s.activeWorkspaceMoveVersion, scope, error));
+    .catch(async (error) => {
+      if (!await recoverViewportSaveConflict(get, s.activeWorkspace, s.layout, scope, error)) reportWorkspaceMoveConflict(get, s.activeWorkspace, s.activeWorkspaceMoveVersion, scope, error);
+    });
 }
 
 // Snapshot of the state needed to persist one workspace. Callers that
@@ -1649,6 +1692,11 @@ function doAutosave(get: () => State) {
 type AutosaveSnapshot = {
   name: string;
   paneMoveVersion?: number;
+  layoutVersion?: number;
+  layoutMode?: 'auto' | 'free';
+  layoutColumns?: number;
+  layoutAspect?: number;
+  knownPaneIds?: string[];
   layout: Layout | null;
   panes: Record<string, PaneInfo>;
   browsers: Record<string, BrowserInfo>;
@@ -1660,10 +1708,68 @@ function autosaveSnapshotFromState(s: State): AutosaveSnapshot | undefined {
   return {
     name: s.activeWorkspace,
     paneMoveVersion: s.activeWorkspaceMoveVersion,
+    layoutVersion: s.activeWorkspaceLayoutVersion,
+    layoutMode: s.paneLayoutMode, layoutColumns: s.layoutColumns, layoutAspect: s.layoutAspect,
+    knownPaneIds: s.activeWorkspaceKnownPaneIds,
     layout: s.layout,
     panes: s.panes,
     browsers: s.browsers,
     files: s.files,
+  };
+}
+
+function reconcileWorkspaceMembership(s: State, workspaces: Workspace[]): Partial<State> {
+  if (s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace)) return {};
+  const w = workspaces.find((w) => w.name === s.activeWorkspace && (!w.backend || w.backend === s.activeBackend));
+  if (!w || w.summary || (w.paneMoveVersion ?? 0) !== s.activeWorkspaceMoveVersion) return {};
+  const removed = new Set(w.removedPaneIds ?? []);
+  const panes = { ...s.panes };
+  for (const id of removed) delete panes[id];
+  const matching = sameJsonValue(w.layout, s.layout) && (w.layoutMode ?? 'auto') === s.paneLayoutMode
+    && (w.layoutColumns || DEFAULT_LAYOUT_COLUMNS) === s.layoutColumns && Math.abs((w.layoutAspect || DEFAULT_LAYOUT_ASPECT) - s.layoutAspect) < 1e-8;
+  if (s.activeWorkspace !== CURRENT_WS && (w.layoutVersion ?? 0) > (s.activeWorkspaceLayoutVersion ?? 0) && (!s.workspaceLayoutDirty || matching)) {
+    for (const def of w.panes ?? []) if (!removed.has(def.id) && !panes[def.id]) panes[def.id] = optimisticPaneFromDef(def);
+    return { layout: w.layout, panes, workspaceLayoutDirty: false,
+      parkedPaneIds: s.parkedPaneIds.filter((id) => !removed.has(id)),
+      focusedPaneId: layoutHasLeaf(w.layout, s.focusedPaneId) ? s.focusedPaneId : collectPaneIds(w.layout)[0] ?? null,
+      lastUserFocusId: layoutHasLeaf(w.layout, s.lastUserFocusId) ? s.lastUserFocusId : null,
+      zoomedPaneId: layoutHasLeaf(w.layout, s.zoomedPaneId) ? s.zoomedPaneId : null,
+      activeWorkspaceKnownPaneIds: [...new Set([...s.activeWorkspaceKnownPaneIds, ...(w.paneIds ?? [])])],
+      activeWorkspaceLayoutVersion: w.layoutVersion ?? 0,
+      paneLayoutMode: w.layoutMode ?? 'auto', layoutColumns: w.layoutColumns || DEFAULT_LAYOUT_COLUMNS, layoutAspect: w.layoutAspect || DEFAULT_LAYOUT_ASPECT };
+  }
+  const known = new Set(s.activeWorkspaceKnownPaneIds);
+  let layout = s.layout;
+  const layoutIds = new Set(collectPaneIds(layout));
+  let changed = false;
+  for (const id of removed) {
+    if (layoutIds.has(id)) {
+      layout = removePane(layout, id);
+      changed = true;
+    }
+    if (s.panes[id]) changed = true;
+  }
+  // The scratchpad is replaceable (Clear layout), but closed panes must still
+  // disappear there. Never import its old additions into a cleared view.
+  for (const id of s.activeWorkspace === CURRENT_WS ? [] : w.paneIds ?? []) {
+    if (removed.has(id)) continue;
+    if (known.has(id)) continue;
+    const def = w.panes?.find((p) => p.id === id);
+    // Need a definition or live pane before rendering; retry on the next poll.
+    if (!panes[id] && !def) continue;
+    if (!panes[id] && def) panes[id] = optimisticPaneFromDef(def);
+    if (!collectPaneIds(layout).includes(id)) {
+      layout = insertPaneOrAppend(layout, id, 'horizontal', def?.origin?.byPaneId ?? null);
+    }
+    known.add(id);
+  }
+  if (!changed && known.size === s.activeWorkspaceKnownPaneIds.length) return {};
+  return {
+    layout, panes, activeWorkspaceKnownPaneIds: [...known],
+    ...(s.focusedPaneId && removed.has(s.focusedPaneId) ? { focusedPaneId: collectPaneIds(layout)[0] ?? null } : {}),
+    ...(s.zoomedPaneId && removed.has(s.zoomedPaneId) ? { zoomedPaneId: null } : {}),
+    ...(s.lastUserFocusId && removed.has(s.lastUserFocusId) ? { lastUserFocusId: null } : {}),
+    parkedPaneIds: s.parkedPaneIds.filter((id) => !removed.has(id)),
   };
 }
 
@@ -1689,23 +1795,16 @@ function paneWorkspaceClaim(
 }
 
 function insertPaneOrAppend(
-  layout: Layout | null,
-  paneId: string,
-  direction: 'horizontal' | 'vertical' | null,
-  target: string | null,
+  layout: Layout | null, paneId: string, _direction: 'horizontal' | 'vertical' | null, _target: string | null,
+  mode = useStore.getState().paneLayoutMode, columns = useStore.getState().layoutColumns, aspect = useStore.getState().layoutAspect,
 ): Layout {
-  const leaf: Layout = { type: 'pane', paneId };
-  if (!layout) return leaf;
-  if (direction && target && layoutHasLeaf(layout, target)) {
-    return insertPane(layout, paneId, direction, target);
-  }
-  return {
-    type: 'split',
-    direction: direction ?? 'horizontal',
-    ratio: 0.5,
-    a: layout,
-    b: leaf,
-  };
+  if (collectPaneIds(layout).includes(paneId)) return layout!;
+  return mode === 'auto' ? appendAutoPane(layout, paneId, columns, aspect) : splitLargestPane(layout, paneId, aspect);
+}
+
+function removePane(layout: Layout | null, id: string, mode = useStore.getState().paneLayoutMode,
+  columns = useStore.getState().layoutColumns, aspect = useStore.getState().layoutAspect): Layout | null {
+  return mode === 'auto' ? balancedLayout(removeLayoutPane(layout, id), columns, aspect) : removeCustomPane(layout, id);
 }
 
 async function saveWorkspaceSnapshot(
@@ -1715,20 +1814,24 @@ async function saveWorkspaceSnapshot(
 ) {
   const scope = currentRoutingScope();
   if (workspaceMovedTo(snapshot.name)) return;
-  const saved = await trackWorkspaceSave(api.saveWorkspace({
+  const saved = await trackWorkspaceSave(saveWorkspaceVersioned({
     name: snapshot.name,
     paneMoveVersion: snapshot.paneMoveVersion,
+    layoutVersion: snapshot.layoutVersion,
+    layoutMode: snapshot.layoutMode, layoutColumns: snapshot.layoutColumns, layoutAspect: snapshot.layoutAspect,
+    knownPaneIds: snapshot.knownPaneIds,
     layout: snapshot.layout,
     paneIds: collectPaneIds(snapshot.layout),
     panes: collectPaneDefs(snapshot.layout, snapshot.panes),
     browsers: collectBrowserInfos(snapshot.layout, snapshot.browsers),
     files: collectFileInfos(snapshot.layout, snapshot.files),
     activeAt: new Date().toISOString(),
-  },scope)).catch((error) => {
+  },scope)).catch(async (error) => {
+    if (await recoverViewportSaveConflict(get, snapshot.name, snapshot.layout, scope, error)) return null;
     reportWorkspaceMoveConflict(get, snapshot.name, snapshot.paneMoveVersion, scope, error);
     throw error;
   });
-  if(scope.key !== currentRoutingScope().key)return;
+  if(!saved || scope.key !== currentRoutingScope().key)return;
   // Write through to the cached entry even when refreshWorkspaces is
   // skipped (the workspace-switch flush passes refreshWorkspaces:false for
   // speed). Without this the outgoing layout we just persisted stays stale
@@ -1747,7 +1850,7 @@ async function persistCreatedPaneToOriginWorkspace(
   target: string | null,
 ) {
   if (!origin) return;
-  const layout = insertPaneOrAppend(origin.layout, pane.id, direction, target);
+  const layout = insertPaneOrAppend(origin.layout, pane.id, direction, target, origin.layoutMode, origin.layoutColumns, origin.layoutAspect);
   await saveWorkspaceSnapshot(get, {
     ...origin,
     layout,
@@ -1816,6 +1919,7 @@ function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
     && (a.hasDeepseek ?? false) === (b.hasDeepseek ?? false)
     && a.liveCwd === b.liveCwd
     && a.backend === b.backend
+    && a.neverAutoAnswer === b.neverAutoAnswer
     && a.autoMode === b.autoMode
     && a.announceDelegation === b.announceDelegation
     && a.announceDelegationEvents === b.announceDelegationEvents
@@ -1878,6 +1982,9 @@ function sameWorkspaceSummary(a: Workspace, b: WorkspaceSummary): boolean {
     && !!a.protected === !!b.protected
     && (a.contextPack ?? '') === (b.contextPack ?? '')
     && (a.paneMoveVersion ?? 0) === (b.paneMoveVersion ?? 0)
+    && sameStringArray(a.removedPaneIds ?? [], b.removedPaneIds ?? [])
+    && (a.layoutVersion ?? 0) === (b.layoutVersion ?? 0)
+    && (a.layoutMode ?? 'auto') === (b.layoutMode ?? 'auto')
     && sameStringArray(a.paneIds, b.paneIds);
 }
 
@@ -1889,7 +1996,8 @@ function mergeWorkspaceSummaries(current: Workspace[], summaries: WorkspaceSumma
       if (sameWorkspaceSummary(prev, summary)) return prev;
       const cachedLayoutPaneIds = collectPaneIds(prev.layout);
       const fullCacheStale = !sameStringArray(cachedLayoutPaneIds, summary.paneIds)
-        || (prev.paneMoveVersion ?? 0) !== (summary.paneMoveVersion ?? 0);
+        || (prev.paneMoveVersion ?? 0) !== (summary.paneMoveVersion ?? 0)
+        || (prev.layoutVersion ?? 0) !== (summary.layoutVersion ?? 0);
       return {
         ...prev,
         name: summary.name,
@@ -1899,6 +2007,8 @@ function mergeWorkspaceSummaries(current: Workspace[], summaries: WorkspaceSumma
         protected: summary.protected,
         contextPack: summary.contextPack,
         paneMoveVersion: summary.paneMoveVersion,
+        removedPaneIds: summary.removedPaneIds,
+        layoutVersion: summary.layoutVersion, layoutMode: summary.layoutMode,
         summary: prev.summary || fullCacheStale,
       };
     }
@@ -1911,6 +2021,8 @@ function mergeWorkspaceSummaries(current: Workspace[], summaries: WorkspaceSumma
       protected: summary.protected,
       contextPack: summary.contextPack,
       paneMoveVersion: summary.paneMoveVersion,
+      removedPaneIds: summary.removedPaneIds,
+        layoutVersion: summary.layoutVersion, layoutMode: summary.layoutMode,
       summary: true,
     };
   });
@@ -1988,7 +2100,7 @@ function removePaneFromWorkspaceCache(
   const next = workspaces.map((w) => {
     if (w.name !== activeWorkspace) return w;
     if (activeBackend && w.backend && w.backend !== activeBackend) return w;
-    const layout = removePane(w.layout ?? null, paneId);
+    const layout = removePane(w.layout ?? null, paneId, w.layoutMode ?? 'auto', w.layoutColumns, w.layoutAspect);
     const paneIds = (w.paneIds ?? []).filter((id) => id !== paneId);
     const panes = (w.panes ?? []).filter((p) => p.id !== paneId);
     if (layout === w.layout && paneIds.length === (w.paneIds ?? []).length && panes.length === (w.panes ?? []).length) {
@@ -2054,6 +2166,9 @@ async function flushAutosave(
     src = {
       name: s.activeWorkspace,
       paneMoveVersion: s.activeWorkspaceMoveVersion,
+    layoutVersion: s.activeWorkspaceLayoutVersion,
+    layoutMode: s.paneLayoutMode, layoutColumns: s.layoutColumns, layoutAspect: s.layoutAspect,
+    knownPaneIds: s.activeWorkspaceKnownPaneIds,
       layout: s.layout,
       panes: s.panes,
       browsers: s.browsers,
@@ -2761,14 +2876,6 @@ const uiScaleDefault: number = (() => {
     return clampUiScale(parseFloat(raw));
   } catch { return 1.0; }
 })();
-const PANE_LAYOUT_MODE_KEY = 'solu.paneLayoutMode';
-const paneLayoutModeDefault: 'auto' | 'free' = (() => {
-  try {
-    const raw = localStorage.getItem(PANE_LAYOUT_MODE_KEY);
-    if (raw === 'free' || raw === 'auto') return raw;
-    return 'auto';
-  } catch { return 'auto'; }
-})();
 // Native bottom-bar vitals visibility — one JSON blob (structured object, so it
 // follows the customKeybindings blob idiom, not the scalar prefs). Missing/corrupt
 // → sane defaults; a partial blob is filled in per-field by sanitizeMetaBarFields.
@@ -2885,7 +2992,18 @@ function loadPaneLastViewed(): Record<string, number> {
     return {};
   }
 }
-export const useStore = create<State>((set, get, storeApi) => ({
+export const useStore = create<State>((rawSet, get, storeApi) => {
+  const set = ((partial: Partial<State> | ((s: State) => Partial<State>)) => rawSet((s) => {
+    const update = typeof partial === 'function' ? partial(s) : partial;
+    if ('layout' in update && (update.activeWorkspace ?? s.activeWorkspace) === s.activeWorkspace
+      && (update.paneLayoutMode ?? s.paneLayoutMode) === 'auto' && leafCount(update.layout ?? null) !== leafCount(s.layout)) {
+      const layout = balancedLayout(update.layout ?? null, update.layoutColumns ?? s.layoutColumns, update.layoutAspect ?? s.layoutAspect);
+      if (layout && s.layout && automaticViewportLayouts.has(s.layout) && update.activeWorkspaceKnownPaneIds && update.activeWorkspaceLayoutVersion === undefined) automaticViewportLayouts.add(layout);
+      return { ...update, layout };
+    }
+    return update;
+  })) as typeof rawSet;
+  return ({
   panes: {},
   browsers: {},
   layout: null,
@@ -2906,8 +3024,28 @@ export const useStore = create<State>((set, get, storeApi) => ({
   rollbackDecline: null,
   shellAutoRestart: null,
   mcpServersByCwd: {},
+  workspaceView: null,
+  showWorkspacePaneView: (paneId, team) => {
+    const s = get();
+    if (s.mainPresentation.kind !== 'workspace' || !s.panes[paneId] || workspaceMovedTo(s.activeWorkspace)) return;
+    set({ workspaceView: { workspace: s.activeWorkspace, backend: s.activeBackend, kind: team ? 'team' : 'single', paneId }, zoomedPaneId: null });
+    get().setFocus(paneId);
+  },
+  toggleWorkspaceLeadsOnly: () => {
+    const s = get();
+    if (s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace)) return;
+    set({ workspaceView: s.workspaceView?.kind === 'leads' ? null : { workspace: s.activeWorkspace, backend: s.activeBackend, kind: 'leads' }, zoomedPaneId: null });
+    const visible = collectPaneIds(workspaceViewLayout(get()));
+    if (!s.focusedPaneId || !visible.includes(s.focusedPaneId)) get().setFocus(visible[0] ?? null);
+  },
+  returnWorkspaceLayout: () => {
+    const s = get();
+    const ids = collectPaneIds(s.layout);
+    set({ workspaceView: null, zoomedPaneId: null });
+    if (s.focusedPaneId && !ids.includes(s.focusedPaneId)) get().setFocus(ids[0] ?? null);
+  },
   activeWorkspace: CURRENT_WS,
-  activeWorkspaceMoveVersion: 0,
+  activeWorkspaceMoveVersion: 0, activeWorkspaceLayoutVersion: 0, workspaceLayoutDirty: false, layoutColumns: DEFAULT_LAYOUT_COLUMNS, layoutAspect: DEFAULT_LAYOUT_ASPECT, activeWorkspaceKnownPaneIds: [],
   activeBackend: isRouterMode() ? activeBackendFromUrl() : null,
   mainPresentation: { kind: 'workspace' },
   ownerReturnContext: null,
@@ -3371,10 +3509,41 @@ export const useStore = create<State>((set, get, storeApi) => ({
     set({ uiScale: v });
   },
 
-  paneLayoutMode: paneLayoutModeDefault,
+  paneLayoutMode: 'auto',
   setPaneLayoutMode: (m) => {
-    try { localStorage.setItem(PANE_LAYOUT_MODE_KEY, m); } catch {}
-    set({ paneLayoutMode: m });
+    if (m === 'auto') { get().retilePanes(); return; }
+    get().beginCustomLayout();
+  },
+  beginCustomLayout: () => {
+    if (get().workspaceView) return;
+    if (get().mainPresentation.kind !== 'workspace' || workspaceMovedTo(get().activeWorkspace)) return;
+    if (get().paneLayoutMode === 'free') return;
+    set({ paneLayoutMode: 'free' });
+    scheduleAutosave(get);
+  },
+  retilePanes: () => {
+    if (get().workspaceView) { get().applyLayoutPreset('grid'); return; }
+    const s = get();
+    if (s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace)) return;
+    const bounds = typeof document === 'undefined' ? undefined : document.querySelector('.workspace-pane-grid')?.getBoundingClientRect();
+    const columns = bounds && bounds.width > 0 && !isMobileViewport() ? Math.max(1, Math.min(MAX_LAYOUT_COLUMNS, Math.floor(bounds.width / MIN_AUTO_PANE_WIDTH))) : s.layoutColumns;
+    const aspect = bounds && bounds.width > 0 && bounds.height > 0 && !isMobileViewport() ? bounds.width / bounds.height : s.layoutAspect;
+    set({ paneLayoutMode: 'auto', layoutColumns: columns, layoutAspect: aspect, layout: balancedLayout(s.layout, columns, aspect) });
+    scheduleAutosave(get);
+  },
+  updateLayoutViewport: (width, height) => {
+    const s = get();
+    if (s.workspaceView || s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace) || isMobileViewport() || width <= 0 || height <= 0) return;
+    if (s.paneLayoutMode === 'free') return;
+    const previous = { columns: s.layoutColumns, aspect: s.layoutAspect };
+    const cached = pickWorkspaceByName(s.workspaces, s.activeWorkspace, s.activeBackend);
+    const config = cached?.layoutColumns ? resizedGridConfig(leafCount(s.layout), width, height, previous)
+      : { columns: Math.max(1, Math.min(MAX_LAYOUT_COLUMNS, Math.floor(width / MIN_AUTO_PANE_WIDTH))), aspect: width / height };
+    const layout = balancedLayout(s.layout, config.columns, config.aspect);
+    if (config === previous && sameJsonValue(layout, s.layout)) return;
+    if (layout) automaticViewportLayouts.add(layout);
+    set({ layout, layoutColumns: config.columns, layoutAspect: config.aspect });
+    scheduleAutosave(get);
   },
 
   nativeMetaBarFields: nativeMetaBarDefault,
@@ -3400,10 +3569,14 @@ export const useStore = create<State>((set, get, storeApi) => ({
     set({ showPromptHistory: v });
   },
   applyLayoutPreset: (preset) => {
+    if (get().workspaceView) {
+      set(s => ({ workspaceView: { ...s.workspaceView!, preset, grid: undefined } }));
+      return;
+    }
     set((s) => {
       const next = buildPresetLayout(s.layout, preset);
       if (!next || next === s.layout) return s;
-      return { layout: next };
+      return { layout: next, paneLayoutMode: 'free' };
     });
     scheduleAutosave(get);
   },
@@ -3411,6 +3584,11 @@ export const useStore = create<State>((set, get, storeApi) => ({
     const total = rows * cols;
     if (total <= 0) return;
     const s0 = get();
+    if (s0.workspaceView) {
+      if (total < collectLeaves(workspaceViewLayout(s0)).length) return;
+      set({ workspaceView: { ...s0.workspaceView, grid: { rows, cols }, preset: undefined } });
+      return;
+    }
     const origin = autosaveSnapshotFromState(s0);
     const existingLeaves = collectLeaves(s0.layout);
     if (total < existingLeaves.length) return; // picker shouldn't allow this
@@ -3469,6 +3647,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
       if (next) {
         await saveWorkspaceSnapshot(get, {
           ...origin,
+          layoutMode: 'free',
           layout: next,
           panes: newPanes.reduce(
             (acc, p) => ({ ...acc, [p.id]: p }),
@@ -3488,13 +3667,11 @@ export const useStore = create<State>((set, get, storeApi) => ({
       if (!next) return st;
       const panesUpdate = { ...st.panes };
       for (const p of newPanes) panesUpdate[p.id] = p;
-      // Force auto so cells render equal-area; without it a fresh grid
-      // inherits stored ratios from prior splits and looks lopsided.
-      try { localStorage.setItem(PANE_LAYOUT_MODE_KEY, 'auto'); } catch {}
+      // An explicit grid is a custom arrangement until the user re-tiles.
       return {
         panes: panesUpdate,
         layout: next,
-        paneLayoutMode: 'auto',
+        paneLayoutMode: 'free',
         focusedPaneId: newPanes.length > 0 ? newPanes[0].id : st.focusedPaneId,
         lastViewedMs: newPanes.reduce(
           (acc, p) => ({ ...acc, [p.id]: Date.now() }),
@@ -4091,6 +4268,9 @@ export const useStore = create<State>((set, get, storeApi) => ({
       ? {
           name: state0.activeWorkspace,
           paneMoveVersion: state0.activeWorkspaceMoveVersion,
+          layoutVersion: state0.activeWorkspaceLayoutVersion,
+          layoutMode: state0.paneLayoutMode, layoutColumns: state0.layoutColumns, layoutAspect: state0.layoutAspect,
+          knownPaneIds: state0.activeWorkspaceKnownPaneIds,
           layout: state0.layout,
           panes: state0.panes,
           browsers: state0.browsers,
@@ -4122,7 +4302,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
         browsers: {},
         files: {},
         activeWorkspace: CURRENT_WS,
-        activeWorkspaceMoveVersion: 0,
+        activeWorkspaceMoveVersion: 0, activeWorkspaceLayoutVersion: 0, workspaceLayoutDirty: false, layoutColumns: DEFAULT_LAYOUT_COLUMNS, layoutAspect: DEFAULT_LAYOUT_ASPECT, paneLayoutMode: 'auto', activeWorkspaceKnownPaneIds: [],
         focusedPaneId: null,
         zoomedPaneId: null,
         activeBackend: b,
@@ -4387,6 +4567,9 @@ export const useStore = create<State>((set, get, storeApi) => ({
         } : {}),
         activeWorkspace: activeWorkspaceName,
         activeWorkspaceMoveVersion: pickWorkspaceByName(wss, activeWorkspaceName, activeBackendFromUrl())?.paneMoveVersion ?? 0,
+        activeWorkspaceLayoutVersion: preferred?.layoutVersion ?? 0, workspaceLayoutDirty: false,
+        paneLayoutMode: preferred?.layoutMode ?? 'auto', layoutColumns: preferred?.layoutColumns || DEFAULT_LAYOUT_COLUMNS, layoutAspect: preferred?.layoutAspect || DEFAULT_LAYOUT_ASPECT,
+        activeWorkspaceKnownPaneIds: preferred?.paneIds ?? collectPaneIds(layout),
         activeBackend: isRouterMode() ? activeBackendFromUrl() : null,
         focusedPaneId: layout ? collectPaneIds(layout)[0] ?? null : null,
         loading: false,
@@ -4552,6 +4735,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
         ? await api.listWorkspacesAllBackends()
         : await api.listWorkspaces();
       if(scope.key !== currentRoutingScope().key)return;
+      set((state) => reconcileWorkspaceMembership(state, wss));
       if (sameJsonValue(get().workspaces, wss)) {
         debugPerf('refreshWorkspaces full unchanged', startedAt, { workspaces: wss.length }, 80);
         return;
@@ -4564,6 +4748,16 @@ export const useStore = create<State>((set, get, storeApi) => ({
       ? await api.listWorkspaceSummariesAllBackends()
       : await api.listWorkspaceSummaries();
     if(scope.key !== currentRoutingScope().key)return;
+    const active = summaries.find((w) => w.name === get().activeWorkspace && (!w.backend || w.backend === get().activeBackend));
+    const state = get();
+    if (active && state.mainPresentation.kind === 'workspace'
+      && !workspaceMovedTo(state.activeWorkspace)
+      && (active.paneMoveVersion ?? 0) === state.activeWorkspaceMoveVersion
+      && ((state.activeWorkspace !== CURRENT_WS && ((active.layoutVersion ?? 0) > (state.activeWorkspaceLayoutVersion ?? 0) || active.paneIds?.some((id) => !state.activeWorkspaceKnownPaneIds.includes(id))))
+        || active.removedPaneIds?.some((id) => collectPaneIds(state.layout).includes(id) || !!state.panes[id]))) {
+      await get().refreshWorkspaces({ full: true });
+      return;
+    }
     const merged = mergeWorkspaceSummaries(get().workspaces, summaries);
     if (sameWorkspaceListByRef(get().workspaces, merged)) {
       debugPerf('refreshWorkspaces summary unchanged', startedAt, { workspaces: summaries.length }, 80);
@@ -4574,6 +4768,14 @@ export const useStore = create<State>((set, get, storeApi) => ({
     } catch {
       // Daemon unreachable: keep the last-known workspace list; the poll retries.
     }
+  },
+
+  showSpawnedPane: (paneId, workspace) => {
+    const s = get();
+    if (s.mainPresentation.kind !== 'workspace' || s.activeWorkspace !== workspace || !collectPaneIds(s.layout).includes(paneId)) return;
+    // Clear zoom to reveal the tile, while preserving both selection and caret.
+    set({ zoomedPaneId: null });
+    scrollPaneIntoView(paneId);
   },
 
   mergeSavedWorkspaceIntoCache: (saved) => {
@@ -4594,7 +4796,14 @@ export const useStore = create<State>((set, get, storeApi) => ({
         return { ...w, ...saved, backend: w.backend, summary: false };
       });
       if (!found) return s;
-      return { workspaces: next };
+      const own = saved.name === s.activeWorkspace ? {
+        activeWorkspaceLayoutVersion: Math.max(s.activeWorkspaceLayoutVersion ?? 0, saved.layoutVersion ?? 0),
+        workspaceLayoutDirty: sameJsonValue(s.layout, saved.layout) && s.paneLayoutMode === (saved.layoutMode ?? 'auto') ? false : s.workspaceLayoutDirty,
+      } : {};
+      const reconciled = reconcileWorkspaceMembership({ ...s, ...own }, next);
+      const final = { ...s, ...own, ...reconciled };
+      const matches = saved.name === s.activeWorkspace && sameJsonValue(final.layout, saved.layout) && final.paneLayoutMode === (saved.layoutMode ?? 'auto');
+      return { workspaces: next, ...own, ...reconciled, ...(matches ? { workspaceLayoutDirty: false } : {}) };
     });
   },
 
@@ -5931,6 +6140,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
   setPaneAutoMode: async (id, mode) => {
     const prev = get().panes[id];
     if (!prev) return null;
+    if (prev.neverAutoAnswer) return prev;
     if ((prev.autoMode ?? '') === mode) return prev;
     const seq = (paneAutoModeSeq.get(id) ?? 0) + 1;
     paneAutoModeSeq.set(id, seq);
@@ -6238,6 +6448,8 @@ export const useStore = create<State>((set, get, storeApi) => ({
     const scope=currentRoutingScope(),generation=get().navigationGeneration;
     const current=()=>scope.key === currentRoutingScope().key && generation === get().navigationGeneration;
     const before = get();
+    const priorLayoutFlush = flushAutosave(get, autosaveSnapshotFromState(before), { refreshWorkspaces: false });
+    const earlierSaves = [...workspaceSaves];
     const prevPane = before.panes[id];
     const promptKey = terminalSessionKey(scope, id);
     const prevPrompt = before.lastPrompts[promptKey];
@@ -6279,7 +6491,9 @@ export const useStore = create<State>((set, get, storeApi) => ({
     clearVitalsSnapshot(id);
     scheduleAutosave(get);
     try {
+      await Promise.allSettled([priorLayoutFlush, ...earlierSaves]);
       await api.deletePane(id,scope);
+      if (current()) await get().refreshWorkspaces({ full: true });
       const {forgetTerminalSession,sessionKey}=await import('./lib/terminalViewSessions');
       forgetTerminalSession(sessionKey(scope,id));
       if(!current())return true;
@@ -6383,11 +6597,12 @@ export const useStore = create<State>((set, get, storeApi) => ({
     // write rate bounded, and the store updates themselves are
     // cheap. Restore the log temporarily if debugging a layout-
     // persistence regression.
-    set({ layout: l });
+    set({ layout: l, paneLayoutMode: 'free' });
     scheduleAutosave(get);
   },
 
   setFocus: (id) => set((s) => s.mainPresentation.kind === 'owner' ? {} : ({
+    ...(s.workspaceView && id && !collectPaneIds(workspaceViewLayout(s)).includes(id) ? { workspaceView: null } : {}),
     focusedPaneId: id,
     // Deliberate user focus change — stamp lastUserFocusId so the target pane's
     // focus effect routes DOM focus even if the user was mid-typing in the pane
@@ -6459,10 +6674,12 @@ export const useStore = create<State>((set, get, storeApi) => ({
   },
 
   movePaneInLayout: (source, target, zone) => {
+    // A temporary presentation cannot reorder or autosave the workspace.
+    if (get().workspaceView) return;
     set((s) => {
       if (!s.layout) return {};
       const next = movePaneInLayoutImpl(s.layout, source, target, zone);
-      return { layout: next, focusedPaneId: source, lastUserFocusId: source };
+      return { layout: next, paneLayoutMode: 'free', focusedPaneId: source, lastUserFocusId: source };
     });
     scheduleAutosave(get);
   },
@@ -6533,6 +6750,8 @@ export const useStore = create<State>((set, get, storeApi) => ({
       set({
         layout: remaining,
         activeWorkspaceMoveVersion: result.source.paneMoveVersion ?? 0,
+        activeWorkspaceLayoutVersion: result.source.layoutVersion ?? 0,
+        activeWorkspaceKnownPaneIds: result.source.paneIds,
         focusedPaneId: current.focusedPaneId === paneId ? collectPaneIds(remaining)[0] ?? null : current.focusedPaneId,
         zoomedPaneId: current.zoomedPaneId === paneId ? null : current.zoomedPaneId,
         lastUserFocusId: current.lastUserFocusId === paneId ? null : current.lastUserFocusId,
@@ -6573,6 +6792,9 @@ export const useStore = create<State>((set, get, storeApi) => ({
     const w: Workspace = {
       name,
       paneMoveVersion: name === s.activeWorkspace ? s.activeWorkspaceMoveVersion : pickWorkspaceByName(s.workspaces, name, s.activeBackend)?.paneMoveVersion,
+      layoutVersion: name === s.activeWorkspace ? s.activeWorkspaceLayoutVersion : pickWorkspaceByName(s.workspaces, name, s.activeBackend)?.layoutVersion,
+      layoutMode: s.paneLayoutMode, layoutColumns: s.layoutColumns, layoutAspect: s.layoutAspect,
+      knownPaneIds: name === s.activeWorkspace ? s.activeWorkspaceKnownPaneIds : pickWorkspaceByName(s.workspaces, name, s.activeBackend)?.paneIds,
       layout: s.layout,
       paneIds: collectPaneIds(s.layout),
       panes: collectPaneDefs(s.layout, s.panes),
@@ -6580,11 +6802,13 @@ export const useStore = create<State>((set, get, storeApi) => ({
       files: collectFileInfos(s.layout, s.files),
       activeAt: new Date().toISOString(),
     };
-    await trackWorkspaceSave(api.saveWorkspace(w,scope));
+    const saved = await trackWorkspaceSave(saveWorkspaceVersioned(w,scope));
     if(scope.key !== currentRoutingScope().key || generation !== get().navigationGeneration)return;
     // Make this the active workspace so subsequent autosaves land here
     // (and not in _current, which is how Save as… used to get "stuck").
-    set({ activeWorkspace: name, activeWorkspaceMoveVersion: w.paneMoveVersion ?? 0 });
+    set({ activeWorkspace: name, activeWorkspaceMoveVersion: saved.paneMoveVersion ?? 0,
+        activeWorkspaceLayoutVersion: saved.layoutVersion ?? 0, workspaceLayoutDirty: false,
+        paneLayoutMode: w.layoutMode ?? 'auto', layoutColumns: w.layoutColumns || DEFAULT_LAYOUT_COLUMNS, layoutAspect: w.layoutAspect || DEFAULT_LAYOUT_ASPECT, activeWorkspaceKnownPaneIds: w.paneIds ?? [] });
     await get().refreshWorkspaces({ full: true });
     get().toast(`Saved workspace "${name}"`, { kind: 'success', icon: '✓' });
   },
@@ -6680,6 +6904,9 @@ export const useStore = create<State>((set, get, storeApi) => ({
       ? {
           name: state0.activeWorkspace,
           paneMoveVersion: state0.activeWorkspaceMoveVersion,
+          layoutVersion: state0.activeWorkspaceLayoutVersion,
+          layoutMode: state0.paneLayoutMode, layoutColumns: state0.layoutColumns, layoutAspect: state0.layoutAspect,
+          knownPaneIds: state0.activeWorkspaceKnownPaneIds,
           layout: state0.layout,
           panes: state0.panes,
           browsers: state0.browsers,
@@ -6899,6 +7126,8 @@ export const useStore = create<State>((set, get, storeApi) => ({
         files: fileMap,
         activeWorkspace: name,
         activeWorkspaceMoveVersion: w.paneMoveVersion ?? 0,
+        activeWorkspaceLayoutVersion: w.layoutVersion ?? 0, workspaceLayoutDirty: false,
+        paneLayoutMode: w.layoutMode ?? 'auto', layoutColumns: w.layoutColumns || DEFAULT_LAYOUT_COLUMNS, layoutAspect: w.layoutAspect || DEFAULT_LAYOUT_ASPECT, activeWorkspaceKnownPaneIds: w.paneIds ?? [],
         focusedPaneId: null,
         zoomedPaneId: null,
         parkedPaneIds: parkedNext,
@@ -6927,6 +7156,8 @@ export const useStore = create<State>((set, get, storeApi) => ({
         files: fileMap,
         activeWorkspace: name,
         activeWorkspaceMoveVersion: w.paneMoveVersion ?? 0,
+        activeWorkspaceLayoutVersion: w.layoutVersion ?? 0, workspaceLayoutDirty: false,
+        paneLayoutMode: w.layoutMode ?? 'auto', layoutColumns: w.layoutColumns || DEFAULT_LAYOUT_COLUMNS, layoutAspect: w.layoutAspect || DEFAULT_LAYOUT_ASPECT, activeWorkspaceKnownPaneIds: w.paneIds ?? [],
         focusedPaneId: initialLayout ? collectPaneIds(initialLayout)[0] ?? null : null,
         // Clear any active zoom — it was scoped to the outgoing workspace.
         zoomedPaneId: null,
@@ -6943,9 +7174,11 @@ export const useStore = create<State>((set, get, storeApi) => ({
     // before the 400ms debounce would fire.
     if (didAdopt && initialLayout) {
       try {
-        await trackWorkspaceSave(api.saveWorkspace({
+        await trackWorkspaceSave(saveWorkspaceVersioned({
           name,
           paneMoveVersion: w.paneMoveVersion,
+          layoutVersion: w.layoutVersion, layoutMode: w.layoutMode ?? 'auto', layoutColumns: w.layoutColumns, layoutAspect: w.layoutAspect,
+          knownPaneIds: w.paneIds,
           layout: initialLayout,
           paneIds: collectPaneIds(initialLayout),
           panes: collectPaneDefs(initialLayout, state0.panes),
@@ -7134,7 +7367,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
     // armed by layout/pane events during/after the await still writes
     // under the deleted name and recreates it on disk.
     if (get().activeWorkspace === name) {
-      set({ activeWorkspace: CURRENT_WS, activeWorkspaceMoveVersion: 0 });
+      set({ activeWorkspace: CURRENT_WS, activeWorkspaceMoveVersion: 0, activeWorkspaceLayoutVersion: 0, workspaceLayoutDirty: false, layoutColumns: DEFAULT_LAYOUT_COLUMNS, layoutAspect: DEFAULT_LAYOUT_ASPECT, paneLayoutMode: 'auto', activeWorkspaceKnownPaneIds: [] });
     }
     await api.deleteWorkspace(name);
     // Remove from saved order too.
@@ -7202,7 +7435,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
       layout: null,
       focusedPaneId: null,
       activeWorkspace: CURRENT_WS,
-      activeWorkspaceMoveVersion: 0,
+      activeWorkspaceMoveVersion: 0, activeWorkspaceLayoutVersion: 0, workspaceLayoutDirty: false, layoutColumns: DEFAULT_LAYOUT_COLUMNS, layoutAspect: DEFAULT_LAYOUT_ASPECT, paneLayoutMode: 'auto', activeWorkspaceKnownPaneIds: [],
     });
     scheduleAutosave(get);
     if (detached > 0) {
@@ -7297,7 +7530,8 @@ export const useStore = create<State>((set, get, storeApi) => ({
     scrollPaneIntoView(paneId);
     markRevealed();
   },
-}));
+});
+});
 
 // "Last looked at" per pane, behind every unread marker and the turn chip's
 // "new" tag. Two rules on top of the stamp setFocus already writes:
@@ -7388,6 +7622,10 @@ try {
         }
         await saveWorkspaceSnapshot(() => useStore.getState(), {
           name: state.activeWorkspace,
+          paneMoveVersion: state.activeWorkspaceMoveVersion,
+          layoutVersion: state.activeWorkspaceLayoutVersion,
+          layoutMode: state.paneLayoutMode, layoutColumns: state.layoutColumns, layoutAspect: state.layoutAspect,
+          knownPaneIds: state.activeWorkspaceKnownPaneIds,
           layout: state.layout,
           panes: state.panes,
           browsers: state.browsers,
@@ -7501,20 +7739,21 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
 }
 
 export function terminalSessionKey(scope: RoutingScope, paneId: string): string { return JSON.stringify([scope.key, paneId]); }
-export function effectiveVisiblePaneIds(s: { mainPresentation: MainPresentation; layout: Layout | null; zoomedPaneId?: string | null; focusedPaneId?: string | null }): string[] {
+export function effectiveVisiblePaneIds(s: { mainPresentation: MainPresentation; layout: Layout | null; zoomedPaneId?: string | null; focusedPaneId?: string | null } & import('./lib/workspaceView').WorkspaceViewState): string[] {
  if(!routingPrincipalAllowed())return [];
  if (s.mainPresentation.kind === 'owner') return !s.mainPresentation.history && s.mainPresentation.pane && !s.mainPresentation.loading ? [s.mainPresentation.pane.id] : [];
- if (s.zoomedPaneId) return collectPaneIds(s.layout).includes(s.zoomedPaneId) ? [s.zoomedPaneId] : [];
+ const layout = workspaceViewLayout(s);
+ if (s.zoomedPaneId) return collectPaneIds(layout).includes(s.zoomedPaneId) ? [s.zoomedPaneId] : [];
  if(isMobileViewport()) {
-  const leaves=collectLeaves(s.layout),selected=leaves.find(leaf=>leafId(leaf) === s.focusedPaneId) ?? leaves[0];
+  const leaves=collectLeaves(layout),selected=leaves.find(leaf=>leafId(leaf) === s.focusedPaneId) ?? leaves[0];
   return selected?.type === 'pane' ? [selected.paneId] : [];
  }
- return collectPaneIds(s.layout);
+ return collectPaneIds(layout);
 }
-export function effectiveTerminalTarget(s: { mainPresentation: MainPresentation; focusedPaneId: string | null; layout: Layout | null; panes: Record<string, PaneInfo> }): string | null {
+export function effectiveTerminalTarget(s: { mainPresentation: MainPresentation; focusedPaneId: string | null; layout: Layout | null; panes: Record<string, PaneInfo> } & import('./lib/workspaceView').WorkspaceViewState): string | null {
  if(!routingPrincipalAllowed())return null;
  if (s.mainPresentation.kind === 'owner') return !s.mainPresentation.history && !s.mainPresentation.loading && !s.mainPresentation.error ? s.mainPresentation.pane?.id ?? null : null;
- return s.focusedPaneId && collectPaneIds(s.layout).includes(s.focusedPaneId) && s.panes[s.focusedPaneId]?.kind !== 'native' ? s.focusedPaneId : null;
+ return s.focusedPaneId && collectPaneIds(workspaceViewLayout(s)).includes(s.focusedPaneId) && s.panes[s.focusedPaneId]?.kind !== 'native' ? s.focusedPaneId : null;
 }
 let paneAliasScope = currentRoutingScope().key;
 onRoutingScopeChange(() => {
@@ -7533,4 +7772,20 @@ subscribeMachineAccess(()=>{
  const access=getMachineAccessState(),scope=currentRoutingScope();
  if(!access.blocked || !access.machineId || ![ `/m/${access.machineId}`, `/m/${encodeURIComponent(access.machineId)}` ].includes(scope.prefix))return;
  useStore.setState(state=>({navigationGeneration:state.navigationGeneration+1,...(state.mainPresentation.kind === 'owner' ? {mainPresentation:{...state.mainPresentation,pane:undefined,loading:false,error:'Access to this backend is blocked. Reconnect through the existing account controls.'}} : {})}));
+});
+
+useStore.subscribe((s, previous) => {
+  if (!s.workspaceView) return;
+  if (s.activeWorkspace !== previous.activeWorkspace || s.activeBackend !== previous.activeBackend || s.mainPresentation.kind !== previous.mainPresentation.kind) {
+    useStore.setState({ workspaceView: null });
+  } else if (s.focusedPaneId !== previous.focusedPaneId && s.focusedPaneId && layoutHasLeaf(s.layout, s.focusedPaneId)
+    && !collectPaneIds(workspaceViewLayout(s)).includes(s.focusedPaneId)) {
+    // Spawn/open actions also focus tiles directly. Reveal a newly selected
+    // canonical pane/browser/file/diff while preserving that tile's focus.
+    useStore.setState({ workspaceView: null, zoomedPaneId: null });
+  } else if (s.workspaceView.kind !== 'leads' && (s.panes !== previous.panes || s.layout !== previous.layout || s.workspaces !== previous.workspaces) && workspaceViewLayout(s) === s.layout) {
+    // The selected pane vanished or moved: end the presentation as well as
+    // falling back visually, so Arrange and splitter persistence work again.
+    s.returnWorkspaceLayout();
+  }
 });

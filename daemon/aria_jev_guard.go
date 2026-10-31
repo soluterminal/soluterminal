@@ -121,12 +121,8 @@ func (a *Aria) writeJevEnter(ctx context.Context, p *Pane, proof *jevAmbiguousPr
 		if requestDeadline, ok := ctx.Deadline(); ok && requestDeadline.Before(deadline) {
 			deadline = requestDeadline
 		}
-		if err := proof.connection.SetWriteDeadline(deadline); err != nil {
-			writeErr = err
-			return
-		}
-		defer proof.connection.SetWriteDeadline(time.Time{})
-		writeErr = WriteFrame(proof.connection, FrameData, []byte("\r"))
+		policy := p.autoModePolicyLockedForAnswer(ctx)
+		writeErr = p.writeAnswerFrameLocked(proof.connection, []byte("\r"), &policy, deadline, true)
 		if writeErr == nil {
 			wrote = 1
 			commits = p.observeSuccessfulInputLocked([]byte("\r"), false, menuInputNone)

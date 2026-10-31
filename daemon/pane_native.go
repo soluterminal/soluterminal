@@ -344,7 +344,7 @@ func (p *Pane) emitNativeEvent(ev NativeEvent) uint64 {
 		effectiveAgentKind(p.Agent) != agentCodex {
 		how, denyReason := p.allowlistAutoAllows(ev.ToolName, ev.Args)
 		if denyReason != "" {
-			log.Printf("approvals: allowlist auto-allow WITHHELD under cautious mode (pane=%s tool=%s reqID=%s): %s",
+			log.Printf("approvals: allowlist auto-allow WITHHELD by pane policy (pane=%s tool=%s reqID=%s): %s",
 				p.ID, ev.ToolName, ev.RequestID, denyReason)
 		} else {
 			autoAllowHow = how

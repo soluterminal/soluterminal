@@ -193,3 +193,23 @@ signed.
   by the attestation.
 - Windows code signing (Authenticode) of the installer is not part of this
   workflow yet.
+
+## Windows executable identity
+
+The committed `daemon/rsrc_windows_amd64.syso` contains VERSIONINFO and an
+`asInvoker` manifest. `scripts/windows-resources.mjs` pins go-winres v0.3.3
+and regenerates it from the same release version passed to
+`solu_daemon_ldflags`, without timestamps. The official build, publisher,
+reproduction and sidecar build all regenerate it in a temporary directory and
+require identical bytes to the committed resource before stamping the clean
+build. A stale resource fails the build without rewriting the checkout.
+Development builds use the committed canonical resource even with a custom
+build label. Go ignores
+the Windows-suffixed resource on Linux and macOS. After a version bump run
+`node scripts/windows-resources.mjs` and commit the resulting resource.
+
+The official workflow checks deterministic regeneration and the linked PE
+resource directory, including fixed and string versions and execution level;
+`official-build.sh` also checks the actual daemon it produces. Tauri already
+emits VERSIONINFO (from its config version and product name) and a default
+application manifest through `tauri-build`; no duplicate resource is added.

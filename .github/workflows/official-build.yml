@@ -125,6 +125,8 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
+      - name: Check deterministic Windows resources and linked metadata
+        run: bash scripts/test-windows-resources.sh
       - name: Build web bundle and solud (five platforms)
         env:
           SOLU_SOURCE_SHA: ${{ github.sha }}

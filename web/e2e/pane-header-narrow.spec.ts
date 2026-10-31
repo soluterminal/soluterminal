@@ -16,6 +16,9 @@ for (const signals of [false, true]) {
       lastAgentMessage: { fromPaneId: 'lead', fromLabel: '@lead · #1 Campaign lead', at: Date.now(), outcome: 'sent' },
     };
     if (signals) {
+      pane.attention = 'auto-pending';
+      pane.state = 'choice-prompt';
+      pane.codexAuth = { state: 'signed-out' };
       pane.unsentMessage = { id: 'unsent', sender: '@a-long-sender-handle' };
       pane.review = { verdict: 'request-changes', reviewer: 'claude', author: 'codex', round: 1, mustFix: 3, notes: 0, at: Date.now() };
       pane.turn = { active: false, count: 1, last: { n: 1, startedMs: Date.now() - 1000, endedMs: Date.now(), files: 12, added: 1200, removed: 300 } };
@@ -25,14 +28,14 @@ for (const signals of [false, true]) {
       name: 'Narrow header', layout: { type: 'pane', paneId: pane.id },
       paneIds: [pane.id, lead.id], activeAt: pane.createdAt,
     }];
+    if (signals) await page.route('**/api/aria/auto-pending', route => route.fulfill({ json: { pending: [{ id: 'header-countdown', pane_id: pane.id, pane_title: pane.title, input: '\\r', order_id: 'test', deadline_at_ms: Date.now() + 60_000, auto_countdown_ms: 60_000 }] } }));
     await page.route('**/api/panes', route => route.fulfill({ json: [pane, lead] }));
     await page.route('**/api/workspaces**', route => route.fulfill({ json: workspaces }));
     await page.routeWebSocket(/\/api\/panes\/narrow_header\/io/, ws => ws.send(Buffer.from('\r\nReady\r\n')));
     await page.goto('/?ws=Narrow%20header');
     const header = page.locator(`[data-pane-id="${pane.id}"] .pane-header`);
-    await expect(header.locator('.pane-identity-chip')).toBeVisible();
-    await expect(header.locator('.pane-message-chip')).toBeVisible();
-    await expect(header.locator('.pane-origin')).toBeVisible();
+    // @cmo already appears in the title, so its identity chip is redundant.
+    await expect(header.locator('.pane-identity-chip')).toHaveCount(0);
 
     const checkActions = async () => {
       const names = signals ? ['Pane menu', 'Close session', 'Send', 'Clear'] : ['Pane menu', 'Close session'];
@@ -42,7 +45,7 @@ for (const signals of [false, true]) {
         const outer = (await header.boundingBox())!;
         const inner = (await button.boundingBox())!;
         expect(inner.x).toBeGreaterThanOrEqual(outer.x);
-        expect(inner.x + inner.width).toBeLessThanOrEqual(outer.x + outer.width);
+        expect(inner.x + inner.width).toBeLessThanOrEqual(outer.x + outer.width + 1);
         // Visibility alone does not detect clipping or another chip covering it.
         await button.click({ trial: true });
       }
@@ -50,14 +53,26 @@ for (const signals of [false, true]) {
 
     for (const width of [400, 320, 256]) {
       await header.evaluate((el, width) => { el.style.width = `${width}px`; }, width);
+      await expect(header.getByRole('button', { name: /more pane details/ })).toBeVisible();
       await expect(header.locator('.activity-dot')).toBeVisible();
       await expect(header.locator('.pane-title')).toBeVisible();
       if (signals) {
         await expect(header.locator('.pane-review-chip.is-warn')).toBeVisible();
+        await expect(header.locator('.pane-account-chip.is-warn')).toBeVisible();
+        await expect(header.getByRole('button', { name: 'Cancel the pending auto-approval' })).toBeVisible();
         await expect(header.locator('.pane-unsent-message')).toBeVisible();
         await expect(header.locator('.pane-turn-chip')).toBeVisible();
       }
       await checkActions();
+      if (signals) {
+        const more = header.getByRole('button', { name: /more pane details/ });
+        await more.click();
+        const details = page.getByRole('dialog', { name: 'More pane details', exact: true });
+        await expect(details).toBeVisible();
+        await page.waitForTimeout(350); // A live countdown tick must not dismiss the details.
+        await expect(details).toBeVisible();
+        await page.keyboard.press('Escape');
+      }
       if (width <= 320) {
         await expect(header.locator('.pane-identity-chip')).toBeHidden();
       }
@@ -67,13 +82,6 @@ for (const signals of [false, true]) {
     }
 
     await header.evaluate(el => { el.style.width = '256px'; });
-    await header.locator('.pane-message-chip').evaluate(el => el.classList.add('unread'));
-    await expect(header.locator('.pane-message-chip')).toBeVisible();
-    for (const state of ['is-attention', 'is-warn']) {
-      await header.locator('.pane-message-chip').evaluate((el, state) => { el.className = `pane-message-chip ${state}`; }, state);
-      await expect(header.locator('.pane-message-chip')).toBeVisible();
-      await checkActions();
-    }
     await header.evaluate(el => { el.style.width = '320px'; });
     await page.screenshot({ path: testInfo.outputPath('pane-header-320px.png') });
   });

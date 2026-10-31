@@ -69,6 +69,7 @@ With neither, every prompt is left for you.
   leaves our side. The installer isn't code-signed by Windows yet. (A build you make yourself from this README reports
   version dev, so it won't match a release byte for byte.)
 - What's on by default and the known limits: [soluterminal.com/security](https://soluterminal.com/security/?utm_source=github&utm_campaign=oss-launch).
+- [Code signing policy](docs/CODE-SIGNING.md): eligible Windows builds, release roles and signature checks.
 - Found a vulnerability? Report it privately through GitHub's "Report a vulnerability" or email
   security@soluterminal.com. See [SECURITY.md](SECURITY.md).
 

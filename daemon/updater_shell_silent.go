@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 )
 
 // The unattended ("when idle") installer update for an install whose
@@ -266,30 +264,25 @@ foreach ($appExe in $appPaths) {
 		psStringArray(appNames), psSingleQuoted(sha256), psSingleQuoted(silentCourierAppNotFound), int(appExitWait/time.Second))
 }
 
-// encodedPowerShell is the -EncodedCommand form of script (base64 UTF-16LE),
-// so the courier needs no script file and no quoting on the command line.
-func encodedPowerShell(script string) string {
-	units := utf16.Encode([]rune(script))
-	b := make([]byte, 0, len(units)*2)
-	for _, unit := range units {
-		b = append(b, byte(unit), byte(unit>>8))
+// Local generated scripts need a process-local policy on Windows' default
+// Restricted installation. RemoteSigned permits them without Bypass; UNC
+// couriers (WSL shares) retain Bypass because Windows can classify UNC as remote.
+func silentCourierPolicy(courierPath string) string {
+	if strings.HasPrefix(courierPath, `\\`) {
+		return "Bypass"
 	}
-	return base64.StdEncoding.EncodeToString(b)
+	return "RemoteSigned"
 }
 
-func silentCourierCommandLine(script string) string {
-	return "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand " + encodedPowerShell(script)
+func silentCourierCommandLine(courierPath string) string {
+	return "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy " + silentCourierPolicy(courierPath) + ` -WindowStyle Hidden -File "` + courierPath + `"`
 }
 
-// silentCmdScript is the .cmd that explorer.exe runs on native Windows (the
-// same courier hand-off the desktop app's own silent update uses): explorer
-// starts it in the user's session and outside the app's Job Object, and
-// `start` lets it return at once. The script goes in a file next to it, since
-// a cmd.exe line is too short for the whole script in encoded form.
+// Explorer runs this ASCII .cmd outside the app's Job Object. %~dp0 resolves
+// the adjacent BOM'd script in Unicode without putting the profile path into
+// the batch file's OEM code page. Disable delayed expansion for names with !.
 func silentCmdScript(courierPath string) string {
-	// cmd.exe reads a .cmd in the OEM code page, so a non-ASCII profile path
-	// cannot appear in it literally: the path travels inside -EncodedCommand.
-	return "start \"\" /min " + silentCourierCommandLine("& "+psSingleQuoted(courierPath)) + "\r\n"
+	return "@echo off\r\nsetlocal DisableDelayedExpansion\r\nstart \"\" /min powershell.exe -NoProfile -NonInteractive -ExecutionPolicy " + silentCourierPolicy(courierPath) + " -WindowStyle Hidden -File \"%~dp0silent-update.ps1\"\r\n"
 }
 
 // launchSilentInstaller starts the courier for the staged installer at
@@ -314,6 +307,14 @@ func launchSilentInstaller(installerPath, shellPlatform, sha256 string, appPid i
 		return launchResult{}, err
 	}
 
+	// Both launch routes execute the same BOM'd file. lg.path is the local
+	// spelling of the installer directory; winLog names that directory in Windows.
+	dir := filepath.Dir(lg.path)
+	courierPath := filepath.Join(dir, "silent-update.ps1")
+	winCourierPath := windowsDir(winLog) + `\silent-update.ps1`
+	if err := os.WriteFile(courierPath, append([]byte("\ufeff"), script...), 0o600); err != nil {
+		return launchResult{}, fmt.Errorf("write silent update courier: %w", err)
+	}
 	method := ""
 	if fromWSL {
 		// WMI through the repaired interop socket, as for the attended
@@ -321,7 +322,7 @@ func launchSilentInstaller(installerPath, shellPlatform, sha256 string, appPid i
 		// refuses session 0) and outside every process tree we own.
 		method = "silent-courier-wmi"
 		lg.event("dispatch", map[string]string{"path": installerPath, "method": method})
-		out, werr := runWMICourier(silentCourierCommandLine(script), true, psExe)
+		out, werr := runWMICourier(silentCourierCommandLine(winCourierPath), true, psExe)
 		if werr != nil {
 			lg.event("verify", map[string]string{"path": installerPath, "method": method, "err": werr.Error(), "detail": strings.TrimSpace(out)})
 			return launchResult{}, fmt.Errorf("could not start the silent update courier: %v: %s", werr, strings.TrimSpace(out))
@@ -330,15 +331,8 @@ func launchSilentInstaller(installerPath, shellPlatform, sha256 string, appPid i
 		// Native Windows: WMI from this daemon can land in session 0, so hand a
 		// .cmd to explorer.exe, which runs it in the user's session.
 		method = "silent-courier-explorer"
-		dir := filepath.Dir(lg.path)
-		courierPath := filepath.Join(dir, "silent-update.ps1")
 		cmdPath := filepath.Join(dir, "silent-update.cmd")
-		// Windows PowerShell reads a BOM-less script in the ANSI code page, which
-		// would garble a non-ASCII profile path; the BOM makes it UTF-8.
-		if err := os.WriteFile(courierPath, append([]byte("\ufeff"), script...), 0o600); err != nil {
-			return launchResult{}, fmt.Errorf("write silent update courier: %w", err)
-		}
-		if err := os.WriteFile(cmdPath, []byte(silentCmdScript(courierPath)), 0o600); err != nil {
+		if err := os.WriteFile(cmdPath, []byte(silentCmdScript(winCourierPath)), 0o600); err != nil {
 			return launchResult{}, fmt.Errorf("write silent update courier: %w", err)
 		}
 		explorer, err := resolveExplorer(false)

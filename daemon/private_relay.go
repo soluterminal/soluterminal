@@ -591,7 +591,7 @@ func (a *apiServer) servePrivateRelay(ws *websocket.Conn) {
 			if !a.trustedDevices.isApproved(device) {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{
 					"error":   "device_not_approved",
-					"message": "This device is no longer approved on that computer. Approve it there in Settings → Devices.",
+					"message": "This device is no longer approved on that computer. Approve it there in Settings → Privacy & security.",
 				})
 				return
 			}
@@ -599,7 +599,7 @@ func (a *apiServer) servePrivateRelay(ws *websocket.Conn) {
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
-			return context.WithValue(ctx, privateRelayDeviceKey{}, device)
+			return withPrivateRelayDevice(ctx, device)
 		},
 	}
 	go func() { _ = srv.Serve(privateListener{m: mux}) }()
@@ -609,6 +609,12 @@ func (a *apiServer) servePrivateRelay(ws *websocket.Conn) {
 }
 
 type privateRelayDeviceKey struct{}
+
+// withPrivateRelayDevice marks every request on a private channel's
+// connections with the device its handshake authenticated.
+func withPrivateRelayDevice(ctx context.Context, device string) context.Context {
+	return context.WithValue(ctx, privateRelayDeviceKey{}, device)
+}
 
 // privateRelayDevice reports the approved device whose private channel r
 // arrived on, or "".

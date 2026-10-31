@@ -552,6 +552,8 @@ func switchSpawnOpts(snap PaneSnapshot, target string, liveCols, liveRows uint16
 	snap, _ = healPaneSnapshot(snap)
 	agent := snap.Agent
 	opts := SpawnOpts{
+		AutoMode:             snap.AutoMode,
+		NeverAutoAnswer:      snap.NeverAutoAnswer,
 		ID:                   snap.ID,
 		Cwd:                  snap.Cwd,
 		Title:                snap.Title,
@@ -685,6 +687,8 @@ func switchHealthSignal(p *Pane, target string) bool {
 // a dead native pane parked in state).
 func (a *apiServer) rollbackSwitchMode(snap PaneSnapshot) *Pane {
 	opts := SpawnOpts{
+		AutoMode:             snap.AutoMode,
+		NeverAutoAnswer:      snap.NeverAutoAnswer,
 		ID:                   snap.ID,
 		Cwd:                  snap.Cwd,
 		Title:                snap.Title,

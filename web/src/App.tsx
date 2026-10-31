@@ -1,4 +1,5 @@
 import './loadExtensions';
+import { canExitWorkspaceView } from './lib/workspaceViewKeyboard';
 import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useAttentionOutsideBadges } from './lib/attentionBadge';
 import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from 'react-resizable-panels';
@@ -377,7 +378,7 @@ export default function App() {
   // subscribing to the object identity re-rendered the entire app shell
   // (topbar, sidebar, status bar) on every splitter-drag frame — setLayout
   // builds a fresh tree per onLayout tick.
-  const hasLayout = useStore((s) => !!s.layout);
+  const hasLayout = useStore((s) => !!s.layout || !!s.workspaceView);
   const focusedPaneId = useStore((s) => s.focusedPaneId);
   const killPane = useStore((s) => s.killPane);
   const setFocus = useStore((s) => s.setFocus);
@@ -601,10 +602,11 @@ export default function App() {
   // the terminal" flow. We watch the top-level state that those actions
   // change and reset drawerOpen off of it.
   const activeWorkspace = useStore((s) => s.activeWorkspace);
+  const workspaceView = useStore((s) => s.workspaceView);
   useEffect(() => {
     if (drawerOpen) setDrawerOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeWorkspace]);
+  }, [activeWorkspace, workspaceView]);
 
   // Sidebar imperative handle — used by Ctrl+Q (toggle) and the collapsed-rail
   // click-to-expand. react-resizable-panels persists the panel size via the
@@ -1044,6 +1046,7 @@ export default function App() {
       void st.refreshPanes();
       void st.refreshUpdateStatus();
       void st.refreshSchedules();
+      void st.refreshWorkspaces({ full: true });
       // Agents' requests for the person's OK raised while disconnected.
       void resyncPaneConfirms();
 
@@ -1105,7 +1108,7 @@ export default function App() {
     es.onmessage = (ev) => {
       if(!eventActive())return;
       try {
-        const msg = JSON.parse(ev.data) as { type: string; path?: string; url?: string; text?: string; paneId?: string; paneTitle?: string; ts?: number; tool?: string; hint?: string; fromState?: string; toState?: string; durationMs?: number; agentMidTurn?: boolean; prompts?: string[]; degraded?: boolean; attention?: string; attentionReason?: string; skipRecent?: boolean };
+        const msg = JSON.parse(ev.data) as { type: string; path?: string; url?: string; text?: string; paneId?: string; paneTitle?: string; ts?: number; tool?: string; hint?: string; fromState?: string; toState?: string; durationMs?: number; agentMidTurn?: boolean; prompts?: string[]; degraded?: boolean; attention?: string; attentionReason?: string; skipRecent?: boolean; workspace?: string; show?: boolean };
         const st = useStore.getState();
         // Every daemon-published event also feeds the Activity log. We
         // push unconditionally so the ring buffer reflects the full
@@ -1166,10 +1169,16 @@ export default function App() {
             });
             void st.refreshPorts();
           }
+        } else if (msg.type === 'workspace.updated') {
+          void st.refreshWorkspaces({ full: true });
         } else if (msg.type === 'pane.spawned' && msg.text && msg.paneId) {
           // An agent opened a pane. Announce it with a link to the new pane and
           // keep it in Alerts "Recent", so it is still there after the toast.
           st.toast(msg.text, { kind: 'info', ttlMs: 10_000, paneId: msg.paneId, logToRecent: true });
+          void st.refreshWorkspaces({ full: true }).then(() => {
+            if (eventActive() && msg.show && msg.workspace) useStore.getState().showSpawnedPane(msg.paneId!, msg.workspace);
+          });
+          void st.refreshPanes();
         } else if (msg.type === 'pane.reviewed' && msg.text && msg.paneId) {
           // An independent review of a pane's work finished (solu-review).
           // Kept in Alerts "Recent"; anything but an approval is a warning.
@@ -1191,7 +1200,7 @@ export default function App() {
               kind: 'warn',
               ttlMs: 0,
               logToRecent: true,
-              action: { label: 'Review', run: () => useSettings.getState().openSettings('devices') },
+              action: { label: 'Review', run: () => useSettings.getState().openSettings('privacy') },
             });
           }
         } else if (msg.type === 'toast' && msg.text) {
@@ -1720,6 +1729,13 @@ export default function App() {
       if (state.mainPresentation.kind === 'workspace' && (workspaceMovedTo(state.activeWorkspace) || workspaceTransferring(state.activeWorkspace))) return;
       const target = e.target as HTMLElement | null;
       const ourInput = isOurOwnInput(target);
+      // Terminals/editors keep Escape; tree/sidebar/view chrome can exit.
+      if (e.key === 'Escape' && state.workspaceView && canExitWorkspaceView(e.target, document.activeElement) && !document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        state.returnWorkspaceLayout();
+        return;
+      }
       // Optional features see each key first (extensions.ts).
       for (const keys of featureKeys) if (keys.keydown(e)) return;
 
@@ -2062,8 +2078,9 @@ export default function App() {
     const selected = () => setDrawerOpen(false);
     window.addEventListener('solu:show-task-owners',showOwners);
     window.addEventListener('solu:owner-selected',selected);
+    window.addEventListener('solu:workspace-selected',selected);
     window.addEventListener('solu:toggle-sidebar', on);
-    return () => {window.removeEventListener('solu:toggle-sidebar', on);window.removeEventListener('solu:show-task-owners',showOwners);window.removeEventListener('solu:owner-selected',selected);};
+    return () => {window.removeEventListener('solu:toggle-sidebar', on);window.removeEventListener('solu:show-task-owners',showOwners);window.removeEventListener('solu:owner-selected',selected);window.removeEventListener('solu:workspace-selected',selected);};
   }, []);
 
   // Alt + mouse wheel — cycle workspaces (same as Alt+Shift+↑/↓).

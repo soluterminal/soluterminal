@@ -391,6 +391,30 @@ impl SidecarGuard {
             extra_proxies: Vec::new(),
         }
     }
+
+    /// True when the guard holds a process this app started (a daemon, its
+    /// watchdog, or the wsl.exe that runs start-wsl.sh), as opposed to only a
+    /// proxy to a daemon that was already running.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn owns_process(&self) -> bool {
+        #[cfg(windows)]
+        let extras = !self.extras.is_empty();
+        #[cfg(not(windows))]
+        let extras = false;
+        self.child.is_some() || !self.supervisors.is_empty() || extras
+    }
+
+    /// True when the guard owns nothing: the daemon it describes was already
+    /// running, so dropping the guard stops nothing.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn is_empty(&self) -> bool {
+        #[cfg(windows)]
+        let windows_parts_empty =
+            self.proxy.is_none() && self.extras.is_empty() && self.extra_proxies.is_empty();
+        #[cfg(not(windows))]
+        let windows_parts_empty = true;
+        self.child.is_none() && self.supervisors.is_empty() && windows_parts_empty
+    }
 }
 
 impl Drop for SidecarGuard {
@@ -585,6 +609,15 @@ fn daemon_log_line(msg: &str) {
     }
 }
 
+/// The environment of a daemon the app starts only to install this
+/// computer's desktop update from Cloud launch mode (this_computer_update.rs).
+/// SOLU_UPDATE_ONLY=1 makes the daemon run its update-only boot
+/// (daemon/update_only_boot.go): the updater and four update routes, and
+/// nothing else (no relay, pairing, check-in, panes, scheduler, registrations
+/// or self-update). It is also the marker the stop and the reuse checks look
+/// for in a process's own environment.
+pub(crate) const HEADLESS_UPDATE_ENV: [(&str, &str); 1] = [("SOLU_UPDATE_ONLY", "1")];
+
 /// Build the daemon command. Every spawn — first boot and every respawn —
 /// goes through here so a supervised daemon can never drift from the one
 /// the app started with.
@@ -596,13 +629,43 @@ fn daemon_log_line(msg: &str) {
 /// ever heard about panics a daemon SURVIVED). The daemon unsets both vars
 /// after reading them so pane agents and update successors don't inherit a
 /// stale confession.
+
 fn spawn_solud(
     bin: &Path,
     backend_id: &str,
     addr: Option<&str>,
     respawn_reason: Option<&str>,
+    headless: bool,
 ) -> std::io::Result<Child> {
+    let mut cmd = solud_command(bin, backend_id, addr, respawn_reason, headless);
+    match open_daemon_log().and_then(|f| f.try_clone().ok().map(|g| (f, g))) {
+        Some((out, err)) => {
+            cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        }
+        // No writable log dir. Inherit — worthless in a release build,
+        // but it is what we did before and it costs nothing.
+        None => {
+            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        }
+    }
+    let child = cmd.spawn()?;
+    #[cfg(windows)]
+    job::assign(&child);
+    Ok(child)
+}
+
+/// The daemon command line and environment (no stdio, not spawned).
+fn solud_command(
+    bin: &Path,
+    backend_id: &str,
+    addr: Option<&str>,
+    respawn_reason: Option<&str>,
+    headless: bool,
+) -> Command {
     let mut cmd = Command::new(bin);
+    if headless {
+        cmd.envs(HEADLESS_UPDATE_ENV);
+    }
     // None keeps the daemon's built-in default (127.0.0.1:8787).
     if let Some(addr) = addr {
         cmd.args(["--addr", addr]);
@@ -632,16 +695,6 @@ fn spawn_solud(
     // path where shell≠daemon platform; we still pass it for clarity
     // and future cross-arch work.
     cmd.args(["--shell-platform", host_shell_platform()]);
-    match open_daemon_log().and_then(|f| f.try_clone().ok().map(|g| (f, g))) {
-        Some((out, err)) => {
-            cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
-        }
-        // No writable log dir. Inherit — worthless in a release build,
-        // but it is what we did before and it costs nothing.
-        None => {
-            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-        }
-    }
     // Suppress the console window the daemon would otherwise pop up
     // on Windows — same CREATE_NO_WINDOW treatment as the WSL-path
     // wsl.exe spawns. Unix ignores this call (cfg-gated).
@@ -649,10 +702,7 @@ fn spawn_solud(
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let child = cmd.spawn()?;
-    #[cfg(windows)]
-    job::assign(&child);
-    Ok(child)
+    cmd
 }
 
 /// What the watchdog needs from the outside world. Injected rather than
@@ -751,12 +801,18 @@ fn start_supervisor(cfg: SupervisorCfg, child: Child) -> SupervisorHandle {
 
 /// The production wiring: respawn the same binary with the same argv, and
 /// treat "our backend answers on its address" as health.
-fn solud_supervisor(bin: PathBuf, backend_id: String, addr: String, explicit_addr: bool) -> SupervisorCfg {
+fn solud_supervisor(
+    bin: PathBuf,
+    backend_id: String,
+    addr: String,
+    explicit_addr: bool,
+    headless: bool,
+) -> SupervisorCfg {
     let health_backend = backend_id.clone();
     let health_addr = addr.clone();
     SupervisorCfg {
         spawn: Box::new(move |reason| {
-            spawn_solud(&bin, &backend_id, explicit_addr.then_some(addr.as_str()), reason)
+            spawn_solud(&bin, &backend_id, explicit_addr.then_some(addr.as_str()), reason, headless)
         }),
         healthy: Box::new(move || require_backend(&health_addr, &health_backend).is_ok()),
     }
@@ -860,6 +916,18 @@ pub fn ensure_daemon_running_on(
     addr: &str,
     explicit_addr: bool,
 ) -> Result<DaemonStart, String> {
+    ensure_daemon_running_on_with(backend_id, addr, explicit_addr, false)
+}
+
+/// ensure_daemon_running_on, optionally starting the daemon `headless`
+/// (HEADLESS_UPDATE_ENV, for this_computer_update.rs). A daemon already
+/// answering is used as it is.
+pub(crate) fn ensure_daemon_running_on_with(
+    backend_id: &str,
+    addr: &str,
+    explicit_addr: bool,
+    headless: bool,
+) -> Result<DaemonStart, String> {
     let local_url = format!("http://{addr}");
 
     if port_alive(addr) {
@@ -888,7 +956,7 @@ pub fn ensure_daemon_running_on(
         bin.display()
     ));
     let child =
-        spawn_solud(&bin, backend_id, explicit_addr.then_some(addr), None).map_err(|e| format!("spawn {}: {}", bin.display(), e))?;
+        spawn_solud(&bin, backend_id, explicit_addr.then_some(addr), None, headless).map_err(|e| format!("spawn {}: {}", bin.display(), e))?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut ready = false;
@@ -915,7 +983,7 @@ pub fn ensure_daemon_running_on(
         guard: SidecarGuard {
             child: None,
             supervisors: vec![start_supervisor(
-                solud_supervisor(bin, backend_id.to_string(), addr.to_string(), explicit_addr),
+                solud_supervisor(bin, backend_id.to_string(), addr.to_string(), explicit_addr, headless),
                 child,
             )],
             #[cfg(windows)]
@@ -928,6 +996,15 @@ pub fn ensure_daemon_running_on(
         initial_url: local_url,
         alt_url: None,
     })
+}
+
+/// Whether a daemon of `backend_id` already answers on loopback `addr`, so a
+/// caller can use it instead of starting a second daemon on the same data dir
+/// (this_computer_update.rs).
+/// `token` is sent when known: a daemon with SOLU_LOOPBACK_REQUIRE_AUTH set
+/// answers a tokenless probe with 401.
+pub(crate) fn daemon_answers_as(addr: &str, backend_id: &str, token: Option<&str>) -> bool {
+    port_alive(addr) && require_backend_with_token(addr, backend_id, token).is_ok()
 }
 
 fn port_alive(addr: &str) -> bool {
@@ -1171,11 +1248,46 @@ fn wsl_rehome_target<'a>(current: &str, vm_route: Option<&'a str>) -> Option<&'a
     (is_wsl_loopback_route(current) && !is_wsl_loopback_route(vm) && vm != current).then_some(vm)
 }
 
+/// Set only while the "update this computer" flow runs (Cloud launch mode,
+/// where no other code probes daemons): its own start, readiness and
+/// watchdog checks must accept the update-only daemon it starts.
+static ACCEPT_UPDATE_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Holds ACCEPT_UPDATE_ONLY for the length of the update flow.
+pub(crate) struct AcceptUpdateOnlyDaemons(());
+
+impl AcceptUpdateOnlyDaemons {
+    pub(crate) fn hold() -> Self {
+        ACCEPT_UPDATE_ONLY.store(true, Ordering::SeqCst);
+        AcceptUpdateOnlyDaemons(())
+    }
+}
+
+impl Drop for AcceptUpdateOnlyDaemons {
+    fn drop(&mut self) {
+        ACCEPT_UPDATE_ONLY.store(false, Ordering::SeqCst);
+    }
+}
+
 fn check_backend_identity(
     health: serde_json::Value,
     addr: &str,
     expected: &str,
 ) -> Result<serde_json::Value, String> {
+    // A daemon started only to install this computer's desktop update
+    // (this_computer_update.rs) runs with pane restore, the relay and
+    // self-update off. It must never be reused as a normal daemon: panes would
+    // not be restored or saved. Refusing is all this check does; nothing here
+    // stops it (start-wsl.sh replaces one whose own environment carries the
+    // marker, and a Windows one cannot outlive the app's job object). Only
+    // the update flow itself, while it runs, accepts one.
+    if health.get("updateOnly").and_then(|v| v.as_bool()) == Some(true)
+        && !ACCEPT_UPDATE_ONLY.load(Ordering::SeqCst)
+    {
+        return Err(format!(
+            "daemon at {addr} is an update-only daemon (started to install this computer's update); not reusing it"
+        ));
+    }
     let actual = health
         .get("backendID")
         .and_then(|v| v.as_str())
@@ -1252,6 +1364,12 @@ fn require_reusable_wsl_backend_with(
 #[cfg(windows)]
 fn request_wsl_upgrade_once(addr: &str, token: Option<&str>, reason: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
+    // The update flow uses a running daemon as it is and never asks it to
+    // restart into a new version.
+    if ACCEPT_UPDATE_ONLY.load(Ordering::SeqCst) {
+        launch_log(&format!("not asking {addr} to update during the update flow ({reason})"));
+        return;
+    }
     static REQUESTED: AtomicBool = AtomicBool::new(false);
     if REQUESTED.swap(true, Ordering::SeqCst) {
         return;
@@ -1995,6 +2113,14 @@ fn report_recovery_disk_gate(verdict: &HostDiskVerdict) {
 
 #[cfg(windows)]
 pub fn ensure_daemon_running_wsl(app: &AppHandle) -> Result<DaemonStart, String> {
+    ensure_daemon_running_wsl_with(app, false)
+}
+
+/// ensure_daemon_running_wsl, optionally starting the daemon `headless`
+/// (HEADLESS_UPDATE_ENV, for this_computer_update.rs). A daemon already
+/// running is reused as it is.
+#[cfg(windows)]
+pub(crate) fn ensure_daemon_running_wsl_with(app: &AppHandle, headless: bool) -> Result<DaemonStart, String> {
     launch_log("ensure_daemon_running_wsl: start");
 
     // Refresh the WSL launcher on EVERY app start, before any early return.
@@ -2226,7 +2352,18 @@ pub fn ensure_daemon_running_wsl(app: &AppHandle) -> Result<DaemonStart, String>
     }
 
     crate::startup_screen::step("Starting the WSL background service");
-    let child = Command::new("wsl.exe")
+    let mut wsl_cmd = Command::new("wsl.exe");
+    if headless {
+        // WSLENV carries these into WSL, where start-wsl.sh hands its
+        // environment to the daemon.
+        wsl_cmd.envs(HEADLESS_UPDATE_ENV);
+        wsl_cmd.env(
+            "WSLENV",
+            headless_wslenv(std::env::var("WSLENV").ok().as_deref()),
+        );
+        launch_log("starting the WSL daemon update-only");
+    }
+    let child = wsl_cmd
         .args(["-e", "bash", &script_wsl_path])
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -2843,12 +2980,14 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "LIVE_BACKEND=\"\"\n",
             "LIVE_VERSION=\"\"\n",
             "LIVE_BINARY=\"\"\n",
+            "LIVE_UPDATE_ONLY=\"\"\n",
             "probe_live_daemon() {{\n",
             "  local port resp body tok\n",
             "  LIVE_PID=\"\"\n",
             "  LIVE_BACKEND=\"\"\n",
             "  LIVE_VERSION=\"\"\n",
             "  LIVE_BINARY=\"\"\n",
+            "  LIVE_UPDATE_ONLY=\"\"\n",
             "  port=\"${{ADDR##*:}}\"\n",
             "  case \"$port\" in ''|*[!0-9]*) return 1 ;; esac\n",
             "  command -v timeout >/dev/null 2>&1 || return 1\n",
@@ -2860,14 +2999,31 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "  LIVE_BACKEND=\"$(printf '%s' \"$body\" | json_top_value backendID || true)\"\n",
             "  LIVE_VERSION=\"$(printf '%s' \"$body\" | json_top_value version || true)\"\n",
             "  LIVE_BINARY=\"$(printf '%s' \"$body\" | json_top_value binaryPath || true)\"\n",
+            "  LIVE_UPDATE_ONLY=\"$(printf '%s' \"$body\" | json_top_value updateOnly || true)\"\n",
             "  [ -n \"$LIVE_BACKEND\" ] || [ -n \"$LIVE_VERSION\" ]\n",
+            "}}\n",
+            "# A daemon the desktop app started only to install this computer's\n",
+            "# update (pane restore, relay and self-update off) reports updateOnly. It\n",
+            "# counts as one only when its OWN start environment carries the marker\n",
+            "# SOLU_UPDATE_ONLY=1, so a normal daemon is never mistaken for it.\n",
+            "live_daemon_is_update_only() {{\n",
+            "  [ \"$LIVE_UPDATE_ONLY\" = \"true\" ] || return 1\n",
+            "  case \"$LIVE_PID\" in ''|*[!0-9]*) return 1 ;; esac\n",
+            "  tr '\\0' '\\n' 2>/dev/null < \"/proc/$LIVE_PID/environ\" | grep -qx 'SOLU_UPDATE_ONLY=1'\n",
             "}}\n",
             "# A live daemon is worth keeping unless it is a different backend or older\n",
             "# than the daemon this shell bundles (an active rollback hold on the bundle\n",
             "# makes the older one intentional). Unknown version keeps it: replacing a\n",
             "# healthy daemon interrupts every pane and workflow run, and the Windows\n",
             "# side still enforces staleness with its own identity check.\n",
+            "# A leftover update-only daemon is never kept: it restores and saves no\n",
+            "# panes. It is replaced like a stale one.\n",
+            "# The update flow's own run (this script started with the marker in its\n",
+            "# environment) never replaces a normal daemon, older or not: the flow\n",
+            "# uses it as it is and leaves it running.\n",
             "live_daemon_is_current() {{\n",
+            "  if live_daemon_is_update_only; then return 1; fi\n",
+            "  if [ \"${{SOLU_UPDATE_ONLY:-}}\" = \"1\" ] && [ \"$LIVE_BACKEND\" = \"{backend}\" ]; then return 0; fi\n",
             "  [ \"$LIVE_BACKEND\" = \"{backend}\" ] || return 1\n",
             "  [ -n \"$LIVE_VERSION\" ] || return 0\n",
             "  if ver_gt \"$BUNDLE_VERSION\" \"$LIVE_VERSION\"; then\n",
@@ -3972,6 +4128,125 @@ mod claim_mirror_schedule_tests {
 #[cfg(windows)]
 fn run_wsl_bounded(args: &[&str], timeout: Duration) -> Result<std::process::Output, String> {
     run_wsl_bounded_with_stdin(args, None, timeout)
+}
+
+/// WSLENV with the headless update variables added (Windows to WSL only),
+/// keeping whatever it already shares.
+#[cfg(any(windows, test))]
+fn headless_wslenv(existing: Option<&str>) -> String {
+    let mut parts: Vec<String> = existing
+        .unwrap_or("")
+        .split(':')
+        .filter(|p| !p.is_empty())
+        .filter(|p| !HEADLESS_UPDATE_ENV.iter().any(|(k, _)| p.split('/').next() == Some(*k)))
+        .map(str::to_string)
+        .collect();
+    parts.extend(HEADLESS_UPDATE_ENV.iter().map(|(k, _)| format!("{k}/u")));
+    parts.join(":")
+}
+
+/// The pid of the running start-wsl.sh supervisor, from its pidfile.
+#[cfg(windows)]
+pub(crate) fn read_wsl_supervisor_pid() -> Option<u32> {
+    let out = run_wsl_bounded_with_stdin(
+        &["-e", "sh", "-s"],
+        Some(b"cat \"$HOME/.local/share/soluterminal/start-wsl.pid\" 2>/dev/null\n"),
+        Duration::from_secs(10),
+    )
+    .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok().filter(|pid| *pid > 1)
+}
+
+/// Shell functions shared by the WSL stop and its confirmation. The flow's
+/// processes are found by the marker in their OWN start environment
+/// (/proc/<pid>/environ has SOLU_UPDATE_ONLY=1, which only
+/// HEADLESS_UPDATE_ENV sets), never by pid or name alone, so a normal daemon
+/// or supervisor that was already running is never signalled.
+#[cfg(any(windows, test))]
+const WSL_FLOW_PIDS_FN: &str = r#"has_marker() { tr '\0' '\n' 2>/dev/null < "/proc/$1/environ" | grep -qx 'SOLU_UPDATE_ONLY=1'; }
+flow_pids() {
+  for p in /proc/[0-9]*; do
+    pid="${p##*/}"
+    [ "$pid" = "$$" ] && continue
+    has_marker "$pid" || continue
+    case "$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline")" in
+      $1) echo "$pid" ;;
+    esac
+  done
+}
+"#;
+
+/// Stops what the flow started in WSL: SIGKILL to its start-wsl.sh
+/// supervisors first (so their trap cannot touch a daemon they adopted, and
+/// nothing restarts ours), then TERM and finally KILL to its daemons, and
+/// exits 0 only when none is left. Runs detached inside WSL, so it finishes
+/// even if the installer closes the app meanwhile.
+#[cfg(any(windows, test))]
+pub(crate) fn wsl_stop_script() -> String {
+    format!(
+        r#"{WSL_FLOW_PIDS_FN}
+sup="$(flow_pids '*start-wsl.sh*')"
+[ -n "$sup" ] && kill -9 $sup 2>/dev/null
+i=0
+while [ "$i" -lt 50 ]; do
+  left="$(flow_pids '*solud*--addr*')"
+  [ -z "$left" ] && exit 0
+  [ "$i" -eq 0 ] && kill $left 2>/dev/null
+  [ "$i" -eq 30 ] && kill -9 $left 2>/dev/null
+  sleep 0.1
+  i=$((i+1))
+done
+left="$(flow_pids '*solud*--addr*')"
+[ -z "$left" ] && exit 0
+echo "the update-only WSL daemon is still running (pid $left)" >&2
+exit 4
+"#
+    )
+}
+
+/// Exits 0 when no daemon of the flow is left in WSL.
+#[cfg(any(windows, test))]
+pub(crate) fn wsl_flow_gone_script() -> String {
+    format!("{WSL_FLOW_PIDS_FN}\nleft=\"$(flow_pids '*solud*--addr*')\"\n[ -z \"$left\" ] || {{ echo \"still running: pid $left\" >&2; exit 4; }}\n")
+}
+
+/// Stops the WSL daemon (and supervisor) this flow started and confirms it is
+/// gone. `daemon`/`supervisor` are the pids recorded at start, for the log;
+/// the stop itself goes by the marker, so an unknown pid is no excuse for a
+/// clean report.
+#[cfg(windows)]
+pub(crate) fn stop_wsl_daemon(supervisor: Option<u32>, daemon: Option<u32>) -> Result<(), String> {
+    let dir = solu_data_dir().ok_or("no app data directory for the WSL stop script")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let script = dir.join("stop-update-only-wsl.sh");
+    std::fs::write(&script, wsl_stop_script())
+        .map_err(|e| format!("write {}: {e}", script.display()))?;
+    let wsl_path = windows_path_to_wsl(&script)
+        .ok_or_else(|| format!("translate {}", script.display()))?;
+    // Detached inside WSL (setsid -f returns at once): a stop already under
+    // way survives the app being closed by the installer.
+    let detached = run_wsl_bounded(&["-e", "setsid", "-f", "sh", &wsl_path], Duration::from_secs(15));
+    if !detached.as_ref().is_ok_and(|o| o.status.success()) {
+        launch_log("setsid unavailable; stopping the update-only WSL daemon in the foreground");
+        let _ = run_wsl_bounded(&["-e", "sh", &wsl_path], Duration::from_secs(30));
+    }
+    let check = wsl_flow_gone_script();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last = String::from("not checked");
+    while Instant::now() < deadline {
+        match run_wsl_bounded_with_stdin(&["-e", "sh", "-s"], Some(check.as_bytes()), Duration::from_secs(10)) {
+            Ok(out) if out.status.success() => {
+                launch_log(&format!(
+                    "stopped the update-only WSL daemon (recorded pid {daemon:?}, supervisor {supervisor:?})"
+                ));
+                return Ok(());
+            }
+            Ok(out) => last = String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            Err(e) => last = e,
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    Err(format!("could not confirm the update-only WSL daemon stopped: {last}"))
 }
 
 /// run_wsl_bounded, optionally feeding `stdin` to the child. The deadline
@@ -6830,6 +7105,7 @@ mod wsl_port_block_tests {
         let mut fns = vec![
             extract_fn(&b, "ver_gt"),
             extract_fn(&b, "rollback_hold_active"),
+            extract_fn(&b, "live_daemon_is_update_only"),
             extract_fn(&b, "live_daemon_is_current"),
             extract_fn(&b, "port_held_by_other_daemon"),
             extract_fn(&b, "live_daemon_visible_here"),
@@ -6847,7 +7123,7 @@ mod wsl_port_block_tests {
         format!(
             "set -e\nHOME='{home}'\nADDR='0.0.0.0:{port}'\nBUNDLE_VERSION='{bundle}'\n\
              START_STATUS='{home}/{status}'\nWSL_DISTRO_NAME='Ubuntu'\n\
-             LIVE_PID=''\nLIVE_BACKEND=''\nLIVE_VERSION=''\nLIVE_BINARY=''\n{fns}\n",
+             LIVE_PID=''\nLIVE_BACKEND=''\nLIVE_VERSION=''\nLIVE_BINARY=''\nLIVE_UPDATE_ONLY=''\n{fns}\n",
             home = dir.display(),
             status = WSL_START_STATUS_FILE,
             fns = fns.join("\n"),
@@ -6943,6 +7219,69 @@ mod wsl_port_block_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(stdout.contains("FREE"), "a current WSL daemon was treated as a blocker: {stdout}");
         assert!(!reported, "nothing may be reported for a healthy daemon");
+    }
+
+    /// A leftover update-only daemon (its own environ carries the marker) is
+    /// stale and gets replaced; one that only claims updateOnly without the
+    /// marker in its environ is a normal daemon and is kept. Through the real
+    /// probe and json_top_value.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_update_only_daemon_is_replaced_only_when_its_environ_carries_the_marker() {
+        for (marked, stale) in [(true, true), (false, false)] {
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("60");
+            if marked {
+                cmd.env("SOLU_UPDATE_ONLY", "1");
+            }
+            let mut holder = cmd.spawn().unwrap();
+            let json: &'static str = Box::leak(
+                format!(
+                    r#"{{"status":"ok","version":"0.0.1228","pid":{},"backendID":"wsl","updateOnly":true,"updaterReady":true}}"#,
+                    holder.id()
+                )
+                .into_boxed_str(),
+            );
+            let port = serve_health(json);
+            let Some(dir) = scratch_dir("update-only") else { return };
+            let script = format!(
+                "{}\nprobe_live_daemon\nif live_daemon_is_current; then echo CURRENT; else echo STALE; fi\n",
+                classifier(&dir, port, "0.0.1228", None)
+            );
+            let out = run_bash(&script);
+            let _ = holder.kill();
+            let _ = holder.wait();
+            let _ = std::fs::remove_dir_all(&dir);
+            let Some(out) = out else { return };
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let want = if stale { "STALE" } else { "CURRENT" };
+            assert!(
+                stdout.contains(want),
+                "marked={marked}: want {want}, got {stdout} {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// The update flow's own (headless) run keeps a normal WSL daemon even
+    /// when it is older than the bundle; a normal run replaces it as before.
+    #[cfg(unix)]
+    #[test]
+    fn the_flows_own_run_never_replaces_a_normal_daemon() {
+        for (headless, want) in [(true, "CURRENT"), (false, "STALE")] {
+            let Some(dir) = scratch_dir("headless-keeps") else { return };
+            let stub = "probe_live_daemon() {\n  LIVE_PID=77\n  LIVE_BACKEND='wsl'\n  LIVE_VERSION='0.0.1189'\n  LIVE_BINARY=''\n  LIVE_UPDATE_ONLY=''\n  return 0\n}\n";
+            let marker = if headless { "SOLU_UPDATE_ONLY=1\n" } else { "unset SOLU_UPDATE_ONLY\n" };
+            let script = format!(
+                "{}\n{marker}probe_live_daemon\nif live_daemon_is_current; then echo CURRENT; else echo STALE; fi\n",
+                classifier(&dir, 1, "0.0.1228", Some(stub))
+            );
+            let out = run_bash(&script);
+            let _ = std::fs::remove_dir_all(&dir);
+            let Some(out) = out else { return };
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(stdout.contains(want), "headless={headless}: want {want}, got {stdout}");
+        }
     }
 
     /// The same decision across the identities a probe can return.
@@ -7227,5 +7566,114 @@ mod wsl_port_block_tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(candidates[0], "172.20.0.2:8787", "a VM IP resolved during the wait is kept");
+    }
+}
+
+#[cfg(test)]
+mod headless_update_env_tests {
+    use super::{headless_wslenv, solud_command};
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    fn env_of(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == OsStr::new(key))
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    // A daemon started for "update this computer" carries the update-only
+    // marker; every other start is unchanged.
+    #[test]
+    fn only_a_headless_start_sets_the_update_only_marker() {
+        let headless = solud_command(Path::new("solud"), "host", Some("127.0.0.1:41234"), None, true);
+        assert_eq!(env_of(&headless, "SOLU_UPDATE_ONLY").as_deref(), Some("1"));
+        let args: Vec<_> = headless.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|w| w == ["--addr", "127.0.0.1:41234"]), "{args:?}");
+
+        let normal = solud_command(Path::new("solud"), "host", None, None, false);
+        assert_eq!(env_of(&normal, "SOLU_UPDATE_ONLY"), None);
+    }
+
+    /// Serve one canned /api/health?identity=1 until the test ends.
+    fn serve_identity(json: String) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                );
+            }
+        });
+        addr
+    }
+
+    // Local mode (and Dual, and the flow's own discovery) never reuses an
+    // update-only daemon: the reuse check refuses it, before anything is
+    // spawned, and stops nothing. A normal healthy daemon is reused as before
+    // and nothing is stopped either (an empty guard).
+    /// Tests that depend on ACCEPT_UPDATE_ONLY run one at a time.
+    static ACCEPT_FLAG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // While the update flow runs, its own checks accept the update-only daemon
+    // it started (the WSL wait, the host readiness loop and its watchdog all go
+    // through this check); afterwards it is refused again.
+    #[test]
+    fn the_update_flow_accepts_its_own_update_only_daemon_and_nothing_else_does() {
+        let _serial = ACCEPT_FLAG.lock().unwrap_or_else(|e| e.into_inner());
+        let ours = serve_identity(
+            serde_json::json!({"status":"ok","version":env!("SOLU_SHELL_VERSION"),"pid":4244,"backendID":"wsl","updateOnly":true,"updaterReady":false}).to_string(),
+        );
+        assert!(super::require_current_wsl_backend_with_token(&ours, None).is_err());
+        {
+            let _flow = super::AcceptUpdateOnlyDaemons::hold();
+            super::require_current_wsl_backend_with_token(&ours, None).expect("the flow accepts its daemon");
+            assert!(super::daemon_answers_as(&ours, "wsl", None));
+        }
+        assert!(super::require_current_wsl_backend_with_token(&ours, None).is_err());
+    }
+
+    #[test]
+    fn local_mode_refuses_to_reuse_an_update_only_daemon() {
+        let _serial = ACCEPT_FLAG.lock().unwrap_or_else(|e| e.into_inner());
+        let leftover = serve_identity(
+            serde_json::json!({"status":"ok","version":env!("SOLU_SHELL_VERSION"),"pid":4242,"backendID":"host","updateOnly":true,"updaterReady":true}).to_string(),
+        );
+        let err = match super::ensure_daemon_running_on("host", &leftover, true) {
+            Err(e) => e,
+            Ok(_) => panic!("an update-only daemon was reused"),
+        };
+        assert!(err.contains("update-only"), "{err}");
+        assert!(!super::daemon_answers_as(&leftover, "host", None));
+
+        let normal = serve_identity(
+            serde_json::json!({"status":"ok","version":env!("SOLU_SHELL_VERSION"),"pid":4243,"backendID":"host"}).to_string(),
+        );
+        let started = super::ensure_daemon_running_on("host", &normal, true).expect("a normal daemon is reused");
+        assert!(started.guard.is_empty(), "reusing a normal daemon owns (and so stops) nothing");
+        assert!(super::daemon_answers_as(&normal, "host", None));
+    }
+
+    #[test]
+    fn the_wsl_start_shares_the_headless_switches_and_keeps_wslenv() {
+        const ALL: &str =
+            "SOLU_UPDATE_ONLY/u";
+        assert_eq!(headless_wslenv(None), ALL);
+        assert_eq!(
+            headless_wslenv(Some("USERPROFILE/p:SOLU_UPDATE_ONLY/w")),
+            format!("USERPROFILE/p:{ALL}")
+        );
     }
 }

@@ -340,6 +340,9 @@ func registerGitStatusNote(fn func(a *apiServer, path string) string) {
 // scheduleKind implements a schedule kind beyond the core ones ("prompt",
 // "task" and the hidden managed-agent trigger).
 type scheduleKind struct {
+	// available checks whether this build recognises the schedule target.
+	// Nil means every target of this registered kind is supported.
+	available func(Schedule) bool
 	// validate checks a create/update input of this kind.
 	validate func(in ScheduleInput) error
 	// title is the default name of a schedule created without one ("" falls

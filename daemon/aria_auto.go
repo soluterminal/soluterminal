@@ -162,6 +162,9 @@ func (a *Aria) evaluateObservation(ctx context.Context, paneID, paneTitle, obser
 	if !found {
 		return
 	}
+	if p.Snapshot().NeverAutoAnswer {
+		return
+	}
 	ctx, policy := withAriaAutoModePolicy(ctx, p)
 	isNative := p.Snapshot().Kind == "native"
 	if !isNative && p.Snapshot().AutoMode == "cautious" {
@@ -1224,7 +1227,7 @@ func (a *Aria) directAutoFireWithJevProof(ctx context.Context, paneID, paneTitle
 			recordOutcome("error", "pane prompt changed before body write", "")
 			return
 		}
-		if _, err := p.WriteNoPromptRecord([]byte(body)); err != nil {
+		if _, err := p.writeWithAutoModePolicy([]byte(body), false, policy.policy, time.Now().Add(ariaJevTimeout)); err != nil {
 			log.Printf("aria-auto-direct: pane=%s body write failed: %v", paneID, err)
 			emit(map[string]any{"type": "confirm_resolved", "id": confirmID, "approved": true, "error": err.Error()})
 			emit(map[string]any{"type": "error", "message": err.Error()})
@@ -1337,4 +1340,12 @@ func (a *Aria) directAutoFireWithJevProof(ctx context.Context, paneID, paneTitle
 	a.markAutoFirePace(paneID, settleKey, time.Now())
 	a.verifyAutoFireLanded(paneID, paneTitle, atomic.LoadInt64(&p.LastInputMs))
 	recordOutcome("fired", "", renderControlChars(displayInput))
+}
+
+// Caller holds p.mu; Jev must retain its screen/input transaction through transport.
+func (p *Pane) autoModePolicyLockedForAnswer(ctx context.Context) paneAutoModePolicy {
+	if captured, ok := ctx.Value(ariaAutoModePolicyKey{}).(ariaAutoModePolicy); ok {
+		return captured.policy
+	}
+	return paneAutoModePolicy{mode: p.AutoMode, generation: p.autoModeGeneration}
 }

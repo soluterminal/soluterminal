@@ -5,6 +5,7 @@ import { applyShellUpdateNative, revealShellInstallerNative } from '../tauri-bro
 import { fallBackToDownloadPage } from '../lib/shellUpdateFallback';
 import { installerNeedsLocalMode } from '../lib/shellUpdateRoute';
 import { switchDesktopLaunchMode } from '../lib/launchModeSwitch';
+import { canUpdateThisComputerHere, THIS_COMPUTER_PHASE_LABEL, updateThisComputer, useUpdateThisComputer } from '../lib/updateThisComputer';
 
 // Cloud-mode installer-update nudge. The daemon-driven update chip can't see a
 // stale LOCAL shell in cloud mode (no local daemon — see useCloudShellUpdate),
@@ -21,7 +22,9 @@ import { switchDesktopLaunchMode } from '../lib/launchModeSwitch';
 // which nothing in this window can install here (shellUpdateRoute.ts
 // installerNeedsLocalMode), and the download page would hand this computer
 // the public one. The banner then offers the switch to Local mode, where this
-// computer's own daemon fetches and verifies its installer.
+// computer's own daemon fetches and verifies its installer. A shell that can
+// do that from Cloud mode (lib/updateThisComputer.ts) gets a real Update
+// instead, and Switch to Local only if that fails.
 
 function dismissKey(version: string): string {
   return `solu.shellUpdateBannerDismissed.${version}`;
@@ -38,6 +41,9 @@ export function ShellUpdateBanner() {
   const toast = useStore((s) => s.toast);
   const applyAllUpdates = useStore((s) => s.applyAllUpdates);
   const localModeOnly = useStore((s) => installerNeedsLocalMode(s.updateStatus));
+  const thisComputer = useUpdateThisComputer();
+  const updateHere = localModeOnly && canUpdateThisComputerHere();
+  const updateHereFailed = updateHere && !thisComputer.running && !!thisComputer.failure;
 
   if (!available || !latest || !releaseUrl) return null;
 
@@ -129,6 +135,20 @@ export function ShellUpdateBanner() {
             <span aria-hidden>⚠</span> Installer downloaded but didn't open — open it manually
             <code className="shell-update-banner-path">{launchFailure.path}</code>
           </>
+        ) : updateHereFailed ? (
+          <>
+            <span aria-hidden>⚠</span> Couldn't update from here
+            <span className="shell-update-banner-sub"> · {thisComputer.failure}</span>
+          </>
+        ) : updateHere ? (
+          <>
+            <span aria-hidden>⬆</span> Update this computer's desktop app
+            <span className="shell-update-banner-sub">
+              {thisComputer.running
+                ? ` · ${THIS_COMPUTER_PHASE_LABEL[thisComputer.phase ?? 'starting']}`
+                : ' · installs this computer\'s own update and stays in Cloud mode'}
+            </span>
+          </>
         ) : localModeOnly ? (
           <>
             <span aria-hidden>⬆</span> Update this computer's desktop app in Local mode
@@ -143,7 +163,16 @@ export function ShellUpdateBanner() {
         )}
       </span>
       <span className="shell-update-banner-actions">
-        {updateHoldRefusal || downgradeRefusal ? null : localModeOnly ? (
+        {updateHoldRefusal || downgradeRefusal ? null : updateHere && !updateHereFailed ? (
+          <button
+            type="button"
+            className="shell-update-banner-btn primary"
+            disabled={thisComputer.running}
+            onClick={() => void updateThisComputer(toast)}
+          >
+            {thisComputer.running ? 'Updating…' : 'Update'}
+          </button>
+        ) : localModeOnly ? (
           <button
             type="button"
             className="shell-update-banner-btn primary"

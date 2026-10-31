@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -44,5 +45,34 @@ func TestProbeCandidateCapabilities(t *testing.T) {
 	}
 	if _, err := probeCandidateCapabilities(context.Background(), path); err == nil {
 		t.Fatal("failed capability probe was accepted")
+	}
+}
+
+// A staged Go executable sees argv0 directly (a shell script replaces it).
+// Keep rollback probes compatible with the strict daemon/shim dispatch.
+func TestProbeCandidateCapabilitiesStagedDaemonArgv0(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a tiny staged daemon fixture")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "main.go")
+	code := `package main
+import ("fmt"; "os")
+func main() {
+ if os.Args[0] != "solud" || len(os.Args) != 2 || os.Args[1] != "--update-capabilities" { os.Exit(127) }
+ fmt.Println("{\"version\":\"1.0.0\",\"rollbackHold\":1}")
+}`
+	if err := os.WriteFile(source, []byte(code), 0600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "solud.rollback")
+	cmd := exec.Command("go", "build", "-o", bin, source)
+	cmd.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build staged fixture: %v: %s", err, out)
+	}
+	caps, err := probeCandidateCapabilities(context.Background(), bin)
+	if err != nil || caps.Version != "1.0.0" {
+		t.Fatalf("staged daemon probe: caps=%+v err=%v", caps, err)
 	}
 }

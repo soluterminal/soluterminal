@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,7 +17,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-	"unicode/utf16"
 
 	"soluterminal-shared/releases"
 )
@@ -229,44 +227,36 @@ func TestSilentCourierScript(t *testing.T) {
 		t.Fatal("unescaped apostrophe in the courier script")
 	}
 
-	line := silentCourierCommandLine(script)
-	if len(line) >= 32767 {
-		t.Fatalf("courier command line is %d characters; CreateProcess allows 32767", len(line))
-	}
-	if decodeEncodedCommand(t, line) != script {
-		t.Fatal("encoded command does not decode to the courier script")
-	}
-
 	courier := `C:\Users\Zoë o'brien\.solu\shell-update\silent-update.ps1`
+	line := silentCourierCommandLine(courier)
+	if !strings.HasSuffix(line, `-File "`+courier+`"`) || !strings.Contains(line, "-ExecutionPolicy RemoteSigned") {
+		t.Fatalf("file command: %q", line)
+	}
 	cmd := silentCmdScript(courier)
 	for _, r := range cmd {
 		if r > 0x7f {
-			t.Fatalf("cmd script is not ASCII: %q", cmd)
+			t.Fatalf("batch must stay ASCII: %q", cmd)
 		}
 	}
-	if !strings.HasPrefix(cmd, `start "" /min powershell.exe `) || !strings.HasSuffix(cmd, "\r\n") {
-		t.Fatalf("cmd script = %q", cmd)
+	for _, want := range []string{`setlocal DisableDelayedExpansion`, `start "" /min powershell.exe`, `-File "%~dp0silent-update.ps1"`} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("batch lacks %q: %q", want, cmd)
+		}
 	}
-	if got := decodeEncodedCommand(t, strings.TrimSuffix(cmd, "\r\n")); got != `& 'C:\Users\Zoë o''brien\.solu\shell-update\silent-update.ps1'` {
-		t.Fatalf("cmd runs %q", got)
+	for _, text := range []string{cmd, line} {
+		if strings.Contains(text, "-EncodedCommand") || strings.Contains(text, "Bypass") {
+			t.Fatalf("unexpected launch flags: %q", text)
+		}
 	}
 }
 
-func decodeEncodedCommand(t *testing.T, line string) string {
-	t.Helper()
-	i := strings.Index(line, "-EncodedCommand ")
-	if i < 0 {
-		t.Fatalf("no -EncodedCommand in %q", line)
+func TestSilentCourierRetainsProcessPolicyForUNCFiles(t *testing.T) {
+	courier := `\\wsl.localhost\Ubuntu\home\Zoë o'brien\silent-update.ps1`
+	for _, command := range []string{silentCmdScript(courier), silentCourierCommandLine(courier)} {
+		if !strings.Contains(command, "-ExecutionPolicy Bypass") || !strings.Contains(command, "-File ") || strings.Contains(command, "EncodedCommand") {
+			t.Fatalf("UNC file command: %q", command)
+		}
 	}
-	raw, err := base64.StdEncoding.DecodeString(line[i+len("-EncodedCommand "):])
-	if err != nil || len(raw)%2 != 0 {
-		t.Fatalf("encoded command: %v", err)
-	}
-	units := make([]uint16, len(raw)/2)
-	for i := range units {
-		units[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
-	}
-	return string(utf16.Decode(units))
 }
 
 // #739: the desktop app runs as soluterminal-desktop.exe (the Cargo binary,

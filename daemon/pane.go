@@ -657,7 +657,8 @@ type Pane struct {
 	// Per-hour cap (ariaAutoMaxPerHour) and global pause still apply
 	// to both modes — AutoMode only governs how the evaluator decides,
 	// not whether the safety gates run.
-	AutoMode string `json:"autoMode,omitempty"`
+	AutoMode        string `json:"autoMode,omitempty"`
+	NeverAutoAnswer bool   `json:"neverAutoAnswer,omitempty"`
 	// Every policy transition revokes in-flight approval decisions, including
 	// switching off and back to the same mode. Guarded by mu; not persisted.
 	autoModeGeneration uint64
@@ -1115,6 +1116,7 @@ type PaneSnapshot struct {
 	// rides the DTO separately as announceDelegation.
 	AnnounceDelegationEvents *bool                `json:"announceDelegationEvents,omitempty"`
 	AutoMode                 string               `json:"autoMode,omitempty"`
+	NeverAutoAnswer          bool                 `json:"neverAutoAnswer,omitempty"`
 	AutoModeLastFiredMs      int64                `json:"autoModeLastFiredMs,omitempty"`
 	Narrating                bool                 `json:"narrating,omitempty"`
 	Flagged                  bool                 `json:"flagged,omitempty"`
@@ -1187,6 +1189,7 @@ func (p *Pane) Snapshot() PaneSnapshot {
 		ContextPackStatus:        p.ContextPackStatus,
 		AnnounceDelegationEvents: p.AnnounceDelegationEvents,
 		AutoMode:                 p.AutoMode,
+		NeverAutoAnswer:          p.NeverAutoAnswer,
 		AutoModeLastFiredMs:      p.AutoModeLastFiredMs,
 		Narrating:                p.Narrating,
 		Flagged:                  p.Flagged,
@@ -1273,6 +1276,7 @@ type Manager struct {
 }
 
 func NewManager(dataDir string) *Manager {
+	requireNormalBootEngine("pane.NewManager")
 	return &Manager{
 
 		panes:          map[string]*Pane{},
@@ -1909,6 +1913,11 @@ const autoPromptExpectWindow = 3 * time.Second
 
 // expectAutoPrompt opens the expected-menu window for an auto-mode pane.
 func (p *Pane) expectAutoPrompt() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.NeverAutoAnswer {
+		return
+	}
 	p.autoPromptExpectUntilMs.Store(time.Now().Add(autoPromptExpectWindow).UnixMilli())
 }
 
@@ -2387,29 +2396,7 @@ func (p *Pane) writeWithFleetAdmissionPolicy(b []byte, recordPrompt, nativeTurn 
 		// SetAutoMode. A queued writer must not reuse a revoked decision.
 		p.autoModeMu.Lock()
 		defer p.autoModeMu.Unlock()
-		p.mu.Lock()
-		if !policy.matchesLocked(p) || p.agentConn != conn {
-			p.mu.Unlock()
-			return errAutoModePolicyChanged
-		}
-		p.mu.Unlock()
-		if err := conn.SetWriteDeadline(deadline); err != nil {
-			return err
-		}
-		defer conn.SetWriteDeadline(time.Time{})
-		frame := autoModeFrameWriter{Writer: conn}
-		err := WriteFrame(&frame, FrameData, payload)
-		if err != nil && frame.written > 0 {
-			// A timeout may have written the frame header but not its body.
-			// Reusing that stream would corrupt every subsequent frame.
-			_ = conn.Close()
-			p.mu.Lock()
-			if p.agentConn == conn {
-				p.agentConn = nil
-			}
-			p.mu.Unlock()
-		}
-		return err
+		return p.writeAnswerFrameLocked(conn, payload, policy, deadline, false)
 	}()
 	releaseInput()
 	if err != nil {

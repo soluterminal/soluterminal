@@ -13,8 +13,11 @@ import (
 )
 
 type apiServer struct {
+	uiPrefs *uiPrefsStore
 	// ext holds optional features' per-server state (extSlot, extensions.go).
 	ext extState
+	// Agent-requested reveals share a cooldown across workspaces and clients.
+	spawnReveals spawnRevealLimiter
 	// The provider logins this daemon reports on: the provider CLI's own
 	// login (provider_login.go), or a credential manager that replaces it.
 	claudeLogin claudeLoginState
@@ -486,6 +489,7 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/panes/{id}/identity", a.setPaneIdentity)
 	mux.HandleFunc("POST /api/panes/{id}/name/suggest", a.handleSuggestPaneName)
 	mux.HandleFunc("POST /api/panes/{id}/auto-mode", a.setPaneAutoMode)
+	mux.HandleFunc("POST /api/panes/{id}/never-auto-answer", a.setPaneNeverAutoAnswer)
 	mux.HandleFunc("POST /api/panes/{id}/announce-delegation", a.setPaneAnnounceDelegation)
 	mux.HandleFunc("POST /api/panes/{id}/composer-state", a.setPaneComposerState)
 	mux.HandleFunc("POST /api/panes/{id}/flag", a.setPaneFlag)
@@ -750,6 +754,8 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	// local-only.
 	mux.HandleFunc("GET /api/view", a.handleGetView)
 	mux.HandleFunc("PUT /api/view", a.handlePutView)
+	mux.HandleFunc("GET /api/settings/ui", a.handleUIPrefs)
+	mux.HandleFunc("PUT /api/settings/ui", a.handleUIPrefs)
 	mux.HandleFunc("GET /api/settings/privacy", a.handleGetPrivacySettings)
 	mux.HandleFunc("GET /api/settings/pane-naming", a.handleGetPaneNaming)
 	mux.HandleFunc("PUT /api/settings/pane-naming", a.handlePutPaneNaming)
@@ -1650,6 +1656,7 @@ func (a *apiServer) listPanes(w http.ResponseWriter, _ *http.Request) {
 }
 
 type createPaneReq struct {
+	NeverAutoAnswer bool     `json:"neverAutoAnswer,omitempty"`
 	Restore         bool     `json:"restore,omitempty"`
 	IdentityBlocked bool     `json:"identityBlocked,omitempty"`
 	Cwd             string   `json:"cwd"`
@@ -1735,6 +1742,9 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 	// Cap decode memory at 1MB; oversize folds into the same "invalid json" 400
 	// that the global 32MB request-body middleware already yields.
 	if !decodeJSON(w, r, &req, 1<<20) {
+		return
+	}
+	if req.NeverAutoAnswer && !a.requireHuman(w, r, "restore pane automatic-answer lock") {
 		return
 	}
 	if req.Restore {
@@ -1884,6 +1894,7 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 	// an earlier restore.
 	paneOrigin = a.originAliases.resolveOrigin(paneOrigin)
 	p, err := a.spawnPaneForRequest(SpawnOpts{
+		NeverAutoAnswer:              req.NeverAutoAnswer,
 		RequireResumableConversation: req.Restore && conversationIDForAgent(agent, req.ClaudeSessionID, req.CodexThreadID, req.MuseSessionID) != "",
 		Cwd:                          req.Cwd,
 		Cmd:                          req.Cmd,
@@ -1943,6 +1954,7 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 			Effort:          snap.Effort,
 			Role:            snap.Role,
 			ContextPack:     snap.ContextPack,
+			NeverAutoAnswer: snap.NeverAutoAnswer,
 			TitleOverride:   snap.TitleOverride,
 			Origin:          snap.Origin.clone(),
 			Identity:        snap.Identity.clone(),
@@ -2090,7 +2102,15 @@ func (a *apiServer) setPaneAutoMode(w http.ResponseWriter, r *http.Request) {
 	if req.AutoMode != "" && !a.requireHumanOrDelegated(w, r, "turn on auto-approve") {
 		return
 	}
+	if !a.acquirePaneSettings(w, p) {
+		return
+	}
+	defer p.releaseRespawn()
 	prev := p.Snapshot()
+	if prev.NeverAutoAnswer && req.AutoMode != "" {
+		http.Error(w, "pane is locked against automatic answers", http.StatusConflict)
+		return
+	}
 	p.SetAutoMode(req.AutoMode)
 	if a.panes != nil {
 		if err := a.panes.Put(p); err != nil {
@@ -2196,6 +2216,10 @@ func (a *apiServer) ackPane(w http.ResponseWriter, r *http.Request) {
 }
 
 type workspaceSummaryDTO struct {
+	RemovedPaneIDs []string `json:"removedPaneIds,omitempty"`
+	LayoutMode     string   `json:"layoutMode,omitempty"`
+	LayoutVersion  uint64   `json:"layoutVersion,omitempty"`
+
 	Name            string    `json:"name"`
 	PaneIds         []string  `json:"paneIds"`
 	ActiveAt        time.Time `json:"activeAt"`
@@ -2209,6 +2233,9 @@ func (a *apiServer) listWorkspaceSummaries() []workspaceSummaryDTO {
 	out := make([]workspaceSummaryDTO, 0, len(workspaces))
 	for _, ws := range workspaces {
 		out = append(out, workspaceSummaryDTO{
+			RemovedPaneIDs:  ws.RemovedPaneIDs,
+			LayoutMode:      ws.LayoutMode,
+			LayoutVersion:   ws.LayoutVersion,
 			Name:            ws.Name,
 			PaneIds:         ws.PaneIds,
 			ActiveAt:        ws.ActiveAt,
@@ -2233,13 +2260,20 @@ func (a *apiServer) putWorkspace(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &wp, defaultJSONBodyBytes) {
 		return
 	}
+	before, _ := a.ws.Get(wp.Name)
 	if err := a.ws.Put(&wp); err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, errWorkspaceMoveConflict) {
+		if errors.Is(err, errWorkspaceInvalidLayout) {
+			status = http.StatusBadRequest
+		}
+		if errors.Is(err, errWorkspaceMoveConflict) || errors.Is(err, errWorkspaceLayoutConflict) {
 			status = http.StatusConflict
 		}
 		http.Error(w, err.Error(), status)
 		return
+	}
+	if a.uiBus != nil && wp.Name != "_current" && workspaceSavedViewChanged(before, &wp) {
+		a.uiBus.publish(uiEvent{Type: "workspace.updated", Workspace: wp.Name})
 	}
 	writeJSON(w, 200, &wp)
 }
@@ -2272,7 +2306,7 @@ func (a *apiServer) moveWorkspacePane(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errWorkspacePersistence) {
 			status = http.StatusInternalServerError
 		}
-		if errors.Is(err, errWorkspaceMoveConflict) {
+		if errors.Is(err, errWorkspaceMoveConflict) || errors.Is(err, errWorkspaceLayoutConflict) {
 			status = http.StatusConflict
 		}
 		http.Error(w, err.Error(), status)

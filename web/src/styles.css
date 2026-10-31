@@ -12692,8 +12692,7 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
 /* (Phase 3.1) Not-authorized note when a member drill returned 403. */
 .usage-member-forbidden { margin-bottom: 12px; }
 
-/* ===========================================================================
-   Native renderer pane (pane.kind === 'native'). A non-terminal pane body that
+/* ====================================================================   Native renderer pane (pane.kind === 'native'). A non-terminal pane body that
    renders a headless-Claude conversation as markdown / tool cards / structured
    approvals at the browser's own width. Terminal panes never use these styles.
    =========================================================================== */
@@ -17037,3 +17036,104 @@ button.pane-account-chip.is-warn:hover { border-color: var(--warn); color: var(-
 .service-status-chip.is-running {color:var(--accent)}
 .service-status-chip.is-completed {color:var(--ok)}
 .service-status-chip.is-muted {opacity:.7}
+
+/* Workspace > starter > worker tree. Depth stays readable in narrow drawers. */
+.workspace-pane-row { display: flex; align-items: center; gap: 6px; min-height: 38px; padding: 4px 8px; cursor: pointer; border-radius: 5px; }
+.workspace-pane-row:hover, .workspace-pane-row.is-selected { background: var(--bg-hover); }
+[data-tree-key]:focus { outline: none; }
+[data-tree-key]:focus-visible > .workspace-pane-row, .ws-row[data-tree-key]:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.tree-chevron { flex: 0 0 16px; width: 16px; padding: 0; border: 0; background: transparent; color: var(--fg-dim); cursor: pointer; text-align: center; }
+.pane-tree-dot { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--fg-dim); }
+.pane-tree-dot.is-busy { background: var(--ok); }
+.pane-tree-dot.is-finished { background: var(--accent); }
+.pane-tree-dot.is-needs-you { background: var(--danger, #e5484d); box-shadow: 0 0 0 2px #e5484d22; }
+.pane-tree-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pane-tree-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.pane-tree-status, .pane-tree-role { color: var(--fg-dim); font-size: 10px; }
+.pane-tree-status.needs-you { color: var(--danger, #e5484d); }
+.tree-leads-toggle { flex: 0 0 auto; border: 0; border-radius: 4px; background: transparent; color: var(--fg-dim); font-size: 9px; padding: 3px; cursor: pointer; }
+.tree-leads-toggle[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
+.ws-row .ws-text { min-width: 0; }
+.pane-tree-close { flex-shrink: 0; }
+@media (max-width: 800px) { .workspace-pane-row { min-height: 44px; } .tree-chevron { min-height: 28px; } }
+[data-tree-key]:focus-visible > .ws-row { outline: 1px solid var(--accent); outline-offset: -1px; }
+.workspace-tree-row { grid-template-columns: 16px auto minmax(0, 1fr) auto; column-gap: 4px; }
+.ws-row .tree-leads-toggle { grid-column: 3; justify-self: start; }
+.ws-row .ws-delete { grid-column: 4; grid-row: 1 / 3; }
+/* Secondary pane details move together, so a split never produces letter
+ fragments. Phones and the legacy native header retain their existing tiers. */
+[data-pane-detail], .pane-header-attention { display: contents; }
+[data-pane-detail][hidden] { display: none; }
+.pane-details-more { flex: 0 0 auto; order: 1; border: 1px solid var(--border); border-radius: 9px; padding: 2px 6px; color: var(--fg); background: var(--bg-3); font: inherit; cursor: pointer; }
+.pane-details-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pane-details-popover { position: fixed; z-index: var(--z-menu, 1000); display: flex; flex-direction: column; gap: 9px; width: max-content; max-width: min(420px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); color: var(--fg); box-shadow: 0 6px 20px #0005; font-size: 11px; }
+.pane-detail-row { display: flex; align-items: center; min-width: 0; }
+.pane-details-popover :is(.pane-identity-chip, .pane-origin, .pane-origin-btn, .pane-message-chip, .pane-review-chip, .pane-account-chip, .pane-identity-working-on) { max-width: none; min-width: 0; white-space: normal; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; }
+.pane-details-popover .pane-role-long { display: inline; }
+.pane-details-popover .pane-role-short { display: none; }
+.pane-origin-message { display: inline-flex; align-items: center; gap: 4px; }
+/* The class follows isMobileViewport, including narrow Tauri windows. */
+.pane-header-managed { min-height: 28px; padding: 4px 8px; gap: 8px; }
+.pane-header-managed .pane-actions .iconbtn { min-width: 0; min-height: 0; padding: 2px 6px; }
+.pane-needs-you { color: var(--warn); white-space: nowrap; }
+.pane-header.pane-header-managed .pane-title { flex: 1 1 auto; min-width: 10ch; max-width: none; }
+.pane-header.pane-header-managed [data-pane-detail] :is(.pane-identity-chip, .pane-origin, .pane-origin-btn, .pane-message-chip, .pane-review-chip, .pane-account-chip, .pane-role-badge, .pane-pack-badge, .pane-resume-badge, .pane-schedule-chip, .pane-automode-badge, .pane-mem-chip, .pane-zoom-btn) {
+  display: inline-flex; flex-shrink: 0; min-width: max-content; max-width: none; overflow: visible; text-overflow: clip;
+}
+.pane-header-managed [data-pane-detail] .pane-identity-working-on { display: inline; overflow: visible; }
+.pane-header-managed .pane-role-long { display: inline; }
+.pane-header-managed .pane-role-short { display: none; }
+.pane-header-managed .pane-header-attention > * { flex-shrink: 0; }
+.pane-header-managed .pane-header-attention :is(.pane-status, .pane-turn-chip, .pane-autoapproving-cancel) { display: inline-flex; }
+.pane-header-managed[data-details-overflow] { flex-wrap: wrap; }
+.pane-header-managed[data-details-overflow] .pane-header-attention { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; order: 3; flex-basis: 100%; min-width: 0; }
+.pane-header-managed[data-details-overflow] .pane-header-attention:empty { display: none; }
+.pane-header-managed .pane-header-attention .pane-unsent-message { max-width: 100%; min-width: 0; }
+/* Used for one synchronous measurement; removed before the browser paints. */
+.pane-header-managed[data-measuring-details] { flex-wrap: nowrap; }
+.pane-header-managed[data-measuring-details] [data-pane-detail],
+.pane-header-managed[data-measuring-details] .pane-header-attention { display: contents; }
+.pane-header-managed[data-measuring-details] .pane-details-more { display: none; }
+.pane-header-managed[data-measuring-details] .pane-title { flex: 0 0 10ch; min-width: 10ch; max-width: 10ch; }
+.pane-zoom-label { display: none; }
+.pane-details-popover .pane-zoom-label { display: inline; margin-left: 6px; }
+/* Keep the established wide-header sequence even though attention shares
+   a second row when details fold. display:contents preserves flex order. */
+.pane-header-managed .pane-index-badge { order: 1; }
+.pane-header-managed :is(.pane-role-badge, .pane-pack-badge, .pane-account-chip, .pane-schedule-chip) { order: 2; }
+.pane-header-managed :is(.pane-agent-stale-dot, .pane-automode-badge) { order: 3; }
+.pane-header-managed .pane-autoapproving-chip { order: 4; }
+.pane-header-managed .pane-resume-badge { order: 5; }
+.pane-header-managed :is(.pane-title, .pane-title-input) { order: 6; }
+.pane-header-managed .pane-identity-chip { order: 7; }
+.pane-header-managed :is(.pane-origin, .pane-origin-message) { order: 8; }
+.pane-header-managed .pane-review { order: 9; }
+.pane-header-managed .pane-message-chip { order: 10; }
+.pane-header-managed .pane-status { order: 11; }
+.pane-header-managed .pane-turn-chip { order: 12; }
+.pane-header-managed .pane-unsent-message { order: 13; }
+.pane-header-managed .pane-details-more { order: 19; }
+.pane-header-managed > .pane-actions { order: 20; }
+.pane-header-managed[data-details-overflow] .pane-header-attention { order: 21; }
+/* Flex wrapping uses basis before shrink: reserve ten characters so the
+   menu and close stay on the title's row even at 256px. */
+.pane-header-managed[data-details-overflow] .pane-title { flex-basis: 10ch; }
+/* One detail with two existing actions: origin details and the lead's message. */
+.pane-origin-message { border: 1px solid var(--border); border-radius: 4px; }
+.pane-origin-message .pane-origin-btn,
+.pane-origin-message .pane-message-chip { border-color: transparent; border-radius: 0; background: transparent; }
+
+.workspace-retile {
+  border: 0; border-radius: 4px; background: transparent; color: var(--muted);
+  cursor: pointer; font: inherit; font-size: 11px; padding: 4px 6px; white-space: nowrap;
+}
+.workspace-retile:hover { background: var(--hover); color: var(--fg); }
+
+.pane-automode-locked,
+.pane-automode-locked:disabled {
+  color: var(--fg-dim);
+  border-color: var(--border);
+  background: transparent;
+  cursor: default;
+  opacity: 1;
+}

@@ -137,6 +137,7 @@ const (
 // newRelaySupervisor constructs the supervisor. relayURL=="" yields a
 // supervisor that immediately reports "unconfigured" and does nothing.
 func newRelaySupervisor(ctx context.Context, dataDir, relayURL, backendID string, handler http.Handler) *relaySupervisor {
+	requireNormalBootEngine("relay_supervisor.newRelaySupervisor")
 	s := &relaySupervisor{
 		ctx:          ctx,
 		dataDir:      dataDir,
@@ -196,6 +197,7 @@ func (s *relaySupervisor) signalTokenChanged() {
 // lifetime. It blocks (call it as `go sup.run()`), returning only when ctx
 // is cancelled.
 func (s *relaySupervisor) run() {
+	requireNormalBootEngine("relay_supervisor.run")
 	if s.relayURL == "" {
 		return // unconfigured: cloud-DEAD by user choice, nothing to supervise
 	}

@@ -190,7 +190,7 @@ export function PaneContextMenu({
       <button role="menuitem" onClick={onCreateSchedule}>Create schedule…</button>
       </>}
       <div className="pane-ctx-menu-sep" />
-      <div className="pane-ctx-menu-label">Auto-approve</div>
+      <div className="pane-ctx-menu-label">{pane.neverAutoAnswer ? 'Auto-approve — locked' : 'Auto-approve'}</div>
       {AUTO_MODES.map((mode) => {
         const checked = currentAutoMode === mode;
         return (
@@ -199,7 +199,8 @@ export function PaneContextMenu({
             role="menuitemradio"
             aria-checked={checked}
             className={checked ? 'is-checked' : ''}
-            onClick={() => onSetAutoMode(mode)}
+            disabled={pane.neverAutoAnswer === true}
+            onClick={() => { if (!pane.neverAutoAnswer) onSetAutoMode(mode); }}
           >
             <span className="pane-ctx-menu-check" aria-hidden>{checked ? '●' : '○'}</span>
             {autoModeMenuLabel(mode)}

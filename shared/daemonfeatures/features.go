@@ -18,6 +18,8 @@ import (
 )
 
 const (
+	// UIPrefs: this daemon persists sidebar/UI choices across app origins.
+	UIPrefs = "ui-prefs.v1"
 	// TeamBrokerCodex: the daemon can provision a broker-only Codex team set
 	// (no bundle on the wire; model calls go through the cloud broker). Daemons
 	// <= 0.0.1153 cannot — the Oct 1 2026 outage.

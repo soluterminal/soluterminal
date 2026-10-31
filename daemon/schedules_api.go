@@ -279,14 +279,23 @@ func (a *apiServer) injectPane(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "text is required", 400)
 		return
 	}
-	if !a.promptInputGate(r)(p) {
+	caller := a.identifyCaller(r)
+	if !a.promptInputGateFor(caller)(p) {
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error":   "human_required",
-			"message": "That pane is showing a permission prompt. Agents can't answer it on their own; the person can, or can turn on Settings → Devices → Agent permissions.",
+			"message": "That pane is showing a permission prompt. Agents can't answer it on their own; the person can, or can turn on Settings → Privacy & security → Agent permissions.",
 		})
 		return
 	}
-	if _, err := p.Write([]byte(req.Text)); err != nil {
+	write := p.Write
+	if caller.Kind != callerHuman {
+		write = p.writeProgrammaticInput
+	}
+	if _, err := write([]byte(req.Text)); err != nil {
+		if errors.Is(err, errAutoModePolicyChanged) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, "write failed: "+err.Error(), 500)
 		return
 	}

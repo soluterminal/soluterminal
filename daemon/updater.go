@@ -630,6 +630,7 @@ func NewUpdater(current, shellCurrent, shellPlatform string, bus *uiBus, metrics
 // ticker for the life of ctx. Dev builds (version == "dev") are
 // skipped entirely so `go run` iterations don't spam the endpoint.
 func (u *Updater) StartBackgroundPoll(ctx context.Context) {
+	requireNormalBootEngine("updater.StartBackgroundPoll")
 	if u.current == "dev" {
 		return
 	}

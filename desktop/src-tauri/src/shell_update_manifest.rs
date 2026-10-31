@@ -265,24 +265,31 @@ try {{
     )
 }
 
+// Preserve the updater's process-scoped policy: staging uses Get-FileHash,
+// which can require loading a script module on Windows PowerShell 5.1.
+// This changes no persistent policy and does not override Group Policy.
+#[cfg(any(windows, test))]
+pub(crate) fn powershell_command(ps: &str, script: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(ps);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
+    command
+}
+
 /// Runs the fetch script and verifies what it downloaded.
 #[cfg(windows)]
 pub(crate) fn fetch_verified_shell_asset(ps: &str) -> Result<VerifiedShellAsset, String> {
-    use std::process::Command;
-
     let repos = release_repos_for(SHELL_FLAVOR);
     if repos.is_empty() {
         return Err(TEAM_SHELL_UPDATE_UNAVAILABLE.to_string());
     }
-    let out = Command::new(ps)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &fetch_manifest_script(&repos),
-        ])
+    let out = powershell_command(ps, &fetch_manifest_script(&repos))
         .output()
         .map_err(|e| format!("could not run powershell ({ps}): {e}"))?;
     if !out.status.success() {
@@ -311,6 +318,25 @@ pub(crate) fn fetch_verified_shell_asset(ps: &str) -> Result<VerifiedShellAsset,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn updater_commands_keep_process_scoped_execution_policy() {
+        let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+        let script = r"Get-FileHash -LiteralPath 'C:\Users\O''Brien\setup.exe'";
+        let command = super::powershell_command(ps, script);
+        assert_eq!(command.get_program(), ps);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script
+            ]
+        );
+    }
+
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 

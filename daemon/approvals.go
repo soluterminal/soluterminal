@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // approvals.go is the native-renderer approvals pipeline (Phase 1, Component 7).
@@ -312,6 +313,9 @@ func sortedAllowlistLocked(m map[string]bool) []string {
 // hide a card for a request nobody approved, hanging the agent on a question the
 // user can never see. The daemon already knows; it says so on the event.
 func (p *Pane) allowlistAutoAllows(toolName string, rawInput json.RawMessage) (how, denyReason string) {
+	if p.Snapshot().NeverAutoAnswer {
+		return "", "automatic answers locked by user"
+	}
 	// Two rule shapes: a whole-tool opt-in ("Bash") or an argument-scoped
 	// prefix rule ("Bash(git status)") that only covers commands it can fully
 	// see (see allowlistPrefixMatch).
@@ -347,7 +351,7 @@ func (p *Pane) maybeAutoAllowFromList(reqID, toolName, how string) bool {
 	if reqID == "" || how == "" {
 		return false
 	}
-	pending, err := p.resolveApproval(reqID, true, "")
+	pending, err := p.resolveAutomaticApproval(reqID)
 	if err != nil || pending == nil {
 		// Resolve failed (e.g. write error) or the approval was already
 		// taken by a racing manual/ARIA resolve. Either way DON'T claim it —
@@ -537,6 +541,22 @@ func (p *Pane) listNativePending() []*NativeApproval {
 // claimed approval is returned so the caller can bridge into ARIA's confirm
 // registry (ConfirmID) at the apiServer layer where Aria is reachable.
 func (p *Pane) resolveApproval(reqID string, allow bool, denyReason string) (*NativeApproval, error) {
+	return p.resolveApprovalWithPolicy(reqID, allow, denyReason, nil)
+}
+
+func (p *Pane) resolveAutomaticApproval(reqID string) (*NativeApproval, error) {
+	policy := p.autoModePolicy()
+	return p.resolveAutomaticApprovalForPolicy(reqID, policy)
+}
+
+func (p *Pane) resolveAutomaticApprovalForPolicy(reqID string, policy paneAutoModePolicy) (*NativeApproval, error) {
+	return p.resolveApprovalWithPolicy(reqID, true, "", &policy)
+}
+
+func (p *Pane) resolveApprovalWithPolicy(reqID string, allow bool, denyReason string, policy *paneAutoModePolicy) (*NativeApproval, error) {
+	if policy != nil && !policy.matches(p) {
+		return nil, errAutoModePolicyChanged
+	}
 	pending := p.takeNativePending(reqID)
 	if pending == nil {
 		// Diagnostic: a resolve that finds NO live pending entry. Expected for a
@@ -556,7 +576,13 @@ func (p *Pane) resolveApproval(reqID string, allow bool, denyReason string) (*Na
 		p.setNativePending(pending)
 		return nil, errors.New("native agent cannot correlate this approval request")
 	}
-	if _, err := p.WriteNoPromptRecord(frame); err != nil {
+	write := p.WriteNoPromptRecord
+	if policy != nil {
+		write = func(b []byte) (int, error) {
+			return p.writeWithAutoModePolicy(b, false, *policy, time.Now().Add(ariaJevTimeout))
+		}
+	}
+	if _, err := write(frame); err != nil {
 		p.setNativePending(pending)
 		return nil, err
 	}
@@ -690,7 +716,7 @@ func (a *Aria) nativeAutoResolve(p *Pane, reqID, confirmID string, useRegistry b
 	if !reserved {
 		return false
 	}
-	pending, err := p.resolveApproval(reqID, true, "")
+	pending, err := p.resolveAutomaticApproval(reqID)
 	if err != nil || pending == nil {
 		// Write failed or nothing pending — give the budget slot back.
 		a.releaseAutoFireReservation(confirmID)
@@ -738,8 +764,19 @@ func (a *apiServer) handlePaneApprovalResolve(w http.ResponseWriter, r *http.Req
 	if req.Allow && !a.requireHumanOrDelegated(w, r, "allow a pane's permission request") {
 		return
 	}
-	pending, err := p.resolveApproval(reqID, req.Allow, req.DenyReason)
+	// A delegated API caller is still a machine answer. Only the person's
+	// native approval card may use the manual writer on a locked pane.
+	var policy *paneAutoModePolicy
+	if a.identifyCaller(r).Kind != callerHuman {
+		captured := p.autoModePolicy()
+		policy = &captured
+	}
+	pending, err := p.resolveApprovalWithPolicy(reqID, req.Allow, req.DenyReason, policy)
 	if err != nil {
+		if errors.Is(err, errAutoModePolicyChanged) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		if errors.Is(err, errNoPendingApproval) {
 			// No-op: already resolved or never pending. Safe duplicate.
 			writeJSON(w, 200, map[string]any{"resolved": false, "reason": "no pending approval"})

@@ -1,5 +1,6 @@
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
+import { PaneDetail } from './PaneHeaderOverflow';
 import { IconBolt, IconClock } from './ui/icons';
 import type { PaneInfo } from '../types';
 import { useStore } from '../store';
@@ -9,7 +10,7 @@ import { api } from '../api';
 import { copyToClipboard } from '../lib/clipboard';
 
 import { PaneAgentStaleDot } from './PaneAgentStaleDot';
-import { PaneCredentialBadge } from './PaneCredentialBadge';
+import { PaneCredentialBadge, paneAccountStatus } from './PaneCredentialBadge';
 import { PaneAutoModeChip } from './PaneAutoModeChip';
 
 // AutoApprovingChip surfaces the daemon's auto-pending attention signal
@@ -195,13 +196,15 @@ interface PaneHeaderBadgesProps {
   // Focus panes default to showing the badge for both supported agents. Terminal
   // panes explicitly gate it with isAutoApproveCapable so plain shells omit it.
   showAutoMode?: boolean;
+  section?: 'index' | 'details' | 'attention';
 }
 
 // The #index / auto-approval / resume badge cluster shared by the terminal
 // (PaneHeader) and native (NativePane) headers so the two stay in lockstep.
 // All three badges live inside a draggable header, so each escapes drag-start
 // via stopPropagation + onMouseDownCapture (mirrors the mode toggle).
-export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true }: PaneHeaderBadgesProps) {
+export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section }: PaneHeaderBadgesProps) {
+  const accountWarning = paneAccountStatus(pane, account => account || 'unknown')?.tone === 'warn';
   const toast = useStore((s) => s.toast);
 
   const [copiedResume, setCopiedResume] = useState(false);
@@ -233,55 +236,63 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true }: PaneH
     }
   };
 
+  const Detail = section ? PaneDetail : Fragment;
+
   return (
     <>
-      {paneIndex > 0 && (
+      {(!section || section === 'index') && paneIndex > 0 && (
         <span
           className="pane-index-badge"
           title={`Alt+${paneIndex} focuses this pane`}
         >#{paneIndex}</span>
       )}
+      {(!section || section === 'details') && <>
       {/* Role identity — standing, not an alert: this pane IS the orchestrator.
           Deliberately NOT the ⚙ glyph (that means an in-session workflow, see
           StatusBar.tsx). Rendered in the shared cluster, so it shows in both the
           terminal (PaneHeader) and Focus (NativePane) headers. */}
-      {pane.role === 'task_owner' && <span className="pane-role-badge" title="Interactive task owner — dispatches specialists for its assigned task">owner</span>}
+      {pane.role === 'task_owner' && <Detail><span className="pane-role-badge" title="Interactive task owner — dispatches specialists for its assigned task">owner</span></Detail>}
       {pane.role === 'orchestrator' && (
-        <span
+        <Detail><span
           className="pane-role-badge"
           title={`Orchestrator pane (${agentLabel(paneAgent)}) — delegates work to tasks and agents. Right-click the pane to change its role.`}
           aria-label={`Orchestrator pane (${agentLabel(paneAgent)}) — delegates work to tasks and agents. Right-click the pane to change its role.`}
           onMouseDownCapture={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
-        >orch</span>
+        >orch</span></Detail>
       )}
       {pane.contextPack && (
-        <span
+        <Detail><span
           className={`pane-pack-badge pane-pack-${packStatus}`}
           title={packTitle}
           aria-label={packTitle}
           onMouseDownCapture={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
-        >pack</span>
+        >pack</span></Detail>
       )}
-      <PaneCredentialBadge pane={pane} />
-      <NextScheduleChip pane={pane} />
+      {(!section || !accountWarning) && <Detail><PaneCredentialBadge pane={pane} /></Detail>}
+      <Detail><NextScheduleChip pane={pane} /></Detail>
       {/* Delegated work runs through the team-only Tasks engine. */}
 
 
-      <PaneAgentStaleDot pane={pane} />
+      </>}
+      {section === 'attention' && accountWarning && <PaneCredentialBadge pane={pane} />}
+      {(!section || section === 'attention') && <PaneAgentStaleDot pane={pane} />}
+      {(!section || section === 'details') && <>
       {/* Opens a three-option menu; never changes the mode on its own, and
           Always approve asks first (PaneAutoModeChip). */}
-      {showAutoMode && <PaneAutoModeChip pane={pane} />}
+      {(showAutoMode || pane.neverAutoAnswer) && <Detail><PaneAutoModeChip pane={pane} /></Detail>}
       {/* AFTER the auto badge: the transient chip reads as a status hanging off
           the control it belongs to, and — because it mounts/unmounts mid-turn —
           appearing to the badge's RIGHT never shoves the badge sideways under
           the cursor mid-click. */}
-      {showAutoMode && <AutoApprovingChip pane={pane} />}
+      </>}
+      {(!section || section === 'attention') && showAutoMode && <AutoApprovingChip pane={pane} />}
+      {(!section || section === 'details') && <>
       {conversationID && pane.resumeReady && (
-        <button
+        <Detail><button
           type="button"
           className={`pane-resume-badge${copiedResume ? ' copied' : ''}`}
           aria-label={`Copy ${paneAgentLabel} ${paneAgent === 'codex' ? 'thread' : 'session'} id ${conversationID}`}
@@ -296,8 +307,9 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true }: PaneH
           }}
         >
           {copiedResume ? 'copied ✓' : 'resume'}
-        </button>
+        </button></Detail>
       )}
+      </>}
     </>
   );
 }

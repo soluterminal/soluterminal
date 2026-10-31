@@ -154,6 +154,7 @@ func parseAgentCmdline(raw []byte) (isAgent bool, socket string) {
 // pane (Status != running) is intentionally NOT an owner — its agent, if somehow
 // still alive, is an orphan we want gone. Linux-only (reads /proc); no-op elsewhere.
 func reapOrphanAgents(mgr *Manager, agentsDir string, retained ...map[string]ownerRetainedHistory) {
+	requireNormalBootEngine("agent_reaper.reapOrphanAgents")
 	if runtime.GOOS != "linux" {
 		return
 	}

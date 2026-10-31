@@ -368,6 +368,10 @@ func (e *attentionEngine) Refresh(p *Pane) {
 		f.HumanOnlyReason = folderTrustHint
 	}
 	f.AutoMode = snap.AutoMode
+	if snap.NeverAutoAnswer {
+		f.AutoMode = ""
+		f.HumanOnlyReason = "automatic answers locked by user"
+	}
 	f.IsNative = snap.Kind == "native"
 	if f.IsNative {
 		f.NativeAutoOn = nativeAriaAutoEnabled()

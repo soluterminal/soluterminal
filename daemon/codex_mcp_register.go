@@ -239,6 +239,7 @@ func codexConfigInsertPaneHeader(body string) (string, bool) {
 // ensureCodexMcpRegistration runs once at daemon startup on its own
 // goroutine, next to its Claude sibling.
 func ensureCodexMcpRegistration(listenAddr string) {
+	requireNormalBootEngine("codex_mcp_register.ensureCodexMcpRegistration")
 	if os.Getenv("SOLU_SKIP_MCP_REGISTER") == "1" {
 		return
 	}

@@ -84,6 +84,7 @@ type PersistedPane struct {
 	ContextPack       string `json:"contextPack,omitempty"`
 	ContextPackStatus string `json:"contextPackStatus,omitempty"`
 	AutoMode          string `json:"autoMode,omitempty"`
+	NeverAutoAnswer   bool   `json:"neverAutoAnswer,omitempty"`
 	// AnnounceDelegationEvents mirrors Pane.AnnounceDelegationEvents: the
 	// user's EXPLICIT delegation-announcement override, or absent for "follow
 	// the role default". A pointer (not a bool) so an explicit `false` on an
@@ -169,6 +170,18 @@ func (s *PaneStore) load() error {
 		quarantineCorruptState(s.path, err)
 		s.list = nil
 		return nil
+	}
+	changed := false
+	for i := range s.list {
+		entry := &s.list[i]
+		mode, locked := tightenPaneAnswerSettings(entry.Cwd, entry.AutoMode, entry.NeverAutoAnswer)
+		if mode != entry.AutoMode || locked != entry.NeverAutoAnswer {
+			entry.AutoMode, entry.NeverAutoAnswer = mode, locked
+			changed = true
+		}
+	}
+	if changed {
+		return s.saveList(s.list)
 	}
 	return nil
 }
@@ -303,6 +316,7 @@ func persistedFromSnapshot(snap PaneSnapshot) PersistedPane {
 		ContextPack:              snap.ContextPack,
 		ContextPackStatus:        snap.ContextPackStatus,
 		AutoMode:                 snap.AutoMode,
+		NeverAutoAnswer:          snap.NeverAutoAnswer,
 		AnnounceDelegationEvents: snap.AnnounceDelegationEvents,
 		Narrating:                snap.Narrating,
 		Flagged:                  snap.Flagged,

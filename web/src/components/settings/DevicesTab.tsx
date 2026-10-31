@@ -1,22 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { usePhoneAccessAllowed, useTeamFeatures } from '../../entitlements';
-import { PersonalViewSetting } from './PersonalViewSetting';
-import { confirmDialog } from '../../lib/dialog';
+import { usePhoneAccessAllowed } from '../../entitlements';
 import { useStore } from '../../store';
 import { useSettings } from '../../settings';
-import { useCloud } from '../../cloud';
 import { DesktopInstallerLink, detectVisitorOS } from '../DesktopInstallerLink';
 import { chipStateFor, isDesktopShell, usePhoneAccessStatus } from '../../cloudPair';
 import { getAutostartStatus, setAutostart, type AutostartStatus } from '../../tauri-browser';
 import { SettingsCheck, SettingsGroup, SettingsRow } from './SettingsRow';
-import { CheckinSetting } from './CheckinSetting';
-import { AgentAuthoritySetting } from './AgentAuthoritySetting';
-import { RemoteDevicesSetting } from './RemoteDevicesSetting';
-import { AgentIntegrationSetting } from './AgentIntegrationSetting';
-import { MarketingConsentSetting } from './MarketingConsentSetting';
 import type { UpdateAutoApplyMode } from '../../types';
-import { slotList } from '../../extensions';
 
+// Settings › Devices & updates. Account, voice and the privacy and security
+// groups moved to their own tabs (AccountTab, NotificationsVoiceTab,
+// PrivacySecurityTab) on 2026-10-31.
+//
 // Other-device entry points. The installer download is always offered — in a
 // browser it's how you get the app; inside the desktop shell it's how you grab
 // the installer for another machine (or reinstall by hand), so only the hint
@@ -45,11 +40,6 @@ export function DevicesTab() {
   // computer, which is only useful with an account to reach it from.
   const os = detectVisitorOS();
   const showDesktopRow = phoneAllowed || (os !== 'mac' && os !== 'linux');
-  const withoutAccount = useCloud((s) => s.withoutAccount && !s.session);
-  const requestSignIn = useCloud((s) => s.requestSignIn);
-  const signedInEmail = useCloud((s) => (s.session ? s.session.user?.email ?? '' : null));
-  const signOut = useCloud((s) => s.signOut);
-  const team = useTeamFeatures();
   const [autostartStatus, setAutostartStatus] = useState<AutostartStatus | null>(null);
   const [autostartError, setAutostartError] = useState<string | null>(null);
   const [autostartPending, setAutostartPending] = useState(false);
@@ -98,42 +88,8 @@ export function DevicesTab() {
 
   return (
     <>
-    {(withoutAccount || signedInEmail !== null || showDesktopRow || (desktop && phoneAllowed)) && (
+    {(showDesktopRow || (desktop && phoneAllowed)) && (
     <SettingsGroup title="Devices">
-      {withoutAccount && (
-        <SettingsRow
-          label="Account"
-          hint="A free account adds phone and browser access, push alerts, voice and smart approvals."
-        >
-          <span className="settings-status">Not signed in</span>
-          <button
-            type="button"
-            className="settings-btn"
-            onClick={() => {
-              useSettings.getState().closeSettings();
-              requestSignIn();
-            }}
-          >Create free account or sign in</button>
-        </SettingsRow>
-      )}
-      {signedInEmail !== null && (
-        <SettingsRow label="Account" hint={team ? 'Team account.' : 'Free beta account.'}>
-          <span className="settings-status">{signedInEmail ? `Signed in as ${signedInEmail}` : 'Signed in'}</span>
-          <button
-            type="button"
-            className="settings-btn"
-            onClick={async () => {
-              const ok = await confirmDialog({
-                message: 'Sign out? Your panes keep running. Phone access, push alerts, voice and smart approvals stop until you sign in again.',
-                confirmLabel: 'Sign out',
-              });
-              if (ok) void signOut();
-            }}
-          >Sign out</button>
-        </SettingsRow>
-      )}
-      {signedInEmail !== null && <MarketingConsentSetting />}
-      <PersonalViewSetting />
       {showDesktopRow && (
         <SettingsRow
           label="Desktop app"
@@ -233,11 +189,6 @@ export function DevicesTab() {
         </SettingsRow>
       )}
     </SettingsGroup>
-    {slotList('settingsSections').filter((section) => section.tab === 'devices').map((section, i) => <section.Component key={i} />)}
-    <AgentIntegrationSetting />
-    <AgentAuthoritySetting />
-    <RemoteDevicesSetting />
-    <CheckinSetting />
     </>
   );
 }

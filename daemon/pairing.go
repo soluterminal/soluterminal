@@ -77,6 +77,7 @@ type pairingSnapshot struct {
 // goroutine so they outlive the short-lived /pair/start request but still die
 // with the daemon. A nil baseCtx falls back to context.Background() (tests).
 func newPairingManager(baseCtx context.Context, relayURL, dataDir string, onClaimed func()) *pairingManager {
+	requireNormalBootEngine("pairing.newPairingManager")
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
@@ -120,6 +121,7 @@ func (e errPair) Error() string { return string(e) }
 // context) instead, because it must OUTLIVE this request — net/http cancels the
 // request ctx the moment /pair/start's response is written.
 func (m *pairingManager) start(ctx context.Context) (pairStartResult, error) {
+	requireNormalBootEngine("pairing.start")
 	if m == nil || m.relayURL == "" {
 		return pairStartResult{}, errPairUnconfigured
 	}

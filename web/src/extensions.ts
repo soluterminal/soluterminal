@@ -122,6 +122,9 @@ export interface GlobalKeys {
 export interface SettingsSectionEntry {
   tab: SettingsTab;
   Component: ComponentType;
+  /** Whether the section is offered right now. A hook: called on every
+   *  render. Leave it out for a section that always shows. */
+  useVisible?: () => boolean;
 }
 
 /** A group of rows in the keyboard-shortcut overlay. */

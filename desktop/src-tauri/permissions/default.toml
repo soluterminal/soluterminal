@@ -65,6 +65,13 @@ description = "Allow the app UI to read the app's own process id, which it passe
 commands.allow = ["app_process_id"]
 
 [[permission]]
+identifier = "allow-desktop-update-this-computer"
+description = "Allow the main UI, in Cloud launch mode, to have this computer's own daemon check for and launch this computer's desktop installer update. Takes no arguments."
+commands.allow = ["desktop_update_this_computer"]
+# Deliberately not in the [default] set above: only capabilities/default.json
+# (the main window) grants it.
+
+[[permission]]
 identifier = "allow-exit-for-update"
 description = "Allow the app UI to flush geometry and exit after the update courier starts."
 commands.allow = ["exit_for_update"]

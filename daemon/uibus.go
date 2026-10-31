@@ -86,6 +86,7 @@ type uiEvent struct {
 	// _current scratchpad / unattached). Populated on pane.awaiting_approval
 	// so the aria-watcher's "Approval needed — X" title can show the
 	// workspace name (recognizable) instead of a generic pane title.
+	Show       bool   `json:"show,omitempty"` // pane.spawned: scroll only; never keyboard focus
 	Workspace  string `json:"workspace,omitempty"`
 	Ts         int64  `json:"ts,omitempty"`
 	Tool       string `json:"tool,omitempty"`

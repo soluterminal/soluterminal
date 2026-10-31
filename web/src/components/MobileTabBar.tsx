@@ -1,3 +1,4 @@
+import { workspaceViewLayout } from '../lib/workspaceView';
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { IconMenu } from './ui/icons';
@@ -116,7 +117,7 @@ export function MobileTabBar({
   // subscribing to the full `panes` map which swaps reference on
   // every WS byte / every refreshPanes poll.
   const tabsHash = useStore((s) => {
-    const leaves = collectLeaves(s.layout);
+    const leaves = collectLeaves(workspaceViewLayout(s));
     let h = '';
     for (const leaf of leaves) {
       if (leaf.type === 'pane') {
@@ -138,7 +139,7 @@ export function MobileTabBar({
   });
   const tabs = useMemo(() => {
     const s = useStore.getState();
-    const leaves = collectLeaves(s.layout) as VisibleLeaf[];
+    const leaves = collectLeaves(workspaceViewLayout(s)) as VisibleLeaf[];
     return leaves.filter(leaf => leaf.type !== 'tasks').map((leaf): MobileLeafTab => {
       if (leaf.type === 'browser') {
         const b = s.browsers[leaf.browserId];

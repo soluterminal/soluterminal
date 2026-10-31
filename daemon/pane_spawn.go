@@ -22,6 +22,10 @@ import (
 )
 
 type SpawnOpts struct {
+	// Restored before publication: security settings must never lag the live pane.
+	AutoMode        string
+	NeverAutoAnswer bool
+
 	teamBrokerTeamID string // nonsecret scope captured with the minted route
 	teamBrokerLabel  string
 	// teamBrokerCapability is the capability minted for this spawn. It is
@@ -728,6 +732,7 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 		home, _ := os.UserHomeDir()
 		opts.Cwd = home
 	}
+	opts.AutoMode, opts.NeverAutoAnswer = tightenPaneAnswerSettings(opts.Cwd, opts.AutoMode, opts.NeverAutoAnswer)
 	contextPack := resolveContextPack(opts.ContextPack, opts.Cwd, opts.Kind, opts.Agent, opts.Cmd)
 
 	// Resume-target validation (BOTH kinds). Never hand `claude --resume <id>` a
@@ -1170,7 +1175,13 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 		if opts.Kind == "" {
 			childCmd = codexPaneLaunchCommand(childCmd)
 		}
-		argv = append(argv, brokerChildCommand(childCmd, teamBrokerOverrides)...)
+		childCmd = brokerChildCommand(childCmd, teamBrokerOverrides)
+		// Keep the driver command visible to provider/broker planning above;
+		// only adapt argv0 at the final process launch boundary.
+		if opts.Kind == "native" && len(childCmd) > 1 && childCmd[1] == "muse-driver" {
+			childCmd = daemonCommandArgv(childCmd[0], childCmd[1:]...)
+		}
+		argv = append(argv, childCmd...)
 	}
 
 	// Keep pre-wire startup failures (including guard diagnostics) visible
@@ -1180,7 +1191,7 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 	// failed can't be re-Start()'d, so the breakaway-fallback retry below
 	// needs to rebuild it.
 	buildAgentCmd := func(breakaway bool) *exec.Cmd {
-		c := exec.Command(selfExe, argv...)
+		c := daemonCommand(selfExe, argv...)
 		// Setsid (Unix) / CREATE_NEW_PROCESS_GROUP+DETACHED (Windows)
 		// makes the agent survive daemon death. See spawn_*.go.
 		if breakaway {
@@ -1229,6 +1240,8 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 		credentialTeamSelection: m.selectedCredentialTeam,
 		credentialLiveStatus:    m.liveCredentialStatus,
 		codexLiveDataDir:        m.dataDir,
+		AutoMode:                opts.AutoMode,
+		NeverAutoAnswer:         opts.NeverAutoAnswer,
 		ID:                      id,
 		Cwd:                     opts.Cwd,
 		Cmd:                     opts.Cmd,
@@ -1326,6 +1339,9 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 		p.setSwitchNoticeReason(kindOrTerminal(p.Kind), noticeReason, noticeReason == "resume-repair")
 	}
 
+	if p.Snapshot().AutoMode != "" {
+		p.ensureGrid()
+	}
 	started = true
 	go p.readLoop(m)
 	return p, nil
@@ -1343,6 +1359,9 @@ func kindOrTerminal(kind string) string {
 // a daemon restart). Returns nil, nil if the agent is dead; callers retain
 // the pane as a suspended recovery record.
 func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
+	copy := *info
+	info = &copy
+	info.AutoMode, info.NeverAutoAnswer = tightenPaneAnswerSettings(info.Cwd, info.AutoMode, info.NeverAutoAnswer)
 	// Is the agent process alive?
 	if !pidAlive(info.AgentPid) {
 		return nil, nil
@@ -1395,6 +1414,7 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 		ContextPackStatus:        info.ContextPackStatus,
 		AnnounceDelegationEvents: info.AnnounceDelegationEvents,
 		AutoMode:                 info.AutoMode,
+		NeverAutoAnswer:          info.NeverAutoAnswer,
 		Narrating:                info.Narrating,
 		Flagged:                  info.Flagged,
 		FlagMemo:                 info.FlagMemo,
@@ -1444,7 +1464,7 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 	m.panes[info.ID] = p
 	m.mu.Unlock()
 
-	if p.AutoMode != "" {
+	if p.Snapshot().AutoMode != "" {
 		p.ensureGrid()
 	}
 	// Restore an armed deferred switch ("switch when Claude finishes") — the
@@ -1502,6 +1522,9 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 // An explicit recovery error also permits an unidentified session or shell
 // placeholder. It stays visible until the user chooses a conversation or closes it.
 func (m *Manager) SuspendExisting(info *PersistedPane) *Pane {
+	copy := *info
+	info = &copy
+	info.AutoMode, info.NeverAutoAnswer = tightenPaneAnswerSettings(info.Cwd, info.AutoMode, info.NeverAutoAnswer)
 	agent, _ := normalizeAgentKind(info.Agent, info.Cmd, info.CodexThreadID)
 	// A managed terminal harness has its durable conversation in the client's
 	// sidecar, adopted into HarnessSessionID; it is resumable even though there
@@ -1552,6 +1575,7 @@ func (m *Manager) SuspendExisting(info *PersistedPane) *Pane {
 		ContextPackStatus:        info.ContextPackStatus,
 		AnnounceDelegationEvents: info.AnnounceDelegationEvents,
 		AutoMode:                 info.AutoMode,
+		NeverAutoAnswer:          info.NeverAutoAnswer,
 		Narrating:                info.Narrating,
 		Flagged:                  info.Flagged,
 		FlagMemo:                 info.FlagMemo,
@@ -1623,6 +1647,11 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 		}
 		defer existing.releaseRespawn()
 		suspended = existing
+		// The boot queue can predate a successful settings change on this tile.
+		// Take security policy from the current pane after acquiring its lease.
+		live := existing.Snapshot()
+		info.AutoMode = live.AutoMode
+		info.NeverAutoAnswer = live.NeverAutoAnswer
 	}
 	if info.IdentityBlocked {
 		return nil, &SpawnError{msg: "conversation identity is unverified; choose the original conversation"}
@@ -1713,6 +1742,8 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 	p, err := m.Spawn(SpawnOpts{
 		ID:                           info.ID,
 		ReplaceSuspended:             suspended,
+		AutoMode:                     info.AutoMode,
+		NeverAutoAnswer:              info.NeverAutoAnswer,
 		RequireResumableConversation: !harnessResume && conversationID != "",
 		MuseSessionID:                info.MuseSessionID,
 		Cwd:                          info.Cwd,
@@ -1755,7 +1786,6 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 		p.CreatedAt = info.CreatedAt
 	}
 	p.Kind = info.Kind
-	p.AutoMode = info.AutoMode
 	p.AnnounceDelegationEvents = info.AnnounceDelegationEvents
 	p.Flagged = info.Flagged
 	p.FlagMemo = info.FlagMemo
@@ -1764,7 +1794,7 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 	p.FlagRevision = info.FlagRevision
 	p.LastPrompts = cloneStringSlice(info.LastPrompts)
 	p.mu.Unlock()
-	if p.AutoMode != "" {
+	if p.Snapshot().AutoMode != "" {
 		p.ensureGrid()
 	}
 	if p.Kind == "native" {
@@ -1813,11 +1843,13 @@ func (p *Pane) pokeBlankReattachAfter(after time.Duration) {
 	//      an old-protocol agent that doesn't ship FrameSyntheticPaint
 	//      lands here and Ctrl+L is the last-resort repaint trigger.
 	blank := p.buffer.TotalWritten() == 0
+	p.subsMu.Lock()
 	if !blank && p.replayEmu != nil {
 		if !gridSnapshotHasText(p.replayEmu.Snapshot()) {
 			blank = true
 		}
 	}
+	p.subsMu.Unlock()
 	if !blank {
 		return
 	}

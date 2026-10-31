@@ -1,11 +1,14 @@
-import { useEffect, useState, type Dispatch, type DragEventHandler, type MouseEvent as ReactMouseEvent, type SetStateAction } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type DragEventHandler, type MouseEvent as ReactMouseEvent, type SetStateAction, type ReactNode } from 'react';
 import { IconMaximize, IconMinimize } from './ui/icons';
 import type { PaneInfo } from '../types';
 import { useStore } from '../store';
 import { confirmClosePane } from './usePaneContextMenu';
+import { useIsMobileView } from './useIsMobileView';
+import { PaneHeaderOverflow, PaneDetail, usePaneDetailVisible } from './PaneHeaderOverflow';
 import { PaneHeaderBadges } from './PaneHeaderBadges';
 import { UnsentMessageChip } from './UnsentMessageChip';
 import { PaneOriginButton } from './PaneOriginButton';
+import { messageSharesOrigin } from '../lib/paneHeaderDetails';
 import { PaneIdentityChip } from './PaneIdentityChip';
 import { PaneReviewChip } from './PaneReviewChip';
 import { PaneMessageChip } from './PaneMessageChip';
@@ -155,9 +158,168 @@ export function PaneHeader({
   onSwitchMode,
   onOpenMenu,
 }: PaneHeaderProps) {
-  const isNative = pane.kind === 'native';
+  const paneMovesAllowed = useStore(s => !s.workspaceView);
+  const isMobileView = useIsMobileView();
+  const warningReview = !isMobileView && (pane.review?.verdict === 'request-changes' || pane.review?.verdict === 'comment');
+  const headerRef = useRef<HTMLDivElement>(null);
+  const combineMessage = useStore(s => !isMobileView && messageSharesOrigin(pane, s.panes));
   const paneAgentLabel = agentLabel(effectivePaneAgent(pane));
   const agentMemMB = paneAgentRssMB(pane);
+
+  return (
+    <div
+      ref={headerRef}
+      className={`pane-header${isMobileView ? '' : ' pane-header-managed'}`}
+      draggable={!ownerPresentation && paneMovesAllowed}
+      onDragStart={e=>{if(actionGuard()&&!ownerPresentation&&paneMovesAllowed)onDragStart(e);else e.preventDefault();}}
+      onDragEnd={onDragEnd}
+      // Double-click empty header area toggles maximise — matches OS window
+      // affordance. Title span, edit input, and action buttons stop
+      // propagation so they don't trigger this.
+      onDoubleClick={(e) => {
+        if (!canZoom) return;
+        e.stopPropagation();
+        onToggleZoom();
+      }}
+    >
+      <PaneHeaderOverflow headerRef={headerRef} enabled={!isMobileView}>
+      <Tooltip label={activityTooltip(activityClass, paneAgentLabel)}>
+        <span className={`activity-dot ${activityClass}`} />
+      </Tooltip>
+      <PaneHeaderBadges pane={pane} paneIndex={paneIndex} section={isMobileView ? undefined : "index"} showAutoMode={isAutoApproveCapable(pane)} />
+      {!isMobileView && <PaneHeaderBadges pane={pane} paneIndex={paneIndex} section="details" showAutoMode={isAutoApproveCapable(pane)} />}
+      {editingTitle ? (
+        <input
+          className="pane-title-input"
+          autoFocus
+          value={titleDraft}
+          onChange={(e) => setTitleDraft(e.target.value)}
+          onBlur={async () => {
+            if(!actionGuard()) {setEditingTitle(false);return;}
+            setEditingTitle(false);
+            const next = titleDraft.trim();
+            if (next !== pane.title) {
+              try { await onRename(next); } catch {}
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            if (e.key === 'Escape') {
+              setTitleDraft(pane.title);
+              setEditingTitle(false);
+            }
+            e.stopPropagation();
+          }}
+          onMouseDownCapture={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+        />
+      ) : (
+        <Tooltip label="Double-click to rename">
+          <span
+            className="pane-title"
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setTitleDraft(pane.title);
+              setEditingTitle(true);
+            }}
+          >
+            {unread && (unreadKind !== 'turn' || !turnChipModel(pane, Date.now(), true)) && <span className="unread-marker" aria-label="new activity">●</span>}
+            {pane.title || pane.cmd.join(' ')}
+          </span>
+        </Tooltip>
+      )}
+      <PaneDetail><PaneIdentityChip pane={pane} deduplicateTitle={!isMobileView} /></PaneDetail>
+      <PaneDetail>{combineMessage ? <span className="pane-origin-message"><PaneOriginButton pane={pane} /><PaneMessageChip pane={pane} /></span> : <PaneOriginButton pane={pane} />}</PaneDetail>
+      {!warningReview && <PaneDetail><PaneReviewChip pane={pane} /></PaneDetail>}
+      {!combineMessage && <PaneDetail><PaneMessageChip pane={pane} /></PaneDetail>}
+      <HeaderAttention enabled={!isMobileView}>
+      {warningReview && <PaneReviewChip pane={pane} />}
+      {!isMobileView && <PaneHeaderBadges pane={pane} paneIndex={paneIndex} section="attention" showAutoMode={isAutoApproveCapable(pane)} />}
+      {!isMobileView && pane.attention === 'needs-user' && <span className="pane-needs-you">needs you</span>}
+      {/* Status chip only when it carries SIGNAL — exited / (re)connecting.
+          The steady-state "running" was permanent header noise (and Focus
+          panes never had it), so the healthy state now shows nothing. */}
+      {(pane.status === 'exited' || connStatus !== 'open') && (
+        <span className={`pane-status ${paneStatusClass(pane, connStatus)}`}>
+          {paneStatusLabel(pane, connStatus)}
+        </span>
+      )}
+      <PaneTurnChip pane={pane} unseen={unreadKind === 'turn'} />
+      <UnsentMessageChip pane={pane} actionGuard={actionGuard} />
+      </HeaderAttention>
+      <div className="pane-actions">
+        <PaneDetail><PaneModeControl pane={pane} onSwitchMode={onSwitchMode} /></PaneDetail>
+        {/* Agent memory readout (display-only on Term): the selected provider's
+            resident RAM, sampled ~60s. No tap-to-restart here — Term reclaims
+            via Ctrl+C + resume or reopen
+            (one-tap restart lives in Focus mode). Amber when heavy. */}
+        {agentMemMB > 0 && (
+          <PaneDetail><Tooltip label={`Agent memory ${memLabel(agentMemMB)}. To reclaim: Ctrl+C to exit the agent then resume, or use Restart pane in the ⋯ menu.`}>
+            <span
+              className={`iconbtn pane-mem-chip readonly${agentMemMB >= 500 ? ' heavy' : ''}`}
+              aria-label={`Agent memory ${memLabel(agentMemMB)}`}
+            >
+              {memLabel(agentMemMB)}
+            </span>
+          </Tooltip></PaneDetail>
+        )}
+        {canZoom && (
+          <PaneDetail><Tooltip label={isZoomed ? 'Restore layout (Alt+Z)' : 'Maximise pane (Alt+Z)'}>
+            <button
+              className="iconbtn pane-zoom-btn"
+              aria-label={isZoomed ? 'Restore pane' : 'Maximise pane'}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleZoom();
+              }}
+              onDoubleClick={(e) => e.stopPropagation()}
+            >{isZoomed ? <IconMinimize size={13} /> : <IconMaximize size={13} />}<span className="pane-zoom-label">{isZoomed ? 'Restore layout' : 'Maximise pane'}</span></button>
+          </Tooltip></PaneDetail>
+        )}
+        {onOpenMenu && (
+          <Tooltip label="Pane menu">
+            <button
+              className="iconbtn pane-menu-btn"
+              aria-label="Pane menu"
+              aria-haspopup="menu"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenMenu(e);
+              }}
+              onDoubleClick={(e) => e.stopPropagation()}
+            >⋯</button>
+          </Tooltip>
+        )}
+        <Tooltip label="Close session">
+          <button
+            className="iconbtn"
+            aria-label={ownerPresentation ? 'Close owner view' : 'Close session'}
+            onClick={async (e) => {
+              e.stopPropagation();
+              if(!actionGuard())return;
+              if(ownerPresentation) {onClose();return;}
+              if (await confirmClosePane(pane) && actionGuard()) onClose();
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >×</button>
+        </Tooltip>
+      </div>
+      </PaneHeaderOverflow>
+    </div>
+  );
+}
+
+function HeaderAttention({ enabled, children }: { enabled: boolean; children: ReactNode }) {
+  return enabled ? <div className="pane-header-attention">{children}</div> : <>{children}</>;
+}
+
+// Each inline/popover copy owns its confirmation. Hiding an inline detail or
+// unmounting its popover cancels that copy instead of retaining an armed dialog.
+function PaneModeControl({ pane, onSwitchMode }: Pick<PaneHeaderProps, 'pane' | 'onSwitchMode'>) {
+  const detailVisible = usePaneDetailVisible();
+  const paneAgentLabel = agentLabel(effectivePaneAgent(pane));
+  const isNative = pane.kind === 'native';
   const modeSwitchReady = isFocusCapable(pane) && !pane.identityBlocked;
   const codexIdentityPending = !isNative && (pane.hasCodex === true || pane.hasMuse === true) && !modeSwitchReady;
   // Focus retired: the toggle only remains on a pane that is STILL native, as
@@ -229,191 +391,64 @@ export function PaneHeader({
     void switchPaneMode(pane.id, kind, { when: 'now' });
   };
 
+  useLayoutEffect(() => {
+    if (!detailVisible) setConfirmTarget(null);
+  }, [detailVisible]);
+
+  if (!showModeToggle) return null;
   return (
-    <div
-      className="pane-header"
-      draggable={!ownerPresentation}
-      onDragStart={e=>{if(actionGuard()&&!ownerPresentation)onDragStart(e);else e.preventDefault();}}
-      onDragEnd={onDragEnd}
-      // Double-click empty header area toggles maximise — matches OS window
-      // affordance. Title span, edit input, and action buttons stop
-      // propagation so they don't trigger this.
-      onDoubleClick={(e) => {
-        if (!canZoom) return;
-        e.stopPropagation();
-        onToggleZoom();
-      }}
-    >
-      <Tooltip label={activityTooltip(activityClass, paneAgentLabel)}>
-        <span className={`activity-dot ${activityClass}`} />
-      </Tooltip>
-      <PaneHeaderBadges pane={pane} paneIndex={paneIndex} showAutoMode={isAutoApproveCapable(pane)} />
-      {editingTitle ? (
-        <input
-          className="pane-title-input"
-          autoFocus
-          value={titleDraft}
-          onChange={(e) => setTitleDraft(e.target.value)}
-          onBlur={async () => {
-            if(!actionGuard()) {setEditingTitle(false);return;}
-            setEditingTitle(false);
-            const next = titleDraft.trim();
-            if (next !== pane.title) {
-              try { await onRename(next); } catch {}
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-            if (e.key === 'Escape') {
-              setTitleDraft(pane.title);
-              setEditingTitle(false);
-            }
-            e.stopPropagation();
-          }}
-          onMouseDownCapture={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-          onDoubleClick={(e) => e.stopPropagation()}
-        />
-      ) : (
-        <Tooltip label="Double-click to rename">
-          <span
-            className="pane-title"
-            onDoubleClick={(e) => {
+    <div className="pane-mode-toggle-wrap" onClickCapture={() => { if (showFocusHint) closeFocusHint(); }}>
+      {showFocusHint && confirmTarget === null && visual === 'idle' && (
+        <div className="pane-focus-hint" role="note">
+          <span className="pane-focus-hint-text">
+            Try <strong>Focus</strong> — this {paneAgentLabel} session as a structured chat
+            (rich diffs, one-tap approvals, reflows on any screen). Switch back anytime.
+          </span>
+          <button
+            type="button"
+            className="pane-focus-hint-x"
+            aria-label="Dismiss tip"
+            title="Dismiss"
+            onClick={(e) => {
               e.stopPropagation();
-              setTitleDraft(pane.title);
-              setEditingTitle(true);
+              closeFocusHint();
             }}
           >
-            {unread && (unreadKind !== 'turn' || !turnChipModel(pane, Date.now(), true)) && <span className="unread-marker" aria-label="new activity">●</span>}
-            {pane.title || pane.cmd.join(' ')}
-          </span>
-        </Tooltip>
+            ✕
+          </button>
+        </div>
       )}
-      <PaneIdentityChip pane={pane} />
-      <PaneOriginButton pane={pane} />
-      <PaneReviewChip pane={pane} />
-      <PaneMessageChip pane={pane} />
-      {/* Status chip only when it carries SIGNAL — exited / (re)connecting.
-          The steady-state "running" was permanent header noise (and Focus
-          panes never had it), so the healthy state now shows nothing. */}
-      {(pane.status === 'exited' || connStatus !== 'open') && (
-        <span className={`pane-status ${paneStatusClass(pane, connStatus)}`}>
-          {paneStatusLabel(pane, connStatus)}
-        </span>
+      <PaneModeToggle
+        isNative={isNative}
+        visual={visual}
+        pending={pendingSwitch}
+        onSeg={requestSwitch}
+        onCancelPending={cancelPending}
+        onSwitchNow={switchNow}
+        termTitle="Terminal renderer — raw TUI (xterm). Shared PTY width."
+        nativeTitle="Focus renderer — structured chat that reflows at any width."
+        idleTitle={MODE_TOGGLE_TITLE}
+        agentLabel={paneAgentLabel}
+        disabledReason={modeDisabledReason}
+      />
+      {detailVisible && confirmTarget !== null && (
+        <ModeSwitchConfirm
+          target={confirmTarget}
+          working={stillWorking}
+          agentLabel={paneAgentLabel}
+          onConfirm={(choice) => {
+            const to = confirmTarget;
+            setConfirmTarget(null);
+            if (!stillWorking) {
+              // Settled mid-confirm → plain immediate switch (back-compat).
+              onSwitchMode?.(to);
+              return;
+            }
+            void switchPaneMode(pane.id, to, switchRequestForChoice(choice, to));
+          }}
+          onCancel={() => setConfirmTarget(null)}
+        />
       )}
-      <PaneTurnChip pane={pane} unseen={unreadKind === 'turn'} />
-      <UnsentMessageChip pane={pane} actionGuard={actionGuard} />
-      <div className="pane-actions">
-        {showModeToggle && (
-          <div className="pane-mode-toggle-wrap" onClickCapture={() => { if (showFocusHint) closeFocusHint(); }}>
-            {showFocusHint && confirmTarget === null && visual === 'idle' && (
-              <div className="pane-focus-hint" role="note">
-                <span className="pane-focus-hint-text">
-                  Try <strong>Focus</strong> — this {paneAgentLabel} session as a structured chat
-                  (rich diffs, one-tap approvals, reflows on any screen). Switch back anytime.
-                </span>
-                <button
-                  type="button"
-                  className="pane-focus-hint-x"
-                  aria-label="Dismiss tip"
-                  title="Dismiss"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeFocusHint();
-                  }}
-                >
-                  ✕
-                </button>
-              </div>
-            )}
-            <PaneModeToggle
-              isNative={isNative}
-              visual={visual}
-              pending={pendingSwitch}
-              onSeg={requestSwitch}
-              onCancelPending={cancelPending}
-              onSwitchNow={switchNow}
-              termTitle="Terminal renderer — raw TUI (xterm). Shared PTY width."
-              nativeTitle="Focus renderer — structured chat that reflows at any width."
-              idleTitle={MODE_TOGGLE_TITLE}
-              agentLabel={paneAgentLabel}
-              disabledReason={modeDisabledReason}
-            />
-            {confirmTarget !== null && (
-              <ModeSwitchConfirm
-                target={confirmTarget}
-                working={stillWorking}
-                agentLabel={paneAgentLabel}
-                onConfirm={(choice) => {
-                  const to = confirmTarget;
-                  setConfirmTarget(null);
-                  if (!stillWorking) {
-                    // Settled mid-confirm → plain immediate switch (back-compat).
-                    onSwitchMode?.(to);
-                    return;
-                  }
-                  void switchPaneMode(pane.id, to, switchRequestForChoice(choice, to));
-                }}
-                onCancel={() => setConfirmTarget(null)}
-              />
-            )}
-          </div>
-        )}
-        {/* Agent memory readout (display-only on Term): the selected provider's
-            resident RAM, sampled ~60s. No tap-to-restart here — Term reclaims
-            via Ctrl+C + resume or reopen
-            (one-tap restart lives in Focus mode). Amber when heavy. */}
-        {agentMemMB > 0 && (
-          <Tooltip label={`Agent memory ${memLabel(agentMemMB)}. To reclaim: Ctrl+C to exit the agent then resume, or use Restart pane in the ⋯ menu.`}>
-            <span
-              className={`iconbtn pane-mem-chip readonly${agentMemMB >= 500 ? ' heavy' : ''}`}
-              aria-label={`Agent memory ${memLabel(agentMemMB)}`}
-            >
-              {memLabel(agentMemMB)}
-            </span>
-          </Tooltip>
-        )}
-        {canZoom && (
-          <Tooltip label={isZoomed ? 'Restore layout (Alt+Z)' : 'Maximise pane (Alt+Z)'}>
-            <button
-              className="iconbtn pane-zoom-btn"
-              aria-label={isZoomed ? 'Restore pane' : 'Maximise pane'}
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggleZoom();
-              }}
-              onDoubleClick={(e) => e.stopPropagation()}
-            >{isZoomed ? <IconMinimize size={13} /> : <IconMaximize size={13} />}</button>
-          </Tooltip>
-        )}
-        {onOpenMenu && (
-          <Tooltip label="Pane menu">
-            <button
-              className="iconbtn pane-menu-btn"
-              aria-label="Pane menu"
-              aria-haspopup="menu"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenMenu(e);
-              }}
-              onDoubleClick={(e) => e.stopPropagation()}
-            >⋯</button>
-          </Tooltip>
-        )}
-        <Tooltip label="Close session">
-          <button
-            className="iconbtn"
-            aria-label={ownerPresentation ? 'Close owner view' : 'Close session'}
-            onClick={async (e) => {
-              e.stopPropagation();
-              if(!actionGuard())return;
-              if(ownerPresentation) {onClose();return;}
-              if (await confirmClosePane(pane) && actionGuard()) onClose();
-            }}
-            onDoubleClick={(e) => e.stopPropagation()}
-          >×</button>
-        </Tooltip>
-      </div>
     </div>
   );
 }

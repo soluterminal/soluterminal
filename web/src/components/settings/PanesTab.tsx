@@ -5,8 +5,7 @@ import { useIsMobileDevice } from '../useIsMobileView';
 import { SettingsGroup, SettingsCheck, SettingsRow } from './SettingsRow';
 import { ClaudeTab } from './ClaudeTab';
 
-// Pane layout + mouse behavior. The Arrange presets only apply in auto mode —
-// in free mode the user reshapes the layout by dragging handles instead.
+// Layout is saved with the workspace. Applying a preset selects custom mode.
 
 export function PanesTab() {
   const isMobile = useIsMobileDevice();
@@ -33,18 +32,18 @@ export function PanesTab() {
       <SettingsGroup title="Layout">
         <SettingsRow
           label="Pane layout"
-          hint="Auto keeps all panes equal-sized (resize handles locked); Free lets you drag handles."
+          hint="Saved with this workspace. Auto balances the grid; dragging a divider or choosing a preset switches to Custom."
         >
           <select
             className="settings-select"
             value={paneLayoutMode}
             onChange={(e) => setPaneLayoutMode(e.target.value as 'auto' | 'free')}
           >
-            <option value="auto">Auto (equal)</option>
-            <option value="free">Free (drag)</option>
+            <option value="auto">Auto grid</option>
+            <option value="free">Custom</option>
           </select>
         </SettingsRow>
-        {paneLayoutMode === 'auto' && leafCountInLayout >= 2 && (
+        {leafCountInLayout >= 2 && (
           <SettingsRow label="Arrange" hint="Rebuild the current workspace's pane arrangement.">
             <div className="settings-btn-row">
               <button

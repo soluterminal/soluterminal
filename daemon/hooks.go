@@ -577,6 +577,7 @@ func hostOf(rawURL string) string {
 //     standard user config location and missing just means the user
 //     hasn't customized anything yet — safe to create.
 func ensureClaudeHooksRegistered(addr string) {
+	requireNormalBootEngine("hooks.ensureClaudeHooksRegistered")
 	if os.Getenv("SOLU_SKIP_HOOK_REGISTER") == "1" {
 		return
 	}

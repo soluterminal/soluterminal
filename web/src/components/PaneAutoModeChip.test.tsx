@@ -183,3 +183,43 @@ describe('auto-approve chip menu', () => {
     expect(onHeaderDown).not.toHaveBeenCalled();
   });
 });
+
+describe('human-only auto-answer lock', () => {
+  it.each([undefined, 'details'] as const)('shows locked on a plain shell header (section %j)', (section) => {
+    const locked = { ...pane, cmd: ['bash'], hasClaude: false, neverAutoAnswer: true };
+    render(<PaneHeaderBadges pane={locked} paneIndex={0} showAutoMode={false} section={section} />);
+    const btn = screen.getByRole('button', { name: 'Auto-approve: locked' });
+    expect(btn).toHaveTextContent('locked');
+    expect(btn).toBeDisabled();
+    fireEvent.click(btn);
+    expect(screen.queryByRole('menu', { name: 'Auto-approve' })).toBeNull();
+    expect(setPaneAutoMode).not.toHaveBeenCalled();
+  });
+
+  it('closes the mode choices when an open chip becomes locked', () => {
+    const view = render(<PaneAutoModeChip pane={pane} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Auto-approve:/ }));
+    expect(screen.getByRole('menu', { name: 'Auto-approve' })).toBeInTheDocument();
+    view.rerender(<PaneAutoModeChip pane={{ ...pane, neverAutoAnswer: true }} />);
+    expect(screen.queryByRole('menu', { name: 'Auto-approve' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Auto-approve: locked' })).toBeDisabled();
+  });
+
+  it('does not apply an already-open Always confirmation after the pane locks', async () => {
+    fireEvent.click(chip(''));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /Always approve/ }));
+    await flush();
+    const arg = openDialog.mock.calls[0][0] as DialogArg;
+    useStore.setState({ panes: { [pane.id]: { ...pane, neverAutoAnswer: true } } });
+    await act(async () => { arg.resolve(true); });
+    await flush();
+    expect(setPaneAutoMode).not.toHaveBeenCalled();
+  });
+
+  it('the store refuses a mode change before any optimistic update or API call', async () => {
+    const locked = { ...pane, neverAutoAnswer: true };
+    useStore.setState({ panes: { [pane.id]: locked } });
+    expect(await original.setPaneAutoMode(pane.id, 'always')).toEqual(locked);
+    expect(useStore.getState().panes[pane.id].autoMode).toBe('');
+  });
+});

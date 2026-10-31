@@ -8,6 +8,7 @@ import "soluterminal-shared/daemonfeatures"
 // here in the same change that adds the behaviour; never list something a
 // build cannot actually do.
 var daemonFeatures = []string{
+	daemonfeatures.UIPrefs,
 	daemonfeatures.TeamBrokerCodex,
 	daemonfeatures.TeamBrokerClaude,
 	daemonfeatures.WorkflowOwnerDirect,

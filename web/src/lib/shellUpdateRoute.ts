@@ -44,12 +44,24 @@ export function shellUpdateNeedsDaemon(status: UpdateStatus | null | undefined):
 //   running at all in cloud launch mode (lib.rs DaemonStart::single), and when
 //   it is, it rejects cross-origin requests (daemon/auth.go originProtected)
 //   and this page holds no token for it.
-// So the remote status is not this computer's installer status, and the one
-// way to update this computer's app is Local mode, where its own daemon
-// fetches and verifies the team installer (shellUpdateNeedsDaemon). The
-// download page would hand a team computer the public installer, so it is
-// never the answer here either.
+// So the remote status is not this computer's installer status. This
+// computer's own daemon has to fetch and verify the team installer: in Local
+// mode (shellUpdateNeedsDaemon), or, with a shell that can, from Cloud mode
+// through the shell itself (lib/updateThisComputer.ts), which starts that
+// daemon natively. The download page would hand a team computer the public
+// installer, so it is never the answer here either.
 // A browser tab has no desktop app on this computer and is not affected.
+//
+// The same holds whatever computer the window shows when this app is itself a
+// team build (window.__SOLU_BACKEND__.shellFlavor, from shells that report
+// it): its installer comes only through this computer's daemon, and the app's
+// own updater refuses it (shell_update_manifest.rs TEAM_SHELL_UPDATE_UNAVAILABLE).
 export function installerNeedsLocalMode(status: UpdateStatus | null | undefined): boolean {
-  return status?.updateChannel === 'team' && isDesktopApp() && !daemonOnThisComputer();
+  if (!isDesktopApp() || daemonOnThisComputer()) return false;
+  return status?.updateChannel === 'team' || thisAppIsTeamBuild();
+}
+
+export function thisAppIsTeamBuild(): boolean {
+  const g = (window as unknown as { __SOLU_BACKEND__?: { shellFlavor?: unknown } }).__SOLU_BACKEND__;
+  return g?.shellFlavor === 'team';
 }

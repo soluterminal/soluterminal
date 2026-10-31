@@ -158,3 +158,16 @@ describe('PaneContextMenu Resume session', () => {
     expect(screen.queryByRole('menuitem', { name: 'Resume session' })).toBeNull();
   });
 });
+
+describe('PaneContextMenu automatic-answer lock', () => {
+  it('disables every mode choice when the pane is locked', () => {
+    const change = vi.fn();
+    renderMenu({ neverAutoAnswer: true }, { onSetAutoMode: change });
+    expect(screen.getByText('Auto-approve — locked')).toBeInTheDocument();
+    for (const option of screen.getAllByRole('menuitemradio')) {
+      expect(option).toBeDisabled();
+      fireEvent.click(option);
+    }
+    expect(change).not.toHaveBeenCalled();
+  });
+});

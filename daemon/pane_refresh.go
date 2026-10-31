@@ -103,6 +103,8 @@ func (a *apiServer) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	// Cmd stays nil: Spawn selects headless Claude resume or Codex app-server
 	// thread/resume from Agent + the provider-specific durable id.
 	opts := SpawnOpts{
+		AutoMode:             snap.AutoMode,
+		NeverAutoAnswer:      snap.NeverAutoAnswer,
 		ID:                   snap.ID,
 		Cwd:                  snap.Cwd,
 		Title:                snap.Title,

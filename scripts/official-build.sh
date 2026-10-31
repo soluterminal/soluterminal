@@ -228,6 +228,8 @@ daemons() {
   # tree, release channel, update key, auth defaults, public flavour, empty
   # build ID and -B). The official app is always the public flavour: it
   # follows the public releases repo and the signed manifest must say so.
+  # Verify the committed resource before computing the clean-source stamp.
+  node "$ROOT/scripts/windows-resources.mjs" "$version" --check
   ldflags="$(SOLU_BUILD_CHANNEL=release SOLU_SOURCE_SHA="$source_sha" SOLU_BUILD_FLAVOR=public \
     solu_daemon_ldflags "$version" "$cloud_flags" "$ROOT")"
   case " $ldflags " in
@@ -261,6 +263,8 @@ daemons() {
       go build -C "$ROOT/daemon" -buildvcs=false -trimpath -ldflags "$ldflags" -o "$out/$artifact" .
     built+=("$artifact")
   done
+
+  go run -C "$ROOT/daemon" ./cmd/check-winres "$out/solud-windows-amd64.exe" "$version"
 
   echo "==> checking what each binary carries"
   local bin needle symbols

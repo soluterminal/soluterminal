@@ -29,15 +29,15 @@ export const FORGET_AND_COMPARE = 'Forget the old computer key and compare codes
 
 const IDENTITY_CHANGED =
   "This computer's identity changed. If you reinstalled SoluTerminal there, remove this browser in Settings → " +
-  'Devices → Remote devices on the computer, then compare codes again here; otherwise someone may be ' +
+  'Privacy & security → Remote devices on the computer, then compare codes again here; otherwise someone may be ' +
   'intercepting the connection. Until a new code is confirmed, this browser keeps the old key and refuses ' +
   'the computer.';
 const STILL_APPROVED =
   'This browser is still approved on the computer, so there is no code to compare. Remove it there in ' +
-  'Settings → Devices → Remote devices first, then compare codes again.';
+  'Settings → Privacy & security → Remote devices first, then compare codes again.';
 const CODES_DIFFER =
   "The codes don't match, so nothing was changed: someone may be intercepting the connection. On the computer, " +
-  'remove this browser in Settings → Devices → Remote devices, and don\'t approve it there.';
+  'remove this browser in Settings → Privacy & security → Remote devices, and don\'t approve it there.';
 
 function browserName(): string {
   const ua = navigator.userAgent;
@@ -175,7 +175,7 @@ export function DeviceApprovalPrompt() {
         <h2 id={titleId} style={{ margin: 0, fontSize: 16 }}>{DEVICE_APPROVAL_TITLE}</h2>
         <div style={{ marginTop: 6, fontSize: 12, color: 'var(--fg-dim)', lineHeight: 1.5 }}>
           That computer only accepts devices you have approved on it. Ask for approval, then on the
-          computer open SoluTerminal → Settings → Devices → Remote devices and approve the device
+          computer open SoluTerminal → Settings → Privacy & security → Remote devices and approve the device
           showing the same code:
         </div>
         <div style={{ marginTop: 12, fontFamily: 'var(--font-mono, monospace)', fontSize: 18, letterSpacing: 1 }}>

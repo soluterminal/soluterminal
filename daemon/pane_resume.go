@@ -226,6 +226,8 @@ func (a *apiServer) handleResumePane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer p.releaseRespawn()
+	snap = p.Snapshot()
+	snap, _ = healPaneSnapshot(snap)
 
 	// The client posts its live measured viewport {cols,rows} so the fresh PTY
 	// comes up at the CURRENT window width, not the last-persisted size. The body
@@ -313,6 +315,8 @@ func resumeSpawnOpts(snap PaneSnapshot, liveCols, liveRows uint16) SpawnOpts {
 	agent := effectiveAgentKind(snap.Agent)
 	conversationID := conversationIDForAgent(snap.Agent, snap.ClaudeSessionID, snap.CodexThreadID, snap.MuseSessionID)
 	opts := SpawnOpts{
+		AutoMode:                     snap.AutoMode,
+		NeverAutoAnswer:              snap.NeverAutoAnswer,
 		ID:                           snap.ID,
 		RequireResumableConversation: conversationID != "" && harnessProvider == "",
 		Cwd:                          snap.Cwd,
@@ -425,6 +429,7 @@ func (p *Pane) releaseRespawn() { p.respawning.Store(false) }
 // a dangling tool_use for `--resume` to repair. On total failure the original
 // identity, layout reference and metadata remain as a retryable recovery tile.
 func (a *apiServer) respawnInPlace(snap PaneSnapshot, opts SpawnOpts) (*Pane, error) {
+	opts.AutoMode, opts.NeverAutoAnswer = snap.AutoMode, snap.NeverAutoAnswer
 	// Snapshot the agent's full descendant set BEFORE the kill. A managed
 	// harness client is spawned DETACHED (its own session) by launch.mjs, so the
 	// pane child's process-group teardown never signals it; once its wrapper dies
@@ -497,7 +502,8 @@ func (a *apiServer) respawnInPlace(snap PaneSnapshot, opts SpawnOpts) (*Pane, er
 		return nil, fmt.Errorf("respawn failed: %w", err)
 	}
 
-	// Restore non-spawn state SpawnOpts doesn't carry (mirrors ResumeClaudePane).
+	// Approval settings were initialized by Spawn before publication. Restore
+	// the remaining metadata without overwriting a concurrent settings update.
 	restoreResumedState(newPane, snap)
 
 	// Re-persist the now-running pane so it survives a later daemon restart.
@@ -510,7 +516,7 @@ func (a *apiServer) respawnInPlace(snap PaneSnapshot, opts SpawnOpts) (*Pane, er
 }
 
 // restoreResumedState copies the pane state that SpawnOpts doesn't carry — the
-// auto-approval mode, the delegation-announcement override, flag, flag memo,
+// delegation-announcement override, flag, flag memo,
 // prompt history and original createdAt —
 // from the exited snapshot onto the freshly respawned pane, and re-arms the grid
 // when auto-mode is active. Mirrors ResumeClaudePane's restoration so a live
@@ -523,7 +529,6 @@ func restoreResumedState(p *Pane, snap PaneSnapshot) {
 	if !snap.CreatedAt.IsZero() {
 		p.CreatedAt = snap.CreatedAt
 	}
-	p.AutoMode = snap.AutoMode
 	p.AnnounceDelegationEvents = snap.AnnounceDelegationEvents
 	p.Flagged = snap.Flagged
 	p.FlagMemo = snap.FlagMemo
@@ -532,7 +537,7 @@ func restoreResumedState(p *Pane, snap PaneSnapshot) {
 	p.FlagRevision = snap.FlagRevision
 	p.LastPrompts = cloneStringSlice(snap.LastPrompts)
 	p.mu.Unlock()
-	if p.AutoMode != "" {
+	if p.Snapshot().AutoMode != "" {
 		p.ensureGrid()
 	}
 }

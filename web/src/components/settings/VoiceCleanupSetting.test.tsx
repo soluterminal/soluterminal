@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../api';
 import type { VoiceLocalSettings } from '../../private/voice.api';
 import { useStore } from '../../store';
-import { VOICE_KEEP_MIC_LABEL,
+import { VOICE_AUTO_SEND_LABEL, VOICE_KEEP_MIC_LABEL,
   VOICE_READY_TICK_LABEL, VOICE_LOCAL_LABEL, VoiceCleanupSetting, voiceLocalHint } from './VoiceCleanupSetting';
 
 const on: VoiceLocalSettings = { enabled: true, available: true, model: 'claude-haiku-4-5' };
@@ -85,5 +85,43 @@ describe('VoiceCleanupSetting', () => {
     expect(voiceLocalHint({ ...on, available: false, reason: 'not_signed_in' })).toMatch(/Sign in to Claude Code/);
     expect(voiceLocalHint({ ...on, available: false, reason: 'not_installed' })).toMatch(/Needs Claude Code/);
     expect(voiceLocalHint({ ...on, available: false, reason: 'paused' })).toMatch(/Paused/);
+  });
+});
+
+// Auto-send and language used to be only in the mic menu; Settings › Voice
+// now holds every voice preference, on the same store values.
+describe('VoiceCleanupSetting auto-send and language', () => {
+  afterEach(() => {
+    useStore.setState({ voiceAutoSend: false, voiceLanguage: '' });
+  });
+
+  it('toggles auto-send on the same preference the mic menu uses', async () => {
+    vi.spyOn(api, 'getVoiceLocal').mockResolvedValue(null);
+    useStore.setState({ voiceAutoSend: false });
+    render(<VoiceCleanupSetting />);
+    const box = screen.getByLabelText(VOICE_AUTO_SEND_LABEL);
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    expect(useStore.getState().voiceAutoSend).toBe(true);
+    expect(box).toBeChecked();
+  });
+
+  it('names each language and saves the code', async () => {
+    vi.spyOn(api, 'getVoiceLocal').mockResolvedValue(null);
+    useStore.setState({ voiceLanguage: '' });
+    render(<VoiceCleanupSetting />);
+    const select = screen.getByRole('combobox', { name: 'Voice language' });
+    expect([...select.querySelectorAll('option')].map((o) => o.textContent)).toEqual([
+      'Auto-detect', 'English', 'Chinese (中文)', 'Malay (Bahasa Melayu)', 'Japanese (日本語)', 'Spanish (Español)',
+    ]);
+    fireEvent.change(select, { target: { value: 'ms' } });
+    expect(useStore.getState().voiceLanguage).toBe('ms');
+  });
+
+  it('keeps a language set outside the list selectable', async () => {
+    vi.spyOn(api, 'getVoiceLocal').mockResolvedValue(null);
+    useStore.setState({ voiceLanguage: 'de' });
+    render(<VoiceCleanupSetting />);
+    expect(screen.getByRole('combobox', { name: 'Voice language' })).toHaveValue('de');
   });
 });

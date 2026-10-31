@@ -1,3 +1,4 @@
+import { workspaceMovedTo } from '../lib/workspaceHandoff';
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type UIEvent as ReactUIEvent } from 'react';
 import { paneIdsInOrder, useStore } from '../store';
@@ -11,13 +12,13 @@ import { MCPSection } from './sidebar/MCPSection';
 import { SchedulesSection } from './sidebar/SchedulesSection';
 import { sidebarSectionSlot } from '../extensions';
 import { SectionHeader } from './sidebar/SectionHeader';
-import { AgentPanesSection } from './sidebar/AgentPanesSection';
+import { createWorkspacePaneTreeSelector, withoutRemovedWorkspacePanes } from '../lib/workspacePaneTree';
 import { IconGlobe, IconPlus } from './ui/icons';
 import { WorkspaceSection } from './sidebar/WorkspaceSection';
 import { UsagePage } from './UsagePage';
 import type { WorkspaceDropTarget } from './sidebar/WorkspaceSection';
 import type { Workspace } from '../types';
-import { usePrefs } from '../prefs';
+import { hydratePrefs, usePrefs } from '../prefs';
 import { useSettings } from '../settings';
 import { useClampedMenuPosition } from './useClampedMenuPosition';
 import { effectiveZoom } from '../lib/effectiveZoom';
@@ -49,55 +50,6 @@ import { isWebService, workspacePorts } from '../lib/ports';
 // A collapsed zone shrinks to its header strip and the remaining expanded
 // zone(s) absorb the slack. Each zone scrolls internally so the
 // proportions stay stable as content grows.
-
-const OPEN_MIDDLE_KEY_V1 = 'solu.sidebarOpenMiddle.v1';
-const OPEN_MIDDLE_KEY = 'solu.sidebarOpenMiddle.v2';
-const WS_COLLAPSED_KEY = 'solu.sidebarWorkspacesCollapsed.v1';
-
-// Multi-open: several middle sections can be expanded at once, so open-state is
-// a Set (v2 stores a JSON array). v1 held a single scalar key — migrate it to a
-// one-element set so a user's one open section survives the upgrade.
-// "Started by agents" opens once for everyone (new and existing sidebars), so
-// the panes agents start are noticed; collapsing it afterwards sticks.
-const AGENT_PANES_INTRODUCED_KEY = 'solu.sidebar.agentPanesIntroduced';
-
-function loadOpenMiddle(): Set<MiddleKey> {
-  const open = loadStoredOpenMiddle();
-  try {
-    if (localStorage.getItem(AGENT_PANES_INTRODUCED_KEY) === null) {
-      open.add('agentPanes');
-      localStorage.setItem(AGENT_PANES_INTRODUCED_KEY, '1');
-      saveOpenMiddle(open);
-    }
-  } catch { /* ignore */ }
-  return open;
-}
-function loadStoredOpenMiddle(): Set<MiddleKey> {
-  try {
-    const raw = localStorage.getItem(OPEN_MIDDLE_KEY);
-    if (raw) {
-      const arr: unknown = JSON.parse(raw);
-      if (Array.isArray(arr)) return new Set(arr.filter(isMiddleKey));
-    }
-    const legacy = localStorage.getItem(OPEN_MIDDLE_KEY_V1);
-    if (legacy && legacy !== 'null' && isMiddleKey(legacy)) {
-      return new Set<MiddleKey>([legacy]);
-    }
-  } catch { /* ignore */ }
-  try { if (localStorage.getItem(OPEN_MIDDLE_KEY) === null && localStorage.getItem(OPEN_MIDDLE_KEY_V1) === null) return new Set<MiddleKey>(['owners']); } catch {}
-  return new Set<MiddleKey>();
-}
-
-function saveOpenMiddle(keys: Set<MiddleKey>) {
-  try { localStorage.setItem(OPEN_MIDDLE_KEY, JSON.stringify([...keys])); } catch { /* ignore */ }
-}
-
-function loadWsCollapsed(): boolean {
-  try { return localStorage.getItem(WS_COLLAPSED_KEY) === '1'; } catch { return false; }
-}
-function saveWsCollapsed(v: boolean) {
-  try { localStorage.setItem(WS_COLLAPSED_KEY, v ? '1' : '0'); } catch { /* ignore */ }
-}
 
 // Per-section drag-resized heights (px), persisted. Every open section except
 // the LAST gets a drag handle; its saved height applies as a max-height CAP,
@@ -153,17 +105,30 @@ export function Sidebar({
   onOpenHelp?: () => void;
 } = {}) {
   const teamFeatures = useOperatorFeatures();
+  const personalView = usePersonalView();
   const serviceCount = useStore(s => workspacePorts(s.ports,s.activeWorkspace,s.activeBackend,s.workspaces).filter(isWebService).length);
 
   // Credentials is a team-plan section (saved accounts, team-only key rows).
   const teamPlan = useTeamFeatures();
-  const [openMiddle, setOpenMiddle] = useState<Set<MiddleKey>>(loadOpenMiddle);
+  useEffect(hydratePrefs, []);
+  const savedOpen = usePrefs((s) => s.prefs.sidebar?.open);
+  const ownOpenMiddle = useMemo(() => new Set<MiddleKey>((savedOpen ?? []).filter(isMiddleKey)), [savedOpen]);
+  // Personal view can explore sections without changing the real layout.
+  const [personalOpenMiddle, setPersonalOpenMiddle] = useState(() => new Set<MiddleKey>());
+  const openMiddle = personalView ? personalOpenMiddle : ownOpenMiddle;
   const toggleMiddle = (k: MiddleKey) => {
-    setOpenMiddle((prev) => {
-      const next = new Set(prev);
+    if (personalView) {
+      setPersonalOpenMiddle((prev) => {
+        const next = new Set(prev);
+        if (next.has(k)) next.delete(k); else next.add(k);
+        return next;
+      });
+      return;
+    }
+    usePrefs.getState().setPrefs((p) => {
+      const next = new Set(p.sidebar?.open ?? []);
       if (next.has(k)) next.delete(k); else next.add(k);
-      saveOpenMiddle(next);
-      return next;
+      return { ...p, sidebar: { ...p.sidebar, open: [...next] } };
     });
   };
   const isOpen = (k: MiddleKey) => openMiddle.has(k);
@@ -345,13 +310,14 @@ export function Sidebar({
     window.addEventListener('solu:open-usage', openUsage);
     return () => window.removeEventListener('solu:open-usage', openUsage);
   }, []);
-  const [wsCollapsed, setWsCollapsed] = useState<boolean>(loadWsCollapsed);
+  const ownWsCollapsed = usePrefs((s) => s.prefs.sidebar?.workspacesCollapsed) ?? false;
+  const [personalWsCollapsed, setPersonalWsCollapsed] = useState(false);
+  const wsCollapsed = personalView ? personalWsCollapsed : ownWsCollapsed;
   const toggleWs = () => {
-    setWsCollapsed((prev) => {
-      const next = !prev;
-      saveWsCollapsed(next);
-      return next;
-    });
+    if (personalView) { setPersonalWsCollapsed((prev) => !prev); return; }
+    usePrefs.getState().setPrefs((p) => ({
+      ...p, sidebar: { ...p.sidebar, workspacesCollapsed: !p.sidebar?.workspacesCollapsed },
+    }));
   };
 
   const workspaces = useStore((s) => s.workspaces);
@@ -369,7 +335,6 @@ export function Sidebar({
   const layout = useStore((s) => s.layout);
   const revealPane = useStore((s) => s.revealPane);
   const killPane = useStore((s) => s.killPane);
-  const allPanes = useStore((s) => s.panes);
   const wsOrder = useStore((s) => s.wsOrder);
   const setWsOrder = useStore((s) => s.setWsOrder);
   const wsLastViewedMs = useStore((s) => s.wsLastViewedMs);
@@ -385,7 +350,6 @@ export function Sidebar({
   const ctxMenuRef = useRef<HTMLDivElement | null>(null);
   // The personal view shows a stranger's sidebar: the shipped defaults, not
   // this install's own arrangement, which stays untouched (edits are off).
-  const personalView = usePersonalView();
   const ownSidebarPrefs = usePrefs((s) => s.prefs.sidebar);
   const sidebarPrefs = personalView ? undefined : ownSidebarPrefs;
   const setPrefs = usePrefs((s) => s.setPrefs);
@@ -485,6 +449,13 @@ export function Sidebar({
     );
     return [...ordered, ...leftovers];
   }, [workspaces, wsOrder]);
+  const treeWorkspaces = useMemo(() => activeWorkspace === '_current' && layout
+    ? [{ name: '_current', layout, paneIds: paneIdsInOrder(layout), protected: true } as Workspace, ...named]
+    : named, [named, activeWorkspace, layout]);
+
+  const treePanes = useMemo(() => withoutRemovedWorkspacePanes(workspaces, panes, activeBackend), [workspaces, panes, activeBackend]);
+  const selectTrees = useMemo(createWorkspacePaneTreeSelector, []);
+  const paneTrees = selectTrees(treeWorkspaces, treePanes, activeWorkspace, layout, activeBackend);
 
   function reorderWorkspaces(fromKey: string, toKey: string, position: 'before' | 'after') {
     if (fromKey === toKey) return;
@@ -500,11 +471,11 @@ export function Sidebar({
   const background = useMemo(() => {
     const claimedByNamed = new Set<string>();
     for (const w of named) {
-      for (const id of w.paneIds) claimedByNamed.add(id);
+      for (const id of w.paneIds ?? []) claimedByNamed.add(id);
     }
 
-    const visibleIds = new Set(paneIdsInOrder(layout));
-    return Object.values(panes)
+    const visibleIds = new Set(paneTrees.flatMap(t => t.paneIds));
+    return Object.values(treePanes)
       .filter(
         (p) =>
           // Suspended-resumable panes count too: after a full teardown
@@ -519,7 +490,7 @@ export function Sidebar({
           !claimedByNamed.has(p.id),
       )
       .sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
-  }, [activeBackend, layout, named, panes, managedOwnerBindings]);
+  }, [activeBackend, named, paneTrees, treePanes, managedOwnerBindings]);
 
   async function commitCreate(rawName: string) {
     const name = rawName.trim();
@@ -659,16 +630,6 @@ export function Sidebar({
   const renderMiddleSection = (key: MiddleKey) => {
     switch (key) {
       case 'owners': return null;
-      case 'agentPanes':
-        return (
-          <AgentPanesSection
-            panes={allPanes}
-            collapsed={!isOpen('agentPanes')}
-            onToggle={() => toggleMiddle('agentPanes')}
-            onRevealPane={(paneId) => { void revealPane(paneId); }}
-            onKillPane={(paneId) => killPane(paneId)}
-          />
-        );
       case 'background':
         // No background sessions ⇒ the section renders nothing. Return null (not
         // an empty <BackgroundSessionsSection/>) so the slot map below can drop
@@ -773,8 +734,9 @@ export function Sidebar({
         >
           <WorkspaceSection
             collapsed={wsCollapsed}
-            named={named}
-            panes={panes}
+            named={treeWorkspaces}
+            trees={paneTrees}
+            panes={treePanes}
             activeWorkspace={activeWorkspace}
             activeBackend={activeBackend}
             layout={layout}
@@ -802,16 +764,17 @@ export function Sidebar({
             setRenameDraft={setRenameDraft}
             setCtxMenu={setCtxMenu}
             onLoadWorkspace={(w) => {
+              window.dispatchEvent(new CustomEvent('solu:workspace-selected'));
               const storeActiveBackend = useStore.getState().activeBackend;
               if (isRouterMode() && w.backend && w.backend !== storeActiveBackend) {
-                void useStore.getState().switchBackend(w.backend, w.name);
-                return;
+                return useStore.getState().switchBackend(w.backend, w.name);
               }
               if (useStore.getState().mainPresentation.kind === 'owner') {
                 useStore.getState().returnToWorkspace();
-                if (useStore.getState().activeWorkspace === w.name) return;
+                if (useStore.getState().activeWorkspace === w.name && !workspaceMovedTo(w.name)) return;
               }
-              void loadWorkspace(w.name);
+              if (useStore.getState().activeWorkspace === w.name && !workspaceMovedTo(w.name)) return;
+              return loadWorkspace(w.name);
             }}
             onRenameWorkspace={renameWorkspace}
             onSetWorkspaceContextPack={setWorkspaceContextPack}

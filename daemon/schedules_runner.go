@@ -46,7 +46,7 @@ func (s *ScheduleStore) checkPreFire() {
 			continue
 		}
 		sched, ok := s.items[id]
-		if !ok || !sched.Enabled {
+		if !ok || !sched.Enabled || !scheduleAvailable(sched) {
 			continue
 		}
 		// A hidden agent-run trigger has no row anywhere in the Schedules UI,
@@ -94,6 +94,9 @@ func (s *ScheduleStore) checkPreFire() {
 // scheduleUnlocked wires a schedule into its trigger (cron entry or
 // one-shot timer). Caller must hold s.mu.
 func (s *ScheduleStore) scheduleUnlocked(sched *Schedule) error {
+	if !scheduleAvailable(sched) {
+		return nil
+	}
 	// Capture the ID by value — the schedule itself might be mutated
 	// by subsequent edits, but callbacks should always look up the
 	// current version by ID.
@@ -135,7 +138,7 @@ func (s *ScheduleStore) unscheduleUnlocked(id string) {
 func (s *ScheduleStore) fire(id string) {
 	s.mu.Lock()
 	sched, ok := s.items[id]
-	if !ok {
+	if !ok || !scheduleAvailable(sched) {
 		s.mu.Unlock()
 		return
 	}
@@ -292,7 +295,7 @@ func (s *ScheduleStore) pauseForReason(id, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sched, ok := s.items[id]
-	if !ok {
+	if !ok || !scheduleAvailable(sched) {
 		return
 	}
 	s.unscheduleUnlocked(id)
@@ -316,9 +319,6 @@ func (s *ScheduleStore) fireAgentRun(schedID, agentID string) {
 	runner := s.agentRunner
 	s.mu.Unlock()
 	if runner == nil {
-		run.Status = "error"
-		run.Detail = "agents are unavailable on this daemon"
-		s.recordRun(schedID, run)
 		return
 	}
 	status, detail := runner(agentID, agentTriggerCron)
@@ -353,7 +353,7 @@ func isFireReadyState(state PaneRuntimeState, status PaneStatus) bool {
 func (s *ScheduleStore) recordRun(id string, run ScheduleRun) {
 	s.mu.Lock()
 	sched, ok := s.items[id]
-	if !ok {
+	if !ok || !scheduleAvailable(sched) {
 		s.mu.Unlock()
 		return
 	}

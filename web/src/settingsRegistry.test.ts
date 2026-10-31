@@ -35,9 +35,10 @@ describe('settingsRegistry', () => {
 
   it('distinguishes canonical ids from compatibility ids', () => {
     expect(Object.keys(LEGACY_TAB_TARGETS)).toEqual([
-      'appearance', 'panes', 'claude', 'sidebar', 'team', 'devices', 'warden', 'tasks', 'agent', 'credentials',
+      'appearance', 'panes', 'claude', 'sidebar', 'team', 'account', 'notifications', 'privacy', 'devices',
+      'warden', 'tasks', 'agent', 'credentials',
     ]);
-    for (const id of ['panes', 'claude', 'sidebar', 'warden', 'tasks', 'agent']) {
+    for (const id of ['panes', 'claude', 'sidebar', 'account', 'notifications', 'privacy', 'warden', 'tasks', 'agent']) {
       expect(resolveSettingsTarget(id).legacy).toBe(true);
     }
     for (const id of ['appearance', 'team', 'devices', ...SETTINGS_CATEGORIES.map(({ id }) => id)]) {
@@ -74,6 +75,16 @@ describe('settingsRegistry', () => {
       category: 'workflows', section: 'workflows.modelsFallbacks',
     });
     expect(parseSettingsHash('#view=tasks')).toBeNull();
+  });
+
+  it.each([
+    ['anonymous daily check-in', 'anonymousCheckin'],
+    ['Let Claude Code and Codex use SoluTerminal', 'agentIntegration'],
+  ])('routes %s search and saved links to Privacy & security', (query, key) => {
+    expect(searchSettings(query, { mobile: false })[0]?.section.id).toBe('devices.privacy');
+    expect(parseSettingsHash(`#settings=devices.diagnostics.${key}`)).toEqual({
+      category: 'devices', section: 'devices.privacy', control: `devices.privacy.${key}`,
+    });
   });
 
   it.each([

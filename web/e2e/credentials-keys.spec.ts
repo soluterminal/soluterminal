@@ -81,6 +81,17 @@ async function installCloudCredentialsScenario(
   await context.route('**/api/workflow/runtimes/health', (route) => (
     json(route, CREDENTIALS_KEYS_HEALTH_FIXTURE)
   ));
+  // Sidebar preferences now belong to the viewed daemon (#849). A signed-in
+  // scenario must seed that user's daemon prefs instead of relying on the
+  // anonymous legacy localStorage entry installed by the capture helper.
+  await context.route('**/api/health', async route => {
+    const response = await route.fetch({ url: new URL('/api/health', route.request().url()).toString() });
+    const health = await response.json();
+    return json(route, { ...health, features: [...new Set([...(health.features ?? []), 'ui-prefs.v1'])] });
+  });
+  await context.route('**/api/settings/ui', route => json(route, {
+    prefs: { sidebar: { hidden: [], open: ['credentials'], workspacesCollapsed: true } },
+  }));
 }
 
 function deepSeekRow(page: Page) {

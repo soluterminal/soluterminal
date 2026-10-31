@@ -188,8 +188,8 @@ func TestWorkspaceStoreMovePaneIsAtomicAndPreservesLayouts(t *testing.T) {
 	if len(destination.PaneIds) != 2 || destination.PaneIds[1] != "p1" || len(destination.Panes) != 2 {
 		t.Fatalf("destination = %#v, want p1 appended", destination)
 	}
-	if destination.Layout["type"] != "split" || destination.Layout["direction"] != "vertical" {
-		t.Fatalf("destination layout = %#v, want vertical split", destination.Layout)
+	if destination.Layout["type"] != "split" || destination.Layout["direction"] != "horizontal" {
+		t.Fatalf("destination layout = %#v, want balanced auto row", destination.Layout)
 	}
 	if destination.ContextPack != "/packs/destination" {
 		t.Fatalf("destination context pack = %q", destination.ContextPack)

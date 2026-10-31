@@ -36,6 +36,7 @@ export function WarmPaneLayer() {
  const panes = useStore(s=>s.panes);
  const view = useStore(s=>s.mainPresentation);
  const layout = useStore(s=>s.layout);
+ const workspaceView = useStore(s=>s.workspaceView);
  const focus = useStore(s=>s.focusedPaneId);
  const zoom = useStore(s=>s.zoomedPaneId);
  const parked = useStore(s=>s.parkedPaneIds);
@@ -47,6 +48,8 @@ export function WarmPaneLayer() {
   const visibleIds = effectiveVisiblePaneIds(state);
   const visible = new Set(visibleIds);
   const opportunistic = new Set(warmPanesActive() ? parked : []);
+  // Filtering the workspace must not dispose its hidden terminal cores/drafts.
+  if (workspaceView) for (const id of paneIdsInOrder(layout)) opportunistic.add(id);
   const retain = view.kind === 'owner';
   // Confirmed active-scope metadata may replace a process; absence from a
   // partial/failed fetch never disposes a retained draft.
@@ -64,6 +67,6 @@ export function WarmPaneLayer() {
    if (pane && pane.kind !== 'native') ensureTerminalSession(scope,pane,retain || pane.role === 'task_owner');
   }
   reconcileTerminalSessions(scope,visible,opportunistic);
- },[panes,view,layout,focus,zoom,parked,backend]);
+ },[panes,view,layout,workspaceView,focus,zoom,parked,backend]);
  return <>{sessions.map(session=><TerminalPortal key={session.key} session={session} />)}</>;
 }

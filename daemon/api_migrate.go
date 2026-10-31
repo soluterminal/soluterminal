@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"time"
 )
+
+var errMigrateInProgress = errors.New("pane recovery already in progress")
 
 // migrateReq is the body of POST /api/panes/{id}/migrate-clean.
 type migrateReq struct {
@@ -84,6 +87,10 @@ func (a *apiServer) migratePaneClean(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) writeMigrateErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, errMigrateInProgress) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	if _, bad := err.(*SpawnError); bad {
 		http.Error(w, err.Error(), 400)
 		return
@@ -104,7 +111,8 @@ func (a *apiServer) doMigrateSibling(p *Pane) (*Pane, error) {
 		title = "claude"
 	}
 	np, err := a.spawnPaneForRequest(SpawnOpts{
-		Cwd: cwd, Cmd: []string{"claude"}, Title: title, Cols: snap.Cols, Rows: snap.Rows,
+		NeverAutoAnswer: snap.NeverAutoAnswer,
+		Cwd:             cwd, Cmd: []string{"claude"}, Title: title, Cols: snap.Cols, Rows: snap.Rows,
 		Provider:    snap.Provider,
 		Effort:      snap.Effort,
 		Model:       snap.Model,
@@ -125,7 +133,7 @@ func (a *apiServer) doMigrateSibling(p *Pane) (*Pane, error) {
 		if wsName := a.ws.NameForPane(p.ID); wsName != "" {
 			ns := np.Snapshot()
 			if _, err := a.ws.AddPane(wsName, PaneDef{
-				ID: ns.ID, Cwd: ns.Cwd, Cmd: ns.Cmd, Title: ns.Title, Cols: ns.Cols, Rows: ns.Rows, Kind: ns.Kind, Agent: ns.Agent, CodexThreadID: ns.CodexThreadID, Provider: ns.Provider, Effort: ns.Effort, Model: ns.Model, Role: ns.Role, ContextPack: ns.ContextPack,
+				ID: ns.ID, Cwd: ns.Cwd, Cmd: ns.Cmd, Title: ns.Title, Cols: ns.Cols, Rows: ns.Rows, Kind: ns.Kind, Agent: ns.Agent, CodexThreadID: ns.CodexThreadID, Provider: ns.Provider, Effort: ns.Effort, Model: ns.Model, Role: ns.Role, ContextPack: ns.ContextPack, NeverAutoAnswer: ns.NeverAutoAnswer,
 			}, "right", p.ID); err != nil {
 				a.rollbackSpawnedPane(np)
 				return nil, err
@@ -150,6 +158,10 @@ type inplaceResult struct {
 // `claude --resume <id>`; degraded panes (no transcript) start fresh. The
 // visible scrollback is archived to ~/.solu/archives first.
 func (a *apiServer) doMigrateInplace(p *Pane) (*Pane, inplaceResult, error) {
+	if !p.tryAcquireRespawn() {
+		return nil, inplaceResult{}, errMigrateInProgress
+	}
+	defer p.releaseRespawn()
 	snap := p.Snapshot()
 	cwd := snap.Cwd
 	if live := snapshotPaneProcesses(p).liveCwd; live != "" {
@@ -172,7 +184,9 @@ func (a *apiServer) doMigrateInplace(p *Pane) (*Pane, inplaceResult, error) {
 	// only then remove the old pane. Spawning before the kill also means a spawn
 	// failure leaves the original pane untouched.
 	np, err := a.spawnPaneForRequest(SpawnOpts{
-		Cwd: cwd, Cmd: cmd, Title: title, Cols: snap.Cols, Rows: snap.Rows,
+		AutoMode:        snap.AutoMode,
+		NeverAutoAnswer: snap.NeverAutoAnswer,
+		Cwd:             cwd, Cmd: cmd, Title: title, Cols: snap.Cols, Rows: snap.Rows,
 		ClaudeSessionID: resumeSID,
 		Provider:        snap.Provider,
 		Effort:          snap.Effort,
@@ -192,11 +206,14 @@ func (a *apiServer) doMigrateInplace(p *Pane) (*Pane, inplaceResult, error) {
 	if a.ws != nil {
 		if ws := a.ws.NameForPane(p.ID); ws != "" {
 			ns := np.Snapshot()
-			if _, aerr := a.ws.AddPane(ws, PaneDef{
-				ID: ns.ID, Cwd: ns.Cwd, Cmd: ns.Cmd, Title: ns.Title, Cols: ns.Cols, Rows: ns.Rows, Kind: ns.Kind, Agent: ns.Agent, CodexThreadID: ns.CodexThreadID, Provider: ns.Provider, Effort: ns.Effort, Model: ns.Model, Role: ns.Role, ContextPack: ns.ContextPack,
-			}, "right", p.ID); aerr != nil {
+			if _, aerr := a.ws.ReplacePane(ws, p.ID, PaneDef{
+				ID: ns.ID, Cwd: ns.Cwd, Cmd: ns.Cmd, Title: ns.Title, Cols: ns.Cols, Rows: ns.Rows, Kind: ns.Kind, Agent: ns.Agent, CodexThreadID: ns.CodexThreadID, Provider: ns.Provider, Effort: ns.Effort, Model: ns.Model, Role: ns.Role, ContextPack: ns.ContextPack, NeverAutoAnswer: ns.NeverAutoAnswer,
+			}); aerr != nil {
 				a.rollbackSpawnedPane(np)
 				return nil, inplaceResult{}, aerr
+			}
+			if a.uiBus != nil {
+				a.uiBus.publish(uiEvent{Type: "workspace.updated", Workspace: ws})
 			}
 		}
 	}
@@ -205,9 +222,6 @@ func (a *apiServer) doMigrateInplace(p *Pane) (*Pane, inplaceResult, error) {
 	// Warden flag bound to the retired pane's episode.
 	if snap.Flagged && !(snap.FlagOwner == wardenScopeIdentity && snap.FlagEpisode != "" && snap.FlagRevision != "") {
 		np.SetFlagAs(true, snap.FlagMemo, snap.FlagOwner)
-	}
-	if snap.AutoMode != "" {
-		np.SetAutoMode(snap.AutoMode)
 	}
 	if a.panes != nil {
 		_ = a.panes.Put(np)

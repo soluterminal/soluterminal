@@ -56,7 +56,7 @@ export function SignupConsentPrompt() {
         if (!cancelled) setState(current.consent === null ? 'ask' : 'hidden');
       })
       .catch(() => {
-        // Unknown: don't ask. Settings › Devices › Account has the choice.
+        // Unknown: don't ask. Settings › Account has the choice.
         if (!cancelled) setState('hidden');
       });
     return () => {

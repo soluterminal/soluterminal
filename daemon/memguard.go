@@ -170,6 +170,11 @@ func startMemGuard(ctx context.Context, cfg memGuardConfig) {
 }
 
 func newMemGuard(cfg memGuardConfig) *memGuard {
+	// The agent subcommand is dispatched before daemon boot and has its own
+	// memory guard. An inherited marker must not disable that protection.
+	if cfg.role != "agent" {
+		requireNormalBootEngine("memguard.newMemGuard")
+	}
 	if cfg.softMB == 0 && (cfg.role != "agent" || cfg.hardMB == 0) {
 		return nil
 	}

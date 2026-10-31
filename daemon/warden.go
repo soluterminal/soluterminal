@@ -145,6 +145,7 @@ type Warden struct {
 }
 
 func NewWarden(settings *wardenSettingsStore, mgr *Manager, scopes *mcpScopeStore, bus *uiBus, dataDir, addr string) *Warden {
+	requireNormalBootEngine("warden.NewWarden")
 	w := &Warden{
 		settings:   settings,
 		mgr:        mgr,
@@ -196,6 +197,7 @@ func (w *Warden) now() time.Time {
 // but only detects+spawns when enabled — so toggling the setting takes effect
 // on the next tick with no restart.
 func (w *Warden) Start(ctx context.Context) {
+	requireNormalBootEngine("warden.Start")
 	tick := time.NewTicker(wardenTickInterval)
 	defer tick.Stop()
 	for {

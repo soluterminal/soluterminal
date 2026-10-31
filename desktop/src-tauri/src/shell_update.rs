@@ -23,6 +23,8 @@
 // downloaded but never launched: admit_installer refuses anything older than
 // the running shell or the installed daemon unless forceDowngrade is set.
 
+#[cfg(windows)]
+use crate::shell_update_manifest::powershell_command;
 #[cfg(any(windows, test))]
 use crate::shell_update_manifest::VerifiedShellAsset;
 
@@ -251,23 +253,15 @@ fn silent_courier_file(script: &str) -> Vec<u8> {
     bytes
 }
 
-// -EncodedCommand form (base64 of UTF-16LE), as PowerShell expects it.
-#[cfg(any(windows, test))]
-fn encoded_powershell(script: &str) -> String {
-    use base64::Engine as _;
-    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
+// The batch stays ASCII; cmd.exe expands its own directory in Unicode, so
+// spaces, apostrophes and non-ASCII profile names never need re-encoding.
 #[cfg(any(windows, test))]
 fn silent_cmd_script(courier_path: &str) -> String {
-    // cmd.exe reads a .cmd in the OEM code page, so a non-ASCII path cannot
-    // appear in it literally: the single-quoted path travels inside
-    // -EncodedCommand, which keeps the .cmd ASCII (as the daemon's
-    // silentCmdScript does). `start` hands PowerShell off and returns at once.
+    // Restricted is Windows' default. RemoteSigned permits our local generated
+    // script; UNC shares can require the existing process-local Bypass policy.
+    let policy = if courier_path.starts_with(r"\\") { "Bypass" } else { "RemoteSigned" };
     format!(
-        "start \"\" /min powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {}\r\n",
-        encoded_powershell(&format!("& {}", ps_single_quoted(courier_path))),
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\nstart \"\" /min powershell.exe -NoProfile -NonInteractive -ExecutionPolicy {policy} -WindowStyle Hidden -File \"%~dp0silent-update.ps1\"\r\n"
     )
 }
 
@@ -501,19 +495,9 @@ fn admit_installer(
 
 #[cfg(windows)]
 fn stage_shell_installer(ps: &str, force_downgrade: bool) -> Result<StagedShellInstaller, String> {
-    use std::process::Command;
-
     // Nothing is downloaded until the manifest's signature checks out.
     let asset = crate::shell_update_manifest::fetch_verified_shell_asset(ps)?;
-    let staged = Command::new(ps)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &stage_script(force_downgrade, &asset),
-        ])
+    let staged = powershell_command(ps, &stage_script(force_downgrade, &asset))
         .output()
         .map_err(|e| format!("could not run powershell ({ps}): {e}"))?;
     if !staged.status.success() {
@@ -801,7 +785,6 @@ async fn apply_shell_update_inner(
 ) -> Result<ShellUpdateOutcome, String> {
     #[cfg(windows)]
     {
-        use std::process::Command;
         let force_downgrade = force_downgrade.unwrap_or(false);
         let ps = resolve_powershell();
         let staged = stage_shell_installer(&ps, force_downgrade)?;
@@ -821,15 +804,7 @@ async fn apply_shell_update_inner(
             return Ok(refusal_outcome(&staged, refusal));
         }
         configure_downgrade_token(&staged.path, force_downgrade)?;
-        let out = Command::new(&ps)
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                &launch_script(&staged.path.to_string_lossy()),
-            ])
+        let out = powershell_command(&ps, &launch_script(&staged.path.to_string_lossy()))
             .output()
             .map_err(|e| format!("could not run powershell ({ps}): {e}"))?;
         if out.status.success() {
@@ -1044,7 +1019,6 @@ async fn apply_shell_update_silent_inner(
 ) -> Result<ShellUpdateOutcome, String> {
     #[cfg(windows)]
     {
-        use std::process::Command;
         use std::sync::atomic::Ordering;
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
         use tauri::Manager;
@@ -1129,15 +1103,7 @@ async fn apply_shell_update_silent_inner(
             "$ErrorActionPreference='Stop'; try {{ Start-Process -FilePath 'explorer.exe' -ArgumentList ('\"' + {} + '\"') }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 8 }}",
             ps_single_quoted(&cmd_visible),
         );
-        let dispatched = Command::new(&ps)
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                &dispatch_script,
-            ])
+        let dispatched = powershell_command(&ps, &dispatch_script)
             .output()
             .map_err(|e| format!("could not dispatch silent update courier: {e}"))?;
         if !dispatched.status.success() {
@@ -1840,6 +1806,21 @@ mod tests {
     }
 
     #[test]
+    fn silent_batch_file_commands_allow_local_and_unc_scripts() {
+        for (path, policy) in [
+            (r"C:\Users\Zoë O'Brien\silent-update.ps1", "RemoteSigned"),
+            (r"\\wsl.localhost\Ubuntu\home\user\silent-update.ps1", "Bypass"),
+        ] {
+            assert_eq!(
+                silent_cmd_script(path),
+                format!(
+                    "@echo off\r\nsetlocal DisableDelayedExpansion\r\nstart \"\" /min powershell.exe -NoProfile -NonInteractive -ExecutionPolicy {policy} -WindowStyle Hidden -File \"%~dp0silent-update.ps1\"\r\n"
+                )
+            );
+        }
+    }
+
+    #[test]
     fn silent_generated_files_single_quote_paths_with_spaces_and_apostrophes() {
         let courier_path = r"C:\Users\O'Brien\App Data\silent-update.ps1";
         let courier = silent_courier_script(
@@ -1856,32 +1837,18 @@ mod tests {
         assert!(courier.contains(r"$attempt = 'attempt''s id'"));
 
         let cmd = silent_cmd_script(courier_path);
-        assert_eq!(
-            decode_encoded_command(&cmd),
-            r"& 'C:\Users\O''Brien\App Data\silent-update.ps1'"
-        );
-        assert_eq!(cmd.lines().count(), 1);
-    }
-
-    // The inner command of a silent-update.cmd line (-EncodedCommand, UTF-16LE).
-    fn decode_encoded_command(cmd: &str) -> String {
-        use base64::Engine as _;
-        let prefix = "start \"\" /min powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ";
-        let b64 = cmd
-            .strip_prefix(prefix)
-            .and_then(|rest| rest.strip_suffix("\r\n"))
-            .unwrap_or_else(|| panic!("unexpected silent-update.cmd: {cmd:?}"));
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
-        let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
-        String::from_utf16(&units).unwrap()
+        assert!(cmd.contains("-File \"%~dp0silent-update.ps1\""));
+        assert!(cmd.contains("-ExecutionPolicy RemoteSigned"));
+        assert!(cmd.contains("setlocal DisableDelayedExpansion"));
+        assert!(!cmd.contains("EncodedCommand"));
+        assert!(cmd.contains("WindowStyle Hidden"));
+        let unc = silent_cmd_script(r"\\wsl.localhost\Ubuntu\home\user\silent-update.ps1");
+        assert!(unc.contains("-ExecutionPolicy Bypass"));
     }
 
     // A profile folder with non-ASCII characters (C:\Users\Zoë) reaches both
-    // generated files intact: the .cmd stays ASCII (cmd.exe reads it in the OEM
-    // code page) and the .ps1 carries a UTF-8 BOM (Windows PowerShell 5.1
+    // generated files intact: the .cmd stays ASCII and resolves the adjacent
+    // script through %~dp0 (cmd.exe reads batch text in the OEM code page) and the .ps1 carries a UTF-8 BOM (Windows PowerShell 5.1
     // reads a BOM-less script in the ANSI code page).
     #[test]
     fn silent_generated_files_keep_non_ascii_paths_intact() {
@@ -1889,7 +1856,7 @@ mod tests {
         let courier_path = format!(r"{dir}\silent-update.ps1");
         let cmd = silent_cmd_script(&courier_path);
         assert!(cmd.is_ascii(), "{cmd:?}");
-        assert_eq!(decode_encoded_command(&cmd), format!("& '{courier_path}'"));
+        assert!(cmd.contains("-File \"%~dp0silent-update.ps1\""));
 
         let script = silent_courier_script(
             1,

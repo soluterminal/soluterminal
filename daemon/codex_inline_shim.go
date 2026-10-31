@@ -23,6 +23,23 @@ func ensureCodexInlineShim(dataDir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
+	// The directory survives upgrades and flavour switches. Remove only links
+	// for unregistered commands; leave ordinary files and directories alone.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		// A concurrent installer may be about to rename one of these links.
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if _, ok := paneShimCommand(entry.Name()); !ok && entry.Type()&os.ModeSymlink != 0 {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				return "", err
+			}
+		}
+	}
 	// Other pane shims (extensions.go) share the directory.
 	for _, shim := range paneShims {
 		if err := ensureShimLink(dir, shim.name, self); err != nil {
@@ -111,7 +128,7 @@ func runCodexInlineShim(cliArgs []string) int {
 		args = inline
 	}
 	if live := codexLiveShellCommand(args, childEnv, shimDir); len(live) > 0 {
-		c := exec.Command(live[0], live[1:]...)
+		c := daemonCommand(live[0], live[1:]...)
 		c.Env = append(filterOutEnvKeys(childEnv, []string{"PATH"}), "PATH="+realPath)
 		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := runShimCLI(c); err != nil {
@@ -195,4 +212,52 @@ func runShimProcess(c *exec.Cmd, after func()) error {
 		after()
 	}
 	return err
+}
+
+// runUnknownPaneShim handles links left by a build with more extensions.
+// Resolve the ordinary command with the shim directories removed and reject
+// aliases of this executable so another link cannot recurse back into solud.
+func runUnknownPaneShim(argv0 string, args []string) int {
+	name := filepath.Base(argv0)
+	realPath := os.Getenv("PATH")
+	if dir := os.Getenv(codexInlineShimEnvKey); dir != "" {
+		realPath = pathWithoutCodexShim(realPath, dir)
+	}
+	if filepath.Dir(argv0) != "." {
+		realPath = pathWithoutCodexShim(realPath, filepath.Dir(argv0))
+	}
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, name+": cannot resolve SoluTerminal executable:", err)
+		return 127
+	}
+	selfInfo, err := os.Stat(self)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, name+": cannot inspect SoluTerminal executable:", err)
+		return 127
+	}
+	for _, dir := range filepath.SplitList(realPath) {
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 || os.SameFile(selfInfo, info) {
+			continue
+		}
+		bin, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		c := exec.Command(bin, args...)
+		c.Env = append(filterOutEnvKeys(os.Environ(), []string{"PATH"}), "PATH="+realPath)
+		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := runShimProcess(c, nil); err != nil {
+			if exit, ok := err.(*exec.ExitError); ok {
+				return exit.ExitCode()
+			}
+			fmt.Fprintln(os.Stderr, name+": cannot start real command:", err)
+			return 127
+		}
+		return 0
+	}
+	fmt.Fprintln(os.Stderr, name+": shim not available in this build; real command not found on PATH")
+	return 127
 }

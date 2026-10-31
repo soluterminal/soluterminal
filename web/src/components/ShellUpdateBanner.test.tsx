@@ -2,6 +2,7 @@ import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../store';
 import { ShellUpdateBanner } from './ShellUpdateBanner';
+import { resetUpdateThisComputerForTest } from '../lib/updateThisComputer';
 
 const realApplyAllUpdates = useStore.getState().applyAllUpdates;
 
@@ -17,12 +18,18 @@ const mock = vi.hoisted(() => ({
   nativeForces: [] as boolean[],
   revealed: [] as string[],
   invoked: [] as Array<[string, unknown]>,
+  // desktop_update_this_computer: what the shell answers (or the error it throws).
+  updateHere: { state: 'launched' } as unknown,
+  updateHereThrows: false,
 }));
 vi.mock('../tauri-browser', () => ({
   isDesktopApp: () => mock.isDesktop,
   tauriInvoke: () => (mock.isDesktop
     ? (command: string, args?: unknown) => {
       mock.invoked.push([command, args]);
+      if (command === 'desktop_update_this_computer') {
+        return mock.updateHereThrows ? Promise.reject(new Error('command not found')) : Promise.resolve(mock.updateHere);
+      }
       return Promise.resolve(undefined);
     }
     : null),
@@ -47,13 +54,13 @@ vi.mock('../tauri-browser', () => ({
   },
 }));
 
-function setLaunchMode(mode: 'cloud' | 'local' | undefined) {
+function setLaunchMode(mode: 'cloud' | 'local' | undefined, updateThisComputer?: boolean) {
   if (mode === undefined) {
     delete (window as unknown as { __SOLU_BACKEND__?: unknown }).__SOLU_BACKEND__;
     return;
   }
   Object.defineProperty(window, '__SOLU_BACKEND__', {
-    value: { launchMode: mode },
+    value: updateThisComputer === undefined ? { launchMode: mode } : { launchMode: mode, updateThisComputer },
     configurable: true,
   });
 }
@@ -69,6 +76,9 @@ describe('ShellUpdateBanner', () => {
     mock.nativeForces = [];
     mock.revealed = [];
     mock.invoked = [];
+    mock.updateHere = { state: 'launched' };
+    mock.updateHereThrows = false;
+    resetUpdateThisComputerForTest();
     localStorage.clear();
     setLaunchMode('cloud');
     useStore.setState({ updateStatus: { shellLatest: '0.0.835' } as never, applyAllUpdates: realApplyAllUpdates });
@@ -205,6 +215,121 @@ describe('ShellUpdateBanner', () => {
     } finally {
       useStore.setState({ openDialog: realOpenDialog });
     }
+  });
+
+  describe('with a shell that updates this computer from Cloud mode', () => {
+    const teamRemote = { current: '0.0.1226', shellLatest: '0.0.1226', shellAvailable: true, updateChannel: 'team' };
+    let realOpenDialog: unknown;
+    let realToast: unknown;
+    let toasts: string[];
+    beforeEach(() => {
+      setLaunchMode('cloud', true);
+      mock.pingVersion = '0.0.1225';
+      toasts = [];
+      realOpenDialog = useStore.getState().openDialog;
+      realToast = useStore.getState().toast;
+      useStore.setState({
+        updateStatus: teamRemote as never,
+        openDialog: (d: { resolve: (v: unknown) => void }) => d.resolve(true),
+        toast: (message: string) => { toasts.push(message); },
+      } as never);
+    });
+    afterEach(() => {
+      useStore.setState({ openDialog: realOpenDialog, toast: realToast } as never);
+    });
+
+    it('on a team computer, Update installs this computer\'s update in place', async () => {
+      render(<ShellUpdateBanner />);
+      expect(await screen.findByText(/Update this computer's desktop app$/)).toBeInTheDocument();
+      expect(screen.getByText(/installs this computer's own update and stays in Cloud mode/)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Switch to Local' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+      await waitFor(() => expect(mock.invoked).toEqual([['desktop_update_this_computer', undefined]]));
+      await waitFor(() => expect(toasts).toEqual(['Installer opened. Follow it to finish; the app reopens in Cloud mode.']));
+      expect(mock.nativeCalls).toBe(0);
+      expect(mock.opened).toEqual([]);
+    });
+
+    it('shows the progress the shell reports', async () => {
+      let finish: (value: unknown) => void = () => {};
+      mock.updateHere = new Promise((resolve) => { finish = resolve; });
+      render(<ShellUpdateBanner />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+      expect(await screen.findByRole('button', { name: 'Updating…' })).toBeDisabled();
+      window.dispatchEvent(new CustomEvent('solu:update-this-computer', { detail: { phase: 'installing' } }));
+      expect(await screen.findByText(/Downloading the installer…/)).toBeInTheDocument();
+      finish({ state: 'up-to-date', currentVersion: '0.0.1229' });
+      await waitFor(() => expect(toasts).toEqual(["This computer's desktop app is up to date (v0.0.1229)."]));
+      expect(await screen.findByRole('button', { name: 'Update' })).toBeEnabled();
+    });
+
+    it('falls back to Switch to Local when the update fails', async () => {
+      mock.updateHere = { state: 'failed', message: "Couldn't start this computer's SoluTerminal service: solud binary not found" };
+      render(<ShellUpdateBanner />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+      expect(await screen.findByText(/Couldn't update from here/)).toBeInTheDocument();
+      expect(screen.getByText(/solud binary not found/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Switch to Local' }));
+      await waitFor(() => expect(mock.invoked).toEqual([
+        ['desktop_update_this_computer', undefined],
+        ['desktop_set_launch_mode', { mode: 'local' }],
+      ]));
+      expect(mock.nativeCalls).toBe(0);
+      expect(mock.opened).toEqual([]);
+    });
+
+    it('does nothing more when the user cancels in the desktop app\'s dialog', async () => {
+      mock.updateHere = { state: 'cancelled' };
+      render(<ShellUpdateBanner />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+      await waitFor(() => expect(mock.invoked).toEqual([['desktop_update_this_computer', undefined]]));
+      expect(await screen.findByRole('button', { name: 'Update' })).toBeEnabled();
+      expect(toasts).toEqual([]);
+      expect(screen.queryByText(/Couldn't update from here/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Switch to Local' })).not.toBeInTheDocument();
+    });
+
+    it('says to confirm in the dialog until the shell reports progress', async () => {
+      mock.updateHere = new Promise(() => {});
+      render(<ShellUpdateBanner />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+      expect(await screen.findByText(/Confirm in the dialog…/)).toBeInTheDocument();
+    });
+
+    // A team build's installer comes only through this computer's daemon, so
+    // a team app viewing a PUBLIC computer updates through the same command
+    // instead of the app's updater (which refuses a team build).
+    it('a team-build app viewing a public computer updates through the command too', async () => {
+      Object.defineProperty(window, '__SOLU_BACKEND__', {
+        value: { launchMode: 'cloud', updateThisComputer: true, shellFlavor: 'team' },
+        configurable: true,
+      });
+      mock.nativeOk = true;
+      useStore.setState({ updateStatus: { shellLatest: '0.0.1226', updateChannel: 'public' } as never });
+      render(<ShellUpdateBanner />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+      await waitFor(() => expect(mock.invoked).toEqual([['desktop_update_this_computer', undefined]]));
+      expect(mock.nativeCalls).toBe(0);
+      expect(mock.opened).toEqual([]);
+    });
+
+    it('falls back to Switch to Local when the shell refuses the command', async () => {
+      mock.updateHereThrows = true;
+      render(<ShellUpdateBanner />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+      expect(await screen.findByRole('button', { name: 'Switch to Local' })).toBeInTheDocument();
+    });
+
+    it('on a public computer, keeps the app updater', async () => {
+      mock.nativeOk = true;
+      useStore.setState({ updateStatus: { shellLatest: '0.0.835', updateChannel: 'public' } as never });
+      mock.pingVersion = '0.0.803';
+      render(<ShellUpdateBanner />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Update now' }));
+      await waitFor(() => expect(mock.nativeCalls).toBe(1));
+      expect(mock.invoked).toEqual([]);
+    });
   });
 
   it('on a public computer, keeps the app updater', async () => {

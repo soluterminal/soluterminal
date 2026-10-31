@@ -3432,7 +3432,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       onContextMenu={openContextMenu}
       onDragOver={(e) => {
         // Only engage with our own drag payload.
-        if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+        if (useStore.getState().workspaceView || !e.dataTransfer.types.includes(DRAG_MIME)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         setDropZone(computeZone(e));
@@ -3443,7 +3443,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         if (!e.currentTarget.contains(related)) setDropZone(null);
       }}
       onDrop={(e) => {
-        if (!actionValid() || ownerPresentation || !e.dataTransfer.types.includes(DRAG_MIME)) return;
+        if (!actionValid() || ownerPresentation || useStore.getState().workspaceView || !e.dataTransfer.types.includes(DRAG_MIME)) return;
         e.preventDefault();
         const src = e.dataTransfer.getData(DRAG_MIME);
         const zone = computeZone(e);

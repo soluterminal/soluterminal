@@ -920,6 +920,17 @@ func TestSwitchModeVirginSessionSkipsWaitAndResume(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	// Full boot/restart fixture: isolated HOME, data directory and side port.
+	if len(os.Args) >= 2 && os.Args[1] == "policy-test-daemon" {
+		identifyCallerHook = func(*http.Request) callerIdentity { return callerIdentity{Kind: callerHuman} }
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+		main()
+		os.Exit(0)
+	}
+	// Isolated persistence tests launch the real pane transport with this binary.
+	if len(os.Args) >= 2 && os.Args[1] == "agent" {
+		os.Exit(runAgent())
+	}
 	// Exercise the production fixed-recipe helper in subprocess fixtures.
 	if len(os.Args) >= 2 && os.Args[1] == capabilityCommand {
 		os.Exit(runCapabilityCommand(os.Args[2:], os.Stdout))

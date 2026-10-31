@@ -10,6 +10,9 @@ import { SidebarCustomizer } from './sidebar/SidebarCustomizer';
 import { AppearanceTab } from './settings/AppearanceTab';
 import { PanesTab } from './settings/PanesTab';
 import { DevicesTab } from './settings/DevicesTab';
+import { AccountTab, useAccountTabVisible } from './settings/AccountTab';
+import { NotificationsVoiceTab, useNotificationsVoiceVisible } from './settings/NotificationsVoiceTab';
+import { PrivacySecurityTab } from './settings/PrivacySecurityTab';
 import { PhoneEncryptionSetting, privateRelayCandidateInView } from './settings/RemoteDevicesSetting';
 import { WardenTab } from './settings/WardenTab';
 import { ServicesTab } from './settings/ServicesTab';
@@ -28,7 +31,10 @@ const TABS: { key: SettingsTab; label: string }[] = [
   { key: 'appearance', label: 'Appearance' },
   { key: 'panes', label: 'Terminal & panes' },
   { key: 'sidebar', label: 'Sidebar' },
-  { key: 'devices', label: 'Devices' },
+  { key: 'account', label: 'Account' },
+  { key: 'notifications', label: 'Notifications & voice' },
+  { key: 'privacy', label: 'Privacy & security' },
+  { key: 'devices', label: 'Devices & updates' },
   { key: 'warden', label: 'Warden' },
   { key: 'tasks', label: 'Services' },
 ];
@@ -44,6 +50,8 @@ export function SettingsModal() {
   const close = useSettings((s) => s.closeSettings);
   const isMobile = useIsMobileDevice();
   const team = useOperatorFeatures();
+  const accountVisible = useAccountTabVisible();
+  const notificationsVisible = useNotificationsVoiceVisible();
   // Tabs registered by optional features (extensions.ts), each placed after
   // a core tab. The list is fixed for the page's lifetime, so the hook order
   // is stable.
@@ -63,12 +71,21 @@ export function SettingsModal() {
   }, [open, close]);
 
   if (!open) return null;
-  // Devices holds the desktop-installer / phone-pairing rows; neither applies
-  // on a phone, so there the tab shows only this browser's end-to-end
-  // encryption switch, and only when that applies.
+  // Account, Notifications & voice and Devices & updates hold desktop rows
+  // (sign-in, voice, installer, phone pairing, updates) that don't apply on a
+  // phone, so a phone sees only Privacy & security, holding just this
+  // browser's end-to-end encryption switch, and only when that applies.
   const phoneEncryption = isMobile && privateRelayCandidateInView() !== null;
-  const coreTabs = TABS.filter((t) => (t.key !== 'devices' || !isMobile || phoneEncryption)
-    && (team || !TEAM_ONLY_TABS.has(t.key)));
+  const shown = (key: SettingsTab): boolean => {
+    switch (key) {
+      case 'account': return !isMobile && accountVisible;
+      case 'notifications': return !isMobile && notificationsVisible;
+      case 'devices': return !isMobile;
+      case 'privacy': return !isMobile || phoneEncryption;
+      default: return true;
+    }
+  };
+  const coreTabs = TABS.filter((t) => shown(t.key) && (team || !TEAM_ONLY_TABS.has(t.key)));
   const tabs: { key: SettingsTab; label: string }[] = [];
   const placed = new Set<number>();
   // A feature tab follows its anchor, which may be another feature's tab;
@@ -91,7 +108,9 @@ export function SettingsModal() {
   // empty panel.
   // The old two-row "Claude sessions" tab now lives at the bottom of
   // Terminal & panes, so its deep links land there.
-  const wanted = tab === 'claude' ? 'panes' : tab;
+  // Settings › Devices was split into four tabs; on a phone the encryption
+  // switch it used to hold now lives in Privacy & security.
+  const wanted = tab === 'claude' ? 'panes' : tab === 'devices' && isMobile ? 'privacy' : tab;
   const activeTab = tabs.some((t) => t.key === wanted) ? wanted : tabs[0].key;
 
   return (
@@ -128,8 +147,11 @@ export function SettingsModal() {
               {activeTab === 'appearance' && <AppearanceTab />}
               {activeTab === 'panes' && <PanesTab />}
               {activeTab === 'sidebar' && <SidebarCustomizer />}
-              {activeTab === 'devices' && !isMobile && <DevicesTab />}
-              {activeTab === 'devices' && isMobile && <PhoneEncryptionSetting />}
+              {activeTab === 'account' && <AccountTab />}
+              {activeTab === 'notifications' && <NotificationsVoiceTab />}
+              {activeTab === 'privacy' && !isMobile && <PrivacySecurityTab />}
+              {activeTab === 'privacy' && isMobile && <PhoneEncryptionSetting />}
+              {activeTab === 'devices' && <DevicesTab />}
               {activeTab === 'warden' && <WardenTab />}
               {activeTab === 'tasks' && <ServicesTab />}
               {featureTabs.map((f, i) => activeTab === f.key && featureVisible[i] && <f.Component key={f.key} />)}

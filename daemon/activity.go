@@ -31,6 +31,7 @@ import (
 // to refreshPaneAITitleCache so the pane's generated title re-warms once per
 // completed turn — off the request path, naturally rate-limited.
 func startActivityWatcher(ctx context.Context, mgr *Manager, bus *uiBus, onReplyComplete func(*Pane)) {
+	requireNormalBootEngine("activity.startActivityWatcher")
 	last := map[string]PaneRuntimeState{}
 	enteredAt := map[string]time.Time{}
 	// Separate from enteredAt: busyEnteredAt is pinned at the moment

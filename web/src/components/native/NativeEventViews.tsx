@@ -2707,7 +2707,7 @@ export function Cheatsheet({
 // Three actions:
 //   • "Switch when done" — PRIMARY, full-width on its own row, AUTOFOCUSED. The
 //     lossless default: arm a deferred switch that fires when the turn finishes.
-//     Enter triggers it (window-level, so it works regardless of focus).
+//     Enter triggers it while focus is inside the confirmation.
 //   • "Switch now" — secondary, warn-tinted OUTLINE (de-emphasized). Interrupts
 //     the current turn immediately. CLICK-ONLY: no Enter/key accelerator, so a
 //     stray keystroke can never abort live work.
@@ -2743,31 +2743,23 @@ export function ModeSwitchConfirm({
     confirmRef.current?.focus();
   }, []);
 
-  // Window-level Esc/Enter so the keys work even before focus settles (and even
-  // if the user tabs away). Esc cancels; Enter triggers the LOSSLESS default
-  // ('deferred' while working, plain switch once settled). "Switch now" has NO
-  // key accelerator — interrupting live work must be an explicit click. Stop
-  // here so the pane's own Esc/Enter handlers don't also fire.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        onCancel();
-      } else if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        onConfirm('deferred');
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [onConfirm, onCancel]);
-
   return (
     <div
       className="native-switch-confirm"
+      // Only keys originating inside this confirmation belong to it. Terminal
+      // input must never arm a renderer switch or lose Escape to this dialog.
+      onKeyDown={(e) => {
+        if (e.defaultPrevented) return;
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          onCancel();
+        } else if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          onConfirm('deferred');
+        }
+      }}
       role="alertdialog"
       aria-label={
         working
