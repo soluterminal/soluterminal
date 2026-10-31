@@ -87,6 +87,31 @@ func (s *recoverySettingsStore) AutoResumeAfterRestart() bool {
 	return s.Snapshot().ResumeAfterRestart == recoveryResumeAuto
 }
 
+// Mode is the current After a restart choice: manual ("Ask me"), auto
+// ("Resume automatically") or paused ("Don't resume").
+func (s *recoverySettingsStore) Mode() recoveryResumeMode {
+	return s.Snapshot().ResumeAfterRestart
+}
+
+// suspendAfterRestart parks a dead-but-resumable pane found at daemon start
+// (its agent died with the machine) without spawning anything. Under "Ask me"
+// the client offers Resume on the pane; under "Don't resume" the pane is
+// marked RestartPaused so the client shows it as paused with no offer, and it
+// stays that way until the person resumes it. Panes carrying a recovery error
+// keep their recovery card either way.
+func suspendAfterRestart(mgr *Manager, info *PersistedPane, mode recoveryResumeMode) *Pane {
+	sp := mgr.SuspendExisting(info)
+	if sp == nil || mode != recoveryResumePaused {
+		return sp
+	}
+	sp.mu.Lock()
+	if sp.Status == PaneExited && sp.Resumable && sp.RecoveryError == "" {
+		sp.RestartPaused = true
+	}
+	sp.mu.Unlock()
+	return sp
+}
+
 func (s *recoverySettingsStore) Set(next recoverySettings) (recoverySettings, error) {
 	mode, ok := normalizeRecoveryResumeMode(next.ResumeAfterRestart)
 	if !ok {

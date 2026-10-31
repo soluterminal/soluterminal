@@ -9,6 +9,7 @@ import { setupStartedWithin } from './lib/setupActivity';
 import { INSTALL_PANE_TITLE, LOGIN_PANE_TITLE } from './claudeBootstrap';
 import { CODEX_INSTALL_PANE_TITLE, CODEX_LOGIN_PANE_TITLE } from './codexBootstrap';
 import { useAgentInstallPrompt } from './agentStart';
+import { connectPromptPending } from './accountConnect';
 import type { Health } from './types';
 
 // Opt-in for adding SoluTerminal's tools to Claude Code and Codex on this
@@ -109,6 +110,8 @@ function agentSetUp(agent: 'claude' | 'codex', health: Health | null): boolean {
 
 export function setupInProgress(now: number = Date.now()): boolean {
   if (setupStartedWithin(SETUP_QUIET_MS, now)) return true;
+  // "Connect this PC to your account?" is being asked: don't replace it.
+  if (connectPromptPending()) return true;
   if (useAgentInstallPrompt.getState().agent !== null) return true;
   const health = getDaemonHealthState().health;
   return Object.values(useStore.getState().panes).some((p) => {

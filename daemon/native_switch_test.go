@@ -927,6 +927,9 @@ func TestMain(m *testing.M) {
 	// Handler tests act as the person at the app; caller_authority_test.go
 	// switches the real identification back on.
 	identifyCallerHook = func(*http.Request) callerIdentity { return callerIdentity{Kind: callerHuman} }
+	// Task schedules are created all over the suite on hosts with no Claude
+	// CLI; schedules_task_claude_test.go exercises the real check.
+	scheduleTaskRunnable = func() error { return nil }
 	// Generated-storage producers must never allocate fixture roots beneath the
 	// invoking user's real cache. Keep one process-stable cache base so every
 	// managed fixture is bounded to this test process and discarded afterward.

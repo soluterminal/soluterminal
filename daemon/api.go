@@ -169,6 +169,9 @@ type apiServer struct {
 	checkin      *installCheckin
 	privacy      *privacySettings
 	naming       *paneNaming
+	// paneConfirms are agents' open requests to close or change a pane they
+	// did not start, waiting for the person's OK (pane_confirm.go).
+	paneConfirms paneConfirms
 	// agentAuthority is the person's grant letting agents in panes approve
 	// for them (caller_authority.go).
 	agentAuthority *agentAuthority
@@ -488,7 +491,7 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/panes/{id}/flag", a.setPaneFlag)
 	mux.HandleFunc("POST /api/panes/{id}/migrate-clean", a.migratePaneClean)
 	mux.HandleFunc("POST /api/panes/{id}/ack", a.ackPane)
-	mux.HandleFunc("/api/panes/{id}/io", handleWS(a.mgr, a.promptInputGate))
+	mux.HandleFunc("/api/panes/{id}/io", handleWS(a.mgr, a.paneSocketInputPolicy))
 
 	mux.HandleFunc("GET /api/workspaces", a.listWorkspaces)
 	mux.HandleFunc("POST /api/workspaces", a.putWorkspace)
@@ -757,6 +760,8 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/settings/agent-authority", a.handlePutAgentAuthority)
 	// Remote devices (trusted_devices.go): enrolment and status are reachable
 	// by unapproved devices over the relay; approval and the policy are local.
+	mux.HandleFunc("GET /api/pane-confirmations", a.handleListPaneConfirms)
+	mux.HandleFunc("POST /api/pane-confirmations/{id}", a.handleAnswerPaneConfirm)
 	mux.HandleFunc("GET /api/remote-devices", a.handleListRemoteDevices)
 	mux.HandleFunc("POST /api/remote-devices/enroll", a.handleEnrollRemoteDevice)
 	mux.HandleFunc("GET /api/remote-devices/{id}/status", a.handleRemoteDeviceStatus)

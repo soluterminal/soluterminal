@@ -40,7 +40,7 @@ export function ClaudeTab() {
         </SettingsRow>}
         <SettingsRow
           label="After a restart"
-          hint="What Claude panes do after your computer (or WSL) restarts."
+          hint="What Claude panes do after your computer (or WSL) restarts. Ask me offers Resume on each pane. Don't resume leaves them paused until you choose Resume session in a pane's ⋯ menu."
         >
           <select
             className="settings-select"

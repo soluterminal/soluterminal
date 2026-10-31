@@ -411,3 +411,36 @@ describe('hosted app get-started card', () => {
     await waitFor(() => expect(document.body.textContent).toMatch(/install\.sh/));
   });
 });
+
+describe('machine list refresh', () => {
+  beforeEach(() => {
+    useCloud.setState(useCloud.getInitialState(), true);
+    Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 0 });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    useCloud.setState(useCloud.getInitialState(), true);
+  });
+
+  it('refreshes the machine list by itself, so "Your PC appears here" happens without a reload', async () => {
+    visitor(WINDOWS_UA, 'Win32');
+    entitlements(false);
+    seed();
+    const refresh = vi.fn(async () => {
+      useCloud.setState({ machines: [{ ...machine, online: false }] });
+    });
+    useCloud.setState({ refreshMachines: refresh });
+    vi.useFakeTimers();
+    try {
+      renderGate();
+      expect(screen.getByRole('heading', { name: "You're in. Three steps to your first team." })).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(refresh).toHaveBeenCalled();
+      expect(screen.getByText('desk')).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: "You're in. Three steps to your first team." })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

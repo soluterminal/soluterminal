@@ -1,6 +1,7 @@
 import { useStore, type AppThemePref } from '../../store';
 import { THEMES } from '../../themes';
 import { SettingsGroup, SettingsRow } from './SettingsRow';
+import { NumberInput } from './NumberInput';
 import { useFocusEnabled } from '../../lib/focusAvailability';
 
 // Theme + type-size controls. Everything applies live to mounted panes, so
@@ -64,22 +65,23 @@ export function AppearanceTab() {
         </SettingsRow>
       </SettingsGroup>
       <SettingsGroup title="Text size">
-        {/* Font size: the store clamps to 10-22px on set, so out-of-range input
-            self-heals on the next render. Applies to BOTH renderers: xterm gets
+        {/* Font size: NumberInput keeps the typed draft and applies it once it
+            is a valid 10-22px value (or clamps it on blur/Enter), so typing
+            "18" over "13" works instead of clamping each keystroke. Applies to BOTH renderers: xterm gets
             the px directly; the Focus pane scales its prose ramp proportionally
             (px / 13 default) so the two modes stay consistent. */}
         <SettingsRow
           label="Font size"
           hint="Terminal text, 10–22 px."
         >
-          <input
-            type="number"
-            className="settings-input"
+          <NumberInput
+            label="Font size"
             min={10}
             max={22}
             step={1}
+            live
             value={terminalFontSize}
-            onChange={(e) => setTerminalFontSize(parseInt(e.target.value, 10) || terminalFontSize)}
+            onCommit={setTerminalFontSize}
           />
           <span className="settings-unit">px</span>
         </SettingsRow>
@@ -89,14 +91,14 @@ export function AppearanceTab() {
           label="Line height"
           hint="Ratio, 1.0–1.8. Tighter fits more lines; looser reads easier."
         >
-          <input
-            type="number"
-            className="settings-input"
+          <NumberInput
+            label="Line height"
             min={1.0}
             max={1.8}
             step={0.1}
+            live
             value={terminalLineHeight}
-            onChange={(e) => setTerminalLineHeight(parseFloat(e.target.value) || terminalLineHeight)}
+            onCommit={setTerminalLineHeight}
           />
         </SettingsRow>
         {/* Focus text offset: Focus is a proportional font (reads smaller than
@@ -128,14 +130,14 @@ export function AppearanceTab() {
           label="Sidebar text size"
           hint="Scales the sidebar lists only, 0.7–1.4×. Panes and the top bar keep their size."
         >
-          <input
-            type="number"
-            className="settings-input"
+          <NumberInput
+            label="Sidebar text size"
             min={0.7}
             max={1.4}
             step={0.05}
+            live
             value={uiScale}
-            onChange={(e) => setUiScale(parseFloat(e.target.value) || uiScale)}
+            onCommit={setUiScale}
           />
           <span className="settings-unit">×</span>
         </SettingsRow>

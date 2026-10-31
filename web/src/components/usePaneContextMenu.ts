@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 
 import { api, currentRoutingScope, type RoutingScope } from '../api';
 import { useStore } from '../store';
 import { confirmDialog, selectDialog } from '../lib/dialog';
+import { confirmAutoModeChange } from '../lib/autoModeConfirm';
 import type { PaneInfo } from '../types';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { paneRunningWork } from '../lib/paneWork';
@@ -175,9 +176,16 @@ export function usePaneContextMenu({
       setAutoMode: (mode: PaneAutoMode) => {
         if (!actionGuard()) return;
       setCtxMenu(null);
-        // Optimistic store action (no-ops if already in `mode`); keeps the
-        // header badge / palette / menu in sync the instant the user picks.
-        void updatePane(()=>api.setPaneAutoMode(pane.id,mode,scope));
+        // Always approve asks first, the same as the header chip and palette.
+        // The view/scope guard is captured at the click and checked again
+        // after the confirmation; updatePane also re-checks the pane's pid.
+        const originScope = scope ?? currentRoutingScope();
+        const generation = useStore.getState().navigationGeneration;
+        const valid = captureGuard?.() ?? (() => actionGuard() && originScope.key === currentRoutingScope().key
+          && generation === useStore.getState().navigationGeneration);
+        void confirmAutoModeChange((pane.autoMode ?? '') as PaneAutoMode, mode, pane.title).then((ok) => {
+          if (ok && valid()) void updatePane(()=>api.setPaneAutoMode(pane.id,mode,originScope));
+        });
       },
       toggleAnnounceDelegation: () => {
         if (!actionGuard()) return;

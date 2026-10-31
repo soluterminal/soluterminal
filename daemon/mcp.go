@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 )
 
 const mcpProtocolVersion = "2024-11-05"
@@ -25,7 +29,7 @@ const mcpServerInstructions = mcpDirectServerInstructions
 // The engine-free brief is also used by the generated global Codex policy.
 // Keep schedules and pane coordination available without
 // advertising task lifecycle or repair capabilities that cannot run.
-const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. The workflow task engine is unavailable. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards, and close it with kill_pane once you have its result unless the user wants it kept. Keep your own pane's working_on line current with set_pane_info as your work moves on. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Preserve user authorization and required approval gates."
+const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. The workflow task engine is unavailable. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards, and close it with kill_pane once you have its result unless the user wants it kept. Pick each worker's agent for its task (cmd claude or codex, optionally with model and effort): work that writes code goes to a visible worker pane, and in-session subagents are for read-only research.Keep your own pane's working_on line current with set_pane_info as your work moves on. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Preserve user authorization and required approval gates."
 
 // SOLU_MCP_MUTATION_POLICY controls MCP tools that directly mutate local
 // state without the ARIA confirmation channel. Default "allow" preserves
@@ -118,14 +122,97 @@ func (a *apiServer) mcp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tracing reads the process table (tens of milliseconds), so only tool
+	// calls pay for it; initialize and tools/list read the header, which
+	// only shapes what is advertised (tools/call checks the surface again).
 	callerPane := mcpCallerPane(r)
+	if req.Method == "tools/call" {
+		callerPane = a.mcpTracedCallerPane(r)
+	}
 
 	writeJSON(w, 200, a.mcpDispatchTransport(req, scope, callerPane))
 }
 
-// mcpCallerPane treats the header as daemon-observed transport metadata for
-// scoped and unscoped callers alike. It tolerates both missing pane headers
-// from existing sessions and literal, unexpanded environment-variable headers.
+// mcpTracedCallerPane is the pane an MCP call comes from, as far as the
+// daemon can tell. It decides which panes the caller owns (kill_pane,
+// rename_pane, set_pane_info), who a message is from (send_input, ask_pane),
+// who started a pane or schedule, and which tool surface the caller gets.
+//
+// The X-Soluterminal-Pane header is the caller's own word: any agent can call
+// /mcp on loopback and name another pane. So the connection is traced to its
+// process first (caller_authority.go). A process inside a pane is that pane,
+// whatever the header says. A process the daemon started, or any other traced
+// program, is no pane and owns none. The header counts only when the
+// connection cannot be traced (a Windows process reaching a WSL daemon, WSL's
+// relayed loopback): the limit SECURITY.md documents. A process placed only
+// by SOLU_PANE_ID in its environment is no pane either (see below).
+func (a *apiServer) mcpTracedCallerPane(r *http.Request) string {
+	header := mcpCallerPane(r)
+	id := a.identifyCaller(r)
+	switch {
+	case id.Kind == callerPane && id.PaneID != "" && id.FromEnv:
+		// No pane above the process (setsid, a detached tmux or screen
+		// server): the pane id is only what its environment says, as
+		// self-declared as the header. It owns no panes; the confirmation
+		// prompt names the pane it claims, marked as unverified.
+		return mcpClaimedCallerPrefix + id.PaneID
+	case id.Kind == callerPane && id.PaneID != "":
+		if header != "" && header != id.PaneID {
+			noteMCPCallerMismatch(id.PaneID, header, id.PID)
+		}
+		return id.PaneID
+	case id.Kind == callerWorker:
+		return ""
+	case id.PID > 0 && !peerIsRelayProxy(id.PID):
+		// Traced to a program outside the panes (an agent in another
+		// terminal, a script): it owns no panes, whatever it claims.
+		return ""
+	}
+	return header
+}
+
+// mcpClaimedCallerPrefix marks a caller pane that could not be verified
+// (mcpTracedCallerPane). It never reaches a tool: mcpCallToolTransport strips
+// it, and a header can't carry a NUL byte.
+const mcpClaimedCallerPrefix = "\x00claimed:"
+
+// splitMCPCaller separates a verified caller pane from a claimed one.
+func splitMCPCaller(callerPane string) paneCaller {
+	if claimed, ok := strings.CutPrefix(callerPane, mcpClaimedCallerPrefix); ok {
+		return paneCaller{Claimed: claimed}
+	}
+	return paneCaller{ID: callerPane}
+}
+
+// mcpCallerMismatches rate-limits the log line for a traced pane that names
+// another pane in its header: one line per pair per interval.
+var mcpCallerMismatches = struct {
+	sync.Mutex
+	last map[string]time.Time
+}{last: map[string]time.Time{}}
+
+const mcpCallerMismatchEvery = 10 * time.Minute
+
+func noteMCPCallerMismatch(traced, header string, pid int) {
+	key := traced + "\x00" + header
+	now := time.Now()
+	mcpCallerMismatches.Lock()
+	if t, ok := mcpCallerMismatches.last[key]; ok && now.Sub(t) < mcpCallerMismatchEvery {
+		mcpCallerMismatches.Unlock()
+		return
+	}
+	if len(mcpCallerMismatches.last) >= 256 {
+		mcpCallerMismatches.last = map[string]time.Time{}
+	}
+	mcpCallerMismatches.last[key] = now
+	mcpCallerMismatches.Unlock()
+	log.Printf("mcp: caller traced to pane %s (pid %d) named pane %q in X-Soluterminal-Pane; acting as %s", traced, pid, header, traced)
+}
+
+// mcpCallerPane reads the X-Soluterminal-Pane header the pane's MCP client
+// sends. It is self-declared: mcpTracedCallerPane decides when it counts. It
+// tolerates both missing pane headers from existing sessions and literal,
+// unexpanded environment-variable headers.
 func mcpCallerPane(r *http.Request) string {
 	paneID := strings.TrimSpace(r.Header.Get("X-Soluterminal-Pane"))
 	if strings.Contains(paneID, "$") {
@@ -145,7 +232,7 @@ func (a *apiServer) mcpDispatchTransport(req rpcReq, scope *mcpScope, callerPane
 	// instructions instead of the delegation brief. Scoped callers (managed
 	// agents, the Warden) only exist on operator installs. The personal view
 	// gives panes started while it is on the same public surface.
-	public := scope == nil && (!a.operatorFeaturesOn() || a.personalViewForPane(callerPane))
+	public := scope == nil && (!a.operatorFeaturesOn() || a.personalViewForPane(splitMCPCaller(callerPane).ID))
 	if public && req.Method == "tools/call" {
 		var p toolCallParams
 		if err := json.Unmarshal(req.Params, &p); err == nil && !mcpPublicToolNames[p.Name] {
@@ -432,7 +519,16 @@ func mcpCoreTools() []mcpTool {
 					},
 					"cmd": {
 						"type": "string",
-						"description": "Command to run in the pane (e.g. \"claude\", \"bash\"). Optional — defaults to the user's shell. Parsed as a single argv0; arguments are not supported here."
+						"description": "Command to run in the pane (e.g. \"claude\", \"codex\", \"bash\"). Optional — defaults to the user's shell. Parsed as a single argv0; arguments are not supported here (use model and effort for an agent)."
+					},
+					"model": {
+						"type": "string",
+						"description": "Optional model for a claude or codex pane, passed as the agent's own model flag (e.g. \"opus\" or \"sonnet\" for Claude, a Codex model id for Codex). Omit to use the agent's default."
+					},
+					"effort": {
+						"type": "string",
+						"enum": ["low", "medium", "high", "xhigh", "max"],
+						"description": "Optional reasoning effort for a claude or codex pane. Codex takes low to xhigh, and max only on models that support it."
 					},
 					"workspace": {
 						"type": "string",
@@ -470,9 +566,10 @@ func mcpCoreTools() []mcpTool {
 			Name: "kill_pane",
 			Description: "Terminate a pane and the agent process running inside it. Close the panes you " +
 				"started once you have collected their result, unless the user asked to keep them. " +
-				"Closing a pane you did not start needs user_requested: true, and only when the user " +
-				"explicitly asked for it in this conversation. Closing never deletes files. The " +
-				"pane_id must come from list_panes.",
+				"Any other pane is the user's: closing it is refused, unless the user explicitly asked " +
+				"for it in this conversation and you pass user_requested: true; the user is then asked " +
+				"to allow it in the SoluTerminal app, and the pane closes only if they do. Closing " +
+				"never deletes files. The pane_id must come from list_panes.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -482,7 +579,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"user_requested": {
 						"type": "boolean",
-						"description": "Set true only when the user explicitly asked you to close this pane. Not needed for panes you started."
+						"description": "Set true only when the user explicitly asked you to close this pane. It does not close the pane by itself: the user is asked to allow it in the app. Not needed for panes you started."
 					}
 				},
 				"required": ["pane_id"],
@@ -680,7 +777,10 @@ func mcpCoreTools() []mcpTool {
 			Name: "rename_pane",
 			Description: "Change a pane's display title. Use when the user wants to relabel a pane " +
 				"for clarity (e.g. \"rename this pane to backend\"). Does not affect the " +
-				"process running inside it. The pane_id must come from list_panes.",
+				"process running inside it. You can rename your own pane and the panes you " +
+				"started; any other pane is the user's: renaming it is refused, unless the user " +
+				"asked for it and you pass user_requested: true; the user is then asked to allow " +
+				"it in the SoluTerminal app. The pane_id must come from list_panes.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -691,6 +791,10 @@ func mcpCoreTools() []mcpTool {
 					"title": {
 						"type": "string",
 						"description": "New display title for the pane."
+					},
+					"user_requested": {
+						"type": "boolean",
+						"description": "Set true only when the user asked you to rename a pane you did not start. The rename waits for the user to allow it in the app."
 					}
 				},
 				"required": ["pane_id", "title"],
@@ -704,7 +808,8 @@ func mcpCoreTools() []mcpTool {
 				"pane id or #number; numbers change when panes close, handles don't. working_on is one " +
 				"line on what the pane is doing now, shown on the pane and in list_panes; keep your own " +
 				"current as your work moves on. Defaults to your own pane. Another pane needs to be one " +
-				"you started, or user_requested: true. An empty string clears a field.",
+				"you started; for anyone else's, pass user_requested: true only when the user asked, " +
+				"and they are asked to allow it in the SoluTerminal app. An empty string clears a field.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -722,7 +827,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"user_requested": {
 						"type": "boolean",
-						"description": "Set true only when the user asked you to change a pane you did not start."
+						"description": "Set true only when the user asked you to change a pane you did not start. The change waits for the user to allow it in the app."
 					}
 				},
 				"additionalProperties": false
@@ -935,6 +1040,10 @@ func (a *apiServer) mcpCallTool(params json.RawMessage, scope *mcpScope, callerP
 }
 
 func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope, callerPane string) any {
+	// An unverified caller acts as no pane; only the pane tools that ask the
+	// person keep its claim, to say so in the prompt.
+	caller := splitMCPCaller(callerPane)
+	callerPane = caller.ID
 	var p toolCallParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return toolErr("invalid params: " + err.Error())
@@ -1027,7 +1136,7 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 	case "spawn_pane":
 		return a.noteCrossPaneTool(crossPane, a.mcpToolSpawnPane(p.Arguments, callerPane, false))
 	case "kill_pane":
-		return a.mcpToolKillPane(p.Arguments, callerPane)
+		return a.mcpToolKillPaneAs(p.Arguments, caller)
 	case "list_workspaces":
 		return a.mcpToolListWorkspaces(p.Arguments)
 	case "switch_workspace":
@@ -1049,9 +1158,9 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 	case "search_files":
 		return a.mcpToolSearchFiles(p.Arguments)
 	case "rename_pane":
-		return a.mcpToolRenamePane(p.Arguments)
+		return a.mcpToolRenamePaneAs(p.Arguments, caller)
 	case "set_pane_info":
-		return a.mcpToolSetPaneInfo(p.Arguments, callerPane)
+		return a.mcpToolSetPaneInfoAs(p.Arguments, caller)
 	case "set_pane_flag":
 		return a.mcpToolSetPaneFlag(p.Arguments, callerIdent, scope)
 	case "list_schedules":
@@ -1190,13 +1299,22 @@ func (a *apiServer) mcpToolPreviewFile(args map[string]any) any {
 	if credentialPathRefusal(abs, a.dataDir) != "" || secretPathRefusal(abs) != "" {
 		return toolErr("refusing to access credential material")
 	}
-	info, err := os.Stat(abs)
+	// Same open-then-fstat check the tile's read will make, so the agent
+	// gets the refusal instead of the person getting an error tile.
+	f, info, err := openUserFile(abs, -1)
 	if err != nil {
-		return toolErr("not found: " + err.Error())
+		if errors.Is(err, fs.ErrNotExist) {
+			return toolErr("not found: " + err.Error())
+		}
+		if errors.Is(err, errUserFileIsDir) {
+			return toolErr("path is a directory — preview_file expects a text file. To list a directory, use shell tools.")
+		}
+		if errors.Is(err, errUserFileNotRegular) {
+			return toolErr(err.Error())
+		}
+		return toolErr("cannot open: " + err.Error())
 	}
-	if info.IsDir() {
-		return toolErr("path is a directory — preview_file expects a text file. To list a directory, use shell tools.")
-	}
+	_ = f.Close()
 	if info.Size() > maxFileBytes {
 		return toolErr(fmt.Sprintf("file too large (%d bytes > %d cap for preview)", info.Size(), maxFileBytes))
 	}
@@ -1475,6 +1593,12 @@ func (a *apiServer) mcpToolSpawnPane(args map[string]any, callerPane string, aut
 	if strings.TrimSpace(cmdStr) != "" {
 		cmd = []string{strings.TrimSpace(cmdStr)}
 	}
+	modelArg, _ := args["model"].(string)
+	effortArg, _ := args["effort"].(string)
+	cmd, err := spawnAgentModelArgv(cmd, modelArg, effortArg)
+	if err != nil {
+		return toolErr(err.Error())
+	}
 	role = strings.TrimSpace(role)
 	if !validPaneRole(role) {
 		return toolErr("unknown role: " + role + " (only \"orchestrator\" is supported)")
@@ -1645,17 +1769,50 @@ func resolveMCPSpawnWorkspace(ws *WorkspaceStore, requested, callerPane string) 
 }
 
 func (a *apiServer) mcpToolKillPane(args map[string]any, callerPane string) any {
+	return a.mcpToolKillPaneAs(args, paneCaller{ID: callerPane})
+}
+
+// mcpToolKillPaneAs is mcpToolKillPane for a caller that may only claim a pane
+// (paneCaller.Claimed): it owns nothing, and the prompt says so.
+func (a *apiServer) mcpToolKillPaneAs(args map[string]any, c paneCaller) any {
+	callerPane := c.ID
 	paneID, _ := args["pane_id"].(string)
 	if paneID == "" {
 		return toolErr("pane_id is required")
 	}
+	target, ok := a.mgr.Get(paneID)
+	if !ok {
+		return a.killPaneNow(paneID, callerPane, "")
+	}
+	asked, _ := args["user_requested"].(bool)
+	switch a.paneAgentAuthority(target.Snapshot().Origin, paneID, callerPane, asked) {
+	case paneAgentRefused:
+		return toolErr(a.paneConfirmTarget(target) + " was not started by you, so you can't close it. If the user asked you to close it, call kill_pane again with user_requested: true and they will be asked to allow it in the SoluTerminal app. Otherwise leave it: they can close it themselves.")
+	case paneAgentNeedsOK:
+		name := a.paneConfirmTarget(target)
+		caller := a.paneConfirmCaller(c)
+		req, err := a.requestPaneConfirmFor(paneConfirmClose+"\x00"+c.bucket()+"\x00"+paneID, c.bucket(), paneConfirmView{
+			Action:       paneConfirmClose,
+			CallerPaneID: strings.TrimSpace(callerPane),
+			Caller:       caller,
+			PaneID:       paneID,
+			Pane:         name,
+			Title:        "Close " + name + "?",
+			Message:      caller + " wants to close " + name + ". Closing stops what is running in it; files are not deleted.",
+		}, func() map[string]any { return a.killPaneNow(paneID, callerPane, " (you allowed it in the app)") })
+		if err != nil {
+			return toolErr(err.Error())
+		}
+		return awaitPaneConfirm(req, paneConfirmWaitingText(name+" is not closed yet"))
+	}
+	return a.killPaneNow(paneID, callerPane, "")
+}
+
+// killPaneNow closes the pane for an agent once kill_pane is allowed.
+func (a *apiServer) killPaneNow(paneID, callerPane, note string) map[string]any {
 	var origin *PaneOrigin
 	if target, ok := a.mgr.Get(paneID); ok {
 		origin = target.Snapshot().Origin
-		asked, _ := args["user_requested"].(bool)
-		if killPaneRefused(origin, paneID, callerPane, asked) {
-			return toolErr("pane " + paneID + " was not started by you; close it only if the user asked, with user_requested: true")
-		}
 	}
 	if err := a.mgr.Kill(paneID); err != nil {
 		return toolErr(err.Error())
@@ -1671,7 +1828,7 @@ func (a *apiServer) mcpToolKillPane(args map[string]any, callerPane string) any 
 	if a.ws != nil {
 		_ = a.ws.RemovePane(paneID)
 	}
-	return toolOK("Killed pane " + paneID + ".")
+	return toolOK("Killed pane " + paneID + note + ".")
 }
 
 // resolveWorkspaceName matches `name` against stored workspace names
@@ -1938,9 +2095,23 @@ func (a *apiServer) mcpToolSearchFiles(args map[string]any) any {
 	return toolOK(res)
 }
 
-func (a *apiServer) mcpToolRenamePane(args map[string]any) any {
+// mcpToolRenamePane changes a pane's title. Like kill_pane and set_pane_info,
+// an agent renames its own pane and the panes it started (or leads); anyone
+// else's, including a pane without an origin record, only with the person's
+// OK in the app. That also keeps an agent from retitling someone else's pane
+// to mislead the person in a later confirmation prompt.
+func (a *apiServer) mcpToolRenamePane(args map[string]any, callerPane string) any {
+	return a.mcpToolRenamePaneAs(args, paneCaller{ID: callerPane})
+}
+
+// mcpToolRenamePaneAs is mcpToolRenamePane for a caller that may only claim a pane
+// (paneCaller.Claimed): it owns nothing, and the prompt says so.
+func (a *apiServer) mcpToolRenamePaneAs(args map[string]any, c paneCaller) any {
+	callerPane := c.ID
 	paneID, _ := args["pane_id"].(string)
-	title, _ := args["title"].(string)
+	// One line, bounded: what the person approves is exactly what is set.
+	rawTitle, _ := args["title"].(string)
+	title := clipRunes(oneLine(printableText(rawTitle)), paneTitleMaxRunes)
 	if strings.TrimSpace(paneID) == "" {
 		return toolErr("pane_id is required")
 	}
@@ -1951,7 +2122,56 @@ func (a *apiServer) mcpToolRenamePane(args map[string]any) any {
 	if !ok {
 		return toolErr("no pane with id " + paneID + " (call list_panes for ids)")
 	}
-	oldTitle := p.Title
+	asked, _ := args["user_requested"].(bool)
+	switch a.paneAgentAuthority(p.Snapshot().Origin, p.ID, callerPane, asked) {
+	case paneAgentRefused:
+		return toolErr(a.paneConfirmTarget(p) + " was not started by you, so you can't rename it. If the user asked you to rename it, call rename_pane again with user_requested: true and they will be asked to allow it in the SoluTerminal app. Otherwise leave it: they can rename it themselves.")
+	case paneAgentNeedsOK:
+		name := a.paneConfirmTarget(p)
+		caller := a.paneConfirmCaller(c)
+		req, err := a.requestPaneConfirmFor(paneConfirmRename+"\x00"+c.bucket()+"\x00"+p.ID+"\x00"+title, c.bucket(), paneConfirmView{
+			Action:       paneConfirmRename,
+			CallerPaneID: strings.TrimSpace(callerPane),
+			Caller:       caller,
+			PaneID:       p.ID,
+			Pane:         name,
+			Title:        "Rename " + name + "?",
+			Message:      caller + " wants to rename " + name + " to “" + title + "”.",
+		}, func() map[string]any {
+			target, ok := a.mgr.Get(p.ID)
+			if !ok {
+				return toolErr(name + " has closed; nothing was renamed.")
+			}
+			return a.renamePaneNow(target, title)
+		})
+		if err != nil {
+			return toolErr(err.Error())
+		}
+		return awaitPaneConfirm(req, paneConfirmWaitingText(name+" is not renamed yet"))
+	}
+	return a.renamePaneNow(p, title)
+}
+
+// printableText drops control and bidi-override characters, which could make
+// a title read differently in the prompt than it is.
+func printableText(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\t' || r == '\n' || r == '\r':
+			return ' '
+		case unicode.IsControl(r), r >= 0x202A && r <= 0x202E, r >= 0x2066 && r <= 0x2069, r == 0x200E, r == 0x200F:
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// paneTitleMaxRunes bounds a title an agent sets with rename_pane.
+const paneTitleMaxRunes = 120
+
+// renamePaneNow sets the title once rename_pane is allowed.
+func (a *apiServer) renamePaneNow(p *Pane, title string) map[string]any {
+	oldTitle := p.Snapshot().Title
 	p.Rename(title)
 	// Persist for reattach on restart — mirrors the ARIA rename path.
 	if a.panes != nil {
@@ -1960,7 +2180,7 @@ func (a *apiServer) mcpToolRenamePane(args map[string]any) any {
 			return toolErr("persist pane failed: " + err.Error())
 		}
 	}
-	return toolOK("Renamed pane " + paneID + " from '" + oldTitle + "' to '" + title + "'.")
+	return toolOK("Renamed pane " + p.ID + " from '" + oldTitle + "' to '" + title + "'.")
 }
 
 func (a *apiServer) mcpToolSetPaneFlag(args map[string]any, ident string, scope *mcpScope) any {

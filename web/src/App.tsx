@@ -147,6 +147,8 @@ import { startAgent } from './agentStart';
 import { AgentInstallPrompt } from './components/AgentInstallPrompt';
 import { DeviceApprovalPrompt } from './components/DeviceApprovalPrompt';
 import { remoteDevicePendingText } from './components/settings/RemoteDevicesSetting';
+import { forgetPaneConfirm, notePaneConfirm, resyncPaneConfirms } from './lib/paneConfirm';
+import { PaneConfirmHost } from './components/PaneConfirmHost';
 import { PrivateRelayIdentityWarning } from './components/PrivateRelayIdentityWarning';
 import { PrivateRelayStatus } from './components/PrivateRelayStatus';
 import { RebuildBackoff } from './lib/rebuildBackoff';
@@ -403,8 +405,6 @@ export default function App() {
   }, []);
   useEffect(() => installPortraitOrientationLock(), []);
   useLoadEntitlementsOnMount();
-  // After a sign-in, ask once whether to connect this PC to the account.
-  useAskToConnectOnSignIn();
   useEffect(() => {
     let raf = 0;
     const sync = () => {
@@ -502,6 +502,10 @@ export default function App() {
   // The current load failed because the computer refused this browser, not
   // because the daemon is down.
   const awaitingApproval = useStore((s) => s.bootstrapNeedsApproval);
+  // After a sign-in, ask once whether to connect this PC to the account, but
+  // only once the first-run tour and checklist are closed, never on top of
+  // them. Declared before the integration question so it goes first.
+  useAskToConnectOnSignIn(firstRunReady && !(welcomeOpen && showEmbedChrome('welcome')) && !checklistOpen);
   // Ask about adding SoluTerminal to Claude Code / Codex only once the
   // first-run tour and checklist are out of the way (agentIntegration.ts).
   useAgentIntegrationPrompt(firstRunReady && !welcomeOpen && !checklistOpen && showEmbedChrome('welcome'));
@@ -1040,6 +1044,8 @@ export default function App() {
       void st.refreshPanes();
       void st.refreshUpdateStatus();
       void st.refreshSchedules();
+      // Agents' requests for the person's OK raised while disconnected.
+      void resyncPaneConfirms();
 
       // ARIA cap pill resync: aria-status-changed is also a
       // transition-only event, so any fires that landed while SSE was
@@ -1169,6 +1175,13 @@ export default function App() {
           // Kept in Alerts "Recent"; anything but an approval is a warning.
           const ok = / approved$/.test(msg.text);
           st.toast(msg.text, { kind: ok ? 'info' : 'warn', ttlMs: 10_000, paneId: msg.paneId, logToRecent: true });
+        } else if (msg.type === 'pane.confirm' && msg.text && msg.hint) {
+          // An agent wants to close or change a pane it did not start and
+          // says the person asked; the daemon waits for their OK here
+          // (daemon/pane_confirm.go).
+          notePaneConfirm(msg.text, msg.hint);
+        } else if (msg.type === 'pane.confirm.resolved' && msg.text) {
+          forgetPaneConfirm(msg.text);
         } else if (msg.type === 'remote-device.pending' && msg.text) {
           // A phone or browser asked to use this computer (daemon
           // trusted_devices.go). It is approved here, at the computer, after
@@ -2263,6 +2276,7 @@ export default function App() {
         </div>
       )}
       <ToastHost />
+      <PaneConfirmHost />
       <DialogHost />
       <BannerSetupGate />
       {showEmbedChrome('phonePairing') && <PhoneAccessPairPanelGate />}

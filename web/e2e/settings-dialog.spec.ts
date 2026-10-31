@@ -180,3 +180,34 @@ test('support bundle empty state disables Save and does not download', async ({ 
   expect(requestCount()).toBe(1);
   expect(downloads).toBe(0);
 });
+
+test('appearance text sizes can be typed over the current value', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('.topbar button[aria-label="Settings"]').click();
+  const dialog = page.locator('.settings-modal[role="dialog"]');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('tab', { name: 'Appearance' }).click();
+
+  // Before the fix every keystroke was clamped: "1" became 10 and "18" became 22.
+  const fontSize = dialog.getByRole('spinbutton', { name: 'Font size' });
+  await fontSize.fill('');
+  await fontSize.pressSequentially('18');
+  await expect(fontSize).toHaveValue('18');
+  await fontSize.blur();
+  await expect(fontSize).toHaveValue('18');
+  await fontSize.press('Backspace');
+  await fontSize.press('Backspace');
+  await expect(fontSize).toHaveValue('');
+  await fontSize.pressSequentially('16');
+  await fontSize.press('Enter');
+  await expect(fontSize).toHaveValue('16');
+
+  // "0" used to fall back to the old value, so 0.9 could never be typed.
+  const sidebarSize = dialog.getByRole('spinbutton', { name: 'Sidebar text size' });
+  await sidebarSize.fill('');
+  await sidebarSize.pressSequentially('0.9');
+  await sidebarSize.blur();
+  await expect(sidebarSize).toHaveValue('0.9');
+  expect(await page.evaluate(() => localStorage.getItem('solu.uiScale'))).toBe('0.9');
+  expect(await page.evaluate(() => localStorage.getItem('solu.terminalFontSize'))).toBe('16');
+});

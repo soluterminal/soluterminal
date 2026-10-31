@@ -11,9 +11,10 @@ import (
 // who or what started it, which lead it works for, and what it was started
 // for. It answers "what is this pane?" when the user comes back to panes an
 // agent opened, and is snapshotted at creation so it survives the creator
-// closing. It is not a security boundary: kill_pane uses it only as a
-// guardrail against an agent closing the wrong pane by mistake (the caller
-// header and user_requested are self-declared).
+// closing. kill_pane and set_pane_info read it to tell an agent's own panes
+// (which it may close and rename) from the person's, which need the person's
+// OK in the app (pane_confirm.go). The caller header is self-declared, so this
+// guards against a confused or misled agent, not a hostile program.
 type PaneOrigin struct {
 	// Source is "user" (opened from the app), "agent" (spawn_pane from
 	// another pane), "schedule", or "api" (any other caller). A pane without
@@ -142,22 +143,10 @@ func paneStartedBy(o *PaneOrigin) string {
 }
 
 // paneStartedByCaller reports whether caller started the pane or leads the
-// chain that did: the panes an agent may close without asking the user.
+// chain that did: the panes an agent may close or rename without the person's
+// OK.
 func paneStartedByCaller(o *PaneOrigin, caller string) bool {
 	return o != nil && o.Source == paneOriginAgent && caller != "" && (o.ByPaneID == caller || o.LeadPaneID == caller)
-}
-
-// killPaneRefused reports whether kill_pane should refuse: an agent may close
-// itself and the panes it started (or leads); anyone else's pane only when the
-// user asked. Unattributed callers and panes without an origin (older panes)
-// keep the old behaviour, so agents are not taught to claim user_requested
-// routinely.
-func killPaneRefused(target *PaneOrigin, paneID, callerPane string, userRequested bool) bool {
-	caller := strings.TrimSpace(callerPane)
-	if caller == "" || caller == paneID || userRequested || target == nil {
-		return false
-	}
-	return !paneStartedByCaller(target, caller)
 }
 
 // remapOrigin rewrites the starter and lead ids after a workspace restore,

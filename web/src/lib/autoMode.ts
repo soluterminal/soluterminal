@@ -1,13 +1,12 @@
 import type { PaneAutoMode } from '../types';
 
-// Single source of truth for Auto-approve mode copy + cycling, shared by
-// the pane-header badge (click-to-cycle), the pane context-menu radio, and the
-// command-palette action so all three surfaces describe the SAME three modes
-// identically. Mirrors MODE_TOGGLE_TITLE's shared-copy approach for the
-// Terminal/Native toggle.
+// Single source of truth for Auto-approve mode copy, shared by the pane-header
+// chip (a three-option menu), the pane context-menu radio, and the command
+// palette, so all three surfaces describe the SAME three modes identically.
+// Moving a pane to Always approve goes through confirmAutoModeChange
+// (lib/autoModeConfirm.ts) on every surface.
 
-// Cycle order: off → cautious → always → off. Also the radio order in the
-// context menu (least → most permissive).
+// Radio / menu order, least → most permissive.
 export const AUTO_MODES: readonly PaneAutoMode[] = ['', 'cautious', 'always'];
 
 // Full-word label for menus / palette / radio rows.
@@ -17,11 +16,14 @@ export function autoModeMenuLabel(mode: PaneAutoMode): string {
   return 'Always approve';
 }
 
-// Compact chip label for the header badge. Off and always both read "auto" —
-// the chip's styling (greyed vs. solid magenta box) carries that distinction —
-// while cautious gets a trailing "?" to signal "only when low-risk".
+// Compact chip label for the header. Each mode reads differently, so the chip
+// never says "auto" while auto-approve is off: "manual" (off), "auto?"
+// (cautious: only when low-risk) and "AUTO" (always). The chip's styling
+// (greyed / dotted outline / solid box) repeats the distinction.
 export function autoModeBadgeLabel(mode: PaneAutoMode): string {
-  return mode === 'cautious' ? 'auto?' : 'auto';
+  if (mode === '') return 'manual';
+  if (mode === 'cautious') return 'auto?';
+  return 'AUTO';
 }
 
 // One-line explanation of what a mode does — shared tooltip copy.
@@ -33,8 +35,9 @@ export function autoModeDescription(mode: PaneAutoMode): string {
   return 'always approve — recognized tool permissions are approved with no cancel window; questions and plan changes still need you';
 }
 
-// Next mode in the off → cautious → always → off cycle.
+// The palette's one-step toggle: Off ↔ Approve with caution, and Always back
+// to Off. It never steps INTO Always approve; that is its own confirmed
+// action, so no repeated or accidental activation can land there.
 export function nextAutoMode(mode: PaneAutoMode): PaneAutoMode {
-  const i = AUTO_MODES.indexOf(mode);
-  return AUTO_MODES[(i + 1) % AUTO_MODES.length] ?? '';
+  return mode === '' ? 'cautious' : '';
 }

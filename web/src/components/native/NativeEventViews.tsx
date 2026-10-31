@@ -17,6 +17,7 @@ import type { ModelOption } from '../../native/modelInfo';
 import type { PendingSwitch } from '../../native/modeSwitch';
 import { Markdown } from './Markdown';
 import { detectLang, tokenizeLine } from '../../lib/highlight';
+import { RESTART_PAUSED_BODY, RESTART_PAUSED_TITLE } from '../../lib/restartPaused';
 import { useRenderCount } from '../../native/nativePerf';
 import { copyToClipboard } from '../../lib/clipboard';
 
@@ -2193,7 +2194,15 @@ export function TurnSeparator({ label }: { label: string }) {
 // dignity of the terminal pane's "Session closed" overlay (PaneBodyOverlays):
 // a calm card stating the process has exited (with its code when known). The
 // composer is disabled separately by NativePane.
-export function SessionEndedCard({ exitCode, resumable, agentLabel = 'Claude' }: { exitCode?: number; resumable?: boolean; agentLabel?: string }) {
+export function SessionEndedCard({ exitCode, resumable, restartPaused, agentLabel = 'Claude' }: { exitCode?: number; resumable?: boolean; restartPaused?: boolean; agentLabel?: string }) {
+  if (resumable && restartPaused) {
+    return (
+      <div className="native-session-ended" role="status" aria-live="polite">
+        <div className="native-session-ended-title">{RESTART_PAUSED_TITLE}</div>
+        <div className="native-session-ended-body">{RESTART_PAUSED_BODY}</div>
+      </div>
+    );
+  }
   // When the session is resumable, the continuation path is the "Resume session"
   // button on the composer below — not a fresh pane. Keep the copy consistent.
   const tail = resumable ? 'Resume to continue, or close the pane.' : 'Start a new session to continue.';

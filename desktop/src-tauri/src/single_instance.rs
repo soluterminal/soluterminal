@@ -38,28 +38,25 @@ fn should_reveal<S: AsRef<str>>(argv: &[S]) -> bool {
 }
 
 fn reveal_main_window<R: Runtime>(app: &AppHandle<R>) {
-    use std::sync::atomic::Ordering;
-
     // The first instance may still be starting its backends (or in the
     // first-run wizard) — no main window yet. Bring the startup window forward
     // if it is showing; the main window shows itself when startup finishes.
-    let Some(window) = app.get_webview_window("main") else {
+    if app.get_webview_window("main").is_none() {
         if let Some(startup) = app.get_webview_window(crate::startup_screen::LABEL) {
             let _ = startup.unminimize();
             let _ = startup.set_focus();
         }
         return;
-    };
-    let maximize = app
-        .try_state::<MainWindowReveal>()
-        .map(|r| r.0.swap(false, Ordering::AcqRel))
-        .unwrap_or(false);
-    let _ = window.show();
-    let _ = window.unminimize();
-    if maximize {
-        let _ = window.maximize();
     }
-    let _ = window.set_focus();
+    let reveal = app.try_state::<MainWindowReveal>();
+    let no_maximize = AtomicBool::new(false);
+    crate::show_main_window(
+        app,
+        reveal
+            .as_ref()
+            .map(|r| r.0.as_ref())
+            .unwrap_or(&no_maximize),
+    );
 }
 
 /// Release the single-instance lock before a main-thread `app.restart()`.

@@ -4,6 +4,8 @@ import { useStore } from '../store';
 import { api } from '../api';
 import { ScheduleDialog } from './ScheduleDialog';
 import { useEntitlements } from '../entitlements';
+import type { Health } from '../types';
+
 
 function pane(id: string, cwd: string, kind?: '' | 'native') {
   return {
@@ -35,11 +37,68 @@ describe('ScheduleDialog', () => {
     vi.spyOn(api, 'listScheduleAgents').mockResolvedValue([]);
     vi.spyOn(api, 'previewCron').mockResolvedValue({ fires: [] });
     vi.spyOn(api, 'githubAppStatus').mockResolvedValue({ configured: false, connected: false } as never);
+    vi.spyOn(api, 'healthScoped').mockResolvedValue({ claudeChecked: true, claudeInstalled: true } as never);
   });
 
   afterEach(() => {
     useStore.setState({ panes: {} });
     vi.restoreAllMocks();
+  });
+
+  describe('without Claude Code installed', () => {
+    beforeEach(() => {
+      vi.spyOn(api, 'healthScoped').mockResolvedValue({ claudeChecked: true, claudeInstalled: false } as Health & { features?: string[] });
+    });
+
+    it('defaults a new schedule to a prompt and greys out the Claude task kind', async () => {
+      open('p1');
+      fireEvent.click(screen.getByText('Start from scratch →'));
+      const task = screen.getByLabelText<HTMLInputElement>('Run a Claude task', { exact: false });
+      await waitFor(() => expect(task).toBeDisabled());
+      expect(task).not.toBeChecked();
+      expect(screen.getByLabelText<HTMLInputElement>('Prompt into a pane', { exact: false })).toBeChecked();
+      expect(screen.getByText('· Needs Claude Code')).toBeInTheDocument();
+      expect(screen.getByText('Types into a pane you already have open, such as a Codex pane. Skipped if that pane is busy.')).toBeInTheDocument();
+    });
+
+    it('disables the Claude task recipes but keeps Remind me', async () => {
+      open('p1');
+      const digest = screen.getByText('Morning digest').closest('button')!;
+      await waitFor(() => expect(digest).toBeDisabled());
+      expect(digest).toHaveTextContent('Needs Claude Code');
+      expect(screen.getByText('Remind me…').closest('button')).not.toBeDisabled();
+    });
+
+    it('keeps an existing Claude task editable and says why it cannot run', async () => {
+      render(
+        <ScheduleDialog
+          open
+          onClose={() => {}}
+          editing={{ id: 's1', name: 'Nightly', kind: 'task', cron: '0 0 * * *', cwd: '/home/me/project', prompt: 'x', permission: 'plan', enabled: true } as never}
+        />,
+      );
+      const task = screen.getByLabelText<HTMLInputElement>('Run a Claude task', { exact: false });
+      expect(task).toBeChecked();
+      expect(task).not.toBeDisabled();
+      expect(await screen.findByText("Claude Code isn't installed on this computer any more, so this task can't run until it is.")).toBeInTheDocument();
+    });
+  });
+
+  it('asks the selected machine and backend, not the shared health poll', async () => {
+    const scoped = vi.spyOn(api, 'healthScoped');
+    open('p1');
+    await waitFor(() => expect(scoped).toHaveBeenCalledTimes(1));
+    expect(scoped.mock.calls[0][0]).toHaveProperty('key');
+  });
+
+  it('still defaults to a Claude task while the first Claude check is pending', async () => {
+    const scoped = vi.spyOn(api, 'healthScoped').mockResolvedValue({ claudeChecked: false, claudeInstalled: false } as never);
+    open('p1');
+    fireEvent.click(screen.getByText('Start from scratch →'));
+    await waitFor(() => expect(scoped).toHaveBeenCalled());
+    const task = screen.getByLabelText<HTMLInputElement>('Run a Claude task', { exact: false });
+    expect(task).toBeChecked();
+    expect(task).not.toBeDisabled();
   });
 
   it('opens on the recipe shelf and prefills from a template', async () => {

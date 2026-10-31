@@ -21,6 +21,10 @@ export interface DialogRequest {
   placeholder?: string;
   options?: string[];
   selectLabel?: string;
+  /** Confirm dialogs only: Escape, a click outside, or being replaced by
+   *  another dialog resolve null instead of false, so the caller can tell a
+   *  dismissal apart from the Cancel button. */
+  distinguishDismiss?: boolean;
   resolve: (value: boolean | string | null) => void;
 }
 
@@ -185,7 +189,7 @@ export const createToastDialogSlice: StateCreator<State, [], [], ToastDialogSlic
     set((s) => {
       // Resolve any already-open dialog as cancelled before replacing it,
       // so its awaiting Promise never leaks.
-      if (s.dialog) s.dialog.resolve(s.dialog.kind === 'confirm' ? false : null);
+      if (s.dialog) s.dialog.resolve(s.dialog.kind === 'confirm' && !s.dialog.distinguishDismiss ? false : null);
       return { dialog: { ...req, id: nextDialogId++ } };
     });
   },

@@ -82,4 +82,72 @@ describe('NumberInput', () => {
     expect(input).toHaveValue(15);
     expect(onCommit).not.toHaveBeenCalled();
   });
+
+  it('rounds to a fractional step on commit', () => {
+    const onCommit = vi.fn();
+    render(<NumberInput label="Sidebar text size" value={1} min={0.7} max={1.4} step={0.05} onCommit={onCommit} />);
+    const input = screen.getByRole('spinbutton', { name: 'Sidebar text size' });
+    fireEvent.change(input, { target: { value: '0.93' } });
+    fireEvent.blur(input);
+    expect(onCommit).toHaveBeenCalledWith(0.95);
+    expect(input).toHaveValue(0.95);
+  });
+
+  it('live mode applies a valid typed value without waiting for blur, and skips intermediate ones', () => {
+    function Live() {
+      const [value, setValue] = useState(13);
+      return <>
+        <NumberInput label="Font size" value={value} min={10} max={22} live onCommit={setValue} />
+        <output data-testid="applied">{value}</output>
+      </>;
+    }
+    render(<Live />);
+    const input = screen.getByRole('spinbutton', { name: 'Font size' });
+    const applied = screen.getByTestId('applied');
+    // Typing "18" over "13": "1" is out of range, so nothing applies and the
+    // box keeps the "1" instead of jumping to the 10 px floor.
+    fireEvent.change(input, { target: { value: '1' } });
+    expect(input).toHaveValue(1);
+    expect(applied).toHaveTextContent('13');
+    fireEvent.change(input, { target: { value: '18' } });
+    expect(input).toHaveValue(18);
+    expect(applied).toHaveTextContent('18');
+    // An empty box is allowed while typing and restores on blur.
+    fireEvent.change(input, { target: { value: '' } });
+    expect(input).toHaveValue(null);
+    fireEvent.blur(input);
+    expect(input).toHaveValue(18);
+    expect(applied).toHaveTextContent('18');
+  });
+
+  it('live mode keeps a fractional draft while it applies the rounded value', () => {
+    function Live() {
+      const [value, setValue] = useState(1);
+      return <>
+        <NumberInput label="Sidebar text size" value={value} min={0.7} max={1.4} step={0.05} live onCommit={setValue} />
+        <output data-testid="applied">{value}</output>
+      </>;
+    }
+    render(<Live />);
+    const input = screen.getByRole('spinbutton', { name: 'Sidebar text size' });
+    const applied = screen.getByTestId('applied');
+    fireEvent.change(input, { target: { value: '0' } });
+    expect(applied).toHaveTextContent('1');
+    fireEvent.change(input, { target: { value: '0.9' } });
+    expect(input).toHaveValue(0.9);
+    expect(applied).toHaveTextContent('0.9');
+    fireEvent.change(input, { target: { value: '1.22' } });
+    expect(input).toHaveValue(1.22);
+    expect(applied).toHaveTextContent('1.2');
+    fireEvent.blur(input);
+    expect(input).toHaveValue(1.2);
+  });
+
+  it('without live, typing never commits before blur', () => {
+    const onCommit = vi.fn();
+    render(<NumberInput {...props} value={10} onCommit={onCommit} />);
+    const input = screen.getByRole('spinbutton', { name: props.label });
+    fireEvent.change(input, { target: { value: '25' } });
+    expect(onCommit).not.toHaveBeenCalled();
+  });
 });

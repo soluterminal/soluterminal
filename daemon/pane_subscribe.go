@@ -984,12 +984,14 @@ func (p *Pane) ClaimWithReason(subID int64, restampSize bool, reason string) boo
 // re-adopt it safely (AdoptIfUnowned) instead of showing "in use
 // somewhere else" when no one is using it. Old clients ignore the extra
 // field. Non-blocking: if the sub's ctrl channel is full (client slow),
-// drop silently — they'll get the next one.
+// drop silently — they'll get the next one. The read lock is held across
+// the (non-blocking) send: a departing sub's cancel closes e.ctrl under the
+// write lock, so sending after releasing it raced that close.
 func (p *Pane) sendOwnership(subID int64, owned bool) {
 	p.subsMu.RLock()
+	defer p.subsMu.RUnlock()
 	e, ok := p.subs[subID]
 	hasOwner := p.ownerSubID != 0
-	p.subsMu.RUnlock()
 	if !ok {
 		return
 	}
@@ -1094,6 +1096,53 @@ func (p *Pane) AdoptIfUnowned(subID int64) bool {
 	}
 	p.recomputeSize()
 	return true
+}
+
+// AdoptOnInput makes subID the owner when it types into a pane NOBODY owns
+// while it is visible. It is the daemon-side backstop for clients that lost
+// their claim across a reconnect (every relayed socket drops on a cloud
+// deploy, leaving each pane unowned) and kept typing into the void.
+//
+// Stricter than AdoptIfUnowned on purpose: it never displaces an owner — not
+// a same-device ghost, not a stale one — so it can never undo a takeover.
+// The caller (handleWS) only calls it for sockets the daemon classified as a
+// human (callerHuman); the visibility flag only chooses WHICH human socket
+// adopts. Check and set happen under one subsMu critical section, so when
+// two viewers type at once exactly one wins; the other gets ("owned-by-other")
+// and its keystrokes are dropped. Never restamps the sizing seq.
+// Returns whether subID now owns the pane, and the drop reason when not.
+func (p *Pane) AdoptOnInput(subID int64) (bool, string) {
+	p.subsMu.Lock()
+	requester, ok := p.subs[subID]
+	switch {
+	case !ok:
+		p.subsMu.Unlock()
+		return false, "viewer-gone"
+	case p.ownerSubID == subID:
+		p.subsMu.Unlock()
+		return true, ""
+	case p.ownerSubID != 0:
+		p.subsMu.Unlock()
+		return false, "owned-by-other"
+	case !requester.visible:
+		p.subsMu.Unlock()
+		return false, "unowned-viewer-hidden"
+	}
+	p.ownerSubID = subID
+	allIDs := make([]int64, 0, len(p.subs))
+	for sid := range p.subs {
+		allIDs = append(allIDs, sid)
+	}
+	deviceID := requester.deviceID
+	p.subsMu.Unlock()
+
+	log.Printf("ownership: pane=%s adopt granted (unowned, on input) owner 0 -> %d device=%q",
+		p.ID, subID, deviceID)
+	for _, sid := range allIDs {
+		p.sendOwnership(sid, sid == subID)
+	}
+	p.recomputeSize()
+	return true, ""
 }
 
 // desiredSizeLocked returns the PTY geometry for the current subscriber

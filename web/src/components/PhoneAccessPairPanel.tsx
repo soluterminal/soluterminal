@@ -285,7 +285,10 @@ function PairBody(props: {
                   <b>same account</b>.
                 </li>
                 <li>
-                  Tap <b>&ldquo;Add a computer&rdquo;</b> and enter this code.
+                  {/* The phone's real button (CloudGate.tsx); on a first visit it sits
+                      under the folded "Other ways to connect". */}
+                  Tap <b>&ldquo;+ Claim a new machine&rdquo;</b> (under &ldquo;Other ways to
+                  connect&rdquo; if you don&rsquo;t see it) and enter this code.
                 </li>
               </ol>
               <p className="phone-access-secondary">

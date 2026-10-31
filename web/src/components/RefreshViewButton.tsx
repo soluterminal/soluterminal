@@ -1,4 +1,5 @@
-import { useStore } from '../store';
+import { useStore, terminalSessionKey } from '../store';
+import { currentRoutingScope } from '../api';
 import { TopbarPopover } from './TopbarPopover';
 import { IconRefresh, IconChevronDown } from './ui/icons';
 
@@ -32,9 +33,12 @@ export function RefreshViewButton() {
     // fires, so first win the sizing election and force this view's width onto
     // the PTY (realign), give the SIGWINCH + repaint a beat to land, then toggle
     // Claude's transcript view.
-    st.realignPane(id);
+    // Terminal handlers are registered under the view-session key, not the
+    // bare pane id.
+    const key = terminalSessionKey(currentRoutingScope(), id);
+    st.realignPane(key);
     window.setTimeout(() => {
-      useStore.getState().senders[id]?.('\x0f');
+      useStore.getState().senders[key]?.('\x0f');
     }, 800);
   };
 

@@ -20,6 +20,7 @@ import { DRAG_MIME, computeZone, type DropZone } from '../lib/paneDnd';
 import { confirmClosePane, usePaneContextMenu } from './usePaneContextMenu';
 import { confirmDialog } from '../lib/dialog';
 import { restartPaneFlow } from '../lib/paneRestart';
+import { isRestartPaused } from '../lib/restartPaused';
 import { PaneContextMenu } from './PaneContextMenu';
 import { PaneFlagMemo } from './PaneFlagMemo';
 import { PaneLastPrompt } from './PaneLastPrompt';
@@ -146,6 +147,8 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
   const promptSuggestionsOn = useStore((s) => s.nativeSettings?.promptSuggestions === true);
   const killPane = useStore((s) => s.killPane);
   const resumePane = useStore((s) => s.resumePane);
+  // "Don't resume": no Resume offer on the pane body (⋯ menu still has it).
+  const restartPaused = isRestartPaused(pane);
   const refreshPane = useStore((s) => s.refreshPane);
   const setPaneEffort = useStore((s) => s.setPaneEffort);
   const setPaneModel = useStore((s) => s.setPaneModel);
@@ -1964,6 +1967,11 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
             closeContextMenu();
             void restartPaneFlow(pane.id);
           }}
+          onResumePane={() => {
+            closeContextMenu();
+            // store.resumePane toasts a failure and restores the pane.
+            resumePane(pane.id).catch(() => {});
+          }}
           onSetEffort={paneAgent === 'claude' ? (effort) => {
             closeContextMenu();
             void setPaneEffort(pane.id, effort);
@@ -2253,7 +2261,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
               flow — it's the dedicated, always-visible metabar docked under the
               composer (so it's seen even when scrolled up, and never shifts the
               transcript as it toggles). */}
-          {sessionEnded && <SessionEndedCard exitCode={pane.exitCode} resumable={pane.resumable} agentLabel={paneAgentLabel} />}
+          {sessionEnded && <SessionEndedCard exitCode={pane.exitCode} resumable={pane.resumable} restartPaused={pane.restartPaused} agentLabel={paneAgentLabel} />}
         </div>
         </NativeFindContext.Provider>
       </div>
@@ -2315,11 +2323,13 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
           <span className="native-composer-ended-text">
             {resumeFailed
               ? "Couldn't resume — the session may have expired. Try again or close the pane."
-              : pane.resumable
-                ? 'Session ended — resume to continue, or close the pane.'
-                : 'Session ended — this pane no longer accepts input.'}
+              : restartPaused
+                ? 'Paused after a restart — not resumed.'
+                : pane.resumable
+                  ? 'Session ended — resume to continue, or close the pane.'
+                  : 'Session ended — this pane no longer accepts input.'}
           </span>
-          {pane.resumable && (
+          {pane.resumable && !restartPaused && (
             <button
               type="button"
               className="native-btn native-btn-send"

@@ -16,6 +16,12 @@ import { HeardAboutPrompt } from './HeardAboutPrompt';
 import { SignupConsentPrompt } from './SignupConsentPrompt';
 import { INSTALL_SCRIPT_DEFAULT_CLOUD, INSTALL_SCRIPT_URL } from '../lib/siteLinks';
 import { WINDOWS_VERSIONS_NOTE } from '../lib/windowsOnlyCopy';
+import { usePollWhileVisible } from '../lib/usePollWhileVisible';
+
+// How often the machine list re-checks while it is on screen and visible:
+// quicker while the account is waiting for its first PC.
+const MACHINE_LIST_POLL_FIRST_MS = 5000;
+const MACHINE_LIST_POLL_MS = 10000;
 
 // CloudGate wraps the app. Mode is decided by probing /api/config:
 // exists → cloud flow (Supabase login + machine picker); missing →
@@ -159,6 +165,9 @@ function MachinePicker() {
   const isMobile = useIsMobileDevice();
   const desktop = isDesktopShell();
   const hosted = useHostedBrand();
+  // Keep the list live while it's on screen: a PC that connects (step 3,
+  // "Your PC appears here") or goes on or offline shows up without a reload.
+  usePollWhileVisible(refresh, machines.length === 0 ? MACHINE_LIST_POLL_FIRST_MS : MACHINE_LIST_POLL_MS);
 
   const [showClaim, setShowClaim] = useState(false);
   const [showHost, setShowHost] = useState(false);

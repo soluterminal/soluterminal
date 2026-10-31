@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useCloud } from './cloud';
 import { useEntitlements } from './entitlements';
 import { useStore } from './store';
-import { confirmDialog } from './lib/dialog';
+import { confirmOrDismissDialog } from './lib/dialog';
 
 // Connecting this computer to the signed-in free account. The cloud only
 // spends its voice and smart-approval allowance for an account that owns a
@@ -10,9 +10,12 @@ import { confirmDialog } from './lib/dialog';
 // "run solud --claim". The daemon's POST /api/cloud/pair/account mints a
 // pairing code and accepts it with the account's token (daemon/
 // pairing_account.go). After sign-in this file asks once ("Connect this PC
-// to your account?"); "Not now" is remembered by the daemon, like an
-// explicit Disconnect, so it is never asked again automatically. The
-// "Connect" actions (voice toast, smart-approvals hint) connect on demand.
+// to your account?"), but only after the welcome tour and setup checklist
+// are closed, so it never sits on top of them. The "Not now" button is
+// remembered by the daemon, like an explicit Disconnect, so it is never
+// asked again automatically. Escape or a click outside only puts it off: it
+// is asked again the next time SoluTerminal starts. The "Connect" actions
+// (voice toast, smart-approvals hint) connect on demand.
 
 export type ConnectStatus = 'available' | 'connecting' | 'connected' | 'declined' | 'machine_limit' | 'signin' | 'error';
 
@@ -80,7 +83,18 @@ export const CONNECT_PROMPT_TITLE = 'Connect this PC to your account?';
 export const CONNECT_PROMPT_BODY =
   "Turns on voice, smart approvals and phone access. Anyone signed into this account can then use this PC's terminals from their phone.";
 
+export const CONNECT_LATER_TOAST = "Not connected yet. We'll ask again next time SoluTerminal starts.";
+export const CONNECT_DECLINED_TOAST = 'Not connected. You can connect this PC any time from the mic or Settings → Devices.';
+
 const tried = new Set<string>();
+
+// True while the question is being checked or shown. The "use SoluTerminal
+// everywhere" question waits on it (agentIntegration.ts), so the two never
+// replace each other.
+let promptPending = false;
+export function connectPromptPending(): boolean {
+  return promptPending;
+}
 
 /**
  * Asks once, right after the user signs in on the desktop, whether to
@@ -88,21 +102,44 @@ const tried = new Set<string>();
  * said "Not now" or disconnected it before (the daemon answers "declined").
  */
 export async function askToConnectAfterSignIn(): Promise<void> {
+  promptPending = true;
+  try {
+    await askToConnect();
+  } finally {
+    promptPending = false;
+  }
+}
+
+async function askToConnect(): Promise<void> {
   const check = await connectThisComputer({ check: true });
   if (check.status !== 'available') return;
-  const yes = await confirmDialog({
+  const choice = await confirmOrDismissDialog({
     title: CONNECT_PROMPT_TITLE,
     message: CONNECT_PROMPT_BODY,
     confirmLabel: 'Connect',
     cancelLabel: 'Not now',
   });
   const toast = useStore.getState().toast;
-  if (!yes) {
-    // Escape and a click outside count as "Not now" too.
-    await connectThisComputer({ decline: true });
-    toast('Not connected. You can connect this PC any time from the mic or Settings → Devices.', { kind: 'info', ttlMs: 6000 });
+  if (choice === null) {
+    // Escape, a click outside, or another dialog took its place: put it off
+    // without telling the daemon, so the next start asks again.
+    toast(CONNECT_LATER_TOAST, {
+      kind: 'info',
+      ttlMs: 10000,
+      action: { label: 'Connect now', run: () => { void connectAndReport(); } },
+    });
     return;
   }
+  if (!choice) {
+    await connectThisComputer({ decline: true });
+    toast(CONNECT_DECLINED_TOAST, { kind: 'info', ttlMs: 6000 });
+    return;
+  }
+  await connectAndReport();
+}
+
+async function connectAndReport(): Promise<void> {
+  const toast = useStore.getState().toast;
   const result = await connectThisComputer({ force: true });
   if (result.status === 'connecting' || result.status === 'connected') {
     toast('This PC is connected. You can disconnect it in Settings → Devices.', { kind: 'info', ttlMs: 7000 });
@@ -112,16 +149,22 @@ export async function askToConnectAfterSignIn(): Promise<void> {
   }
 }
 
-export function useAskToConnectOnSignIn(): void {
+/**
+ * `ready` is false while the welcome tour or setup checklist is open (or the
+ * app isn't up yet); the question waits until then instead of stacking on
+ * top of them.
+ */
+export function useAskToConnectOnSignIn(ready: boolean): void {
   const userId = useCloud((s) => (s.isLocal && s.session ? s.session.user.id : null));
   const withoutAccount = useCloud((s) => s.withoutAccount);
   useEffect(() => {
-    if (!userId || withoutAccount || tried.has(userId)) return;
+    if (!ready || !userId || withoutAccount || tried.has(userId)) return;
     tried.add(userId);
     void askToConnectAfterSignIn();
-  }, [userId, withoutAccount]);
+  }, [ready, userId, withoutAccount]);
 }
 
 export function resetAutoConnectForTests(): void {
   tried.clear();
+  promptPending = false;
 }

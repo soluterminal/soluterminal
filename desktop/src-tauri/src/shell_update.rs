@@ -151,6 +151,14 @@ fn ps_single_quoted(value: &str) -> String {
 // The courier is launched by explorer.exe, not as our child. That escape from
 // the shell's kill-on-close Job Object is what lets it wait for this process to
 // exit, install silently, and relaunch the same executable.
+//
+// It finds the app by this process's own id (app_pid) and relaunches the exact
+// executable this process runs from (app_exe), so no process name is assumed.
+// expected_sha256 is the digest from the signed manifest that staging already
+// checked; the courier checks the file again after the app has exited and
+// right before it runs it, the same as the daemon's courier
+// (daemon/updater_shell_silent.go). Once the app has exited it is relaunched
+// whether or not anything was installed.
 #[cfg(any(windows, test))]
 fn silent_courier_script(
     app_pid: u32,
@@ -158,6 +166,7 @@ fn silent_courier_script(
     app_exe: &str,
     log_path: &str,
     attempt: &str,
+    expected_sha256: &str,
 ) -> String {
     format!(
         r#"$ErrorActionPreference='Stop'
@@ -166,45 +175,99 @@ $installer = {installer}
 $appExe = {app_exe}
 $logPath = {log_path}
 $attempt = {attempt}
+$expectedSha = {expected_sha}
 function ConvertTo-LaunchJsonString([string]$v) {{ if ($null -eq $v) {{ return '' }}; return $v.Replace('\','\\').Replace('"','\"').Replace("`r",'\r').Replace("`n",'\n') }}
 function Write-LaunchLog([string]$event,[string]$method,[string]$processId,[string]$session,[string]$detail,[string]$err) {{
   try {{
     $line = '{{"ts":"' + (Get-Date).ToUniversalTime().ToString('o') + '","event":"' + (ConvertTo-LaunchJsonString $event) + '","path":"' + (ConvertTo-LaunchJsonString $installer) + '","method":"' + (ConvertTo-LaunchJsonString $method) + '","pid":"' + (ConvertTo-LaunchJsonString $processId) + '","session":"' + (ConvertTo-LaunchJsonString $session) + '","detail":"' + (ConvertTo-LaunchJsonString $detail) + '","err":"' + (ConvertTo-LaunchJsonString $err) + '"}}'
-    Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
-  }} catch {{}}
+  }} catch {{ return }}
+  # A reader polling the log can hold it for an instant, and Add-Content then
+  # fails; try again rather than lose the line.
+  for ($try = 0; $try -lt 20; $try++) {{
+    try {{ Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8; return }} catch {{ Start-Sleep -Milliseconds 50 }}
+  }}
 }}
 Write-LaunchLog 'courier-started' 'silent-courier' ([string]$appPid) '' $attempt ''
+$appExited = $false
+$failed = $false
 try {{
   $deadline = (Get-Date).AddSeconds(60)
   while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) {{
-    if ((Get-Date) -ge $deadline) {{ throw 'timed out waiting for the app to exit' }}
+    if ((Get-Date) -ge $deadline) {{ throw 'timed out waiting for the app to exit; nothing was installed' }}
     Start-Sleep -Milliseconds 250
   }}
+  $appExited = $true
   Write-LaunchLog 'app-exited' 'silent-courier' ([string]$appPid) '' $attempt ''
+  # Staging verified these bytes against the signed digest; check again in
+  # case the file changed while the courier waited.
+  $actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer -ErrorAction Stop).Hash
+  if ([string]::IsNullOrEmpty($actualSha)) {{ throw 'could not read the installer to check it; nothing was installed' }}
+  if (-not [string]::Equals($actualSha, $expectedSha, [System.StringComparison]::OrdinalIgnoreCase)) {{
+    Write-LaunchLog 'sha-mismatch' 'silent-courier' '' '' $attempt ('expected ' + $expectedSha + ', found ' + $actualSha)
+    Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+    throw 'installer changed after verification; nothing was installed'
+  }}
   $install = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
   if ($install.ExitCode -ne 0) {{ throw ('installer exited with code ' + $install.ExitCode) }}
   Write-LaunchLog 'installer-done' 'silent-courier' ([string]$install.Id) '' $attempt ''
-  $relaunched = Start-Process -FilePath $appExe -PassThru
-  Write-LaunchLog 'relaunched' 'silent-courier' ([string]$relaunched.Id) '' $attempt ''
 }} catch {{
+  $failed = $true
   Write-LaunchLog 'failed' 'silent-courier' ([string]$appPid) '' $attempt $_.Exception.Message
-  exit 1
-}}"#,
+}}
+# An app that never exited is still running and is left alone. One that exited
+# is started again from the same path, installed or not, unless it is already
+# running from that path.
+if ($appExited) {{
+  $appName = [System.IO.Path]::GetFileNameWithoutExtension($appExe)
+  if (-not (Get-Process -Name $appName -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq $appExe }})) {{
+    try {{
+      $relaunched = Start-Process -FilePath $appExe -PassThru
+      Write-LaunchLog 'relaunched' 'silent-courier' ([string]$relaunched.Id) '' $attempt ''
+    }} catch {{
+      $failed = $true
+      Write-LaunchLog 'failed' 'silent-courier' '' '' $attempt ('relaunch: ' + $_.Exception.Message)
+    }}
+  }}
+}}
+if ($failed) {{ exit 1 }}"#,
         app_pid = app_pid,
         installer = ps_single_quoted(installer),
         app_exe = ps_single_quoted(app_exe),
         log_path = ps_single_quoted(log_path),
         attempt = ps_single_quoted(attempt),
+        expected_sha = ps_single_quoted(expected_sha256),
     )
+}
+
+// The bytes written to silent-update.ps1. Windows PowerShell 5.1 reads a
+// script file without a BOM in the ANSI code page, which garbles every
+// non-ASCII character in its paths (a profile folder such as C:\Users\Zoë);
+// the UTF-8 BOM makes it read the file as UTF-8, as the daemon's courier does.
+#[cfg(any(windows, test))]
+fn silent_courier_file(script: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(script.len() + 3);
+    bytes.extend_from_slice("\u{feff}".as_bytes());
+    bytes.extend_from_slice(script.as_bytes());
+    bytes
+}
+
+// -EncodedCommand form (base64 of UTF-16LE), as PowerShell expects it.
+#[cfg(any(windows, test))]
+fn encoded_powershell(script: &str) -> String {
+    use base64::Engine as _;
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 #[cfg(any(windows, test))]
 fn silent_cmd_script(courier_path: &str) -> String {
-    // -Command lets PowerShell own the single-quoted path, including spaces and
-    // apostrophes. `start` hands PowerShell off and returns immediately.
+    // cmd.exe reads a .cmd in the OEM code page, so a non-ASCII path cannot
+    // appear in it literally: the single-quoted path travels inside
+    // -EncodedCommand, which keeps the .cmd ASCII (as the daemon's
+    // silentCmdScript does). `start` hands PowerShell off and returns at once.
     format!(
-        "start \"\" /min powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"& {}\"\r\n",
-        ps_single_quoted(courier_path),
+        "start \"\" /min powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {}\r\n",
+        encoded_powershell(&format!("& {}", ps_single_quoted(courier_path))),
     )
 }
 
@@ -263,6 +326,8 @@ pub struct ShellUpdateOutcome {
 struct StagedShellInstaller {
     path: std::path::PathBuf,
     version: String,
+    // The signed manifest's digest for the installer, which staging checked.
+    sha256: String,
 }
 
 #[cfg(any(windows, test))]
@@ -476,6 +541,7 @@ fn stage_shell_installer(ps: &str, force_downgrade: bool) -> Result<StagedShellI
     Ok(StagedShellInstaller {
         path: std::path::PathBuf::from(path),
         version: version.to_string(),
+        sha256: asset.sha256,
     })
 }
 
@@ -833,19 +899,147 @@ pub fn app_process_id() -> u32 {
     std::process::id()
 }
 
+/// The local daemon the main window loaded, so the unattended installer update
+/// can ask that same daemon whether it is allowed (its update status). Managed
+/// only in local launch mode; in cloud launch mode there is no local daemon and
+/// the unattended update is refused.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub struct LocalDaemonRoute {
+    origin: String,
+    token: Option<String>,
+}
+
+impl LocalDaemonRoute {
+    /// From the URL the main window loads: a plain-http loopback daemon only,
+    /// with the `token` query parameter when the URL carries one.
+    pub fn from_window_url(url: &str) -> Option<Self> {
+        let parsed = tauri::Url::parse(url).ok()?;
+        if parsed.scheme() != "http" {
+            return None;
+        }
+        let host = parsed.host_str()?;
+        if host != "127.0.0.1" && host != "localhost" {
+            return None;
+        }
+        let port = parsed.port()?;
+        let token = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "token")
+            .map(|(_, value)| value.into_owned())
+            .filter(|value| !value.is_empty());
+        Some(Self {
+            origin: format!("http://127.0.0.1:{port}"),
+            token,
+        })
+    }
+}
+
+// The daemon decides whether the unattended installer restart may run
+// (daemon/updater_control.go: off for public unless the signed control file
+// turns it on). The web checks the same field before it asks; this is the
+// shell's own check, so the gate is not only in the page. Anything but an
+// explicit `false` refuses, as in the web (shellUpdateRoute.ts).
+#[cfg(any(windows, test))]
+fn shell_auto_apply_refusal(status: &serde_json::Value) -> Option<String> {
+    match status.get("shellAutoApplyPaused") {
+        Some(serde_json::Value::Bool(false)) => None,
+        Some(serde_json::Value::Bool(true)) => {
+            let reason = status
+                .get("shellAutoApplyPausedReason")
+                .and_then(serde_json::Value::as_str)
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("paused");
+            Some(format!(
+                "automatic desktop restarts are paused for this install ({reason}); nothing was installed"
+            ))
+        }
+        _ => Some(
+            "the daemon did not report that automatic desktop restarts are allowed; nothing was installed"
+                .to_string(),
+        ),
+    }
+}
+
+// GET /api/update/status from the local daemon, on its own thread: reqwest's
+// blocking client must not run on the async runtime this command is on.
+#[cfg(any(windows, test))]
+fn local_daemon_update_status(route: &LocalDaemonRoute) -> Result<serde_json::Value, String> {
+    use std::io::Read;
+    use std::time::Duration;
+    const MAX_BODY: u64 = 1024 * 1024;
+    let url = format!("{}/api/update/status", route.origin);
+    let token = route.token.clone();
+    let worker = std::thread::spawn(move || -> Result<serde_json::Value, String> {
+        let client = reqwest::blocking::Client::builder()
+            .http1_only()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|_| "could not create the daemon status client".to_string())?;
+        let mut request = client.get(&url);
+        if let Some(token) = token {
+            let mut header = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|_| "invalid daemon authorization".to_string())?;
+            header.set_sensitive(true);
+            request = request.header(reqwest::header::AUTHORIZATION, header);
+        }
+        // No library error text: it can carry the request's credentials.
+        let response = request
+            .send()
+            .map_err(|_| "could not reach the local daemon for its update status".to_string())?;
+        if response.status() != reqwest::StatusCode::OK {
+            return Err(format!(
+                "the local daemon's update status returned HTTP {}",
+                response.status().as_u16()
+            ));
+        }
+        let mut body = Vec::new();
+        response
+            .take(MAX_BODY + 1)
+            .read_to_end(&mut body)
+            .map_err(|_| "could not read the local daemon's update status".to_string())?;
+        if body.len() as u64 > MAX_BODY {
+            return Err("the local daemon's update status is too large".to_string());
+        }
+        serde_json::from_slice(&body)
+            .map_err(|_| "the local daemon's update status is not JSON".to_string())
+    });
+    worker
+        .join()
+        .map_err(|_| "the daemon status check stopped unexpectedly".to_string())?
+}
+
+#[cfg(any(windows, test))]
+fn shell_auto_apply_gate(route: Option<&LocalDaemonRoute>) -> Result<(), String> {
+    let route = route.ok_or_else(|| {
+        "silent installer update needs this computer's daemon; nothing was installed".to_string()
+    })?;
+    let status = local_daemon_update_status(route)
+        .map_err(|e| format!("{e}; nothing was installed"))?;
+    match shell_auto_apply_refusal(&status) {
+        None => Ok(()),
+        Some(refusal) => Err(refusal),
+    }
+}
+
 /// Stage the verified current-user NSIS installer, launch an out-of-job courier
 /// through explorer.exe, and wait until its first log event proves it survived.
 /// The web layer exits only after this command succeeds.
 #[tauri::command]
 pub async fn apply_shell_update_silent(
+    app: tauri::AppHandle,
     force_downgrade: Option<bool>,
 ) -> Result<ShellUpdateOutcome, String> {
-    let result = apply_shell_update_silent_inner(force_downgrade).await;
+    let result = apply_shell_update_silent_inner(&app, force_downgrade).await;
     record_apply_failure("silent", &result);
     result
 }
 
 async fn apply_shell_update_silent_inner(
+    app: &tauri::AppHandle,
     force_downgrade: Option<bool>,
 ) -> Result<ShellUpdateOutcome, String> {
     #[cfg(windows)]
@@ -853,6 +1047,10 @@ async fn apply_shell_update_silent_inner(
         use std::process::Command;
         use std::sync::atomic::Ordering;
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        use tauri::Manager;
+
+        // Before anything is downloaded: the daemon must allow it.
+        shell_auto_apply_gate(app.try_state::<LocalDaemonRoute>().as_deref())?;
 
         let force_downgrade = force_downgrade.unwrap_or(false);
         if SILENT_APPLY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
@@ -916,8 +1114,9 @@ async fn apply_shell_update_silent_inner(
             &explorer_visible_path(&app_exe.to_string_lossy()),
             &explorer_visible_path(&log_path.to_string_lossy()),
             &attempt,
+            &staged.sha256,
         );
-        std::fs::write(&courier_path, courier)
+        std::fs::write(&courier_path, silent_courier_file(&courier))
             .map_err(|e| format!("could not write silent-update.ps1: {e}"))?;
         std::fs::write(
             &cmd_path,
@@ -996,7 +1195,7 @@ async fn apply_shell_update_silent_inner(
     }
     #[cfg(not(windows))]
     {
-        let _ = force_downgrade;
+        let _ = (app, force_downgrade);
         Err("silent installer update is only available on Windows".to_string())
     }
 }
@@ -1046,9 +1245,10 @@ mod tests {
     use super::{
         admit_installer, configure_downgrade_token, downgrade_token_path, explorer_select_argument,
         installed_daemon_version, is_path_within_windows_dir, rollback_hold_refusal_from_documents,
-        silent_cmd_script, silent_courier_script, InstalledDaemon,
+        silent_cmd_script, silent_courier_file, silent_courier_script, InstalledDaemon,
     };
     use super::{apply_failure_reason, download_script_prefix, ShellUpdateOutcome};
+    use super::{shell_auto_apply_gate, shell_auto_apply_refusal, LocalDaemonRoute};
     use crate::shell_update_manifest::VerifiedShellAsset;
 
     fn verified_asset() -> VerifiedShellAsset {
@@ -1454,10 +1654,18 @@ mod tests {
         }
     }
 
+    const COURIER_SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     #[test]
     fn silent_courier_does_not_bind_read_only_powershell_variables() {
-        let script =
-            silent_courier_script(123, "setup.exe", "soluterminal.exe", "launch.log", "try-1");
+        let script = silent_courier_script(
+            123,
+            "setup.exe",
+            "soluterminal-desktop.exe",
+            "launch.log",
+            "try-1",
+            COURIER_SHA,
+        );
         let lower = script.to_lowercase();
         for reserved in ["$pid", "$args", "$input", "$this"] {
             assert!(
@@ -1470,6 +1678,168 @@ mod tests {
     }
 
     #[test]
+    fn silent_update_route_is_the_loopback_daemon_the_window_loaded() {
+        let route = LocalDaemonRoute::from_window_url("http://127.0.0.1:18787/?token=abc%2Bd").unwrap();
+        assert_eq!(route.origin, "http://127.0.0.1:18787");
+        assert_eq!(route.token.as_deref(), Some("abc+d"));
+        let router = LocalDaemonRoute::from_window_url("http://127.0.0.1:28787/?solu_router=1").unwrap();
+        assert_eq!(router.origin, "http://127.0.0.1:28787");
+        assert_eq!(router.token, None);
+        assert!(LocalDaemonRoute::from_window_url("http://127.0.0.1:8787").is_some());
+        for refused in [
+            "https://cloud.example.com/app",
+            "http://example.com:8787/",
+            "https://127.0.0.1:8787/",
+            "not a url",
+        ] {
+            assert!(LocalDaemonRoute::from_window_url(refused).is_none(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn silent_update_runs_only_when_the_daemon_says_not_paused() {
+        use serde_json::json;
+        assert_eq!(shell_auto_apply_refusal(&json!({"shellAutoApplyPaused": false})), None);
+        let paused = shell_auto_apply_refusal(&json!({
+            "shellAutoApplyPaused": true,
+            "shellAutoApplyPausedReason": "automatic desktop restarts are not enabled for this channel yet",
+        }))
+        .unwrap();
+        assert!(paused.contains("paused") && paused.contains("not enabled for this channel yet"));
+        for unclear in [json!({}), json!({"shellAutoApplyPaused": null}), json!({"shellAutoApplyPaused": "false"}), json!([])] {
+            assert!(shell_auto_apply_refusal(&unclear).is_some(), "{unclear}");
+        }
+        assert!(shell_auto_apply_gate(None).is_err());
+    }
+
+    // One request to a throwaway local server standing in for the daemon.
+    fn serve_status_once(body: &'static str) -> (LocalDaemonRoute, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                request.push_str(&line);
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).unwrap();
+            request
+        });
+        let route = LocalDaemonRoute {
+            origin: format!("http://127.0.0.1:{port}"),
+            token: Some("tok".into()),
+        };
+        (route, server)
+    }
+
+    #[test]
+    fn silent_update_gate_asks_the_daemon_with_its_token() {
+        let (route, server) = serve_status_once(r#"{"shellAutoApplyPaused":false}"#);
+        assert_eq!(shell_auto_apply_gate(Some(&route)), Ok(()));
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /api/update/status HTTP/1.1\r\n"), "{request}");
+        assert!(request.to_lowercase().contains("authorization: bearer tok\r\n"), "{request}");
+
+        let (route, server) = serve_status_once(
+            r#"{"shellAutoApplyPaused":true,"shellAutoApplyPausedReason":"paused by operator"}"#,
+        );
+        let refused = shell_auto_apply_gate(Some(&route)).unwrap_err();
+        server.join().unwrap();
+        assert!(refused.contains("paused by operator"), "{refused}");
+
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let unreachable = LocalDaemonRoute { origin: format!("http://127.0.0.1:{port}"), token: None };
+        assert!(shell_auto_apply_gate(Some(&unreachable)).is_err());
+    }
+
+    // The courier runs the installer only after checking it again, after the
+    // app has exited and right before /S, and relaunches the app either way.
+    #[test]
+    fn silent_courier_rechecks_the_installer_digest_right_before_running_it() {
+        let script = silent_courier_script(
+            42,
+            r"C:\x\setup.exe",
+            r"C:\Apps\soluterminal-desktop.exe",
+            r"C:\x\launch.log",
+            "a",
+            COURIER_SHA,
+        );
+        assert!(script.contains(&format!("$expectedSha = '{COURIER_SHA}'\n")));
+        let at = |needle: &str| {
+            script
+                .find(needle)
+                .unwrap_or_else(|| panic!("courier is missing {needle:?}:\n{script}"))
+        };
+        let exited_flag = at("$appExited = $true");
+        let exited = at("Write-LaunchLog 'app-exited'");
+        let hash = at("Get-FileHash -Algorithm SHA256 -LiteralPath $installer");
+        let compare = at(
+            "[string]::Equals($actualSha, $expectedSha, [System.StringComparison]::OrdinalIgnoreCase)",
+        );
+        let mismatch = at("Write-LaunchLog 'sha-mismatch'");
+        let delete = at("Remove-Item -LiteralPath $installer -Force");
+        let refuse = at("throw 'installer changed after verification; nothing was installed'");
+        let install = at("Start-Process -FilePath $installer -ArgumentList '/S'");
+        let catch = at("} catch {\n  $failed = $true");
+        let relaunch_gate = at("if ($appExited) {");
+        let relaunch = at("Start-Process -FilePath $appExe");
+        assert!(exited_flag < hash && exited < hash && hash < compare && compare < mismatch);
+        assert!(mismatch < delete && delete < refuse && refuse < install);
+        // The relaunch sits after the try/catch, so a mismatch (thrown into
+        // the catch, which logs failed) still starts the app again.
+        assert!(install < catch && catch < relaunch_gate && relaunch_gate < relaunch);
+        // The installer is started exactly once, after the check.
+        assert_eq!(script.matches("-FilePath $installer").count(), 1);
+    }
+
+    // The courier finds the app by this process's own id and relaunches the
+    // path it was given, so it assumes no process name: the desktop app runs
+    // as soluterminal-desktop.exe (Cargo.toml), the name the daemon's courier
+    // once missed by matching only "soluterminal" (#739).
+    #[test]
+    fn silent_courier_names_no_process_and_relaunches_the_given_path() {
+        let manifest = include_str!("../Cargo.toml");
+        let package = manifest
+            .lines()
+            .skip_while(|line| line.trim() != "[package]")
+            .find_map(|line| line.trim().strip_prefix("name = "))
+            .map(|name| name.trim_matches('"'))
+            .expect("package name in Cargo.toml");
+        assert_eq!(package, "soluterminal-desktop");
+        let exe = format!(r"C:\Users\a\AppData\Local\Programs\Desk\{package}.exe");
+        let script = silent_courier_script(
+            4242,
+            r"C:\x\setup.exe",
+            &exe,
+            r"C:\x\launch.log",
+            "a",
+            COURIER_SHA,
+        );
+        assert!(script.contains("$appPid = 4242\n"));
+        assert!(script.contains("while (Get-Process -Id $appPid "));
+        assert!(script.contains(&format!("$appExe = '{exe}'\n")));
+        assert!(script.contains("[System.IO.Path]::GetFileNameWithoutExtension($appExe)"));
+        assert!(script.contains("Where-Object { $_.Path -eq $appExe }"));
+        assert!(
+            !script.replace(&exe, "").to_lowercase().contains("soluterminal"),
+            "courier hard-codes an app name:\n{script}"
+        );
+    }
+
+    #[test]
     fn silent_generated_files_single_quote_paths_with_spaces_and_apostrophes() {
         let courier_path = r"C:\Users\O'Brien\App Data\silent-update.ps1";
         let courier = silent_courier_script(
@@ -1478,14 +1848,60 @@ mod tests {
             r"C:\Program Files\O'Brien\soluterminal.exe",
             r"C:\Users\O'Brien\App Data\launch.log",
             "attempt's id",
+            "digest'; Remove-Item x; '",
         );
         assert!(courier.contains(r"$installer = 'C:\Users\O''Brien\App Data\setup.exe'"));
+        assert!(courier.contains("$expectedSha = 'digest''; Remove-Item x; '''\n"));
         assert!(courier.contains(r"$appExe = 'C:\Program Files\O''Brien\soluterminal.exe'"));
         assert!(courier.contains(r"$attempt = 'attempt''s id'"));
 
         let cmd = silent_cmd_script(courier_path);
-        assert!(cmd.contains(r"& 'C:\Users\O''Brien\App Data\silent-update.ps1'"));
+        assert_eq!(
+            decode_encoded_command(&cmd),
+            r"& 'C:\Users\O''Brien\App Data\silent-update.ps1'"
+        );
         assert_eq!(cmd.lines().count(), 1);
+    }
+
+    // The inner command of a silent-update.cmd line (-EncodedCommand, UTF-16LE).
+    fn decode_encoded_command(cmd: &str) -> String {
+        use base64::Engine as _;
+        let prefix = "start \"\" /min powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ";
+        let b64 = cmd
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix("\r\n"))
+            .unwrap_or_else(|| panic!("unexpected silent-update.cmd: {cmd:?}"));
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16(&units).unwrap()
+    }
+
+    // A profile folder with non-ASCII characters (C:\Users\Zoë) reaches both
+    // generated files intact: the .cmd stays ASCII (cmd.exe reads it in the OEM
+    // code page) and the .ps1 carries a UTF-8 BOM (Windows PowerShell 5.1
+    // reads a BOM-less script in the ANSI code page).
+    #[test]
+    fn silent_generated_files_keep_non_ascii_paths_intact() {
+        let dir = "C:\\Users\\Zo\u{eb}\\AppData\\Local\\soluterminal\\shell-update";
+        let courier_path = format!(r"{dir}\silent-update.ps1");
+        let cmd = silent_cmd_script(&courier_path);
+        assert!(cmd.is_ascii(), "{cmd:?}");
+        assert_eq!(decode_encoded_command(&cmd), format!("& '{courier_path}'"));
+
+        let script = silent_courier_script(
+            1,
+            &format!(r"{dir}\setup.exe"),
+            "C:\\Users\\Zo\u{eb}\\AppData\\Local\\Programs\\Desk\\soluterminal-desktop.exe",
+            &format!(r"{dir}\launch.log"),
+            "a",
+            COURIER_SHA,
+        );
+        let file = silent_courier_file(&script);
+        assert_eq!(&file[..3], &[0xEF, 0xBB, 0xBF]);
+        assert_eq!(std::str::from_utf8(&file[3..]).unwrap(), script);
     }
 
     #[cfg(windows)]

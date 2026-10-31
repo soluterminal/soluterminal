@@ -21,7 +21,7 @@ export function UnsentMessageChip({ pane, actionGuard }: { pane: PaneInfo; actio
     } finally { setPending(false); }
   };
   return <span className="pane-unsent-message" role="status" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-    Unsent message from {msg.sender} —{' '}
+    <span className="pane-unsent-message-label">Unsent message from {msg.sender} —{' '}</span>
     <button type="button" disabled={pending} onClick={() => void act('send')}>Send</button>{' / '}
     <button type="button" disabled={pending} title="Clear only if the complete unchanged message is visible. Hidden pastes must be edited in the pane." onClick={() => void act('clear')}>Clear</button>
   </span>;

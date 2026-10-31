@@ -70,3 +70,11 @@ it('tells the user the branded address to open, never the raw cloud host', async
   expect(await screen.findByText('https://app.soluterminal.com')).toBeInTheDocument();
   expect(screen.getByRole('dialog').textContent).not.toMatch(/onrender/);
 });
+
+it('names the phone button that really exists, and where it is', async () => {
+  render(<PhoneAccessPairPanelGate />);
+  const dialog = await screen.findByRole('dialog');
+  await waitFor(() => expect(dialog.textContent).toContain(
+    'Tap “+ Claim a new machine” (under “Other ways to connect” if you don’t see it) and enter this code.'));
+  expect(dialog.textContent).not.toContain('Add a computer');
+});

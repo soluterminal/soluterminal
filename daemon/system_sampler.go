@@ -211,6 +211,10 @@ type systemLevelReason struct {
 	Key   string `json:"key"`
 	Level string `json:"level"`
 	Text  string `json:"text"`
+	// Detail is the long tail behind a short Text (VHDX state, the largest
+	// %TEMP% directory, unexplained loss). The status-bar chip shows Text and
+	// puts Detail in its tooltip so a paragraph never fills the bar.
+	Detail string `json:"detail,omitempty"`
 }
 
 type systemLevelsDTO struct {
@@ -753,19 +757,20 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 		text["disk"] = "disk: " + formatSystemGB(*s.DiskFreeMB) + " free on ~/.solu volume"
 		sampled["disk"] = true
 	}
+	detail := map[string]string{}
 	if h := s.HostDisk; h != nil {
 		available := (h.State == hostStorageOK || h.State == hostStorageVHDXUnresolved) && h.FreeMB != nil && h.TotalMB != nil && *h.TotalMB > 0
 		if !available {
 			raw["hostDisk"], text["hostDisk"] = "unknown", "host disk: unavailable ("+h.State+")"
 		} else {
-			raw["hostDisk"] = "ok"
-			if h.FloorMB != nil && *h.FloorMB > 0 && *h.FreeMB < *h.FloorMB {
-				raw["hostDisk"] = "critical"
-			} else if h.FloorMB != nil && *h.FloorMB > 0 && *h.FreeMB < 2**h.FloorMB {
-				raw["hostDisk"] = "warn"
+			floor := int64(0)
+			if h.FloorMB != nil {
+				floor = *h.FloorMB
 			}
+			raw["hostDisk"] = hostDiskAlarmLevel(*h.FreeMB, *h.TotalMB, floor)
+			text["hostDisk"] = "host disk: " + formatSystemGB(*h.FreeMB) + " free on " + h.Volume
 			pct := 100 * float64(*h.FreeMB) / float64(*h.TotalMB)
-			text["hostDisk"] = fmt.Sprintf("host disk: %s free on %s (%.1f%%)", formatSystemGB(*h.FreeMB), h.Volume, pct)
+			parts := []string{fmt.Sprintf("%.1f%% of %s free", pct, formatSystemGB(*h.TotalMB))}
 			if h.State != hostStorageVHDXUnresolved && h.VHDXPhysicalMB != nil {
 				sparse := "sparse state unknown"
 				if h.Sparse != nil && *h.Sparse {
@@ -773,14 +778,15 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 				} else if h.Sparse != nil {
 					sparse = "not sparse"
 				}
-				text["hostDisk"] += " · VHDX " + formatSystemGB(*h.VHDXPhysicalMB) + " physical, " + sparse
+				parts = append(parts, "VHDX "+formatSystemGB(*h.VHDXPhysicalMB)+" physical, "+sparse)
 			}
-			if h.Offender != nil {
-				text["hostDisk"] += " · " + h.Offender.Text
+			if h.Offender != nil && h.Offender.Text != "" {
+				parts = append(parts, h.Offender.Text)
 			}
 			if h.UnexplainedLossMB != nil {
-				text["hostDisk"] += " · unexplained host loss " + formatSystemGB(*h.UnexplainedLossMB)
+				parts = append(parts, "unexplained host loss "+formatSystemGB(*h.UnexplainedLossMB))
 			}
+			detail["hostDisk"] = strings.Join(parts, " · ")
 			sampled["hostDisk"] = true
 		}
 	}
@@ -966,7 +972,7 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 	overall := "ok"
 	for key, level := range prev.Current {
 		if level != "ok" {
-			reasons = append(reasons, systemLevelReason{Key: key, Level: level, Text: text[key]})
+			reasons = append(reasons, systemLevelReason{Key: key, Level: level, Text: text[key], Detail: detail[key]})
 		}
 		if levelRank(level) > levelRank(overall) {
 			overall = level
@@ -984,6 +990,36 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 		reason = reasons[0].Text
 	}
 	return systemLevelsDTO{Overall: overall, Reason: reason, Reasons: reasons, Areas: cloneLevelMap(prev.Current)}, prev
+}
+
+// Thresholds for the Windows-disk alarm a person sees. They are deliberately
+// separate from the host-disk floor (max(100 GB, 5%) by default), which only
+// defers heavy operator work: 90 GB free on a 1 TB laptop is not "almost full".
+const (
+	hostDiskAlarmCriticalMB  = 20 * 1024
+	hostDiskAlarmCriticalPct = 5
+	hostDiskAlarmWarnMB      = 50 * 1024
+	hostDiskAlarmWarnPct     = 10
+)
+
+// hostDiskAlarmLevel is critical only when free space is under both 20 GB and
+// 5% of the drive, and warn under both 50 GB and 10%. An operator floor set
+// lower than those (via settings or env) lowers the alarm with it; the default
+// floor, being higher, never raises it.
+func hostDiskAlarmLevel(freeMB, totalMB, floorMB int64) string {
+	criticalMB := min(int64(hostDiskAlarmCriticalMB), totalMB*hostDiskAlarmCriticalPct/100)
+	warnMB := min(int64(hostDiskAlarmWarnMB), totalMB*hostDiskAlarmWarnPct/100)
+	if floorMB > 0 {
+		criticalMB = min(criticalMB, floorMB)
+		warnMB = min(warnMB, 2*floorMB)
+	}
+	switch {
+	case freeMB < criticalMB:
+		return "critical"
+	case freeMB < warnMB:
+		return "warn"
+	}
+	return "ok"
 }
 
 func cloneLevelMap(in map[string]string) map[string]string {

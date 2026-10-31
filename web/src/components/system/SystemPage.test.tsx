@@ -110,8 +110,10 @@ describe('SystemPage',()=>{
     mocks.snapshot={status,error:null,polling:false};
     render(<SystemPage onClose={()=>{}}/>);
     await Promise.resolve();
+    // 41 GB free on a 2 TB drive blocks heavy work but is not "almost full".
     expect(screen.getByText('Disk almost full')).toBeInTheDocument();
-    expect(screen.getByText(/Your Windows drive C: is almost full/)).toBeInTheDocument();
+    expect(screen.queryByText(/Your Windows drive C: is almost full/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Some background work waits until your Windows drive C: has more space/)).toBeInTheDocument();
     expect(screen.getByText('SoluTerminal v1')).toBeInTheDocument();
     expect(screen.getByText('Windows disk')).toBeInTheDocument();
     expect(screen.getByText('Sessions')).toBeInTheDocument();

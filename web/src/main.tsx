@@ -11,6 +11,7 @@ import { installLifecycleDebugGlobal, lifecycleLog } from './debug';
 import { installEmbedBridge, isEmbedded } from './embed';
 import { captureArrival } from './lib/arrival';
 import { standalonePageFor } from './standalonePages';
+import { RootErrorBoundary } from './components/RootErrorBoundary';
 import './prefs'; // activate cloud-synced user-preferences sync (see prefs.ts)
 import './styles.css';
 
@@ -268,19 +269,24 @@ if (isPreviewBuild && !isPopout && isPreviewAcceptanceHost(window.location.hostn
   document.body.insertBefore(notice, rootEl);
   rootEl.style.height = 'calc(100% - 28px)';
 }
+// RootErrorBoundary sits outside Suspense so a render crash anywhere (or a
+// lazy chunk that fails to load) shows "Something went wrong · Reload"
+// instead of a blank window.
 ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
-    <React.Suspense fallback={null}>
-      {StandalonePage ? (
-        <StandalonePage />
-      ) : isPopout ? (
-        <PopoutBrowser />
+    <RootErrorBoundary>
+      <React.Suspense fallback={null}>
+        {StandalonePage ? (
+          <StandalonePage />
+        ) : isPopout ? (
+          <PopoutBrowser />
 
-      ) : (
-        <CloudGate>
-          <App />
-        </CloudGate>
-      )}
-    </React.Suspense>
+        ) : (
+          <CloudGate>
+            <App />
+          </CloudGate>
+        )}
+      </React.Suspense>
+    </RootErrorBoundary>
   </React.StrictMode>,
 );

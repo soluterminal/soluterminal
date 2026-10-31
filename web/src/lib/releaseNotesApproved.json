@@ -68,6 +68,17 @@
       "sha256": "d7dc55db8031a8efec1d71a955d326e36089558e538295ff71a7a4d203c786f0",
       "approvedBy": "CMO",
       "date": "2026-10-29"
+    },
+    "0.0.1229": {
+      "sha256": "e210070bffba28c0c36ae25e79c6cf5bf4eb895dc326ee62aa8861450237416f",
+      "approvedBy": "CMO",
+      "date": "2026-10-29"
+    },
+    "0.0.1230": {
+      "sha256": "bb51886074e14fe45a55ec7404bf5ad71b110392985cdd260dc2b663c0bbd18e",
+      "approvedBy": "CMO",
+      "date": "2026-10-31",
+      "note": "24 lines. Benjamin approved the 20-line base, the typing-fix line (in engineering's pane) and the reopen, menu-items and narrow-header lines (in CMO's pane) on 2026-10-31."
     }
   }
 }

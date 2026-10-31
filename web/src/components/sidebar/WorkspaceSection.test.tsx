@@ -1,8 +1,13 @@
-import { createEvent, fireEvent, render, screen } from '@testing-library/react';
+import { act, createEvent, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../../store';
 import type { PaneInfo, Workspace } from '../../types';
 import { WorkspaceSection } from './WorkspaceSection';
+
+const dialogMocks = vi.hoisted(() => ({
+  confirmDialog: vi.fn<(opts: { message: string; confirmLabel?: string; danger?: boolean }) => Promise<boolean>>(),
+}));
+vi.mock('../../lib/dialog', () => ({ confirmDialog: dialogMocks.confirmDialog }));
 
 const now = new Date('2026-05-18T00:00:00.000Z');
 
@@ -77,6 +82,7 @@ function renderWorkspaceSection(overrides: Partial<Parameters<typeof WorkspaceSe
 
 describe('WorkspaceSection', () => {
   beforeEach(() => {
+    dialogMocks.confirmDialog.mockReset();
     vi.useFakeTimers();
     vi.setSystemTime(now);
     useStore.setState({
@@ -184,14 +190,33 @@ describe('WorkspaceSection', () => {
     expect(onReorderWorkspaces).toHaveBeenLastCalledWith('alpha', 'beta', 'before');
   });
 
-  it('keeps delete clicks from loading the workspace', () => {
+  it('keeps delete clicks from loading the workspace', async () => {
+    dialogMocks.confirmDialog.mockResolvedValue(true);
     const onLoadWorkspace = vi.fn();
     const onDeleteWorkspace = vi.fn();
     renderWorkspaceSection({ onLoadWorkspace, onDeleteWorkspace });
 
-    fireEvent.click(screen.getByTitle('Delete workspace'));
+    await act(async () => { fireEvent.click(screen.getByTitle('Delete workspace')); });
 
     expect(onDeleteWorkspace).toHaveBeenCalledWith('Launch Ops With A Very Long Workspace Name');
     expect(onLoadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('confirms before the row × deletes, the same as right-click › Delete', async () => {
+    const onDeleteWorkspace = vi.fn();
+    const name = 'Launch Ops With A Very Long Workspace Name';
+    const { rerender, props } = renderWorkspaceSection({ onDeleteWorkspace });
+
+    dialogMocks.confirmDialog.mockResolvedValue(false);
+    await act(async () => { fireEvent.click(screen.getByTitle('Delete workspace')); });
+    expect(dialogMocks.confirmDialog).toHaveBeenLastCalledWith({ message: `Delete workspace "${name}"?`, confirmLabel: 'Delete', danger: true });
+    expect(onDeleteWorkspace).not.toHaveBeenCalled();
+
+    // The context-menu path shows the identical confirm.
+    rerender(<WorkspaceSection {...props} ctxMenu={{ x: 0, y: 0, wsName: name }} />);
+    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' })); });
+    expect(dialogMocks.confirmDialog).toHaveBeenCalledTimes(2);
+    expect(dialogMocks.confirmDialog).toHaveBeenLastCalledWith({ message: `Delete workspace "${name}"?`, confirmLabel: 'Delete', danger: true });
+    expect(onDeleteWorkspace).not.toHaveBeenCalled();
   });
 });

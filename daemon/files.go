@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -126,22 +128,10 @@ func (a *apiServer) readFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	info, err := os.Stat(abs)
+	data, info, err := readUserFile(abs, maxFileBytes)
 	if err != nil {
-		http.Error(w, "cannot stat: "+err.Error(), 404)
-		return
-	}
-	if info.IsDir() {
-		http.Error(w, "path is a directory", 400)
-		return
-	}
-	if info.Size() > maxFileBytes {
-		http.Error(w, "file too large (max 512 KB — too big for a viewer, edit in your IDE)", 413)
-		return
-	}
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		http.Error(w, "cannot read: "+err.Error(), 500)
+		msg, status := userFileReadError(err)
+		http.Error(w, msg, status)
 		return
 	}
 	if containsNullByte(data) {
@@ -236,15 +226,10 @@ func writeFileLineAt(path string, lineNo int, newText string, expectedMtime int6
 	if err != nil {
 		return "", 0, 400, err
 	}
-	info, err := os.Stat(abs)
+	data, info, err := readUserFile(abs, maxFileBytes)
 	if err != nil {
-		return "", 0, 404, errors.New("not found: " + err.Error())
-	}
-	if info.IsDir() {
-		return "", 0, 400, errors.New("path is a directory")
-	}
-	if info.Size() > maxFileBytes {
-		return "", 0, 413, errors.New("file too large")
+		msg, status := userFileReadError(err)
+		return "", 0, status, errors.New(msg)
 	}
 	curMtime := info.ModTime().UnixMilli()
 	if expectedMtime != 0 && expectedMtime != curMtime {
@@ -253,10 +238,6 @@ func writeFileLineAt(path string, lineNo int, newText string, expectedMtime int6
 		return "", 0, 409, errors.New("file modified externally since load (mtime mismatch)")
 	}
 
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		return "", 0, 500, err
-	}
 	if containsNullByte(data) {
 		return "", 0, 400, errors.New("file appears binary (contains null bytes)")
 	}
@@ -331,6 +312,20 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 // exist yet (or symlink resolution fails for any other reason), we
 // fall back to the cleaned absolute path so callers can still surface
 // a clean 404 / "not found" rather than a confusing canonicalize error.
+// userFileReadError maps a readUserFile / openUserFile error to the message
+// and HTTP status the files API returns.
+func userFileReadError(err error) (string, int) {
+	switch {
+	case errors.Is(err, errUserFileTooLarge):
+		return fmt.Sprintf("file too large (max %d KB — too big for a viewer, edit in your IDE)", maxFileBytes/1024), http.StatusRequestEntityTooLarge
+	case errors.Is(err, errUserFileNotRegular):
+		return err.Error(), http.StatusBadRequest
+	case errors.Is(err, fs.ErrNotExist):
+		return "not found: " + err.Error(), http.StatusNotFound
+	}
+	return "cannot read: " + err.Error(), http.StatusInternalServerError
+}
+
 func canonicalizeFilePath(p string) (string, error) {
 	if p == "" {
 		return "", errors.New("path required")

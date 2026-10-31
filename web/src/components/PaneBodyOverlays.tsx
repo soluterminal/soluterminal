@@ -3,6 +3,7 @@ import type { DropZone } from '../store';
 import { slotValue } from '../extensions';
 import { CustomScrollbar } from './CustomScrollbar';
 import { ScrollToLatestButton } from './ScrollToLatestButton';
+import { RESTART_PAUSED_BODY, RESTART_PAUSED_TITLE } from '../lib/restartPaused';
 
 interface PaneBodyOverlaysProps {
   paneId: string;
@@ -16,6 +17,9 @@ interface PaneBodyOverlaysProps {
   // suspended the pane instead of auto-respawning it (see daemon
   // SuspendExisting), or after a live client exit.
   resumable?: boolean;
+  // A pane paused across a restart under "Don't resume": shown as paused,
+  // with no Resume offer (the pane menu still has Resume session).
+  restartPaused?: boolean;
   onResume?: () => Promise<unknown>;
   inputLocked: boolean;
   // True when the lock is because NOBODY owns the pane (daemon restart /
@@ -93,6 +97,7 @@ export function PaneBodyOverlays({
   paneStatus,
   exitCode,
   resumable,
+  restartPaused,
   onResume,
   inputLocked,
   inputLockUnowned,
@@ -117,7 +122,8 @@ export function PaneBodyOverlays({
   // state with a real action — show Resume. The optimistic store flip clears
   // `resumable` on click, so the button unmounts immediately; `resuming` only
   // covers the brief click→flip window.
-  const showResume = state?.kind === 'closed' && !!resumable && !!onResume;
+  const paused = state?.kind === 'closed' && !!resumable && !!restartPaused;
+  const showResume = state?.kind === 'closed' && !!resumable && !!onResume && !paused;
   return (
     <>
       {state && (
@@ -125,13 +131,13 @@ export function PaneBodyOverlays({
           className={`pane-state-overlay pane-state-${state.kind}`}
           role="status"
           aria-live="polite"
-          aria-label={state.title}
+          aria-label={paused ? RESTART_PAUSED_TITLE : state.title}
         >
           {/* A locked pane keeps the overlay (it blocks input) but not the card:
               the single grid banner (SessionClaimOverlay) explains it once,
               instead of one card per pane plus the banner. */}
           {state.kind !== 'input-locked' && <div className="pane-state-card">
-            <div className="pane-state-title">{state.title}</div>
+            <div className="pane-state-title">{paused ? RESTART_PAUSED_TITLE : state.title}</div>
             {/* On a normal exit a Claude pane drops back to an interactive
                 shell in place (daemon spawn: `…; claude; exec bash -i`), so
                 this overlay is purely informational — resume via the
@@ -143,9 +149,11 @@ export function PaneBodyOverlays({
                 serves the managed DeepSeek/Pi terminal harnesses, whose
                 conversation is not a Claude session. */}
             <div className="pane-state-body">
-              {showResume
-                ? 'Resume to continue this session, or close the pane.'
-                : state.body}
+              {paused
+                ? RESTART_PAUSED_BODY
+                : showResume
+                  ? 'Resume to continue this session, or close the pane.'
+                  : state.body}
             </div>
             {showResume && (
               <div className="pane-state-actions">

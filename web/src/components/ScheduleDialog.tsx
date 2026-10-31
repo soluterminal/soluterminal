@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { api } from '../api';
+import { api, currentRoutingScope } from '../api';
 import { useStore } from '../store';
 import { useAccountFeatures, useOperatorFeatures } from '../entitlements';
 import type { Schedule, ScheduleAgent, ScheduleChatRef, ScheduleInput, SchedulePermission } from '../types';
@@ -49,6 +49,10 @@ import { useUnsentInput } from '../lib/unsentInput';
 //     the user remembers to delete them.
 //   • Target pane picker lists only RUNNING panes — scheduling against
 //     a dead pane is almost always a mistake.
+
+const NEEDS_CLAUDE = 'Needs Claude Code';
+const NEEDS_CLAUDE_TITLE = 'Claude Code isn\'t installed on this computer. Install it to run Claude tasks, or use "Prompt into a pane" with a pane running another agent such as Codex.';
+const CLAUDE_GONE_HINT = 'Claude Code isn\'t installed on this computer any more, so this task can\'t run until it is.';
 
 interface Props {
   open: boolean;
@@ -187,6 +191,30 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
   const [enabled, setEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
   const [jobKind, setJobKind] = useState<JobKind>('task');
+  // A Claude task needs the Claude Code CLI on this computer. Only a finished
+  // probe that found none counts (claudeChecked): an older daemon or the first
+  // seconds after boot keep the task kind on offer, and the daemon refuses the
+  // save anyway if Claude really is missing. Asked of the selected machine and
+  // backend each time the dialog opens: the shared health poll can still hold
+  // another machine's answer after a switch, or fall back to the other backend.
+  const [claudeMissing, setClaudeMissing] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setClaudeMissing(false);
+    api.healthScoped(currentRoutingScope())
+      .then((h) => { if (!cancelled) setClaudeMissing(h.claudeChecked === true && h.claudeInstalled === false); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [open]);
+  // An existing task stays editable (Claude may come back); new ones can't be made.
+  const taskUnavailable = claudeMissing && editing?.kind !== 'task';
+  const taskUnavailableRef = useRef(taskUnavailable);
+  taskUnavailableRef.current = taskUnavailable;
+  // The health answer can land after the dialog opened on the task default.
+  useEffect(() => {
+    if (open && taskUnavailable) setJobKind((k) => (k === 'task' ? 'prompt' : k));
+  }, [open, taskUnavailable]);
   const [agentId, setAgentId] = useState('');
   const [applyMode, setApplyMode] = useState(false);
   const [agents, setAgents] = useState<ScheduleAgent[]>([]);
@@ -289,8 +317,9 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
       setEnabled(true);
       // A pane context-menu entry means the user already chose both the prompt
       // job and its destination. The global New schedule entry still defaults
-      // to a fresh Claude task because it works unattended without a live pane.
-      setJobKind(fromPaneMenu ? 'prompt' : 'task');
+      // to a fresh Claude task because it works unattended without a live pane,
+      // unless this computer has no Claude Code to run it.
+      setJobKind(fromPaneMenu || taskUnavailableRef.current ? 'prompt' : 'task');
       setAgentId('');
       setApplyMode(false);
       // Seed the working directory from the pane the user came from — the
@@ -646,11 +675,15 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
             <div>
               <label>Start with a recipe</label>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 3 }}>
-                {SCHEDULE_TEMPLATES.map((t) => (
+                {SCHEDULE_TEMPLATES.map((t) => {
+                  const needsClaude = taskUnavailable && t.preset.kind === 'task';
+                  return (
                   <button
                     key={t.id}
                     type="button"
                     onClick={() => applyTemplate(t)}
+                    disabled={needsClaude}
+                    title={needsClaude ? NEEDS_CLAUDE_TITLE : undefined}
                     style={{
                       display: 'flex',
                       alignItems: 'baseline',
@@ -663,10 +696,11 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
                     <span style={{ fontSize: 14 }}>{t.emoji}</span>
                     <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{t.title}</span>
                     <span style={{ color: 'var(--fg-dim)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {t.blurb}
+                      {needsClaude ? NEEDS_CLAUDE : t.blurb}
                     </span>
                   </button>
-                ))}
+                  );
+                })}
               </div>
             </div>
             <div className="row" style={{ marginTop: 10 }}>
@@ -682,9 +716,13 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
           <div>
             <label>Job</label>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                <input type="radio" name="jobKind" checked={jobKind === 'task'} onChange={() => setJobKind('task')} />
+              <label
+                style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, opacity: taskUnavailable ? 0.55 : undefined }}
+                title={taskUnavailable ? NEEDS_CLAUDE_TITLE : undefined}
+              >
+                <input type="radio" name="jobKind" checked={jobKind === 'task'} disabled={taskUnavailable} onChange={() => setJobKind('task')} />
                 <span>Run a Claude task</span>
+                {taskUnavailable && <span style={{ color: 'var(--fg-dim)', fontSize: 10 }}>· {NEEDS_CLAUDE}</span>}
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
                 <input type="radio" name="jobKind" checked={jobKind === 'prompt'} onChange={() => setJobKind('prompt')} />
@@ -699,9 +737,13 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
             </div>
             <div style={{ fontSize: 10, color: 'var(--fg-dim)', marginTop: 3 }}>
               {jobKind === 'task'
-                ? 'A fresh Claude session each run — no pane needed, works while you\'re away.'
+                ? (claudeMissing
+                    ? CLAUDE_GONE_HINT
+                    : 'A fresh Claude session each run — no pane needed, works while you\'re away.')
                 : jobKind === 'prompt'
-                  ? 'Types into a pane you already have open. Skipped if that pane is busy.'
+                  ? (claudeMissing
+                      ? 'Types into a pane you already have open, such as a Codex pane. Skipped if that pane is busy.'
+                      : 'Types into a pane you already have open. Skipped if that pane is busy.')
                   : 'Runs a built-in local agent as a background process.'}
             </div>
           </div>

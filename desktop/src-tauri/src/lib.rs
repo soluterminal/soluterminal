@@ -61,19 +61,40 @@ fn startup_window_plan(
     }
 }
 
-fn show_main_window(
-    app: &tauri::AppHandle,
+fn show_main_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     maximize_on_first_show: &std::sync::atomic::AtomicBool,
 ) {
     use std::sync::atomic::Ordering;
 
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
+        let reason = window_reveal_reason(
+            window.is_visible().unwrap_or(false),
+            window.is_minimized().unwrap_or(false),
+        );
+        if let Err(err) = window.show() {
+            eprintln!("desktop: show main window failed: {err}");
+            return;
+        }
+        if let Err(err) = window.unminimize() {
+            eprintln!("desktop: unminimize main window failed: {err}");
+            return;
+        }
         if maximize_on_first_show.swap(false, Ordering::AcqRel) {
             let _ = window.maximize();
         }
         let _ = window.set_focus();
+        // Showing a hidden WebView need not produce a focus/resize event.
+        // Announce the actual reveal on tray clicks and second launches too.
+        dispatch_desktop_restored_event(&window.as_ref().window(), reason);
+    }
+}
+
+fn window_reveal_reason(was_visible: bool, was_minimized: bool) -> &'static str {
+    if was_visible && !was_minimized {
+        "focused"
+    } else {
+        "shown"
     }
 }
 
@@ -526,6 +547,13 @@ fn finish_startup(
         daemon_urls.push("http://127.0.0.1:8787".to_string()); // the fallback above
     }
     app.manage(nav_guard::AllowedLocalOrigins::from_urls(daemon_urls.iter().map(String::as_str)));
+    // The daemon the unattended installer update asks first (shell_update.rs).
+    // None in cloud launch mode, where no local daemon runs.
+    if matches!(desktop_mode, launch_mode::LaunchMode::Local) {
+        if let Some(route) = shell_update::LocalDaemonRoute::from_window_url(&started.initial_url) {
+            app.manage(route);
+        }
+    }
 
     // Backend signal for the web (status chip + fallback banner +
     // sidebar mode switcher).
@@ -625,7 +653,7 @@ fn finish_startup(
     );
 
     let mut main_builder = WebviewWindowBuilder::new(app, "main", url)
-        .title("soluterminal")
+        .title("SoluTerminal")
         .inner_size(init_w, init_h)
         .min_inner_size(600.0, 400.0)
         .resizable(true)
@@ -677,11 +705,8 @@ fn finish_startup(
         let _ = main_window.set_position(tauri::PhysicalPosition::new(g.x, g.y));
     }
     if window_plan.show_after_build {
-        let _ = main_window.show(); // always show, even if positioning errored
-        if restore.is_some_and(|g| g.maximized) {
-            let _ = main_window.maximize();
-        }
-        let _ = main_window.set_focus();
+        let maximize = std::sync::atomic::AtomicBool::new(restore.is_some_and(|g| g.maximized));
+        show_main_window(app, &maximize); // always show, even if positioning errored
     }
     let maximize_on_first_show = std::sync::Arc::new(
         std::sync::atomic::AtomicBool::new(window_plan.maximize_on_first_show),
@@ -711,7 +736,7 @@ fn finish_startup(
     // daemon's entitlements) and no "Switch to connecting to
     // computers you set up" in Local mode. A Cloud-mode install
     // still gets the way back to running projects on this PC.
-    let show = MenuItem::with_id(app, "show", "Show soluterminal", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show SoluTerminal", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "Hide window", true, None::<&str>)?;
     let switch_to_local = MenuItem::with_id(
         app,
@@ -765,7 +790,7 @@ fn finish_startup(
     let maximize_from_menu = maximize_on_first_show.clone();
     let maximize_from_tray = maximize_on_first_show.clone();
     let _tray = TrayIconBuilder::with_id("main")
-        .tooltip("soluterminal")
+        .tooltip("SoluTerminal")
         .icon(
             tray_icon::image()
                 .unwrap_or_else(|| app.default_window_icon().unwrap().clone()),
@@ -1019,22 +1044,24 @@ async fn desktop_set_launch_mode(app: tauri::AppHandle, mode: String) -> Result<
     app.restart()
 }
 
-fn dispatch_desktop_restored_event(window: &tauri::Window, reason: &str) {
+fn dispatch_desktop_restored_event<R: tauri::Runtime>(window: &tauri::Window<R>, reason: &str) {
     let Some(webview) = window.app_handle().get_webview_window("main") else {
         return;
     };
 
+    if let Err(err) = webview.eval(desktop_restored_script(reason)) {
+        eprintln!("desktop: dispatch solu:desktop-restored failed: {err}");
+    }
+}
+
+fn desktop_restored_script(reason: &str) -> String {
     // hideTracked: this shell announces its own hides (tray Hide, close to
     // tray) with solu:desktop-will-background, so the page may treat a bare
     // focus return as focus only. Older shells omit it.
     let detail = serde_json::json!({ "reason": reason, "hideTracked": true });
-    let script = format!(
+    format!(
         "window.dispatchEvent(new CustomEvent('solu:desktop-restored', {{ detail: {detail} }}));"
-    );
-
-    if let Err(err) = webview.eval(script) {
-        eprintln!("desktop: dispatch solu:desktop-restored failed: {err}");
-    }
+    )
 }
 
 // Native hides bypass the page's titlebar buttons, so announce them the same
@@ -1131,7 +1158,29 @@ fn reset_webview_cache_on_version_change(current_version: &str) {
 
 #[cfg(test)]
 mod autostart_window_tests {
-    use super::startup_window_plan;
+    use super::{desktop_restored_script, startup_window_plan, window_reveal_reason};
+
+    #[test]
+    fn reveal_announces_hidden_and_minimized_windows_without_invalidating_focus_only() {
+        for (visible, minimized, reason) in [
+            (false, false, "shown"), // close-to-tray or tray Hide
+            (false, true, "shown"),
+            (true, true, "shown"),    // minimized on the taskbar
+            (true, false, "focused"), // relaunch while already visible
+        ] {
+            let script = desktop_restored_script(window_reveal_reason(visible, minimized));
+            let payload = script
+                .strip_prefix(
+                    "window.dispatchEvent(new CustomEvent('solu:desktop-restored', { detail: ",
+                )
+                .unwrap()
+                .strip_suffix(" }));")
+                .unwrap();
+            let detail: serde_json::Value = serde_json::from_str(payload).unwrap();
+            assert_eq!(detail["reason"], reason);
+            assert_eq!(detail["hideTracked"], true);
+        }
+    }
 
     #[test]
     fn autostart_preserves_maximized_restore_for_first_tray_show() {
@@ -1190,7 +1239,7 @@ fn classify_wsl_fallback(err: &str) -> (&'static str, String) {
     // / "bundled Linux solud at … is empty". This is NOT a WSL problem.
     if err.contains("bundled Linux solud") {
         return (
-            "soluterminal is missing some files",
+            "SoluTerminal is missing some files",
             "Your install is incomplete — re-download the latest installer \
              from soluterminal and run it again to repair soluterminal.\n\n\
              For now it's running directly on Windows so you can keep working."

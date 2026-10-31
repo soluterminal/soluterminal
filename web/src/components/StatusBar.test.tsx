@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RoutingScope, WorkflowTaskSummary } from '../api';
 import type { PaneInfo, Port } from '../types';
 import { useStore } from '../store';
-import { StatusBar, plainSystemText, systemWithoutWorkflow } from './StatusBar';
+import { StatusBar, plainSystemText, systemReasonDetail, systemWithoutWorkflow } from './StatusBar';
 import { useEntitlements } from '../entitlements';
 
 const workflowTasksMock = vi.hoisted(() => ({
@@ -321,5 +321,27 @@ describe('plainSystemText', () => {
       reasons: [{ key: 'hostDisk', level: 'critical', text: 'host disk: 6% free' }],
     })).toBe('Disk almost full');
     expect(plainSystemText({ level: 'critical', reason: 'mystery: x' })).toBe('System needs attention');
+  });
+
+  it('stays quiet for a Windows-disk warning (the daemon only goes critical under ~5% and ~20 GB)', () => {
+    expect(plainSystemText({
+      level: 'warn',
+      reason: 'host disk: 45.0 GB free on C:\\',
+      reasons: [{ key: 'hostDisk', level: 'warn', text: 'host disk: 45.0 GB free on C:\\' }],
+    })).toBeNull();
+  });
+});
+
+describe('systemReasonDetail', () => {
+  it('returns the headline reason detail for the tooltip, not another area', () => {
+    const text = 'host disk: 102.9 GB free on C:\\';
+    const detail = '5.4% of 1907.0 GB free · VHDX 1010.7 GB physical, not sparse · 55.8 GB (20000 files) in %TEMP% (measurement incomplete)';
+    expect(systemReasonDetail({
+      level: 'warn',
+      reason: text,
+      reasons: [{ key: 'hostDisk', level: 'warn', text, detail }, { key: 'disk', level: 'warn', text: 'disk: 2.0 GB free', detail: 'other' }],
+    })).toBe(detail);
+    expect(systemReasonDetail({ level: 'warn', reason: 'disk: 2.0 GB free', reasons: [{ key: 'disk', level: 'warn', text: 'disk: 2.0 GB free' }] })).toBeUndefined();
+    expect(systemReasonDetail({ level: 'warn', reason: 'disk: 2.0 GB free' })).toBeUndefined();
   });
 });

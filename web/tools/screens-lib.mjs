@@ -353,6 +353,9 @@ export function buildAmbientAppObjectResponses(healthVersion, now = Date.parse('
     '/api/muse/team': { available: false },
     '/api/feedback/inbox': { events: [] },
     '/api/warden/status': { enabled: false, runs: [] },
+    // Agents' requests waiting for the person's OK (lib/paneConfirm.ts),
+    // re-read on every event-stream (re)connect.
+    '/api/pane-confirmations': { pending: [] },
     '/api/agents/status': {
       fixAgent: null,
       prAgent: null,

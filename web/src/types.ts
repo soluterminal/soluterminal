@@ -169,6 +169,11 @@ export interface PaneInfo {
   // with status:'exited'. Absent/false against an older daemon → no Resume
   // affordance (falls back to the plain "session ended" dead-end).
   resumable?: boolean;
+  // Set with resumable when the daemon suspended this pane across a restart
+  // while Settings › Terminal & panes › Sessions › After a restart is "Don't resume": the pane shows
+  // as paused with no offer to resume; the pane menu's Resume session still
+  // resumes it.
+  restartPaused?: boolean;
   cols: number;
   rows: number;
   // True while the daemon's cols/rows are the persisted copy from before a
@@ -777,7 +782,8 @@ export interface Health {
     level: 'ok' | 'warn' | 'critical' | 'unknown';
     reason?: string;
     // Every area that is not ok, worst first. Absent on older daemons.
-    reasons?: { key: string; level: 'warn' | 'critical' | 'unknown'; text: string }[];
+    // detail: the long tail behind a short text (host disk: VHDX, %TEMP%), for tooltips.
+    reasons?: { key: string; level: 'warn' | 'critical' | 'unknown'; text: string; detail?: string }[];
     sampledAt?: string;
   };
   // Claude Code CLI bootstrap status (daemon claude_bootstrap.go). Absent on

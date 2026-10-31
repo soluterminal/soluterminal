@@ -60,17 +60,17 @@ pub fn after_close_to_tray<R: Runtime>(app: &AppHandle<R>) {
         return;
     }
     let body = if cfg!(target_os = "macos") {
-        "Closing the window keeps soluterminal running in the menu bar. \
-         Click the soluterminal icon to reopen it, or choose Quit there to exit."
+        "Closing the window keeps SoluTerminal running in the menu bar. \
+         Click the SoluTerminal icon to reopen it, or choose Quit there to exit."
     } else {
-        "Closing the window keeps soluterminal running in the tray. \
-         Click the soluterminal tray icon to reopen it, or right-click it and \
+        "Closing the window keeps SoluTerminal running in the tray. \
+         Click the SoluTerminal tray icon to reopen it, or right-click it and \
          choose Quit to exit."
     };
     if let Err(e) = app
         .notification()
         .builder()
-        .title("soluterminal is still running")
+        .title("SoluTerminal is still running")
         .body(body)
         .show()
     {

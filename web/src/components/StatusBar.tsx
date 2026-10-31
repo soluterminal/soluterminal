@@ -160,6 +160,11 @@ export function plainSystemText(system: SystemSummary): string | null {
   return PLAIN_SYSTEM_AREA[key] ?? 'System needs attention';
 }
 
+// The long tail behind the headline reason, for the chip's tooltip.
+export function systemReasonDetail(system: SystemSummary): string | undefined {
+  return system.reasons?.find((r) => r.text === system.reason)?.detail || undefined;
+}
+
 function SystemChip({ health }: { health: Health | null }) {
   const team = useOperatorFeatures();
   const setOpen = useStore((s) => s.setSystemPageOpen);
@@ -171,8 +176,11 @@ function SystemChip({ health }: { health: Health | null }) {
   let text: string;
   let title: string;
   if (team) {
+    // The chip carries the short reason ("host disk: 102.9 GB free on C:\");
+    // its long tail (VHDX, %TEMP%) rides in the tooltip, never in the bar.
+    const detail = systemReasonDetail(system);
     text = system.level === 'ok' || partial ? 'System' : (system.reason || 'System needs attention');
-    title = `${system.reason || (partial ? 'Partial data (unavailable on this platform)' : 'All monitored systems healthy')}${age ? ` · checked ${age} ago` : ''}`;
+    title = `${system.reason || (partial ? 'Partial data (unavailable on this platform)' : 'All monitored systems healthy')}${detail ? ` · ${detail}` : ''}${age ? ` · checked ${age} ago` : ''}`;
   } else {
     const plain = plainSystemText(system);
     text = plain ?? 'System';

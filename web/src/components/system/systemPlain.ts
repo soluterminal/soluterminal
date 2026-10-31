@@ -82,14 +82,21 @@ export function plainBlockingLine(status: SystemStatus): string | null {
   const layer = status.disk.blockingLayer ?? 'none';
   const host = status.disk.host ?? null;
   const advice = 'Free some space so your sessions keep running smoothly.';
+  // The host layer blocks heavy work below a generous floor (100 GB by
+  // default). That is not "almost full": say so only when the Windows-disk
+  // alarm itself is critical (under ~20 GB and ~5% free).
+  const hostFull = status.level.areas?.hostDisk === 'critical';
+  const hostWaits = host ? `Some background work waits until your Windows drive ${host.volume} has more space (${fmtMB(host.freeMB)} free).` : '';
   if (layer === 'guest') {
     return `Disk space is low (${fmtMB(status.disk.freeMB)} free). ${advice}`;
   }
   if (layer === 'host' && host) {
-    return `Your Windows drive ${host.volume} is almost full (${fmtMB(host.freeMB)} free). ${advice}`;
+    return hostFull ? `Your Windows drive ${host.volume} is almost full (${fmtMB(host.freeMB)} free). ${advice}` : hostWaits;
   }
   if (layer === 'both' && host) {
-    return `Your Windows drive ${host.volume} (${fmtMB(host.freeMB)} free) and the Linux (WSL) disk (${fmtMB(status.disk.freeMB)} free) are both almost full. ${advice}`;
+    return hostFull
+      ? `Your Windows drive ${host.volume} (${fmtMB(host.freeMB)} free) and the Linux (WSL) disk (${fmtMB(status.disk.freeMB)} free) are both almost full. ${advice}`
+      : `Disk space is low (${fmtMB(status.disk.freeMB)} free). ${advice} ${hostWaits}`;
   }
   return null;
 }

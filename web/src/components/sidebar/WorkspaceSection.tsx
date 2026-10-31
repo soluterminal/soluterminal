@@ -123,6 +123,11 @@ export function WorkspaceSection({
   onReorderWorkspaces,
 }: WorkspaceSectionProps) {
   const [packWorkspaceName, setPackWorkspaceName] = useState<string | null>(null);
+  // Every delete path (the row's × and right-click › Delete) confirms first:
+  // a deleted workspace's layout, tiles and context pack can't be undone.
+  const confirmDelete = async (name: string) => {
+    if (await confirmDialog({ message: `Delete workspace "${name}"?`, confirmLabel: 'Delete', danger: true })) onDeleteWorkspace(name);
+  };
   const isMobileView = useIsMobileView();
   const ctxMenuPos = useClampedMenuPosition(ctxMenuRef, ctxMenu);
   const { count: attnCount, hasChoice: attnHasChoice } = useAttentionBadge();
@@ -452,7 +457,7 @@ export function WorkspaceSection({
                   className="iconbtn ws-delete"
                   title="Delete workspace"
                   aria-label="Delete workspace"
-                  onClick={(e) => { e.stopPropagation(); onDeleteWorkspace(w.name); }}
+                  onClick={(e) => { e.stopPropagation(); void confirmDelete(w.name); }}
                 ><IconX size={13} /></button>
               )}
             </div>
@@ -502,9 +507,9 @@ export function WorkspaceSection({
                 <button
                   role="menuitem"
                   className="danger"
-                  onClick={async () => {
+                  onClick={() => {
                     setCtxMenu(null);
-                    if (await confirmDialog({ message: `Delete workspace "${ws.name}"?`, confirmLabel: 'Delete', danger: true })) onDeleteWorkspace(ws.name);
+                    void confirmDelete(ws.name);
                   }}
                 >Delete</button>
               </>

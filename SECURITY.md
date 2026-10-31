@@ -59,3 +59,16 @@ still welcome.
   the code on both screens; a relay that alters the request makes the codes
   differ. Approvals made with an older app don't verify the computer and are
   marked as such until approved again.
+- **Unattended desktop updates.** When the Windows desktop app restarts itself
+  to install an update while you are idle, the installer is checked against the
+  update's published SHA-256 (in the official app, from the signed update
+  manifest) before it is staged, and checked again right before it runs.
+  Between the two, a minute or so can pass while the update is staged and the
+  app closes. The second check catches a swapped installer. A program that runs
+  as your own operating-system user can still rewrite the update's script files
+  in the same folder during that time, or swap the installer in the instant
+  after the last check, and get its own file run; that is the same boundary as
+  "Agents running as you" above. The official
+  public app does this only after we publish a signed setting that turns it on
+  (it is off today); once it is on, you can switch it off with Settings ›
+  Devices › Updates › Desktop app restarts.

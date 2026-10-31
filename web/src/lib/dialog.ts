@@ -25,6 +25,25 @@ export function confirmDialog(opts: {
   );
 }
 
+/** A confirm that tells the Cancel button apart from a dismissal: resolves
+ *  true on confirm, false on the Cancel button, and null on Escape, a click
+ *  outside, or when another dialog replaces it. */
+export function confirmOrDismissDialog(opts: {
+  title?: string;
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+}): Promise<boolean | null> {
+  return new Promise((resolve) =>
+    useStore.getState().openDialog({
+      kind: 'confirm',
+      ...opts,
+      distinguishDismiss: true,
+      resolve: (v) => resolve(v === true ? true : v === false ? false : null),
+    }),
+  );
+}
+
 /** Replacement for window.prompt. Resolves the entered string on confirm,
  *  or null on cancel / backdrop / Escape. */
 export function promptDialog(opts: {

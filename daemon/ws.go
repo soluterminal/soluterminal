@@ -69,10 +69,81 @@ type wsClientMsg struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// handleWS serves a pane's terminal stream. inputGate, when given, decides
-// per connection whether keystrokes may reach the pane while it shows a
-// permission prompt (apiServer.promptInputGate).
-func handleWS(m *Manager, inputGate ...func(*http.Request) func(*Pane) bool) http.HandlerFunc {
+// wsInputPolicy is decided once per pane socket from the daemon's own
+// classification of the caller (apiServer.paneSocketInputPolicy).
+type wsInputPolicy struct {
+	// allowed decides whether keystrokes may reach the pane while it shows a
+	// permission prompt (apiServer.promptInputGate). Nil allows.
+	allowed func(*Pane) bool
+	// human is true only when identifyCaller classified this socket as
+	// callerHuman (a traced browser, or a relayed request that passed the
+	// device gate). Only a human socket may adopt an unowned pane by typing
+	// into it; nothing the client sends can set this.
+	human bool
+	// kind names the caller class for logs ("human", "pane", ...).
+	kind string
+}
+
+// wsDropLogInterval and wsDropAckInterval rate-limit, per socket, the log
+// line and the truthful ownership frame sent when keystrokes are dropped.
+var (
+	wsDropLogInterval = 10 * time.Second
+	wsDropAckInterval = 2 * time.Second
+)
+
+// isUserKeypress reports whether data is plausibly a person typing rather than
+// terminal machinery: anything except a multi-byte ESC-prefixed sequence
+// (DA/OSC auto-replies, mouse/focus reports). A lone ESC is a real keypress.
+func isUserKeypress(data []byte) bool {
+	return len(data) > 0 && !(data[0] == 0x1b && len(data) > 1)
+}
+
+// isTerminalReply reports whether data starts with a sequence a terminal
+// emulator sends on its own rather than a key a person pressed: OSC/DCS/APC/PM
+// strings, focus and mouse reports, and CSI query answers (DA, CPR, DSR,
+// DECRPM, window reports). Arrow and function keys, Alt combinations and
+// bracketed pastes (ESC[200~) are not replies. Shift+F3 encodes like a CPR
+// (ESC[1;2R) and is treated as a reply; the next key adopts instead.
+func isTerminalReply(data []byte) bool {
+	if len(data) < 2 || data[0] != 0x1b {
+		return false
+	}
+	switch data[1] {
+	case ']', 'P', '_', '^':
+		return true
+	case '[':
+	default:
+		return false
+	}
+	if len(data) >= 3 && (data[2] == 'M' || data[2] == '<') {
+		return true // X10 / SGR mouse report
+	}
+	if len(data) == 3 && (data[2] == 'I' || data[2] == 'O') {
+		return true // focus in / out
+	}
+	// Find the CSI final byte (0x40–0x7e) after parameters/intermediates.
+	for i := 2; i < len(data); i++ {
+		b := data[i]
+		if b < 0x40 || b > 0x7e {
+			continue
+		}
+		switch b {
+		case 'c': // DA1/DA2/DA3 answers carry a ?, > or = prefix
+			return len(data) > 2 && (data[2] == '?' || data[2] == '>' || data[2] == '=')
+		case 'R', 'n', 't':
+			return true // cursor position, device status, window report
+		case 'y':
+			return i > 2 && data[i-1] == '$' // DECRPM mode report
+		}
+		return false
+	}
+	return false
+}
+
+// handleWS serves a pane's terminal stream. policy, when given, classifies
+// each connection (see wsInputPolicy); without it the socket is treated as a
+// non-human viewer whose input is never held by a prompt gate.
+func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		p, ok := m.Get(id)
@@ -81,8 +152,15 @@ func handleWS(m *Manager, inputGate ...func(*http.Request) func(*Pane) bool) htt
 			return
 		}
 		inputAllowed := func(*Pane) bool { return true }
-		if len(inputGate) > 0 && inputGate[0] != nil {
-			inputAllowed = inputGate[0](r)
+		var inPolicy wsInputPolicy
+		if len(policy) > 0 && policy[0] != nil {
+			inPolicy = policy[0](r)
+			if inPolicy.allowed != nil {
+				inputAllowed = inPolicy.allowed
+			}
+		}
+		if inPolicy.kind == "" {
+			inPolicy.kind = "unclassified"
 		}
 		heldInput := false
 		holdInput := func() bool {
@@ -166,6 +244,45 @@ func handleWS(m *Manager, inputGate ...func(*http.Request) func(*Pane) bool) htt
 		markSeen, markActive, markInput := s.markSeen, s.markActive, s.markInput
 		subID := s.id
 		defer s.cancel()
+
+		// ownsInput reports whether this socket may write keystrokes to the
+		// PTY. A non-owner's keystrokes are dropped — accidental taps on an
+		// un-claimed mobile view must not send commands — EXCEPT that a
+		// visible human viewer typing into a pane nobody owns adopts it first
+		// (AdoptOnInput: atomic, never displaces any owner). Every drop is
+		// logged rate-limited (pane, viewer, reason — never the bytes) and
+		// answered with this socket's truthful ownership frame so the client
+		// can show the claim banner instead of losing input silently.
+		// Terminal replies never adopt (isTerminalReply): a viewer's emulator
+		// emits those with nobody at the keyboard. Keys, arrows, Alt combos
+		// and bracketed pastes do.
+		var lastDropLog, lastDropAck time.Time
+		ownsInput := func(data []byte) bool {
+			if isOwner() {
+				return true
+			}
+			reason := "viewer-not-human"
+			if inPolicy.human {
+				reason = "unowned-terminal-reply"
+				if len(data) > 0 && !isTerminalReply(data) {
+					var granted bool
+					if granted, reason = p.AdoptOnInput(subID); granted {
+						return true
+					}
+				}
+			}
+			now := time.Now()
+			if now.Sub(lastDropLog) >= wsDropLogInterval {
+				lastDropLog = now
+				log.Printf("input: dropped keystrokes on pane %s from viewer sub=%d kind=%s reason=%s",
+					p.ID, subID, inPolicy.kind, reason)
+			}
+			if now.Sub(lastDropAck) >= wsDropAckInterval {
+				lastDropAck = now
+				p.sendOwnership(subID, false)
+			}
+			return false
+		}
 
 		// Send replay buffer as a single binary frame. Announce it first
 		// so reconnecting browser clients can replace their existing
@@ -307,17 +424,15 @@ func handleWS(m *Manager, inputGate ...func(*http.Request) func(*Pane) bool) htt
 			case websocket.BinaryMessage:
 				p.ownerViewerClosing(subID, false)
 				// Raw keystrokes in binary. Only the owner can write
-				// to the PTY — passive viewers' keystrokes are
-				// silently dropped so accidental taps on an
-				// un-claimed mobile view don't send commands.
-				if !isOwner() || holdInput() {
+				// to the PTY (see ownsInput).
+				if !ownsInput(data) || holdInput() {
 					continue
 				}
 				// Real user presence, for claim arbitration. Multi-byte
 				// ESC-prefixed data is mostly terminal machinery (DA/OSC
 				// auto-replies, mouse/focus reports) — not proof anyone is
 				// at the keyboard. A lone ESC is a real keypress.
-				if len(data) > 0 && !(data[0] == 0x1b && len(data) > 1) {
+				if isUserKeypress(data) {
 					markInput()
 				}
 				if _, werr := p.Write(data); werr != nil {
@@ -337,10 +452,10 @@ func handleWS(m *Manager, inputGate ...func(*http.Request) func(*Pane) bool) htt
 				case "owner-retirement-ack":
 					p.acknowledgeOwnerRetirement(subID, msg.Token, msg.Ready, msg.Reason)
 				case "input":
-					if !isOwner() || holdInput() {
+					if !ownsInput([]byte(msg.Data)) || holdInput() {
 						continue
 					}
-					if len(msg.Data) > 0 && !(msg.Data[0] == 0x1b && len(msg.Data) > 1) {
+					if isUserKeypress([]byte(msg.Data)) {
 						markInput()
 					}
 					if _, werr := p.Write([]byte(msg.Data)); werr != nil {

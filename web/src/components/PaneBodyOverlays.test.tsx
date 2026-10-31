@@ -70,6 +70,26 @@ describe('PaneBodyOverlays pane state messaging', () => {
     expect(onResume).toHaveBeenCalledTimes(1);
   });
 
+  it("makes no Resume offer on a pane paused by Don't resume", () => {
+    const onResume = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PaneBodyOverlays
+        {...baseProps}
+        connStatus="closed"
+        paneStatus="exited"
+        resumable
+        restartPaused
+        onResume={onResume}
+      />,
+    );
+
+    expect(screen.getByRole('status', { name: /paused after a restart/i })).toBeInTheDocument();
+    expect(screen.getByText(/not resumed, as set in settings › terminal & panes › sessions › after a restart/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /resume/i })).toBeNull();
+    expect(screen.queryByText(/resume to continue this session/i)).toBeNull();
+    expect(onResume).not.toHaveBeenCalled();
+  });
+
   it('stays informational (no Resume button) on a closed pane that is not resumable', () => {
     render(
       <PaneBodyOverlays

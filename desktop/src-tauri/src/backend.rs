@@ -355,7 +355,7 @@ fn repair_or_fallback(app: &AppHandle, saved: Backend, status: WslStatus) -> Bac
     let (title, body, fix_label) = match status {
         WslStatus::NoDistro => (
             "Linux (WSL) needs a distribution",
-            "soluterminal is set to run inside Windows' Linux (WSL), but no Linux \
+            "SoluTerminal is set to run inside Windows' Linux (WSL), but no Linux \
              distribution is installed, so the full experience can't start. Set one \
              up now? Windows will install Ubuntu (it may need a restart). You can \
              also run on Windows directly for this session.",
@@ -363,14 +363,14 @@ fn repair_or_fallback(app: &AppHandle, saved: Backend, status: WslStatus) -> Bac
         ),
         WslStatus::NeedsUpdate => (
             "Linux (WSL) needs an update",
-            "soluterminal is set to run inside Windows' Linux (WSL), but WSL needs a \
+            "SoluTerminal is set to run inside Windows' Linux (WSL), but WSL needs a \
              quick update before it can start. Update now? You can also run on \
              Windows directly for this session.",
             "Update WSL now",
         ),
         _ => (
             "Linux (WSL) is unavailable",
-            "soluterminal is set to run inside Windows' Linux (WSL), but WSL isn't \
+            "SoluTerminal is set to run inside Windows' Linux (WSL), but WSL isn't \
              available right now. Set it up? You can also run on Windows directly \
              for this session.",
             "Set it up",

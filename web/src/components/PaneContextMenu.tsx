@@ -57,6 +57,10 @@ interface PaneContextMenuProps {
   // resuming the conversation (or offering a fresh restart when there is none).
   // Absent ⇒ hidden.
   onRestartPane?: () => void;
+  // An exited pane whose conversation can be resumed in place. The quiet
+  // route for a pane paused by "Don't resume", whose body offers nothing.
+  // Absent ⇒ hidden.
+  onResumePane?: () => void;
   onClosePane: () => void;
   // Terminal selection actions (shown only when text is selected): paste the
   // selection into another pane's input (no Enter), or search every pane's
@@ -100,6 +104,7 @@ export function PaneContextMenu({
   onRedraw,
   onRealign,
   onRestartPane,
+  onResumePane,
   onClosePane,
   selectionText,
   sendTargets,
@@ -289,6 +294,15 @@ export function PaneContextMenu({
       {!isNative && onRedraw && pane.status === 'running' && (
         <button role="menuitem" onClick={onRedraw}>
           Force redraw
+        </button>
+      )}
+      {onResumePane && pane.status === 'exited' && pane.resumable && (
+        <button
+          role="menuitem"
+          onClick={onResumePane}
+          title="Start this pane's conversation again where it left off."
+        >
+          Resume session
         </button>
       )}
       {onRestartPane && pane.status === 'running' && (

@@ -1983,7 +1983,7 @@ export interface WorkflowStatsHeavyWeight {
 }
 
 export type SystemLevel = 'ok' | 'warn' | 'critical' | 'unknown';
-export interface SystemReason { key: string; level: SystemLevel; text: string }
+export interface SystemReason { key: string; level: SystemLevel; text: string; detail?: string }
 export interface SystemProcessCost { procs: number; rssMB: number | null; cpuPct: number | null }
 export interface SystemPaneRow extends SystemProcessCost {
   id: string; title: string; agent: string; kind: string; role: string; status: string; state: string;
@@ -4811,6 +4811,19 @@ const coreApi = {
     }).then(j<RemoteDevice>),
   remoteDeviceStatus: (target: string, id: string): Promise<RemoteDevice> =>
     rootFetch(`${relayPrefixFor(target)}/api/remote-devices/${encodeURIComponent(id)}/status`).then(j<RemoteDevice>),
+  // An agent's request to close or change a pane it did not start, waiting
+  // for the person's OK (daemon pane_confirm.go).
+  paneConfirmations: (): Promise<{ pending: PaneConfirmRequest[] }> =>
+    apiFetch('/api/pane-confirmations', { cache: 'no-store' }).then(j<{ pending: PaneConfirmRequest[] }>),
+  answerPaneConfirmation: async (id: string, allow: boolean): Promise<PaneConfirmAnswer | null> => {
+    const res = await apiFetch(`/api/pane-confirmations/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ allow }),
+    });
+    if (res.status === 404) return null; // already answered or expired
+    return j<PaneConfirmAnswer>(res);
+  },
   approveRemoteDevice: (id: string): Promise<RemoteDevice> =>
     apiFetch(`/api/remote-devices/${encodeURIComponent(id)}/approve`, { method: 'POST' }).then(j<RemoteDevice>),
   removeRemoteDevice: (id: string): Promise<void> =>
@@ -5232,6 +5245,25 @@ export function mergeFeatureApis<T extends object>(core: T, features: object[]):
     Object.assign(core, feature);
   }
   return core;
+}
+
+export interface PaneConfirmRequest {
+  id: string;
+  action: 'close' | 'change' | 'rename';
+  callerPaneId?: string;
+  caller: string;
+  paneId: string;
+  pane: string;
+  title: string;
+  message: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface PaneConfirmAnswer {
+  allowed: boolean;
+  failed: boolean;
+  result: string;
 }
 
 export const api = mergeFeatureApis(

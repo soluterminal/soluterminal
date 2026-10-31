@@ -5,7 +5,7 @@ import { abandonTerminalRetirement, beginTerminalInteraction, beginTerminalRetir
 import { quickReplyHasPendingInteraction } from '../lib/quickReplyDrafts';
 import { currentRoutingScope, routingPrincipalEpoch, routingPrincipalAllowed, signStreamUrl, streamSigningNeeded } from '../api';
 import { effectiveVisiblePaneIds, effectiveTerminalTarget } from '../store';
-import { ensureTerminalSession, registerTerminalCloseGuard, registerSessionKeepalive, captureSessionGesture, sessionVisible, processIdentity, type TerminalViewSession } from '../lib/terminalViewSessions';
+import { ensureTerminalSession, registerTerminalCloseGuard, registerSessionKeepalive, captureSessionGesture, sessionVisible, processIdentity, useTerminalWindowVisible, type TerminalViewSession } from '../lib/terminalViewSessions';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -58,6 +58,7 @@ import { handleTerminalCopyKey } from '../lib/terminalClipboard';
 import { paneUnread } from '../lib/turnChip';
 import { planSelectionSend } from '../lib/selectionSend';
 import { replayPinTarget } from '../lib/replayPin';
+import { createPaneInputOwnership, type PaneClaimReason } from '../lib/paneInputOwnership';
 
 interface Props {
   pane: PaneInfo;
@@ -111,6 +112,10 @@ const MIN_PANE_COLS = 40;
 
 
 export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
+  // Native restore can arrive before document.visibilityState becomes visible.
+  // Subscribe so both orders update the guarded header and reply strip. Keep
+  // canAct reading the live session so event handlers still reject hidden input.
+  useTerminalWindowVisible();
   const fallbackSession = useRef<TerminalViewSession>({key:JSON.stringify([currentRoutingScope().key,pane.id]),scope:currentRoutingScope(),principal:routingPrincipalEpoch(),pane,processIdentity:processIdentity(pane),generation:0,retained:false,invalid:false});
   const session = suppliedSession ?? fallbackSession.current;
   if (!suppliedSession) session.pane = pane;
@@ -1017,6 +1022,12 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
     // pane's host is on-screen (adopted by a slot, not parked). Seeded from the
     // host's current parked state; flipped by the park/reattach events below.
     let onScreen = !isPaneHostParked(key);
+    // True only while a person's input (xterm typing, keybar/quick reply) is
+    // being handed to the socket, so only that can claim ownership on input
+    // (lib/paneInputOwnership) — never a programmatic Ctrl+L nudge. Driven
+    // browsers (navigator.webdriver) never auto-claim, on input included.
+    let sendingUserInput = false;
+    const drivenBrowser = typeof navigator !== 'undefined' && navigator.webdriver === true;
     const currentVisible = () =>
       (typeof document === 'undefined' || document.visibilityState === 'visible') && onScreen && canAct();
     const sendVisibilityNow = () => {
@@ -1882,16 +1893,53 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         && !session.invalid && session.processIdentity === connectionIdentity
         && processIdentity(session.pane) === connectionIdentity
         && session.principal === connectionPrincipal && connectionPrincipal === routingPrincipalEpoch() && routingPrincipalAllowed();
+      const sendAllowed = () => !viewerClosing && routingPrincipalAllowed() && !session.invalid && session.principal === routingPrincipalEpoch();
+      // Input ownership is per SOCKET (lib/paneInputOwnership): this socket
+      // starts unconfirmed whatever ownedRef remembers, claims are kept while
+      // hidden and sent on the next visible edge, an unanswered claim is
+      // retried, and keystrokes typed before the daemon confirms ownership
+      // are held and flushed instead of vanishing.
+      const inputOwnership = createPaneInputOwnership({
+        paneId: pane.id,
+        sendClaim: (reason) => {
+          if (ws.readyState !== WebSocket.OPEN || !sendAllowed()) return false;
+          lifecycleLog('pane.ownership.claim', { paneId: pane.id, reason });
+          transportSend(JSON.stringify({ type: 'claim', reason }));
+          return true;
+        },
+        sendInput: (bytes) => {
+          if (ws.readyState !== WebSocket.OPEN || !sendAllowed() || !currentVisible()) return false;
+          // Ownership is confirmed before this flush. Check the remaining
+          // input gate directly so a refusal is reported truthfully, without
+          // queuing only the first held chunk in the retirement fence.
+          if (!terminalInputAllowed(key)) { cancelTerminalRetirement(key); return false; }
+          transportSend(bytes);
+          return true;
+        },
+        visible: currentVisible,
+        onInputUnclaimed: (owner) => {
+          if (disposed || wsRef.current !== ws) return;
+          // Typing was not delivered: show the existing claim banner
+          // ("Type here") instead of losing it silently.
+          ownedRef.current = false;
+          setPaneOwned(key, false, owner === 'other' ? 'other' : 'none', ownershipToken.current);
+        },
+        log: lifecycleLog,
+      });
       ws.send = (data) => {
-        if (viewerClosing || !routingPrincipalAllowed() || session.invalid || session.principal !== routingPrincipalEpoch()) return;
+        if (!sendAllowed()) return;
         if (typeof data === 'string') {
-          let type = ''; try {type = JSON.parse(data).type;} catch {return;}
-          if (type === 'visibility') { transportSend(JSON.stringify({type,visible:currentVisible()})); return; }
+          let type = ''; let reason: unknown; try {const parsed = JSON.parse(data); type = parsed.type; reason = parsed.reason;} catch {return;}
+          if (type === 'visibility') { transportSend(JSON.stringify({type,visible:currentVisible()})); inputOwnership.onVisible(); return; }
           if (type === 'owner-retirement-ack') { transportSend(data); return; }
-          if (type !== 'ping' && !currentVisible()) return;
+          // Never drop a claim silently: kept while hidden, sent when shown.
+          if (type === 'claim') { inputOwnership.claim((typeof reason === 'string' ? reason : 'takeover') as PaneClaimReason); return; }
+          if (type === 'ping') { transportSend(data); inputOwnership.onVisible(); return; }
+          if (!currentVisible()) return;
         } else {
-          if (!currentVisible() || ownedRef.current !== true) return;
+          if (!currentVisible()) return;
           const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
+          if (!inputOwnership.confirmed) { if (bytes) inputOwnership.holdInput(bytes, sendingUserInput && !drivenBrowser); return; }
           if (bytes && holdTerminalInput(key, bytes)) return;
           if (!terminalInputAllowed(key)) { cancelTerminalRetirement(key); return; }
         }
@@ -2078,7 +2126,8 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           if (!terminalInputAllowed(key)) { cancelTerminalRetirement(key); return false; }
           if (ws.readyState !== WebSocket.OPEN || !currentVisible() || ownedRef.current !== true) return false;
           resumeFollowIfNearBottom();
-          ws.send(typeof bytes === 'string' ? encoder.encode(bytes) : bytes);
+          sendingUserInput = true;
+          try { ws.send(typeof bytes === 'string' ? encoder.encode(bytes) : bytes); } finally { sendingUserInput = false; }
           return true;
         });
         // Claimer fires {type:"claim"} on THIS pane's WS. Centralising
@@ -2428,7 +2477,26 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
               // frame itself is never that ack (see sawInitialOwnershipFrame).
               const isInitialFrame = !sawInitialOwnershipFrame;
               sawInitialOwnershipFrame = true;
+              // The subscribe-time state predates our claim. In particular,
+              // a ghost owner must not cancel the tracker's claim/retries or
+              // discard typing while we wait for the actual acknowledgement.
+              if (isInitialFrame && !msg.owned && autoClaimPending && ownerState === 'other') return;
+              inputOwnership.onOwnership(msg.owned, ownerState);
               if (!msg.owned && autoClaimPending) {
+                // "Nobody owns this pane" while we think a claim is in
+                // flight: that claim may never have reached the daemon (lost
+                // while hidden, or timed out). If this pane is the one in
+                // front of the user, claim now rather than wait forever.
+                if (
+                  ownerState === 'none'
+                  && !inputOwnership.claimPending
+                  && currentVisible()
+                  && (!isMobileClient || useStore.getState().focusedPaneId === pane.id)
+                ) {
+                  lifecycleLog('pane.ownership.unowned-reclaim', { paneId: pane.id, initial: isInitialFrame });
+                  autoClaimConditional = true;
+                  ws.send(JSON.stringify({ type: 'claim', reason: 'adopt-unowned' }));
+                }
                 if (isInitialFrame || !(autoClaimConditional && ownerState === 'other')) return;
               }
               autoClaimPending = false;
@@ -2482,6 +2550,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         }
       };
       ws.onclose = (ev) => {
+        inputOwnership.close();
         if (wsRef.current !== ws) return;
         abandonTerminalRetirement(key);
         if (
@@ -2703,7 +2772,8 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         resumeFollowIfNearBottom();
         // Dictation's polish checks this so it never rewrites typed input.
         notePaneTyped(pane.id);
-        ws.send(encoder.encode(data));
+        sendingUserInput = true;
+        try { ws.send(encoder.encode(data)); } finally { sendingUserInput = false; }
         claimSizingOnTyping(data);
       }
     });
@@ -3478,16 +3548,23 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           onRedraw={() => {
             if(!actionValid())return;
             closeContextMenu();
-            redrawPane(pane.id);
+            redrawPane(key);
           }}
           onRealign={() => {
             if(!actionValid())return;
             closeContextMenu();
-            realignPane(pane.id);
+            realignPane(key);
           }}
           onRestartPane={() => {
             closeContextMenu();
             if (actionValid()) void restartPaneFlow(pane.id,{scope:session.scope,valid:captureSessionGesture(session)});
+          }}
+          onResumePane={() => {
+            closeContextMenu();
+            if(!actionValid())return;
+            const t = termRef.current;
+            // store.resumePane toasts a failure and restores the pane.
+            resumePane(pane.id, t?.cols, t?.rows).catch(() => {});
           }}
           onClosePane={ctxMenuActions.closePane}
           selectionText={menuSelection}
@@ -3598,6 +3675,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           paneStatus={pane.status}
           exitCode={pane.exitCode}
           resumable={pane.resumable}
+          restartPaused={pane.restartPaused}
           onResume={() => {
             // Hand the daemon our live measured viewport so the resumed PTY
             // comes up at the CURRENT window width, not the last-persisted size

@@ -148,7 +148,13 @@ type Pane struct {
 	// (POST /api/panes/{id}/resume) instead of a dead-end. Guarded by mu;
 	// rides PaneSnapshot/DTO. Not persisted — the suspended state is
 	// in-memory only (ephemeral across daemon restarts).
-	Resumable     bool   `json:"resumable,omitempty"`
+	Resumable bool `json:"resumable,omitempty"`
+	// RestartPaused marks a pane the daemon suspended across a restart while
+	// Settings › Claude › After a restart is "Don't resume": the client shows
+	// it as paused without offering to resume it (the person can still
+	// resume it from the pane menu). Set once by suspendAfterRestart before
+	// the pane is published; a resumed pane is a fresh Pane without it.
+	RestartPaused bool   `json:"restartPaused,omitempty"`
 	RecoveryError string `json:"recoveryError,omitempty"`
 	Cols          uint16 `json:"cols"`
 	Rows          uint16 `json:"rows"`
@@ -1068,6 +1074,7 @@ type PaneSnapshot struct {
 	CreatedAt       time.Time  `json:"createdAt"`
 	ExitCode        *int       `json:"exitCode,omitempty"`
 	Resumable       bool       `json:"resumable,omitempty"`
+	RestartPaused   bool       `json:"restartPaused,omitempty"`
 	RecoveryError   string     `json:"recoveryError,omitempty"`
 	IdentityBlocked bool       `json:"-"`
 	Cols            uint16     `json:"cols"`
@@ -1155,6 +1162,7 @@ func (p *Pane) Snapshot() PaneSnapshot {
 		CreatedAt:                p.CreatedAt,
 		ExitCode:                 p.ExitCode,
 		Resumable:                p.Resumable,
+		RestartPaused:            p.RestartPaused,
 		RecoveryError:            p.RecoveryError,
 		IdentityBlocked:          p.codexIdentityBlocked.Load(),
 		Cols:                     p.Cols,
@@ -1212,6 +1220,9 @@ type Manager struct {
 	panes      map[string]*Pane
 	dataDir    string
 	onPaneExit func(*Pane)
+	// onPaneRemoved fires after Kill takes a pane out of the manager (set
+	// with SetOnPaneRemoved; main.go drops agents' open requests about it).
+	onPaneRemoved func(id string)
 	// onPromptsCommit is copied onto each pane at spawn/attach; fires
 	// after the pane's LastPrompts history changes. Wired in main.go to
 	// persist the pane and publish a "pane-prompt" UI event.
@@ -3027,6 +3038,13 @@ func (p *Pane) HasManagedHarnessDescendant() bool {
 	return p.HasDeepseekDescendant() || p.HasPiDescendant()
 }
 
+// SetOnPaneRemoved sets the callback Kill runs once a pane is gone.
+func (m *Manager) SetOnPaneRemoved(f func(id string)) {
+	m.mu.Lock()
+	m.onPaneRemoved = f
+	m.mu.Unlock()
+}
+
 func (m *Manager) Kill(id string) error {
 	p, ok := m.Get(id)
 	if !ok {
@@ -3038,7 +3056,11 @@ func (m *Manager) Kill(id string) error {
 	<-p.done
 	m.mu.Lock()
 	delete(m.panes, id)
+	removed := m.onPaneRemoved
 	m.mu.Unlock()
+	if removed != nil {
+		removed(id)
+	}
 	// Release any subscribers still parked on this object. For a LIVE pane,
 	// markExited already closed them when the process died; but an EXITED or
 	// SUSPENDED pane accepts subscribers AFTER markExited (the client showing

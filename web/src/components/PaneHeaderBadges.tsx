@@ -1,7 +1,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { IconBolt, IconClock } from './ui/icons';
-import type { PaneAutoMode, PaneInfo } from '../types';
+import type { PaneInfo } from '../types';
 import { useStore } from '../store';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { formatNextFire } from '../lib/cron';
@@ -10,12 +10,7 @@ import { copyToClipboard } from '../lib/clipboard';
 
 import { PaneAgentStaleDot } from './PaneAgentStaleDot';
 import { PaneCredentialBadge } from './PaneCredentialBadge';
-import {
-  autoModeBadgeLabel,
-  autoModeDescription,
-  autoModeMenuLabel,
-  nextAutoMode,
-} from '../lib/autoMode';
+import { PaneAutoModeChip } from './PaneAutoModeChip';
 
 // AutoApprovingChip surfaces the daemon's auto-pending attention signal
 // where the user's eye already is: the pane header. Two phases share it:
@@ -210,7 +205,6 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true }: PaneH
   const toast = useStore((s) => s.toast);
 
   const [copiedResume, setCopiedResume] = useState(false);
-  const curAuto = (pane.autoMode ?? '') as PaneAutoMode;
   const paneAgent = effectivePaneAgent(pane) ?? (pane.codexThreadId ? 'codex' : pane.claudeSessionId ? 'claude' : null);
   const paneAgentLabel = agentLabel(paneAgent);
   const conversationID = paneAgent === 'codex'
@@ -226,14 +220,6 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true }: PaneH
     unsupported: `Context pack ${packBase} attached but not applied — no adapter for this command (SOLU_CONTEXT_PACK is set).`,
     missing: `Context pack ${packBase} not found at spawn — pane started unbriefed.`,
   }[packStatus] : '';
-
-  // Cycle off → cautious → always → off via the store's optimistic action so the
-  // badge flips on click (no ~3s pane-poll lag) and rapid cycling reads the
-  // just-applied mode.
-  const cycleAutoMode = () => {
-    const to = nextAutoMode(curAuto);
-    void useStore.getState().setPaneAutoMode(pane.id, to).catch(() => {});
-  };
 
   const copySessionId = async () => {
     const id = conversationID;
@@ -286,22 +272,9 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true }: PaneH
 
 
       <PaneAgentStaleDot pane={pane} />
-      {showAutoMode && (
-        <button
-          type="button"
-          className={`pane-automode-badge pane-automode-${pane.autoMode || 'off'}`}
-          aria-label={`Auto-approve: ${autoModeDescription(curAuto)}. Click to set ${autoModeMenuLabel(nextAutoMode(curAuto))}.`}
-          title={`Auto-approve — ${autoModeDescription(curAuto)}\nClick to cycle → ${autoModeMenuLabel(nextAutoMode(curAuto))}`}
-          onMouseDownCapture={(e) => e.stopPropagation()}
-          onDoubleClick={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            cycleAutoMode();
-          }}
-        >
-          {autoModeBadgeLabel(curAuto)}
-        </button>
-      )}
+      {/* Opens a three-option menu; never changes the mode on its own, and
+          Always approve asks first (PaneAutoModeChip). */}
+      {showAutoMode && <PaneAutoModeChip pane={pane} />}
       {/* AFTER the auto badge: the transient chip reads as a status hanging off
           the control it belongs to, and — because it mounts/unmounts mid-turn —
           appearing to the badge's RIGHT never shoves the badge sideways under

@@ -58,6 +58,9 @@ type callerIdentity struct {
 	PaneID string
 	PID    int
 	Relay  bool
+	// FromEnv: PaneID came from SOLU_PANE_ID in the environment of a process
+	// with no pane above it, not from the pane's own process tree.
+	FromEnv bool
 }
 
 type relayTransportKey struct{}
@@ -160,6 +163,11 @@ func (a *apiServer) classifyPeerProcess(pid int) (callerIdentity, bool) {
 			}
 		}
 	}
+	// A pane process among the ancestors decides first. Only a process with
+	// no pane above it (one that detached) is placed by the SOLU_PANE_ID in
+	// its environment: otherwise `env SOLU_PANE_ID=<another pane> curl …`
+	// run inside one pane would pass as that other pane.
+	var chain []int
 	spawnedBySelf := false
 	cur := pid
 	for depth := 0; depth < 64 && cur > 1; depth++ {
@@ -172,19 +180,22 @@ func (a *apiServer) classifyPeerProcess(pid int) (callerIdentity, bool) {
 		if id, ok := panes[cur]; ok {
 			return callerIdentity{Kind: callerPane, PaneID: id, PID: pid}, true
 		}
-		// A pane process that detached keeps the pane id the daemon put in
-		// its environment. Ancestors count too: a browser an agent launches
-		// starts with a clean environment, but its launcher does not.
-		if env, ok := readProcEnviron(cur); ok {
-			if id := strings.TrimSpace(env["SOLU_PANE_ID"]); id != "" {
-				return callerIdentity{Kind: callerPane, PaneID: id, PID: pid}, true
-			}
-		}
+		chain = append(chain, cur)
 		next := readPpid(cur)
 		if next == cur {
 			break
 		}
 		cur = next
+	}
+	// A pane process that detached keeps the pane id the daemon put in its
+	// environment. Ancestors count too: a browser an agent launches starts
+	// with a clean environment, but its launcher does not.
+	for _, proc := range chain {
+		if env, ok := readProcEnviron(proc); ok {
+			if id := strings.TrimSpace(env["SOLU_PANE_ID"]); id != "" {
+				return callerIdentity{Kind: callerPane, PaneID: id, PID: pid, FromEnv: true}, true
+			}
+		}
 	}
 	if spawnedBySelf {
 		return callerIdentity{Kind: callerWorker, PID: pid}, true
@@ -441,7 +452,10 @@ func (a *apiServer) handlePutAgentAuthority(w http.ResponseWriter, r *http.Reque
 // browser reaching a WSL daemon, a relayed loopback connection) keeps today's
 // behaviour so the person's own keystrokes are never dropped.
 func (a *apiServer) promptInputGate(r *http.Request) func(*Pane) bool {
-	id := a.identifyCaller(r)
+	return a.promptInputGateFor(a.identifyCaller(r))
+}
+
+func (a *apiServer) promptInputGateFor(id callerIdentity) func(*Pane) bool {
 	if id.Kind != callerPane && id.Kind != callerWorker {
 		return func(*Pane) bool { return true }
 	}
@@ -450,5 +464,18 @@ func (a *apiServer) promptInputGate(r *http.Request) func(*Pane) bool {
 			return true
 		}
 		return p == nil || p.computeStateCached() != StateChoicePrompt
+	}
+}
+
+// paneSocketInputPolicy classifies a pane terminal socket once, at upgrade.
+// The prompt gate is unchanged; human is the daemon's own classification and
+// is what lets a visible viewer adopt an unowned pane by typing (handleWS).
+// Panes, workers and unverified local programs never adopt.
+func (a *apiServer) paneSocketInputPolicy(r *http.Request) wsInputPolicy {
+	id := a.identifyCaller(r)
+	return wsInputPolicy{
+		allowed: a.promptInputGateFor(id),
+		human:   id.Kind == callerHuman,
+		kind:    string(id.Kind),
 	}
 }

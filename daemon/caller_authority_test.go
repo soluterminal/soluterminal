@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -432,5 +433,119 @@ func TestRefusalExplainsBrowserStartedFromAPane(t *testing.T) {
 	a.refuseCaller(w, callerIdentity{Kind: callerPane, PaneID: "p1", PID: 4242}, "approve tasks", true)
 	if !strings.Contains(w.Body.String(), "started from inside a SoluTerminal pane") {
 		t.Fatalf("refusal = %s", w.Body.String())
+	}
+}
+
+// A process inside a pane is that pane even when it puts another pane's id in
+// its environment (`env SOLU_PANE_ID=<victim> curl …`).
+func TestIdentifyCallerPaneAncestryOutranksEnv(t *testing.T) {
+	if _, err := os.Stat("/proc/self/environ"); err != nil {
+		t.Skip("needs /proc")
+	}
+	a := authorityTestServer(t)
+	cmd := exec.Command("sh", "-c", "env SOLU_PANE_ID=p-victim sleep 30 & echo $!; wait")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "SOLU_PANE_ID=p-rogue"}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	var childPID int
+	if _, err := fmt.Fscan(out, &childPID); err != nil {
+		t.Fatalf("read child pid: %v", err)
+	}
+	t.Cleanup(func() {
+		if p, err := os.FindProcess(childPID); err == nil {
+			_ = p.Kill()
+		}
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if env, ok := readProcEnviron(childPID); ok && env["SOLU_PANE_ID"] == "p-victim" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child never showed its environment")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rogue := testPaneWithTail(t, "p-rogue", "rogue", "")
+	rogue.Pid = cmd.Process.Pid
+	a.mgr.panes[rogue.ID] = rogue
+	stubPeerPID(t, childPID, true)
+	if got := a.identifyCaller(httptest.NewRequest("POST", "/", nil)); got.Kind != callerPane || got.PaneID != "p-rogue" || got.FromEnv {
+		t.Fatalf("child of pane p-rogue claiming p-victim = %+v, want pane p-rogue by ancestry", got)
+	}
+}
+
+// A process that left its pane (setsid) and sets another pane's id in its
+// environment is placed only by that claim: still an agent, never the person,
+// and no pane for ownership.
+func TestIdentifyCallerDetachedEnvClaimIsAnAgentWithoutOwnership(t *testing.T) {
+	if _, err := os.Stat("/proc/self/environ"); err != nil {
+		t.Skip("needs /proc")
+	}
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("needs setsid")
+	}
+	a := authorityTestServer(t)
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	cmd := exec.Command("setsid", "-f", "env", "SOLU_PANE_ID=p-victim", "sh", "-c", "echo $$ > "+pidFile+"; exec sleep 30")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	deadline := time.Now().Add(3 * time.Second)
+	for pid == 0 {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			fmt.Sscan(strings.TrimSpace(string(b)), &pid)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("detached process never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Cleanup(func() {
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+		}
+	})
+	for deadline = time.Now().Add(2 * time.Second); ; {
+		if env, ok := readProcEnviron(pid); ok && env["SOLU_PANE_ID"] == "p-victim" {
+			if comm := readComm(pid); strings.TrimSpace(comm) == "sleep" {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("detached process never showed its environment")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	victim := testPaneWithTail(t, "p-victim", "victim", "")
+	a.mgr.panes[victim.ID] = victim
+	stubPeerPID(t, pid, true)
+	req := httptest.NewRequest("POST", "/", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	got := a.identifyCaller(req)
+	if got.Kind != callerPane || got.PaneID != "p-victim" || !got.FromEnv {
+		t.Fatalf("detached env claim = %+v, want an unverified pane claim", got)
+	}
+	// Still an agent everywhere else: never the person.
+	rec := httptest.NewRecorder()
+	if a.requireHuman(rec, req, "answer an agent's request to close or change a pane") || rec.Code != 403 {
+		t.Fatalf("requireHuman admitted a detached env claim: %d", rec.Code)
+	}
+	// For ownership it is no pane, whatever it or its header claims.
+	mcpReq := httptest.NewRequest("POST", "/mcp", nil)
+	mcpReq.Header.Set("X-Soluterminal-Pane", "p-victim")
+	if got := a.mcpTracedCallerPane(mcpReq); got != mcpClaimedCallerPrefix+"p-victim" {
+		t.Fatalf("caller = %q, want an unverified claim", got)
+	}
+	if a.paneAgentAuthority(&PaneOrigin{Source: paneOriginUser}, "p-victim", splitMCPCaller(a.mcpTracedCallerPane(mcpReq)).ID, false) != paneAgentRefused {
+		t.Fatal("a detached env claim may act on the pane it claims")
 	}
 }

@@ -142,3 +142,19 @@ describe('PaneContextMenu role lifecycle', () => {
     expect(convert).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('PaneContextMenu Resume session', () => {
+  it("resumes an exited resumable pane (the route for a pane paused by Don't resume)", () => {
+    const resume = vi.fn();
+    renderMenu({ status: 'exited', resumable: true, restartPaused: true }, { onResumePane: resume });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Resume session' }));
+    expect(resume).toHaveBeenCalledOnce();
+  });
+  it('is hidden on a running pane and on an exited pane that cannot resume', () => {
+    const { unmount } = renderMenu({ status: 'running' }, { onResumePane: vi.fn() });
+    expect(screen.queryByRole('menuitem', { name: 'Resume session' })).toBeNull();
+    unmount();
+    renderMenu({ status: 'exited', resumable: false }, { onResumePane: vi.fn() });
+    expect(screen.queryByRole('menuitem', { name: 'Resume session' })).toBeNull();
+  });
+});

@@ -512,19 +512,10 @@ func (a *Aria) toolReadFile(path string, startLine, maxLines int) string {
 	if reason := secretPathRefusal(abs); reason != "" {
 		return "error: " + reason
 	}
-	info, err := os.Stat(abs)
+	data, _, err := readUserFile(abs, maxFileBytes)
 	if err != nil {
-		return fmt.Sprintf("error: cannot stat: %v", err)
-	}
-	if info.IsDir() {
-		return "error: path is a directory"
-	}
-	if info.Size() > maxFileBytes {
-		return "error: file too large"
-	}
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		return fmt.Sprintf("error: cannot read: %v", err)
+		msg, _ := userFileReadError(err)
+		return "error: " + msg
 	}
 	if containsNullByte(data) {
 		return "error: file appears binary"

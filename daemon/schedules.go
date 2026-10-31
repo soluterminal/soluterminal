@@ -804,6 +804,25 @@ func scheduleKindChoices() string {
 	return strings.Join(kinds[:len(kinds)-1], ", ") + ", or " + kinds[len(kinds)-1]
 }
 
+// errScheduleTaskNeedsClaude refuses a Claude-task schedule on a machine with
+// no Claude Code CLI. Without it every run would fail at fire time (and push
+// the failure to the phone), so a Codex-only user is told at save time.
+var errScheduleTaskNeedsClaude = errors.New(`Claude Code isn't installed on this computer, so a Claude task can't run. ` +
+	`Install Claude Code, or use a prompt schedule (kind "prompt", "Prompt into a pane" in the app) ` +
+	`to send the prompt to a pane running another agent such as Codex.`)
+
+// scheduleTaskRunnable reports whether a Claude task could start here: the
+// same binary lookup the run itself does (runTask → resolveClaudeBin). A var
+// so tests that create task schedules don't need a claude on PATH.
+var scheduleTaskRunnable = scheduleTaskClaudeResolves
+
+func scheduleTaskClaudeResolves() error {
+	if _, err := resolveClaudeBin(); err != nil {
+		return errScheduleTaskNeedsClaude
+	}
+	return nil
+}
+
 // Create adds a new schedule and, if enabled, wires it into the cron. The
 // resulting schedule carries no creator provenance — the HTTP API and the
 // dialog behind it have no pane to attribute. See CreateWithOrigin.
@@ -817,6 +836,11 @@ func (s *ScheduleStore) Create(in ScheduleInput) (*Schedule, error) {
 func (s *ScheduleStore) CreateWithOrigin(in ScheduleInput, createdBy *ScheduleOrigin) (*Schedule, error) {
 	if err := in.validate(); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(in.Kind) == "task" {
+		if err := scheduleTaskRunnable(); err != nil {
+			return nil, err
+		}
 	}
 	enabled := true
 	if in.Enabled != nil {
@@ -979,6 +1003,15 @@ func (s *ScheduleStore) ClearOwnedBy(schedID string) error {
 func (s *ScheduleStore) Update(id string, in ScheduleInput) (*Schedule, error) {
 	if err := in.validate(); err != nil {
 		return nil, err
+	}
+	// Switching another kind to a Claude task needs Claude here, as creating
+	// one does. An existing task stays editable: Claude may come back.
+	if strings.TrimSpace(in.Kind) == "task" {
+		if prev, ok := s.Get(id); ok && prev.Kind != "task" {
+			if err := scheduleTaskRunnable(); err != nil {
+				return nil, err
+			}
+		}
 	}
 	s.mu.Lock()
 	sched, ok := s.items[id]

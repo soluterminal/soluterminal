@@ -4073,6 +4073,28 @@ body.mobile-approval-visible .approval-actions { display: none; }
 .error-boundary-state button {
   align-self: flex-start;
 }
+/* Root boundary (main.tsx): fills the window instead of leaving it blank. */
+.root-error-shell {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: safe center;
+  overflow-y: auto;
+  padding: 24px;
+  background: var(--bg);
+}
+.root-error-state {
+  width: min(560px, 100%);
+  margin: 0;
+}
+.root-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.root-error-actions button {
+  align-self: auto;
+}
 
 /* Cloud auth gate — compact, work-focused surfaces that match the
    application shell while the user is outside the main pane layout. */
@@ -4981,8 +5003,8 @@ button.cloud-gate-inline-link {
 .pane-pack-cwd { color: var(--fg-dim); border-color: var(--border); background: var(--bg-3); }
 .pane-pack-unsupported,
 .pane-pack-missing { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 60%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
-/* Auto-mode badge in the pane header — a click-to-cycle button (off →
-   cautious → always → off). Magenta for always-approve and violet for
+/* Auto-mode chip in the pane header — opens a three-option menu
+   (PaneAutoModeChip); labels "manual" / "auto?" / "AUTO". Magenta for always-approve and violet for
    cautious — distinct from the existing busy/awaiting/choice palette
    (green/cyan/yellow/red) so users can read both indicators without
    confusion. Visual hierarchy encodes the mode: greyed (off) → dotted
@@ -5191,6 +5213,7 @@ button.cloud-gate-inline-link {
 }
 /* Always — solid magenta box with a faint fill (the strongest, "on" state). */
 .pane-automode-always {
+  font-weight: 700;
   color: var(--automode-always);
   border: 1px solid var(--automode-always);
   background: color-mix(in srgb, var(--automode-always) 14%, transparent);
@@ -5326,7 +5349,7 @@ button.cloud-gate-inline-link {
   border-radius: 3px;
   padding: 1px 4px;
   outline: none;
-  min-width: 100px;
+  min-width: 2.5rem;
   max-width: 240px;
   flex: 0 1 auto;
 }
@@ -5338,8 +5361,22 @@ button.cloud-gate-inline-link {
 .pane-status.closed { color: var(--danger); }
 .pane-status.exited { color: var(--fg-dim); }
 .pane-unsent-message { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border: 1px solid var(--warn); border-radius: 8px; color: var(--warn); font-size: 11px; white-space: nowrap; }
-.pane-unsent-message button { padding: 0 2px; font-size: inherit; color: inherit; }
-.pane-actions { display: flex; gap: 4px; }
+.pane-unsent-message-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pane-unsent-message button { flex-shrink: 0; padding: 0 2px; font-size: inherit; color: inherit; }
+.pane-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }
+/* Between fold tiers, middle chips yield to the title and fixed actions.
+   Signals remain present; long labels clip instead of widening the row. */
+.pane-header > :is(.pane-status, .pane-turn-chip, .pane-unsent-message,
+  .pane-review, .pane-resume-badge, .pane-role-badge, .pane-schedule-chip,
+  .pane-account-chip, .pane-delegated-chip, .pane-delegated-pending-chip,
+  .pane-automode-badge, .pane-autoapproving-chip) {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-header .pane-review-chip { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Agent turn readout (PaneTurnChip): "Δ files · +a −r · 2m ago" (click →
    that turn's diff) or "done 2m ago". Follows the title (the title stops
    growing when a chip is present). For agent panes it is also the unread
@@ -5402,17 +5439,30 @@ button.cloud-gate-inline-link {
    Fold low-priority header items by PANE width (the header is a query
    container named `panehdr`). Unlike the mobile @media rules below, this reacts
    to the PANE's width, so a vertical split on a wide monitor degrades too.
-   Collapse order: cwd → status/model → resume/auto badges → zoom button. The
-   floor that always survives: activity dot · title · Term/Native (+Focus/Full)
-   · ⋯ · ×. The ⋯ menu and double-click-header (zoom) keep folded actions
+   Collapse order: cwd → working-on → status/model → identity → message
+   → resume/role/schedule/account → origin → zoom. Attention/warning chips
+   stay visible. The floor is activity dot · title · ⋯ · ×.
+   The ⋯ menu and double-click-header (zoom) keep folded actions
    reachable. Pure CSS — no ResizeObserver (hot-path scars). */
 @container panehdr (max-width: 30rem) {
   .pane-cwd { display: none; }
   .pane-turn-chip.done:not(.unseen) { display: none; }
 }
+@container panehdr (max-width: 28rem) {
+  /* With no handle, working-on is the chip’s only label. */
+  .pane-identity-chip:has(.pane-identity-handle) .pane-identity-working-on { display: none; }
+}
 @container panehdr (max-width: 25rem) {
   .pane-status,
   .native-model { display: none; }
+}
+@container panehdr (max-width: 24rem) {
+  .pane-identity-chip:not(.is-attention):not(.is-warn) { display: none; }
+}
+@container panehdr (max-width: 23rem) {
+  /* Message receipts currently have no state class; preserve attention/unread
+     signals if present, just as delegated/account chips do below. */
+  .pane-message-chip:not(.is-attention):not(.is-warn):not(.unread) { display: none; }
 }
 @container panehdr (max-width: 21rem) {
   .pane-resume-badge,
@@ -5432,6 +5482,9 @@ button.cloud-gate-inline-link {
      the countdown remains readable and cancel is still reachable via the
      ARIA panel's autoresponder strip. */
   .pane-autoapproving-cancel { display: none; }
+}
+@container panehdr (max-width: 19rem) {
+  .pane-origin:not(.is-attention):not(.is-warn) { display: none; }
 }
 @container panehdr (max-width: 17rem) {
   .pane-zoom-btn { display: none; }
@@ -7879,6 +7932,20 @@ kbd {
   flex-shrink: 0;
 }
 .toast-msg { flex: 1; line-height: 1.35; }
+/* Agents' requests waiting for the person's OK (PaneConfirmHost): their own
+   strip, so the capped toast queue never pushes one out of reach. */
+.pane-confirm-host {
+  position: fixed;
+  left: 50%;
+  top: 48px; /* under the topbar, clear of the panes' bottom controls */
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: var(--z-toast);
+  max-width: calc(100vw - 32px);
+}
+.pane-confirm { pointer-events: auto; max-width: 480px; }
 .toast-info    { border-left: 3px solid var(--accent-2); }
 .toast-success { border-left: 3px solid var(--ok); }
 .toast-success .toast-icon { color: var(--ok); }
@@ -16836,7 +16903,7 @@ button.pane-account-chip.is-warn:hover { border-color: var(--warn); color: var(-
 @container panehdr (max-width: 480px) {
   .pane-role-long { display: none; }
   .pane-role-short { display: inline; }
-  .pane-origin { flex: 0 0 auto; min-width: auto; } /* a word or two never shrinks */
+  .pane-origin { min-width: 0; } /* short roles can still yield to the actions */
 }
 .pane-origin-btn { border: 1px solid var(--border); background: transparent; color: var(--fg-muted, var(--fg)); border-radius: 4px; font-size: 10.5px; font-weight: 600; line-height: 1; padding: 3px 6px; cursor: pointer; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .pane-origin-card-heading { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; opacity: .75; margin: 6px 0 3px; }
@@ -16855,11 +16922,7 @@ button.pane-account-chip.is-warn:hover { border-color: var(--warn); color: var(-
 .pane-identity-working-on { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .85; }
 /* The name keeps its natural width (up to a third of the header) and sits
    next to the chip; only then does it ellipsize. */
-.pane-header:has(.pane-identity-chip) .pane-title { flex: 0 0 auto; max-width: 33%; }
-.pane-header:has(.pane-identity-chip) .pane-actions { margin-left: auto; }
-@container panehdr (max-width: 480px) {
-  .pane-identity-chip:has(.pane-identity-handle) .pane-identity-working-on { display: none; }
-}
+.pane-header:has(.pane-identity-chip) .pane-title { flex: 0 1 auto; max-width: 33%; }
 .pane-identity-dialog label { display: block; margin-top: 10px; font-size: 12px; font-weight: 600; }
 .pane-identity-dialog input { width: 100%; box-sizing: border-box; }
 .pane-identity-handle-field { display: flex; align-items: center; gap: 4px; }
@@ -16868,7 +16931,7 @@ button.pane-account-chip.is-warn:hover { border-color: var(--warn); color: var(-
 .pane-identity-handle-field span { font-family: 'SF Mono','Menlo',monospace; opacity: .7; }
 .pane-identity-handle-field input { font-family: 'SF Mono','Menlo',monospace; }
 /* An agent just messaged this pane (PaneMessageChip). */
-.pane-message-chip { flex: 0 0 auto; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); border-radius: 9px; font-size: 10.5px; font-weight: 600; line-height: 1; padding: 3px 7px; cursor: pointer; white-space: nowrap; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; }
+.pane-message-chip { flex: 0 4 auto; min-width: 0; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); border-radius: 9px; font-size: 10.5px; font-weight: 600; line-height: 1; padding: 3px 7px; cursor: pointer; white-space: nowrap; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; }
 .pane-message-chip:disabled { cursor: default; opacity: .75; }
 .pane-origin-btn:hover, .pane-origin-btn[aria-expanded="true"] { color: var(--fg); background: var(--bg-hover, rgba(127,127,127,.15)); }
 .pane-origin-btn:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 1px; }

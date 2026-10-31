@@ -1,12 +1,24 @@
 import type { Session } from '@supabase/supabase-js';
+import { renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { askToConnectAfterSignIn, connectThisComputer, CONNECT_PROMPT_BODY, CONNECT_PROMPT_TITLE } from './accountConnect';
+import {
+  askToConnectAfterSignIn,
+  connectPromptPending,
+  connectThisComputer,
+  CONNECT_DECLINED_TOAST,
+  CONNECT_LATER_TOAST,
+  CONNECT_PROMPT_BODY,
+  CONNECT_PROMPT_TITLE,
+  resetAutoConnectForTests,
+  useAskToConnectOnSignIn,
+} from './accountConnect';
 import { useStore } from './store';
 import { useCloud } from './cloud';
 
 afterEach(() => {
   vi.restoreAllMocks();
   useCloud.setState({ session: null, isLocal: false });
+  resetAutoConnectForTests();
 });
 
 describe('connectThisComputer', () => {
@@ -51,7 +63,7 @@ describe('askToConnectAfterSignIn', () => {
     });
     return { spy, bodies };
   }
-  function answerDialog(choice: boolean) {
+  function answerDialog(choice: boolean | null) {
     const opened: Array<{ title?: string; message: string; confirmLabel?: string; cancelLabel?: string }> = [];
     const prev = useStore.getState().openDialog;
     useStore.setState({
@@ -79,13 +91,63 @@ describe('askToConnectAfterSignIn', () => {
     expect(bodies).toEqual([{ force: false, check: true }, { force: true }]);
   });
 
-  it('remembers Not now on the daemon', async () => {
+  it('remembers the Not now button on the daemon', async () => {
     signedIn();
     const { bodies } = daemon([{ status: 'available' }, { status: 'declined' }]);
+    const toast = vi.spyOn(useStore.getState(), 'toast');
     const dialog = answerDialog(false);
     await askToConnectAfterSignIn();
     dialog.restore();
     expect(bodies).toEqual([{ force: false, check: true }, { force: false, decline: true }]);
+    expect(toast).toHaveBeenCalledWith(CONNECT_DECLINED_TOAST, expect.anything());
+  });
+
+  it('treats Escape or a click outside as "later", not as Not now', async () => {
+    signedIn();
+    const { bodies } = daemon([{ status: 'available' }, { status: 'connecting' }]);
+    const toast = vi.fn();
+    const prevToast = useStore.getState().toast;
+    useStore.setState({ toast: toast as never });
+    const dialog = answerDialog(null);
+    await askToConnectAfterSignIn();
+    dialog.restore();
+    // Nothing is sent to the daemon, so the next start asks again.
+    expect(bodies).toEqual([{ force: false, check: true }]);
+    expect(toast).toHaveBeenCalledWith(CONNECT_LATER_TOAST, expect.objectContaining({
+      action: expect.objectContaining({ label: 'Connect now' }),
+    }));
+    // The toast's "Connect now" connects straight away.
+    const action = (toast.mock.calls[0][1] as { action: { run: () => void } }).action;
+    action.run();
+    await new Promise((r) => setTimeout(r, 0));
+    useStore.setState({ toast: prevToast });
+    expect(bodies).toEqual([{ force: false, check: true }, { force: true }]);
+  });
+
+  it('is pending while it asks, so other first-run questions wait', async () => {
+    signedIn();
+    daemon([{ status: 'available' }, { status: 'declined' }]);
+    let resolveDialog: ((v: unknown) => void) | null = null;
+    const prev = useStore.getState().openDialog;
+    useStore.setState({ openDialog: ((req: { resolve: (v: unknown) => void }) => { resolveDialog = req.resolve; }) as never });
+    const asked = askToConnectAfterSignIn();
+    expect(connectPromptPending()).toBe(true);
+    await vi.waitFor(() => expect(resolveDialog).not.toBeNull());
+    expect(connectPromptPending()).toBe(true);
+    resolveDialog!(false);
+    await asked;
+    useStore.setState({ openDialog: prev });
+    expect(connectPromptPending()).toBe(false);
+  });
+
+  it('waits until the tour and checklist are closed', async () => {
+    signedIn();
+    const { bodies } = daemon([{ status: 'connected' }]);
+    const { rerender } = renderHook(({ ready }) => useAskToConnectOnSignIn(ready), { initialProps: { ready: false } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bodies).toEqual([]);
+    rerender({ ready: true });
+    await vi.waitFor(() => expect(bodies).toEqual([{ force: false, check: true }]));
   });
 
   it('does not ask after Not now, a Disconnect, or when already connected', async () => {

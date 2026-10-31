@@ -145,10 +145,25 @@ func TestSetPaneInfoAuthority(t *testing.T) {
 	if _, failed := mcpResultText(t, a.mcpToolSetPaneInfo(map[string]any{"pane_id": "lead", "working_on": "asked"}, "worker")); !failed {
 		t.Fatal("still refused without user_requested")
 	}
-	if text, failed := mcpResultText(t, a.mcpToolSetPaneInfo(map[string]any{"pane_id": "lead", "working_on": "asked", "user_requested": true}, "worker")); failed {
+	// user_requested alone changes nothing: the person allows it in the app.
+	shortenPaneConfirmWait(t, 20*time.Millisecond)
+	text, failed = mcpResultText(t, a.mcpToolSetPaneInfo(map[string]any{"pane_id": "lead", "working_on": "asked", "user_requested": true}, "worker"))
+	if failed || !strings.Contains(text, "waiting for your OK in the app") {
 		t.Fatalf("user_requested: %q", text)
 	}
 	lead, _ := a.mgr.Get("lead")
+	if got := lead.Snapshot().Identity; got != nil && got.WorkingOn == "asked" {
+		t.Fatal("changed before the person allowed it")
+	}
+	pending := a.pendingPaneConfirms()
+	if len(pending) != 1 || pending[0].Message != "@api-fix wants to change pane #1 “claude”: working on → “asked”." {
+		t.Fatalf("pending = %+v", pending)
+	}
+	if res, ok := a.decidePaneConfirm(pending[0].ID, true); !ok {
+		t.Fatal("no request to allow")
+	} else if text, failed := mcpResultText(t, res); failed {
+		t.Fatalf("allowed change: %q", text)
+	}
 	if got := lead.Snapshot().Identity; got.WorkingOn != "asked" || got.WorkingOnBy != "#2 Codex" {
 		t.Fatalf("working_on provenance: %+v", got)
 	}

@@ -96,21 +96,25 @@ func TestKillPaneLimitsAgentsToPanesTheyStarted(t *testing.T) {
 func TestKillPaneGuardrailExceptions(t *testing.T) {
 	user := &PaneOrigin{Source: paneOriginUser}
 	worker := &PaneOrigin{Source: paneOriginAgent, ByPaneID: "pane-lead", LeadPaneID: "pane-lead"}
+	a := &apiServer{}
 	for _, tc := range []struct {
-		name          string
-		target        *PaneOrigin
-		paneID, call  string
-		asked, refuse bool
+		name         string
+		target       *PaneOrigin
+		paneID, call string
+		asked        bool
+		want         paneAgentDecision
 	}{
-		{"someone else's pane", user, "pane-x", "pane-lead", false, true},
-		{"user asked", user, "pane-x", "pane-lead", true, false},
-		{"no origin (older pane)", nil, "pane-old", "pane-lead", false, false},
-		{"own worker", worker, "pane-w", "pane-lead", false, false},
-		{"itself", user, "pane-x", "pane-x", false, false},
-		{"unattributed caller", user, "pane-x", "", false, false},
+		{"someone else's pane", user, "pane-x", "pane-lead", false, paneAgentRefused},
+		{"user asked: the person confirms", user, "pane-x", "pane-lead", true, paneAgentNeedsOK},
+		{"no origin (older pane) is the person's", nil, "pane-old", "pane-lead", false, paneAgentRefused},
+		{"no origin, user asked", nil, "pane-old", "pane-lead", true, paneAgentNeedsOK},
+		{"own worker", worker, "pane-w", "pane-lead", false, paneAgentAllowed},
+		{"itself", user, "pane-x", "pane-x", false, paneAgentAllowed},
+		{"unattributed caller owns nothing", user, "pane-x", "", false, paneAgentRefused},
+		{"unattributed caller, user asked", worker, "pane-w", "", true, paneAgentNeedsOK},
 	} {
-		if got := killPaneRefused(tc.target, tc.paneID, tc.call, tc.asked); got != tc.refuse {
-			t.Fatalf("%s: refused=%v, want %v", tc.name, got, tc.refuse)
+		if got := a.paneAgentAuthority(tc.target, tc.paneID, tc.call, tc.asked); got != tc.want {
+			t.Fatalf("%s: decision=%v, want %v", tc.name, got, tc.want)
 		}
 	}
 	if o, _ := createPaneOrigin(createPaneReq{Origin: &PaneOrigin{Source: paneOriginAgent, ByPaneID: "pane-lead"}, StartedBy: "user"}, "", time.Now()); o.Source != paneOriginAgent {

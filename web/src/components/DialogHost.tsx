@@ -57,6 +57,9 @@ export function DialogHost() {
     closeDialog(isPrompt || isSelect ? value : true);
   };
   const onCancel = () => closeDialog(isPrompt || isSelect ? null : false);
+  // Escape and a click outside: the same as Cancel, unless the caller asked
+  // to tell a dismissal apart (it then resolves null).
+  const onDismiss = () => (dialog.distinguishDismiss ? closeDialog(null) : onCancel());
 
   // Keys are handled on the overlay (capture not needed) so they don't leak
   // through to global app handlers (CommandPalette, pane hotkeys) while the
@@ -72,7 +75,7 @@ export function DialogHost() {
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      onCancel();
+      onDismiss();
     }
   };
 
@@ -80,7 +83,7 @@ export function DialogHost() {
     <div
       className="app-dialog-backdrop"
       role="presentation"
-      onMouseDown={onCancel}
+      onMouseDown={onDismiss}
       onKeyDown={onKeyDown}
     >
       <div

@@ -617,8 +617,11 @@ func main() {
 	// asked for. So by default we SUSPEND those panes — they show the "Resume
 	// session" affordance and come back only when the user clicks. Users can opt
 	// back into eager auto-respawn in Preferences; SOLU_AUTO_RESUME=1 seeds the
-	// same default for installs that have not saved a preference yet.
-	autoResume := recoverySettings.AutoResumeAfterRestart()
+	// same default for installs that have not saved a preference yet. "Don't
+	// resume" suspends the same way but marks the panes RestartPaused, so the
+	// client does not offer to resume them either (suspendAfterRestart).
+	resumeMode := recoverySettings.Mode()
+	autoResume := resumeMode == recoveryResumeAuto
 	var toResume []PersistedPane
 	var suspended int
 	ownerHistories, historyErr := loadOwnerHistories(*dataDir)
@@ -767,7 +770,7 @@ func main() {
 					toResume = append(toResume, info)
 					continue
 				}
-				if sp := mgr.SuspendExisting(&info); sp != nil {
+				if sp := suspendAfterRestart(mgr, &info, resumeMode); sp != nil {
 					suspended++
 					// Persist the kind/session repair so panes.json is corrected.
 					if kindHealed || len(identityNotes) > 0 {
@@ -799,7 +802,7 @@ func main() {
 		log.Printf("reattached pane %s → %s (agent pid %d)", info.ID, info.Title, info.AgentPid)
 	}
 	if suspended > 0 {
-		log.Printf("suspended %d resumable agent pane(s) for manual resume (enable auto-resume in Preferences to auto-respawn)", suspended)
+		log.Printf("suspended %d resumable agent pane(s) for manual resume (after-restart mode %q)", suspended, resumeMode)
 	}
 
 	// Sweep orphan agent sockets. Anything in ~/.solu/agents/ that doesn't
@@ -1226,6 +1229,9 @@ func main() {
 	updater.SetCloudTeamUpdates(api.entitlements.cloudTeamUpdatesPath)
 	api.entitlements.credsChanged = api.cloudCredsChangedCh
 	api.agentAuthority = newAgentAuthority(*dataDir)
+	// An agent's open request about a pane ends when that pane, or the
+	// asking agent's pane, closes (pane_confirm.go).
+	mgr.SetOnPaneRemoved(api.dropPaneConfirmsFor)
 	api.trustedDevices = newTrustedDevices(*dataDir)
 	// Reminder names already mirrored to the cloud are replaced as soon as
 	// approved-only is turned on (schedules_reminders.go reminderPayload).

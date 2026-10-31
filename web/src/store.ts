@@ -1778,6 +1778,7 @@ function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
     && a.createdAt === b.createdAt
     && a.exitCode === b.exitCode
     && (a.resumable ?? false) === (b.resumable ?? false)
+    && (a.restartPaused ?? false) === (b.restartPaused ?? false)
     && (a.resumeReady ?? false) === (b.resumeReady ?? false)
     && (a.identityBlocked ?? false) === (b.identityBlocked ?? false)
     && a.cols === b.cols
@@ -3858,14 +3859,11 @@ export const useStore = create<State>((set, get, storeApi) => ({
       const prev = s.paneOwnership[id];
       const prevState = s.paneOwnerState[id];
       if (prev === owned && prevState === ownerState && s.paneOwnershipTokens[id] === token) return {};
-      // Only reset claimIntent on a genuine displacement
-      // (owned → not-owned transition). Initial "you just joined
-      // this pane, you don't own it" broadcasts have prev=undefined
-      // and MUST NOT reset claimIntent, otherwise every pane
-      // switch on mobile would re-gate the overlay: onopen would
-      // auto-claim, but the server's initial owned=false arrives
-      // before the claim is processed and would wipe the intent.
-      const displaced = prev === true && owned === false;
+      // Only a daemon frame identifying a peer owner revokes Take over
+      // intent. A socket reset or claim timeout also marks input unowned,
+      // but says nothing about displacement. A later peer frame must still
+      // revoke intent even if that local reset already set owned=false.
+      const displaced = owned === false && ownerState === 'other';
       const nextState = { ...s.paneOwnerState };
       if (ownerState) nextState[id] = ownerState;
       else delete nextState[id]; // old daemon: no provenance — legacy copy
@@ -6046,7 +6044,7 @@ export const useStore = create<State>((set, get, storeApi) => ({
     // Resume button disables immediately, without waiting on the round-trip.
     set((s) => ({
       panes: s.panes[id]
-        ? { ...s.panes, [id]: { ...s.panes[id], status: 'running', resumable: false, exitCode: undefined } }
+        ? { ...s.panes, [id]: { ...s.panes[id], status: 'running', resumable: false, restartPaused: false, exitCode: undefined } }
         : s.panes,
     }));
     panesResuming.add(id);

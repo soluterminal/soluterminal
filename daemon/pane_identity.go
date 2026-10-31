@@ -266,6 +266,13 @@ func paneIdentityErrStatus(err error) int {
 // pane (the default) or on a pane the caller started. Another pane's identity
 // is the user's to change, so it needs user_requested like kill_pane.
 func (a *apiServer) mcpToolSetPaneInfo(args map[string]any, callerPane string) any {
+	return a.mcpToolSetPaneInfoAs(args, paneCaller{ID: callerPane})
+}
+
+// mcpToolSetPaneInfoAs is mcpToolSetPaneInfo for a caller that may only claim a pane
+// (paneCaller.Claimed): it owns nothing, and the prompt says so.
+func (a *apiServer) mcpToolSetPaneInfoAs(args map[string]any, c paneCaller) any {
+	callerPane := c.ID
 	target := strings.TrimSpace(mcpArgString(args, "pane_id"))
 	if target == "" {
 		target = strings.TrimSpace(callerPane)
@@ -277,12 +284,6 @@ func (a *apiServer) mcpToolSetPaneInfo(args map[string]any, callerPane string) a
 	if !ok {
 		return toolErr("no pane " + target + " (call list_panes for ids)")
 	}
-	// Unlike kill_pane, a pane without an origin record is not fair game: an
-	// agent names itself and the panes it started, and others only when asked.
-	asked, _ := args["user_requested"].(bool)
-	if callerPane != "" && p.ID != callerPane && !asked && !paneStartedByCaller(p.Snapshot().Origin, callerPane) {
-		return toolErr("pane " + p.ID + " was not started by you; change its handle or working_on only if the user asked, with user_requested: true")
-	}
 	var handle, workingOn *string
 	if v, ok := args["handle"].(string); ok {
 		handle = &v
@@ -290,6 +291,78 @@ func (a *apiServer) mcpToolSetPaneInfo(args map[string]any, callerPane string) a
 	if v, ok := args["working_on"].(string); ok {
 		workingOn = &v
 	}
+	// An agent names itself and the panes it started; anyone else's pane
+	// (including one without an origin record) only with the person's OK.
+	asked, _ := args["user_requested"].(bool)
+	switch a.paneAgentAuthority(p.Snapshot().Origin, p.ID, callerPane, asked) {
+	case paneAgentRefused:
+		return toolErr(a.paneConfirmTarget(p) + " was not started by you, so you can't change its handle or working_on. If the user asked you to, call set_pane_info again with user_requested: true and they will be asked to allow it in the SoluTerminal app. Otherwise leave it: they can change it themselves.")
+	case paneAgentNeedsOK:
+		if handle == nil && workingOn == nil {
+			return toolErr("set handle and/or working_on")
+		}
+		name := a.paneConfirmTarget(p)
+		caller := a.paneConfirmCaller(c)
+		change := paneInfoChangeText(handle, workingOn)
+		key := paneConfirmChange + "\x00" + c.bucket() + "\x00" + p.ID + "\x00" + paneInfoChangeKey(handle, workingOn)
+		req, err := a.requestPaneConfirmFor(key, c.bucket(), paneConfirmView{
+			Action:       paneConfirmChange,
+			CallerPaneID: strings.TrimSpace(callerPane),
+			Caller:       caller,
+			PaneID:       p.ID,
+			Pane:         name,
+			Title:        "Change " + name + "?",
+			Message:      caller + " wants to change " + name + ": " + change + ".",
+		}, func() map[string]any {
+			target, ok := a.mgr.Get(p.ID)
+			if !ok {
+				return toolErr(name + " has closed; nothing was changed.")
+			}
+			return a.applyPaneInfo(target, handle, workingOn, callerPane)
+		})
+		if err != nil {
+			return toolErr(err.Error())
+		}
+		return awaitPaneConfirm(req, paneConfirmWaitingText(name+" is not changed yet"))
+	}
+	return a.applyPaneInfo(p, handle, workingOn, callerPane)
+}
+
+// paneInfoChangeText describes a set_pane_info change for the person:
+// `handle → @api-fix; working on → “Fixing the API”`.
+func paneInfoChangeText(handle, workingOn *string) string {
+	var parts []string
+	if handle != nil {
+		if h, err := normalizePaneHandle(*handle); err == nil && h != "" {
+			parts = append(parts, "handle → @"+h)
+		} else if strings.TrimSpace(*handle) == "" {
+			parts = append(parts, "clear the handle")
+		} else {
+			parts = append(parts, "handle → "+strconvQuote(clipRunes(oneLine(*handle), 40)))
+		}
+	}
+	if workingOn != nil {
+		if w := clipRunes(oneLine(*workingOn), paneWorkingOnMaxLen); w != "" {
+			parts = append(parts, "working on → “"+w+"”")
+		} else {
+			parts = append(parts, "clear the working-on line")
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func paneInfoChangeKey(handle, workingOn *string) string {
+	k := func(s *string) string {
+		if s == nil {
+			return "\x01"
+		}
+		return *s
+	}
+	return k(handle) + "\x00" + k(workingOn)
+}
+
+// applyPaneInfo sets the handle and/or working-on line once allowed.
+func (a *apiServer) applyPaneInfo(p *Pane, handle, workingOn *string, callerPane string) map[string]any {
 	by := "agent"
 	if c, ok := a.mgr.Get(callerPane); ok {
 		by = a.paneLabelFor(c)

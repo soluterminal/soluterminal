@@ -9,6 +9,7 @@ import { confirmDialog } from '../lib/dialog';
 import { multiWindowAvailable, openWorkspaceWindow } from '../tauri-browser';
 import { shouldConfirmModeSwitch } from '../native/modeSwitch';
 import { autoModeMenuLabel, nextAutoMode } from '../lib/autoMode';
+import { applyAutoModeChange } from '../lib/autoModeConfirm';
 import { REBINDABLE_ACTIONS } from '../keybindings';
 import type { PaneAutoMode } from '../types';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
@@ -668,9 +669,10 @@ export function CommandPalette({
       });
     }
 
-    // Auto-approve cycle for the focused pane. Same source of truth as
-    // the header badge + context-menu radio (api.setPaneAutoMode), so the
-    // three surfaces never drift. Label shows the next mode in the cycle.
+    // Auto-approve for the focused pane. Same source of truth as the header
+    // chip + context-menu radio (api.setPaneAutoMode), so the three surfaces
+    // never drift. The one-step toggle moves Off ↔ Approve with caution (and
+    // Always back to Off); Always approve is its own action and asks first.
     // Gated on the broader auto-approve capability so Codex panes get it too
     // (the renderer toggle above stays Claude-only).
     if (isFocusedAutoApproveCapable && focusedPaneId) {
@@ -678,11 +680,25 @@ export function CommandPalette({
       list.push({
         id: 'pane.autoMode',
         label: `Set focused pane auto-approval: ${autoModeMenuLabel(nextMode)}`,
-        hint: `Auto-approve is "${autoModeMenuLabel(focusedAutoMode)}" — cycle to "${autoModeMenuLabel(nextMode)}"`,
+        hint: `Auto-approve is "${autoModeMenuLabel(focusedAutoMode)}"`,
         category: 'Terminal',
-        keywords: 'aria auto approve approval cautious always off mode pane',
+        keywords: 'aria auto approve approval cautious off manual mode pane',
         run: () => void useStore.getState().setPaneAutoMode(focusedPaneId, nextMode).catch(() => {}),
       });
+      if (focusedAutoMode !== 'always') {
+        list.push({
+          id: 'pane.autoMode.always',
+          label: 'Set focused pane auto-approval: Always approve…',
+          hint: 'Asks you to confirm first',
+          category: 'Terminal',
+          keywords: 'aria auto approve approval always mode pane',
+          run: () => {
+            // Read the pane at run time, then capture it for the confirmation.
+            const target = useStore.getState().panes[focusedPaneId];
+            if (target) void applyAutoModeChange(target, 'always');
+          },
+        });
+      }
     }
 
     // Agent turns + recently closed panes.
