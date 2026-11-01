@@ -1,5 +1,5 @@
 {
-  "0.0.1231": [
+  "0.0.1232": [
     "Panes that an agent starts now appear in your open workspace straight away, next to the pane that started them, without reloading. A pane you’ve closed no longer comes back as a “Saved pane” tile.",
     "Each workspace now keeps its panes in an even grid as you open and close them. Dragging a divider, moving a pane or choosing a preset switches that workspace to Custom; “Re-tile panes” goes back to the automatic grid.",
     "The sidebar now shows each workspace as a tree, with the panes an agent started listed under the pane that started them.",

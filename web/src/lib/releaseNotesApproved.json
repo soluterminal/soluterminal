@@ -80,11 +80,11 @@
       "date": "2026-10-31",
       "note": "24 lines. Benjamin approved the 20-line base, the typing-fix line (in engineering's pane) and the reopen, menu-items and narrow-header lines (in CMO's pane) on 2026-10-31."
     },
-    "0.0.1231": {
+    "0.0.1232": {
       "sha256": "601f3582f6e1afd31c2406490fb41c84893940c83deb22b1765056ba5ff5bc0b",
       "approvedBy": "Benjamin",
       "date": "2026-11-01",
-      "note": "Benjamin in @release-lead's pane: \"yes, 1231 notes\". CMO draft soluterminal-1231-notes.md (d1dcc07); 33 lines."
+      "note": "Benjamin in @release-lead's pane: \"yes, 1231 notes\". CMO draft soluterminal-1231-notes.md (d1dcc07); 33 lines. Re-cut as 0.0.1232 after the 0.0.1231 official build failed on a stale Windows resource (v0.0.1231 tag never published); notes text unchanged."
     }
   }
 }
