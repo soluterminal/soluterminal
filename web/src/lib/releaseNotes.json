@@ -1,4 +1,12 @@
 {
+  "0.0.1233": [
+    "The sidebar’s workspace tree now keeps panes in the same order as your workspace, so they no longer jump around when something changes.",
+    "Clicking a workspace in the sidebar now shows just its top-level panes. Panes an agent starts sit under the pane that started them, and All panes shows everything.",
+    "In a narrow pane, the title bar now moves its details under the “+N” button one at a time, least important first, so the important ones stay visible longer. Its buttons now stay inside the pane.",
+    "Fixed: in a small pane, auto-approve could stop with “auto blocked” after a few prompts until you maximised the pane. It now keeps working.",
+    "Fixed: auto-approve now recognises permission prompts whose text wraps onto more than one line in a narrow pane.",
+    "When an agent sends a message to a Codex pane that’s busy, SoluTerminal now queues it for Codex’s next turn instead of interrupting the running one. If it can’t be queued, it waits on the pane as an unsent message you can Send or Clear, instead of sitting in the text box."
+  ],
   "0.0.1232": [
     "Panes that an agent starts now appear in your open workspace straight away, next to the pane that started them, without reloading. A pane you’ve closed no longer comes back as a “Saved pane” tile.",
     "Each workspace now keeps its panes in an even grid as you open and close them. Dragging a divider, moving a pane or choosing a preset switches that workspace to Custom; “Re-tile panes” goes back to the automatic grid.",

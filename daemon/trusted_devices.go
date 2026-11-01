@@ -707,9 +707,8 @@ type relayVerifiedDeviceKey struct{}
 
 // relayVerifiedDevice reports the device whose signature relayDeviceGate
 // verified on this very request, or "". Handlers that allow a narrow action
-// over the relay to approved devices only (remote account switching,
-// claudecreds_relay_switch.go) read it; it is never set from anything the
-// request itself carries.
+// over the relay to approved devices only read it; it is never set from
+// anything the request itself carries.
 func relayVerifiedDevice(r *http.Request) string {
 	v, _ := r.Context().Value(relayVerifiedDeviceKey{}).(string)
 	return v

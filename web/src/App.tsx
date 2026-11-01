@@ -1,4 +1,5 @@
 import './loadExtensions';
+import { isTemporaryWorkspaceView, workspaceViewLayout } from './lib/workspaceView';
 import { canExitWorkspaceView } from './lib/workspaceViewKeyboard';
 import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useAttentionOutsideBadges } from './lib/attentionBadge';
@@ -34,6 +35,8 @@ function pickDirectionalPane(focusedId: string, dir: Dir): string | null {
   for (const el of Array.from(els)) {
     const id = el.dataset.paneId!;
     const r = el.getBoundingClientRect();
+    // Retained hidden terminals have no box; they are not neighbours.
+    if (r.width === 0 || r.height === 0) continue;
     if (id === focusedId) focused = r;
     else rects.push({ id, r });
   }
@@ -378,7 +381,7 @@ export default function App() {
   // subscribing to the object identity re-rendered the entire app shell
   // (topbar, sidebar, status bar) on every splitter-drag frame — setLayout
   // builds a fresh tree per onLayout tick.
-  const hasLayout = useStore((s) => !!s.layout || !!s.workspaceView);
+  const hasLayout = useStore((s) => !!workspaceViewLayout(s));
   const focusedPaneId = useStore((s) => s.focusedPaneId);
   const killPane = useStore((s) => s.killPane);
   const setFocus = useStore((s) => s.setFocus);
@@ -1179,6 +1182,9 @@ export default function App() {
             if (eventActive() && msg.show && msg.workspace) useStore.getState().showSpawnedPane(msg.paneId!, msg.workspace);
           });
           void st.refreshPanes();
+        } else if (msg.type === 'pane.archived') {
+          void st.refreshWorkspaces({ full: true });
+          void st.refreshPanes();
         } else if (msg.type === 'pane.reviewed' && msg.text && msg.paneId) {
           // An independent review of a pane's work finished (solu-review).
           // Kept in Alerts "Recent"; anything but an approval is a warning.
@@ -1730,10 +1736,10 @@ export default function App() {
       const target = e.target as HTMLElement | null;
       const ourInput = isOurOwnInput(target);
       // Terminals/editors keep Escape; tree/sidebar/view chrome can exit.
-      if (e.key === 'Escape' && state.workspaceView && canExitWorkspaceView(e.target, document.activeElement) && !document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) {
+      if (e.key === 'Escape' && isTemporaryWorkspaceView(state.workspaceView) && canExitWorkspaceView(e.target, document.activeElement) && !document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        state.returnWorkspaceLayout();
+        state.showWorkspaceOverview();
         return;
       }
       // Optional features see each key first (extensions.ts).
@@ -1982,14 +1988,16 @@ export default function App() {
         }
       } else if (/^[1-9]$/.test(e.key)) {
         const idx = parseInt(e.key, 10) - 1;
-        const order = paneIdsInOrder(useStore.getState().layout);
+        // Numbers and cycling follow what the grid shows, never hidden workers.
+        const order = paneIdsInOrder(workspaceViewLayout(useStore.getState()));
         if (order[idx]) {
           setFocus(order[idx]);
           focusPaneTextarea(order[idx]);
           handled = true;
         }
       } else if (e.key === '[' || e.key === ']') {
-        const order = paneIdsInOrder(useStore.getState().layout);
+        // Numbers and cycling follow what the grid shows, never hidden workers.
+        const order = paneIdsInOrder(workspaceViewLayout(useStore.getState()));
         if (order.length > 0) {
           const cur = focusedPaneId ? order.indexOf(focusedPaneId) : -1;
           const delta = e.key === ']' ? 1 : -1;

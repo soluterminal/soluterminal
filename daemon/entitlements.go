@@ -16,30 +16,10 @@ import (
 	"time"
 )
 
-// Entitlements gate the daemon's non-public surfaces. There are two flags:
-//
-//   - operator: the operator's own engineering tooling (workflow engine, task
-//     owners, release train, managed agents, Aria, the Warden, the team
-//     credential pool). Customers never get these, even on a team plan.
-//   - team: features a customer team plan could carry (account switching,
-//     higher limits). Today the cloud grants both to the same allowlist.
-//
-// Clouds before the split only answer "team"; a missing operator field falls
-// back to the team verdict, so nothing changes for anyone on upgrade. The cloud (GET /api/entitlements, backed by
-// public.is_team_user()) is the authority; this file caches its verdict so a
-// team member's auto-switch keeps working through cloud outages and restarts.
-//
-// Verdict order:
-//  1. SOLU_TEAM_FEATURES=1 / =0 in the environment (~/.solu/env) — operator
-//     override and rollback.
-//  2. The last verdict the cloud gave this machine (paired: machine token) or
-//     the signed-in account (unpaired: the web forwards its Supabase token).
-//     A later answer takes effect at once, without a restart.
-//  3. Otherwise off. Nothing found on the machine grants anything: only a
-//     positive team verdict from the cloud, cached or fresh, turns the team
-//     features on (Benjamin, 2026-10-27: team machines only, the same rule as
-//     the update channel in update_channel.go). Team machines already hold a
-//     cached positive verdict.
+// Entitlements cache the cloud's access verdict for optional surfaces. The
+// environment overrides the cached verdict; otherwise only a positive cloud
+// answer enables access. Older cloud answers without an operator flag retain
+// their original fallback to the team verdict.
 
 const (
 	entitlementsFile         = "entitlements.json"
@@ -52,26 +32,20 @@ const (
 	entitlementsTeamUpdatesMaxAge = 7 * 24 * time.Hour
 )
 
-// teamOnlyPrefixes are the daemon routes refused to installs without the team
-// entitlement: switching between the user's own saved provider logins.
-var teamOnlyPrefixes = []string{
-	"/api/claude/accounts",
-	"/api/claude/refresh",
-	"/api/claude/autoswitch",
-	"/api/codex/accounts",
-	"/api/codex/refresh",
-	"/api/codex/autoswitch",
-}
+type entitlementLevel int
 
-// operatorOnlyPrefixes are refused to installs without the operator
-// entitlement. The team credential pool stores and relays members' provider
-// logins, which provider terms don't allow for customers, so it stays
-// operator-only even once team plans exist.
-var operatorOnlyPrefixes = []string{
-	"/api/claude/team",
-	"/api/codex/team",
-	"/api/muse/team",
-	"/api/team/broker",
+const (
+	entitlementTeam entitlementLevel = iota
+	entitlementOperator
+)
+
+// Registration runs only during initialization, before requests are served.
+var entitledRoutes = map[entitlementLevel][]string{}
+var entitlementDeniedMessages = map[entitlementLevel]string{}
+var entitlementFlagHooks []func(flags map[string]any, team, operator bool)
+
+func registerEntitledRoutes(level entitlementLevel, prefixes ...string) {
+	entitledRoutes[level] = append(entitledRoutes[level], prefixes...)
 }
 
 // entitlementRecord is the cached cloud verdict. Tier and SmartApprovals were
@@ -209,7 +183,7 @@ func (e *teamEntitlements) tierVerdict() (tier string, smartApprovals bool, sour
 		return tier, false, source
 	}
 	if !team && rec.normalizedTier() != tierNone {
-		// SOLU_TEAM_FEATURES=0 or a non-team account: still an account.
+		// Disabling the team entitlement preserves the signed-in account tier.
 		tier = tierAccount
 	}
 	return tier, rec.SmartApprovals && tier != tierNone, source
@@ -513,9 +487,9 @@ func pathUnder(path string, prefixes []string) bool {
 	return false
 }
 
-func teamOnlyPath(path string) bool { return pathUnder(path, teamOnlyPrefixes) }
+func teamOnlyPath(path string) bool { return pathUnder(path, entitledRoutes[entitlementTeam]) }
 
-func operatorOnlyPath(path string) bool { return pathUnder(path, operatorOnlyPrefixes) }
+func operatorOnlyPath(path string) bool { return pathUnder(path, entitledRoutes[entitlementOperator]) }
 
 // teamFeatureGate refuses team-only and operator-only routes on installs
 // without the matching entitlement. Everything else passes through untouched.
@@ -525,7 +499,7 @@ func (a *apiServer) teamFeatureGate(next http.Handler) http.Handler {
 			if on, _ := a.entitlements.operatorVerdict(); !on {
 				writeJSON(w, http.StatusForbidden, map[string]any{
 					"error":   "team_only",
-					"message": "team credentials are not available on the free beta",
+					"message": entitlementDeniedMessages[entitlementOperator],
 				})
 				return
 			}
@@ -534,7 +508,7 @@ func (a *apiServer) teamFeatureGate(next http.Handler) http.Handler {
 			if team, _ := a.entitlements.verdict(); !team {
 				writeJSON(w, http.StatusForbidden, map[string]any{
 					"error":   "team_only",
-					"message": "account switching and team credentials are not available on the free beta",
+					"message": entitlementDeniedMessages[entitlementTeam],
 				})
 				return
 			}
@@ -566,21 +540,22 @@ func (a *apiServer) handleEntitlements(w http.ResponseWriter, r *http.Request) {
 	team := tier == tierTeam
 	operator, _ := e.operatorVerdict()
 	account := tier != tierNone
-	writeJSON(w, http.StatusOK, map[string]any{
-		"tier":             tier,
-		"team":             team,
-		"operator":         operator,
-		"account":          account,
-		"accountSwitching": team,
-		// The credential pool is operator-only (see operatorOnlyPrefixes).
-		"teamCredentials": operator,
-		"viewPersonal":    a.personalViewOn(),
-		"remoteAccess":    account,
-		"push":            account,
-		"voice":           account && voiceBuiltIn,
-		"smartApprovals":  smartApprovals,
-		"source":          source,
-	})
+	flags := map[string]any{
+		"tier":           tier,
+		"team":           team,
+		"operator":       operator,
+		"account":        account,
+		"viewPersonal":   a.personalViewOn(),
+		"remoteAccess":   account,
+		"push":           account,
+		"voice":          account && voiceBuiltIn,
+		"smartApprovals": smartApprovals,
+		"source":         source,
+	}
+	for _, hook := range entitlementFlagHooks {
+		hook(flags, team, operator)
+	}
+	writeJSON(w, http.StatusOK, flags)
 }
 
 // jevEntitlementsRef publishes the boot-time entitlements cache to the Jev

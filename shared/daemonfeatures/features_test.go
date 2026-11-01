@@ -6,12 +6,12 @@ import (
 )
 
 func TestEncodeParseRoundTrip(t *testing.T) {
-	raw := Encode([]string{TeamBrokerCodex, " Team-Broker.Claude.V1 ", TeamBrokerCodex, "bad name!", ""})
-	if raw != "team-broker.claude.v1,team-broker.codex.v1" {
+	raw := Encode([]string{"example.alpha.v1", " Example.Beta.V1 ", "example.alpha.v1", "bad name!", ""})
+	if raw != "example.alpha.v1,example.beta.v1" {
 		t.Fatalf("Encode = %q", raw)
 	}
 	got := List(Parse(raw))
-	if !reflect.DeepEqual(got, []string{TeamBrokerClaude, TeamBrokerCodex}) {
+	if !reflect.DeepEqual(got, []string{"example.alpha.v1", "example.beta.v1"}) {
 		t.Fatalf("Parse/List = %v", got)
 	}
 	if len(Parse("")) != 0 {

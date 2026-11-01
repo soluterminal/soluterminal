@@ -88,7 +88,7 @@ func codexForegroundNativeAt(procRoot string, pids []int) (string, bool) {
 }
 
 func codexReplayableArgs(env, argv []string, thread string) []string {
-	if _, ok := canonicalCodexThreadID(thread); !ok || len(argv) == 0 || argv[0] == "" || paneBrokerActive(env) {
+	if _, ok := canonicalCodexThreadID(thread); !ok || len(argv) == 0 || argv[0] == "" || paneRouteActive(env) {
 		return nil
 	}
 	for _, key := range []string{"CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL", "SOLU_CODEX_RELAY_DIR"} {

@@ -29,7 +29,7 @@ import (
 // codexLiveCopy is what a live Codex pane tells its user when its login needs
 // attention. Public builds follow the user's own Codex login, so they point at
 // `codex login`; a build with saved accounts replaces these from its init
-// (codex_team_copy.go) to point at its account settings.
+// to point at its account settings.
 var codexLiveCopy = struct {
 	signedOut, loginChanged, refreshFailed, refreshFailedCodex string
 }{
@@ -249,7 +249,7 @@ func runCodexTerminal() int {
 	f := flag.NewFlagSet("codex-terminal", flag.ContinueOnError)
 	dir := f.String("data-dir", defaultDataDir(), "SoluTerminal data directory")
 	daemonURL := f.String("daemon-url", "http://127.0.0.1:8787", "local credential daemon")
-	brokerConfig := f.String("broker-config", "", "generated nonsecret team provider overrides")
+	routeConfig := f.String("broker-config", "", "generated nonsecret provider route overrides")
 	if err := f.Parse(os.Args[2:]); err != nil {
 		return 2
 	}
@@ -260,7 +260,7 @@ func runCodexTerminal() int {
 		return 2
 	}
 	var overrides []string
-	if *brokerConfig != "" && json.Unmarshal([]byte(*brokerConfig), &overrides) != nil {
+	if *routeConfig != "" && json.Unmarshal([]byte(*routeConfig), &overrides) != nil {
 		return 2
 	}
 	if err := runCodexLiveTerminal(*dir, *daemonURL, paneID, cmd, overrides); err != nil {
@@ -270,17 +270,17 @@ func runCodexTerminal() int {
 	return 0
 }
 
-func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, brokerOverrides ...[]string) error {
-	team := paneBrokerActive(os.Environ())
+func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, routeOverrides ...[]string) error {
+	routed := paneRouteActive(os.Environ())
 	var overrides []string
-	if len(brokerOverrides) > 0 {
-		overrides = brokerOverrides[0]
+	if len(routeOverrides) > 0 {
+		overrides = routeOverrides[0]
 	}
-	if team != (len(overrides) > 0) {
-		return errors.New("team broker launch configuration missing or unexpected")
+	if routed != (len(overrides) > 0) {
+		return errors.New("Account route unavailable. Launch configuration is missing or unexpected.")
 	}
-	if team && (paneBroker.codexLiveConfigValid == nil || !paneBroker.codexLiveConfigValid(overrides)) {
-		return errors.New("invalid team broker recovery configuration")
+	if routed && (paneRoute.codexLiveConfigValid == nil || !paneRoute.codexLiveConfigValid(overrides)) {
+		return errors.New("Account route unavailable. Invalid recovery configuration.")
 	}
 	bin, err := exec.LookPath(argv[0])
 	if err != nil {
@@ -298,7 +298,7 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, brokerOv
 	}
 	authPath := filepath.Join(codexDir, "auth.json")
 	var token codexLiveToken
-	if !team {
+	if !routed {
 		if err := codexRequireFileStorage(codexDir); err != nil {
 			return err
 		}
@@ -321,7 +321,7 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, brokerOv
 	}
 	statusPath := codexLiveStatusPath(dir, paneID)
 	st := codexLiveStatus{PaneID: paneID, PID: os.Getpid(), State: "starting"}
-	if team {
+	if routed {
 		st.Mode = "broker"
 	}
 	writeStatus := func() {
@@ -369,7 +369,7 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, brokerOv
 	if err = rpc.write(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
 		return err
 	}
-	if !team {
+	if !routed {
 		err = codexLiveLogin(bootCtx, rpc, token)
 	}
 	if err != nil {
@@ -425,9 +425,9 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, brokerOv
 			st.Error = exitErr.Error()
 			return exitErr
 		case update := <-rpc.accountUpdates:
-			if team {
+			if routed {
 				continue
-			} // broker-only: never adopt a personal login event
+			} // routed: never adopt a personal login event
 			var event struct {
 				AuthMode *string `json:"authMode"`
 			}
@@ -445,8 +445,8 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, brokerOv
 				writeStatus()
 			}
 		case request := <-rpc.requests:
-			if team {
-				_ = rpc.write(map[string]any{"id": request.ID, "error": map[string]any{"code": -32601, "message": "Authentication is managed by the team broker"}})
+			if routed {
+				_ = rpc.write(map[string]any{"id": request.ID, "error": map[string]any{"code": -32601, "message": "Account route unavailable. Authentication is managed by the selected route"}})
 				continue
 			}
 			if request.Method != "account/chatgptAuthTokens/refresh" {
@@ -484,7 +484,7 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, brokerOv
 			}
 			writeStatus()
 		case <-ticker.C:
-			if team {
+			if routed {
 				recovery.gate.Lock()
 				_, retryAt, _ := recovery.status()
 				if retryAt > 0 && time.Now().UnixMilli() >= retryAt && !recovery.busy() {

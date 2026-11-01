@@ -20,7 +20,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 
 // THE Settings dialog — every settings surface lives here as a tab on the
 // left nav rail, and every entry point (topbar gear, sidebar right-click
-// "Customize sidebar…", credentials "Manage team pool…") deep-links to its
+// "Customize sidebar…", section settings links) deep-links to its
 // tab via useSettings.openSettings(tab). All controls apply live; the window
 // drags by its header and resizes from the corner grip (useDraggableDialog
 // pins it to fixed coordinates so both track the cursor 1:1).

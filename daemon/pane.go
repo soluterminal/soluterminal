@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,6 +126,8 @@ const (
 // Everything else (Title, Status, ExitCode, Cols, Rows) must be accessed
 // under p.mu — use Snapshot() to serialize or persist.
 type Pane struct {
+	quotaWorkerCleanupOwned bool // process-local; restored workers rebind ownership
+	workerArchiving         atomic.Bool
 	// Delivery receipts are ephemeral and immutable after publication under mu.
 	unsentMessage           *unsentPaneMessage
 	deliveryMu              sync.Mutex
@@ -1286,6 +1289,8 @@ func NewManager(dataDir string) *Manager {
 	}
 }
 
+// List returns panes in creation order, with IDs breaking ties. Both fields
+// are immutable after spawn; numbering remains defined by workspace layouts.
 func (m *Manager) List() []*Pane {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1293,6 +1298,12 @@ func (m *Manager) List() []*Pane {
 	for _, p := range m.panes {
 		out = append(out, p)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
 	return out
 }
 
@@ -2339,6 +2350,10 @@ func (p *Pane) writeWithFleetAdmissionPolicy(b []byte, recordPrompt, nativeTurn 
 		return 0, errors.New("pane not connected")
 	}
 	p.agentWriteMu.Lock()
+	if p.workerArchiving.Load() {
+		p.agentWriteMu.Unlock()
+		return 0, errors.New("worker archived; reopen it before sending input")
+	}
 	if check != nil {
 		if err := check(); err != nil {
 			p.agentWriteMu.Unlock()

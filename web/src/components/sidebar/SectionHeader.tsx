@@ -3,8 +3,8 @@ import { IconChevronDown } from '../ui/icons';
 
 interface SectionHeaderProps {
   title: string;
-  // Plain text, or a compact inline action (e.g. the Credentials section's
-  // "Team pool" link). Rendered inside the toggle button, so an interactive
+  // Plain text, or a compact inline settings link.
+  // Rendered inside the toggle button, so an interactive
   // subtitle must be a span[role=button] (nested <button> is invalid HTML)
   // that stopPropagation()s its own clicks.
   subtitle?: ReactNode;

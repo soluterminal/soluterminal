@@ -21,7 +21,8 @@ export function PaneMessageChip({ pane, now = Date.now }: { pane: PaneInfo; now?
     return () => clearTimeout(t);
   }, [left]);
   if (!m || left <= 0) return null;
-  const detail = `Message from ${m.fromLabel} ${formatAgo(m.at)}${m.outcome === 'sent_unconfirmed' ? ' (delivery not confirmed)' : ''}`;
+  const note = m.outcome === 'sent_unconfirmed' ? ' (delivery not confirmed)' : m.outcome === 'queued' ? ' (queued until its turn ends)' : '';
+  const detail = `Message from ${m.fromLabel} ${formatAgo(m.at)}${note}`;
   return (
     <button
       type="button"

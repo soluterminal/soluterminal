@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   LEGACY_SECTION_TARGETS,
   LEGACY_TAB_TARGETS,
-  SETTINGS_CATEGORIES,
-  SETTINGS_CONTROLS,
-  SETTINGS_SECTIONS,
+  settingsCategories,
+  settingsControls,
+  settingsSections,
   controlById,
   formatSettingsHash,
   parseSettingsHash,
@@ -15,16 +15,16 @@ import {
 
 describe('settingsRegistry', () => {
   it('has unique ids and DOM ids with valid parents', () => {
-    expect(new Set(SETTINGS_CATEGORIES.map(({ id }) => id)).size).toBe(SETTINGS_CATEGORIES.length);
-    expect(new Set(SETTINGS_SECTIONS.map(({ id }) => id)).size).toBe(SETTINGS_SECTIONS.length);
-    expect(new Set(SETTINGS_SECTIONS.map(({ domId }) => domId)).size).toBe(SETTINGS_SECTIONS.length);
-    expect(new Set(SETTINGS_CONTROLS.map(({ id }) => id)).size).toBe(SETTINGS_CONTROLS.length);
-    expect(new Set(SETTINGS_CONTROLS.map(({ domId }) => domId)).size).toBe(SETTINGS_CONTROLS.length);
+    expect(new Set(settingsCategories().map(({ id }) => id)).size).toBe(settingsCategories().length);
+    expect(new Set(settingsSections().map(({ id }) => id)).size).toBe(settingsSections().length);
+    expect(new Set(settingsSections().map(({ domId }) => domId)).size).toBe(settingsSections().length);
+    expect(new Set(settingsControls().map(({ id }) => id)).size).toBe(settingsControls().length);
+    expect(new Set(settingsControls().map(({ domId }) => domId)).size).toBe(settingsControls().length);
 
-    const categories = new Set(SETTINGS_CATEGORIES.map(({ id }) => id));
-    const sections = new Set(SETTINGS_SECTIONS.map(({ id }) => id));
-    for (const section of SETTINGS_SECTIONS) expect(categories.has(section.category)).toBe(true);
-    for (const control of SETTINGS_CONTROLS) expect(sections.has(control.section)).toBe(true);
+    const categories = new Set(settingsCategories().map(({ id }) => id));
+    const sections = new Set(settingsSections().map(({ id }) => id));
+    for (const section of settingsSections()) expect(categories.has(section.category)).toBe(true);
+    for (const control of settingsControls()) expect(sections.has(control.section)).toBe(true);
 
     expect(sectionById('workflows.modelsFallbacks')?.domId).toBe('settings-section-models-fallbacks');
     expect(controlById('workflows.resources.maxAgentRuns')?.domId).toBe('settings-row-workflows-resources-maxAgentRuns');
@@ -41,7 +41,7 @@ describe('settingsRegistry', () => {
     for (const id of ['panes', 'claude', 'sidebar', 'account', 'notifications', 'privacy', 'warden', 'tasks', 'agent']) {
       expect(resolveSettingsTarget(id).legacy).toBe(true);
     }
-    for (const id of ['appearance', 'team', 'devices', ...SETTINGS_CATEGORIES.map(({ id }) => id)]) {
+    for (const id of ['appearance', 'devices', ...settingsCategories().map(({ id }) => id)]) {
       expect(resolveSettingsTarget(id).legacy).toBe(false);
     }
     for (const id of Object.keys(LEGACY_SECTION_TARGETS)) {

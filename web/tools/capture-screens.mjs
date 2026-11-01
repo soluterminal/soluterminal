@@ -120,6 +120,7 @@ function arg(name) {
 export async function main() {
   const dist = arg('--dist');
   const out = arg('--out');
+  const driver = arg('--driver');
   const scenario = arg('--scenario') || 'default';
   const constrained = process.env.SOLU_CAPTURE_CONSTRAINED === '1';
   const socketless = process.argv.includes('--socketless') || (constrained && scenario === 'update-deferred');
@@ -127,7 +128,7 @@ export async function main() {
   const themeFilter = arg('--theme');
   const updateDeferredVariant = arg('--variant');
   if (!dist || !out) {
-    process.stderr.write('usage: capture-screens.mjs --dist <dir> --out <dir> [--scenario default|update-holds|update-deferred|stale-bundles] [--socketless] [--bundle-state activation|packaged] [--theme light|dark]\n');
+    process.stderr.write('usage: capture-screens.mjs --dist <dir> --out <dir> [--scenario default|update-holds|update-deferred|stale-bundles] [--socketless] [--bundle-state activation|packaged] [--theme light|dark] [--driver <module>]\n');
     process.exit(2);
   }
   if (!['default', 'update-holds', 'update-deferred', 'stale-bundles'].includes(scenario)) {
@@ -177,6 +178,11 @@ export async function main() {
       executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined,
       args: chromiumLaunchArgs({ socketless }),
     });
+    if (driver) {
+      const { default: capture } = await import(pathToFileURL(path.resolve(driver)).href);
+      await capture({ browser, dist, out, waitForAppReady, themes: themeFilter ? [themeFilter] : ['light', 'dark'] });
+      return;
+    }
     browser.on('disconnected', () => fs.writeSync(process.stderr.fd, 'browser-crash: browser disconnected during capture\n'));
     const holdState = scenario === 'update-holds'
       ? {

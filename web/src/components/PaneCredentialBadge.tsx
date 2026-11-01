@@ -112,9 +112,9 @@ export function paneAccountStatus(pane: PaneAccountPane, name: (account?: string
       } };
     }
     if (auth.blocker === 'team') {
-      return { tone: 'warn', label: 'restart for team', title: 'Restart to move this session onto the team account.', detail: {
-        heading: 'Restart to use the team account',
-        body: 'This session uses a personal login. Restart resumes the conversation on the team account.',
+      return { tone: 'warn', label: 'restart for account', title: 'Restart to use the selected account.', detail: {
+        heading: 'Restart to use the selected account',
+        body: 'This session uses a different login. Restart resumes the conversation on the selected account.',
         action: restart,
       } };
     }
@@ -157,9 +157,8 @@ export function PaneCredentialBadge({ pane }: { pane: PaneAccountPane }) {
     onDoubleClick: (e: MouseEvent) => e.stopPropagation(),
     onClick: (e: MouseEvent) => e.stopPropagation(),
   };
-  // Saved accounts live in the team-only part of Credentials, which a build
-  // without that section doesn't have. Everyone else signs Codex in again
-  // from a shell, so point there instead.
+  // Offer the registered repair surface when it is available. Otherwise,
+  // direct the user to sign in again from a shell.
   const detail = status.detail?.action?.kind === 'credentials' && !(team && sectionOffered('credentials'))
     ? { ...status.detail, body: 'Run codex login in a shell pane, then restart this pane.', action: { kind: 'restart' as const, label: 'Restart pane' } }
     : status.detail;

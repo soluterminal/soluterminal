@@ -98,7 +98,7 @@ func validCredName(name string) bool {
 	// teamSentinelName is a reserved name from the retired lease model — never a
 	// personal account. Refuse it at the single boundary every personal-name
 	// mutation (SaveCurrent/Activate/Rename/Delete) passes through, so a stray
-	// sentinel can never be created as a snapshot or auto-switched as if personal.
+	// sentinel can never be saved or selected as a personal credential.
 	if name == teamSentinelName {
 		return false
 	}

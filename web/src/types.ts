@@ -90,7 +90,43 @@ export interface PaneIdentity {
   workingOnBy?: string;
 }
 
+export interface PaneWorker {
+  id?: string;
+  state: 'queued' | 'running' | 'finished' | 'closed' | 'archived';
+  priority?: 'urgent' | 'normal' | 'later';
+  provider?: 'claude' | 'codex';
+  account?: string;
+  teamId?: string;
+  reason?: string;
+  reviewer?: string;
+  reviewerAccount?: string;
+  startStatus?: string;
+  startHint?: string;
+  archiveId?: string;
+  archivedAt?: number;
+  pinned?: boolean;
+}
+
+export interface ArchivedWorker {
+  id: string;
+  title: string;
+  status: 'archived';
+  cwd: string;
+  workspace?: string;
+  origin?: PaneOrigin;
+  worker: PaneWorker;
+}
+export interface WorkerSettings {
+  maxRunning: number;
+  finishAfterMinutes: number;
+  workerLeadReservePct: number;
+  workerExpectedRunMinutes: number;
+  workerAutoArchive: boolean;
+  workerAccounts: 'active' | 'saved' | 'team';
+}
+
 export interface PaneOrigin {
+  worker?: PaneWorker;
   source: 'user' | 'agent' | 'schedule' | 'api';
   byPaneId?: string;
   byPaneTitle?: string;
@@ -1161,491 +1197,6 @@ export interface CreatePaneReq {
 // GET /api/mcp/servers?cwd=…. Read-only — the UI doesn't mutate this;
 // users still edit ~/.claude.json or .mcp.json with their own tooling.
 
-// Claude account credentials management (left-sidebar "Credentials"
-// section). The active account is machine-wide — switching it changes
-// the global Claude login used by every pane. See daemon/claude_accounts.go.
-//
-// One rate-limit window's usage. `available` is false when the account
-// has never been probed (show "—" rather than 0%). `utilPct` is 0-100.
-export interface ClaudeUsageWindow {
-  utilPct: number;
-  resetEpoch: number;
-  resetInLabel: string;
-  // False when the provider did not report this window. Optional for
-  // compatibility with older daemons, which always implied both windows.
-  available?: boolean;
-  // Expected ("paced") utilization % by now per the user's burn model.
-  // 0 when the daemon can't compute a pace (e.g. too little history);
-  // the pace overlay is only rendered when this is > 0.
-  pacePct: number;
-}
-
-export interface ClaudeUsage {
-  source?: string;
-  sevenDStatus?: string;
-  fiveH: ClaudeUsageWindow;
-  sevenD: ClaudeUsageWindow;
-  fetchedAtEpoch: number;
-  stale: boolean;
-  // False = this account has never been probed; render usage as "—".
-  available: boolean;
-}
-
-export interface ClaudeAccount {
-  // Present for virtual broker choices; owner edits remain locked.
-  brokerReady?: boolean;
-  name: string;
-  active: boolean;
-  subscriptionType?: string;
-  usage: ClaudeUsage;
-  // Short per-account message to surface in a warning color when non-empty.
-  error: string;
-  // Next billing-renewal date (unix seconds). When renewalDayOverride > 0 this
-  // is the user's pinned billing day; otherwise it's an ESTIMATE — the monthly
-  // anniversary auto-derived from the subscription start (best-effort, present
-  // only when the OAuth profile probe succeeded), which is NOT authoritative.
-  renewalEpoch?: number;
-  // User-set billing day-of-month (1..31) that overrides the auto-derived
-  // renewal. 0 / absent = auto-derived (no override). The auto date is the
-  // ORIGINAL signup anchor and is wrong once a billing cycle moves, so the
-  // user can pin the real day here and it wins.
-  renewalDayOverride?: number;
-  // e.g. "stripe_subscription". From the OAuth profile probe.
-  billingType?: string;
-  // e.g. "active" / "past_due". From the OAuth profile probe.
-  subscriptionStatus?: string;
-}
-
-export interface ClaudeAccountsResponse {
-  active: string;
-  machineWide: boolean;
-  // True when the current login isn't saved as a named account yet.
-  currentUnsaved: boolean;
-  accounts: ClaudeAccount[];
-}
-
-// --- Auto-switch (swap-based, Phase 1) ---
-//
-// The daemon-side controller keeps the BEST Claude account active
-// automatically, swapping the machine-wide login only at safe idle
-// moments. These DTOs are token-free (mirrors every other claude DTO):
-// no token material ever appears in the wire shape. See
-// docs/autoswitch-plan.md §7.
-
-// Controller runtime state, surfaced one-word for the status line + badge:
-//   ok            — managed, nothing to do (active account is fine)
-//   paused        — auto-switch off, or in manual cooldown
-//   dwell         — a better account exists but min-dwell hasn't elapsed
-//   queued        — switch decided, waiting for a safe (idle) break
-//   all-exhausted — every pooled account near its limit
-//   pinned        — user pinned a specific account (no auto-switching)
-export type AutoSwitchState = 'ok' | 'paused' | 'dwell' | 'queued' | 'all-exhausted' | 'pinned' | 'usage-unknown' | 'no-alternative';
-
-// GET /api/claude/autoswitch response. `pool` maps account name → opted-in.
-// `pendingTarget`/`dwellUntil`/`cooldownUntil` are present only when the
-// matching state is active (queued/dwell/cooldown), so the UI can render
-// live countdowns without polling (refreshed by the SSE event).
-export interface AutoSwitchStatus {
-  management?: 'team-broker';
-  enabled: boolean;
-  pinned: string;
-  switchThresholdPct: number;
-  softWarnPct: number;
-  pool: Record<string, boolean>;
-  state: AutoSwitchState;
-  statusLine: string;
-  pendingTarget?: string;
-  dwellUntil?: number;
-  cooldownUntil?: number;
-}
-
-// PUT /api/claude/autoswitch body. Any subset is accepted (Partial), the
-// daemon validates + persists + reconfigures and returns the new status.
-export interface AutoSwitchUpdate {
-  enabled: boolean;
-  pinned: string;
-  switchThresholdPct: number;
-  softWarnPct: number;
-  pool: Record<string, boolean>;
-}
-
-// One row of the rolling switch history (FIFO cap 50, daemon-side).
-// `trigger` distinguishes background auto-switches from manual/reactive
-// ones so the UI can label "why am I here". Token-free.
-export interface AutoSwitchHistoryEntry {
-  ts: number;
-  from: string;
-  to: string;
-  reason: string;
-  fromPct5h: number;
-  trigger: 'auto' | 'manual' | 'reactive';
-}
-
-// GET /api/claude/autoswitch/history response (lazy-loaded by the UI
-// disclosure — never auto-fetched).
-export interface AutoSwitchHistory {
-  entries: AutoSwitchHistoryEntry[];
-}
-
-// --- Team-shared credentials (mint-and-distribute v2 WEB) ---
-//
-// The cloud is a dumb encrypted mailbox. The OWNER mints one INDEPENDENT
-// full-scope OAuth bundle per teammate-per-account (browser consent each) and
-// distributes a SET per teammate; the OWNER also sets the switching rules ONCE
-// for everyone. MEMBERS pull their set + rules and run them through the EXISTING
-// personal auto-switch — zero credential management, rules applied read-only.
-// The web talks ONLY to the daemon's local endpoints (GET /api/claude/team, the
-// mint wizard, rules, revoke); the daemon proxies the cloud. See
-// docs/team-creds/MINT-DISTRIBUTE.md §3-§5 + the Phase C mint contract.
-//
-// Shapes match what the daemon emits (claudecreds_team_api.go getClaudeTeam +
-// claudecreds_teamclient.go DTOs). No bundles ever cross this wire.
-
-// Flat per-window usage snapshot as the cloud/daemon emit it (UsageDTO). Kept
-// BYTE-IDENTICAL so a future team usage bar can render it unchanged. A
-// never-probed account arrives as `usage: null`. (In v2 the owner-side per-member
-// usage is populated only when usage telemetry has been pushed to the cloud —
-// otherwise null; live member usage is visible in each member's own accounts list.)
-export interface ClaudeTeamUsage {
-  fiveHUtilPct: number;
-  sevenDUtilPct: number;
-  fiveHResetEpoch: number;
-  sevenDResetEpoch: number;
-  fetchedAtEpoch: number;
-  subscriptionType: string;
-}
-
-// Owner-distributed switching rules (daemon teamRules). The owner edits these
-// ONCE for the whole team; every member applies them READ-ONLY. Members see them
-// but cannot change them. NOTE: there is NO ranking-strategy knob — the daemon's
-// selectBest is hard-coded earliest-weekly-deadline.
-export interface ClaudeTeamRules {
-  autoSwitchEnabled: boolean;
-  switchThresholdPct: number;
-  softWarnPct: number;
-  maxAccountsPerMember?: number; // 0/absent = unlimited; owner-set cap
-  rulesVersion?: number;
-}
-
-// Owner-facing sync indicator for one teammate (daemon teamMemberSync). Synced
-// iff the member's daemon acked the CURRENT setHash; ackedAtEpoch is the last
-// pull time (0 = never), surfaced even when stale so the badge can say
-// "pending · last seen 2h ago".
-export interface ClaudeTeamMemberSync {
-  synced: boolean;
-  ackedAtEpoch: number;
-  accountCount: number;
-}
-
-// One account in the owner's per-member summary (daemon MemberSetAccountSummary,
-// GET /sets/{memberUserId} — NO bundle). usage is null unless telemetry exists.
-export interface ClaudeTeamMemberAccount {
-  accountLabel: string;
-  subscriptionType: string;
-  sourceAccount: string;
-  setVersion: number;
-  brokerStatus?: 'ready' | 'migration_required' | 'unsupported';
-  migrationState?: 'ready' | 'legacy_rotation_required' | 'unsupported';
-  mintedAtEpoch: number;
-  assignedBy?: string; // owner who minted this account (audit; shown in the minted tooltip)
-  usage: ClaudeTeamUsage | null;
-  // Member-daemon-reported health (POST /api/team/claude/status): probeError
-  // ""/absent = healthy; a non-empty value (e.g. "re-auth needed") means the
-  // member's machine can no longer use this account → owner should Repair.
-  probeError?: string;
-  statusReportedAtEpoch?: number; // 0/absent = the member's daemon never reported
-}
-
-// Member-daemon-reported "currently using" pointer (daemon TeamMemberActive,
-// roster `active`): which Claude/Codex account that member's machine is signed
-// in with RIGHT NOW. kind: 'team' (account = an owner-minted label),
-// 'personal' (the member's own login; account carries its local name),
-// 'unsaved' (live Claude login not saved as an account), 'none' (no login),
-// '' (unknown / sanitized). Absent entirely when the member's daemon never
-// reported (older daemon, or not running). reportedAtEpoch = last report time;
-// the member heartbeats every ≤30 min, so an older pointer means their daemon
-// stopped reporting.
-export interface ClaudeTeamMemberActive {
-  claudeAccount: string;
-  claudeKind: '' | 'team' | 'personal' | 'unsaved' | 'none';
-  codexAccount: string;
-  codexKind: '' | 'team' | 'personal' | 'none';
-  reportedAtEpoch: number;
-}
-
-// One teammate row in the owner roster (daemon TeamMember + per-member summary).
-export interface ClaudeTeamMember {
-  userId: string;
-  displayName: string;
-  email: string;
-  assignedCount: number;
-  needsRepairCount?: number;            // accounts the member's daemon reported dead
-  accounts?: ClaudeTeamMemberAccount[]; // present when the per-member summary loaded
-  sync?: ClaudeTeamMemberSync;          // present when the per-member summary loaded
-  active?: ClaudeTeamMemberActive;      // "currently using" pointer (absent = never reported)
-}
-
-// One account a MEMBER has been provisioned (member getClaudeTeam `provisioned[]`).
-// Bundle-free; live usage for these shows in the member's normal accounts list
-// (they are real local team__ accounts).
-export interface ClaudeTeamProvisionedAccount {
-  accountLabel: string;
-  subscriptionType: string;
-  sourceAccount: string;
-  setVersion: number;
-  brokerStatus?: 'ready' | 'migration_required' | 'unsupported';
-  migrationState?: 'ready' | 'legacy_rotation_required' | 'unsupported';
-  mintedAtEpoch: number;
-}
-
-// GET /api/claude/team — role-aware, READ-ONLY, no bundles. `available` is false
-// in local mode (no cloud creds) → the whole team UI hides. Discriminated by
-// `role`; only the matching arm is populated.
-export interface ClaudeTeam {
-  available: boolean;
-  teamId?: string;
-  teamName?: string;
-  role?: 'owner' | 'member';
-  // OWNER arm
-  members?: ClaudeTeamMember[];
-  sourceNames?: string[];        // the owner's mintable source accounts (grid columns)
-  // MEMBER arm
-  provisioned?: ClaudeTeamProvisionedAccount[];
-  teamRulesLocked?: boolean;     // member: the owner rules are applied + locked locally
-  // The daemon needed to bootstrap this member's live login from the
-  // provisioned set and every activation failed — the member is logged out
-  // with the cause otherwise buried in the daemon log. Absent when the
-  // bootstrap succeeded or wasn't needed.
-  bootstrapError?: string;
-  // SHARED
-  rules?: ClaudeTeamRules;        // owner edits; member reads
-  // Present when the cloud fetch failed (not-in-team / blip).
-  error?: string;
-}
-
-// POST /api/claude/team/mint/start response (owner): the authorize URL to open.
-export interface ClaudeTeamMintStart {
-  mintSessionId: string;
-  authorizeUrl: string;
-}
-
-// POST /api/claude/team/mint/complete response (owner): one minted+uploaded account.
-export interface ClaudeTeamMintResult {
-  ok: boolean;
-  accountLabel: string;
-  subscriptionType: string;
-  mintedAtEpoch: number;
-}
-
-// --- Codex team-shared credentials ---
-//
-// Codex does not expose the same browser mint flow as Claude credentials. The
-// owner saves/imports Codex auth snapshots locally, then assigns those source
-// accounts to teammates through the same encrypted team mailbox pattern. No
-// auth bundle crosses the web UI.
-export interface CodexAccount {
-  name: string;
-  // Switch key the activate / auto-switch pool / pin surfaces address the row
-  // by: the name for a personal source, `team__<label>` for a team snapshot.
-  // Optional only for older daemons; fall back to `name` when absent.
-  key?: string;
-  authKind: 'access_token' | 'api_key' | string;
-  active: boolean;
-  teamManaged: boolean;
-  // ChatGPT plan type from the usage probe (e.g. "pro", "prolite"). Absent
-  // until first probe and for api_key accounts (no ChatGPT bearer to probe).
-  plan?: string;
-  // Same 5h/7d usage shape as the Claude accounts. Individual windows may be
-  // unavailable because Codex plans do not necessarily report both.
-  usage?: ClaudeUsage;
-  // Short per-account probe error, e.g. "token expired; refresh to update".
-  error?: string;
-  needsReauth?: boolean;
-  refreshing?: boolean;
-  // Recent provider probe of this exact saved credential revision.
-  probeVerified?: boolean;
-}
-
-export interface CodexLoginStatus {
-  id: string;
-  name: string;
-  status: 'starting' | 'waiting' | 'saving' | 'publishing' | 'complete' | 'failed' | 'cancelled';
-  memberUserId?: string;
-  recipient?: string;
-  authorizeUrl?: string;
-  userCode?: string;
-  error?: string;
-}
-
-export interface CodexAccountsResponse {
-  accounts: CodexAccount[];
-  active?: string;
-  liveAuthPresent: boolean;
-  // A valid live Codex login that matches no saved row (auto-switch refuses
-  // to overwrite it until it is saved or rescued).
-  currentUnsaved?: boolean;
-}
-
-export interface CodexTeamPolicy {
-  maxAccountsPerMember?: number;
-  policyVersion?: number;
-  // Owner-distributed switching rules (applied read-only on members). Absent
-  // from an older cloud → members keep local control.
-  autoSwitchEnabled?: boolean;
-  switchThresholdPct?: number;
-}
-
-// PUT /api/codex/team/policy body (owner). Any subset; omitted fields keep
-// their stored value.
-export interface CodexTeamPolicyUpdate {
-  autoSwitchEnabled?: boolean;
-  switchThresholdPct?: number;
-  maxAccountsPerMember?: number;
-}
-
-export interface CodexTeamMemberSync {
-  synced: boolean;
-  ackedAtEpoch: number;
-  accountCount: number;
-  targets?: Array<{ machineId: string; backendId: string; synced: boolean; ackedAtEpoch: number; accountCount: number }>;
-}
-
-export interface CodexTeamMemberAccount {
-  accountLabel: string;
-  authKind: 'access_token' | 'api_key' | string;
-  sourceAccount: string;
-  setVersion: number;
-  brokerStatus?: 'ready' | 'migration_required' | 'unsupported';
-  migrationState?: 'ready' | 'legacy_rotation_required' | 'unsupported';
-  authorizedAtEpoch: number;
-  assignedBy?: string;
-  healthState?: 'pending' | 'healthy' | 'reauth' | 'error' | 'unverified';
-  healthError?: string;
-  healthReportedAtEpoch?: number;
-  targetMachineId?: string;
-  targetBackendId?: string;
-}
-
-export interface CodexTeamMember {
-  userId: string;
-  displayName: string;
-  email: string;
-  assignedCount: number;
-  accounts?: CodexTeamMemberAccount[];
-  sync?: CodexTeamMemberSync;
-  needsRepairCount?: number;
-  machines?: CodexTeamMachine[];
-}
-
-export interface CodexTeamMachine { id: string; name: string; online: boolean; backends: string[] | null; }
-
-export interface CodexTeamProvisionedAccount {
-  accountLabel: string;
-  authKind: 'access_token' | 'api_key' | string;
-  sourceAccount: string;
-  setVersion: number;
-  brokerStatus?: 'ready' | 'migration_required' | 'unsupported';
-  migrationState?: 'ready' | 'legacy_rotation_required' | 'unsupported';
-  authorizedAtEpoch: number;
-}
-
-export interface CodexTeam {
-  available: boolean;
-  teamId?: string;
-  teamName?: string;
-  role?: 'owner' | 'member';
-  members?: CodexTeamMember[];
-  sourceNames?: string[];
-  provisioned?: CodexTeamProvisionedAccount[];
-  policy?: CodexTeamPolicy;
-  // Member: the owner's switching rules are applied and locked locally.
-  policyLocked?: boolean;
-  bootstrapError?: string;
-  error?: string;
-}
-
-// ── Muse credentials (third team-credential bundle kind) ────────────────────
-// Muse has no usage/plan surface, so these rows carry no usage DTO. The
-// member-side rows carry the daemon's install state instead: whether a
-// snapshot is staged (connected), whether it IS the machine's live login
-// (applied), whether a newer assignment is waiting (updateAvailable), and
-// whether muse has refreshed the local copy since we installed it
-// (liveRotated) — see docs/team-creds/MUSE.md.
-export interface MuseAccount {
-  name: string;
-  authKind: 'oauth' | 'api_key' | string;
-  active: boolean;
-  teamManaged: boolean;
-}
-
-export interface MuseAccountsResponse {
-  accounts: MuseAccount[];
-  active?: string;
-  liveAuthPresent: boolean;
-  livePersonal?: boolean;
-  authPath?: string;
-}
-
-export interface MuseTeamPolicy {
-  maxAccountsPerMember?: number;
-  policyVersion?: number;
-}
-
-export interface MuseTeamMemberSync {
-  synced: boolean;
-  ackedAtEpoch: number;
-  accountCount: number;
-}
-
-export interface MuseTeamMemberAccount {
-  accountLabel: string;
-  authKind: 'oauth' | 'api_key' | string;
-  sourceAccount: string;
-  setVersion: number;
-  brokerStatus?: 'ready' | 'migration_required' | 'unsupported';
-  migrationState?: 'ready' | 'legacy_rotation_required' | 'unsupported';
-  authorizedAtEpoch: number;
-  assignedBy?: string;
-}
-
-export interface MuseTeamMember {
-  userId: string;
-  displayName: string;
-  email: string;
-  assignedCount: number;
-  accounts?: MuseTeamMemberAccount[];
-  sync?: MuseTeamMemberSync;
-}
-
-export interface MuseTeamProvisionedAccount {
-  accountLabel: string;
-  authKind: 'oauth' | 'api_key' | string;
-  sourceAccount: string;
-  setVersion: number;
-  brokerStatus?: 'ready' | 'migration_required' | 'unsupported';
-  migrationState?: 'ready' | 'legacy_rotation_required' | 'unsupported';
-  authorizedAtEpoch: number;
-  connected: boolean;
-  applied: boolean;
-  updateAvailable: boolean;
-  liveRotated: boolean;
-}
-
-export interface MuseTeam {
-  available: boolean;
-  teamId?: string;
-  teamName?: string;
-  role?: 'owner' | 'member';
-  members?: MuseTeamMember[];
-  sourceNames?: string[];
-  provisioned?: MuseTeamProvisionedAccount[];
-  policy?: MuseTeamPolicy;
-  bootstrapError?: string;
-  error?: string;
-  livePersonal?: boolean;
-  authPath?: string;
-}
-
 export interface McpServer {
   name: string;
   type: 'http' | 'sse' | 'stdio' | '';
@@ -1694,14 +1245,14 @@ export interface PersonalViewSettings {
 }
 
 // GET /api/entitlements (daemon/entitlements.go). The tier fields arrived in
-// v0.0.1200; older daemons send only team and the team-pool flags.
+// v0.0.1200; older daemons send only team and credential capability flags.
 export type EntitlementsTier = 'none' | 'account' | 'team';
 
 export interface Entitlements {
   tier?: EntitlementsTier;
   team: boolean;
   // The operator's internal tooling (workflow engine, task owners, release
-  // train, agents, Aria, Warden, the team credential pool). Older daemons
+  // train, agents, Aria, Warden and credential administration). Older daemons
   // omit it; it then follows team.
   operator?: boolean;
   // The personal view is on: the daemon still reports the real verdict and

@@ -4,22 +4,26 @@ import (
 	"log"
 	"os"
 	"sync"
-	"time"
 )
 
 type shinoqueRelayConfig struct {
-	port string
-	home string
+	port               string
+	home               string
+	relayAuth          int
+	privateDeviceProof int
 }
 
+func (c shinoqueRelayConfig) supportsRelayAuth() bool { return c.relayAuth == 2 }
+
+// supportsPrivateDeviceProof reports HMAC device proof support from discovery.
+func (c shinoqueRelayConfig) supportsPrivateDeviceProof() bool { return c.privateDeviceProof == 1 }
+
 // Discovery is per token cache, shared by the relay and health capability probe.
-// Platform-specific readers revalidate metadata even when contents are cached.
+// Platform-specific readers revalidate metadata and bytes before reusing parsed contents.
 type shinoqueDiscoveryCache struct {
 	mu         sync.Mutex
 	path       string
-	mtime      time.Time
-	size       int64
-	inode      uint64
+	content    []byte
 	config     shinoqueRelayConfig
 	source     string
 	lastConfig shinoqueRelayConfig

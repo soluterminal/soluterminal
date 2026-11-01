@@ -1,24 +1,38 @@
 import { expect, test } from './fixtures';
+import type { Locator } from 'playwright/test';
 import type { PaneInfo, Workspace } from '../src/types';
 
-const widths = [1200, 600, 400, 320, 256];
+const widths = [1600, 1200, 900, 700, 600, 500, 400, 320, 256];
 const before = process.env.PANE_HEADER_BEFORE === '1';
+// Details leave the header least important first; the popover lists them in the same order.
+const classRanks: [string, number][] = [
+  ['.pane-automode-badge', 1], ['.pane-account-chip', 3], ['.pane-schedule-chip', 4], ['.pane-review-chip', 5],
+  ['.pane-origin-message', 6], ['.pane-message-chip', 6], ['.pane-identity-chip', 7], ['.pane-origin', 8],
+  ['.pane-resume-badge', 11], ['.pane-mem-chip', 12], ['.pane-zoom-btn', 13],
+];
 
-test('busy pane header keeps readable details and keyboard access at every desktop width', async ({ page }, testInfo) => {
+type DetailState = { rank: number; hidden: boolean; kind: string };
+const readDetails = (header: Locator) => header.evaluate((el, classRanks) => [...el.querySelectorAll<HTMLElement>('[data-pane-detail]')].flatMap(detail => {
+  const hit = classRanks.find(([selector]) => detail.querySelector(selector));
+  return hit ? [{ rank: Number(detail.dataset.priority), hidden: detail.hidden, kind: hit[0] }] : [];
+}), classRanks) as Promise<DetailState[]>;
+
+test('busy pane header collapses details by priority, keeps attention, and keeps keyboard access at every desktop width', async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
   await page.setViewportSize({ width: 3000, height: 900 });
   const now = Date.now();
   const pane: PaneInfo = {
     id: 'overflow_header', title: 'Fix approval header overflow', cwd: '/home/user/launch', cmd: ['codex'],
     status: 'running', pid: 11, cols: 80, rows: 24, state: 'busy', hasCodex: true,
     createdAt: '2026-10-31T00:00:00Z', lastActivityMs: now, autoMode: 'always', agentRssMB: 111,
-    codexThreadId: 'overflow-header-session', resumeReady: true,
+    codexThreadId: 'overflow-header-session', resumeReady: true, attention: 'needs-user',
     identity: { handle: 'header-fix', workingOn: 'Keep pane details readable' },
     origin: { source: 'agent', byPaneId: 'lead', leadPaneId: 'lead', byPaneTitle: 'Lead', at: now },
     lastAgentMessage: { fromPaneId: 'lead', fromLabel: '@lead', at: now, outcome: 'sent' },
     review: { verdict: 'approve', reviewer: 'claude', author: 'codex', round: 1, mustFix: 0, notes: 0, at: now },
     credential: { account: 'work', activeAccount: 'work', liveState: 'switching' },
   };
-  const lead: PaneInfo = { ...pane, id: 'lead', title: 'Lead', identity: undefined, origin: undefined, lastAgentMessage: undefined };
+  const lead: PaneInfo = { ...pane, id: 'lead', title: 'Lead', identity: undefined, origin: undefined, lastAgentMessage: undefined, attention: 'none' };
   const workspaces: Workspace[] = [{ name: 'Overflow header', layout: { type: 'split', direction: 'horizontal', ratio: 0.8, a: { type: 'pane', paneId: pane.id }, b: { type: 'pane', paneId: lead.id } }, paneIds: [pane.id, lead.id], activeAt: pane.createdAt }];
   await page.route('**/api/panes', route => route.fulfill({ json: [pane, lead] }));
   await page.route('**/api/workspaces**', route => route.fulfill({ json: workspaces }));
@@ -28,8 +42,13 @@ test('busy pane header keeps readable details and keyboard access at every deskt
   }] }));
   await page.routeWebSocket(/\/api\/panes\/overflow_header\/io/, ws => ws.send(Buffer.from('\r\nReady\r\n')));
   await page.goto('/?ws=Overflow%20header');
+  // The header fixture inspects an agent-started worker; workspace overviews
+  // now show top-level panes until All panes is selected.
+  await page.getByRole('button', { name: 'All panes in Overflow header' }).click();
   const header = page.locator(`[data-pane-id="${pane.id}"] .pane-header`);
   await expect(header.locator('.pane-title')).toBeVisible();
+  const more = header.getByRole('button', { name: /\d+ more pane details/ });
+  let previouslyHidden = 0;
   for (const width of widths) {
     await header.evaluate((el, width) => { el.style.width = `${width}px`; el.style.maxWidth = 'none'; }, width);
     await page.waitForTimeout(250);
@@ -42,36 +61,96 @@ test('busy pane header keeps readable details and keyboard access at every deskt
         expect((await button.boundingBox())!.y).toBeLessThanOrEqual((await header.locator('.pane-title').boundingBox())!.y + 4);
         await button.click({ trial: true });
       }
-      for (const chip of await header.locator('[data-pane-detail] button:visible').all()) {
+      for (const chip of await header.locator('[data-pane-detail]:not([hidden]) button:visible').all()) {
         expect(await chip.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
       }
-      if (width === 1200) await expect(header.getByRole('button', { name: /more pane details/ })).toHaveCount(0);
-      if (width <= 600) {
-        const more = header.getByRole('button', { name: /\d+ more pane details/ });
-        await expect(more).toBeVisible();
+      // The attention group never collapses, at any width.
+      const needsYou = header.locator('.pane-needs-you');
+      await expect(needsYou).toBeVisible();
+      const needsBox = (await needsYou.boundingBox())!;
+      expect(needsBox.x + needsBox.width).toBeLessThanOrEqual(outer.x + outer.width + 1);
+
+      // Hidden details are exactly the least important ones, and only ever grow as the header narrows.
+      const details = await readDetails(header);
+      const hidden = details.filter(d => d.hidden);
+      const visible = details.filter(d => !d.hidden);
+      expect(details.length).toBeGreaterThanOrEqual(8);
+      if (hidden.length && visible.length) expect(Math.max(...visible.map(d => d.rank))).toBeLessThan(Math.min(...hidden.map(d => d.rank)));
+      expect(hidden.length).toBeGreaterThanOrEqual(previouslyHidden);
+      previouslyHidden = hidden.length;
+      if (width === 1600) expect(hidden).toHaveLength(0);
+      if (hidden.length === 0) await expect(more).toHaveCount(0);
+      else {
+        // The +N count is the number of hidden details, no more.
+        await expect(more).toHaveText(`+${hidden.length}`);
+        await expect(more).toHaveAttribute('aria-label', `${hidden.length} more pane details`);
         await more.focus();
         await page.keyboard.press('Enter');
-        const details = page.getByRole('dialog', { name: 'More pane details', exact: true });
-        await expect(details).toBeFocused();
-        for (const selector of ['.pane-automode-badge', '.pane-resume-badge', '.pane-identity-chip', '.pane-origin', '.pane-message-chip', '.pane-review-chip', '.pane-schedule-chip', '.pane-account-chip', '.pane-mem-chip', '.pane-zoom-btn']) {
-          await expect(details.locator(selector)).toBeVisible();
-        }
-        await expect(more).toHaveAttribute('aria-label', `${await details.locator('.pane-detail-row').count()} more pane details`);
-        await page.locator('[data-pane-id="overflow_header"] .xterm-viewport').dispatchEvent('scroll');
-        await expect(details).toBeVisible();
-        await details.locator('.pane-mem-chip').dblclick();
-        await expect(details.getByRole('button', { name: 'Maximise pane', exact: true })).toBeVisible();
-        await details.screenshot({ animations: 'disabled', path: testInfo.outputPath(`after-popover-${width}.png`) });
-        await details.getByRole('button', { name: /Auto-approve:/ }).click();
-        await expect(page.getByRole('menu', { name: 'Auto-approve', exact: true })).toBeVisible();
+        const popover = page.getByRole('dialog', { name: 'More pane details', exact: true });
+        await expect(popover).toBeFocused();
+        const rows = await popover.locator('.pane-detail-row').evaluateAll((els, classRanks) => els.map(row => classRanks.find(([selector]) => row.querySelector(selector))?.[0] ?? '?'), classRanks);
+        expect(rows).toEqual([...hidden].sort((a, b) => a.rank - b.rank).map(d => d.kind));
+        for (const row of await popover.locator('.pane-detail-row').all()) await expect(row).toBeVisible();
+        await popover.screenshot({ animations: 'disabled', path: testInfo.outputPath(`after-popover-${width}.png`) });
         await page.keyboard.press('Escape');
-        await details.locator('.pane-resume-badge').focus();
-        await page.keyboard.press('Escape');
-        await expect(details).toBeHidden();
+        await expect(popover).toBeHidden();
         await expect(more).toBeFocused();
       }
     }
     await page.screenshot({ animations: 'disabled', clip: (await header.boundingBox())!, path: testInfo.outputPath(`${before ? 'before' : 'after'}-${width}.png`) });
+  }
+  if (!before) {
+    expect(previouslyHidden).toBeGreaterThanOrEqual(8); // at 256px everything but the attention group is in +N
+    // Fully collapsed: every detail works from the popover.
+    await more.focus();
+    await page.keyboard.press('Enter');
+    const details = page.getByRole('dialog', { name: 'More pane details', exact: true });
+    await expect(details).toBeFocused();
+    for (const selector of classRanks.map(([selector]) => selector).filter(selector => selector !== '.pane-origin' && selector !== '.pane-message-chip')) {
+      await expect(details.locator(selector)).toBeVisible();
+    }
+    await expect(more).toHaveAttribute('aria-label', `${await details.locator('.pane-detail-row').count()} more pane details`);
+    await page.locator('[data-pane-id="overflow_header"] .xterm-viewport').dispatchEvent('scroll');
+    await expect(details).toBeVisible();
+    await details.locator('.pane-mem-chip').dblclick();
+    await expect(details.getByRole('button', { name: 'Maximise pane', exact: true })).toBeVisible();
+    await details.getByRole('button', { name: /Auto-approve:/ }).click();
+    await expect(page.getByRole('menu', { name: 'Auto-approve', exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await details.locator('.pane-resume-badge').focus();
+    await page.keyboard.press('Escape');
+    await expect(details).toBeHidden();
+    await expect(more).toBeFocused();
+
+    // No oscillation: find where a detail first leaves, then jitter around it.
+    await header.evaluate(el => { el.style.width = '1600px'; });
+    await page.waitForTimeout(250);
+    const wobble = await header.evaluate(async el => {
+      const settle = () => new Promise(resolve => setTimeout(resolve, 160));
+      const hiddenCount = () => el.querySelectorAll('[data-pane-detail][hidden]').length;
+      let boundary = 0;
+      const fold = async (from: number, step: number) => {
+        for (let width = from; width >= 256; width -= step) {
+          el.style.width = `${width}px`; await settle();
+          if (hiddenCount() > 0) return width;
+        }
+        return 0;
+      };
+      boundary = await fold(1600, 20); // coarse, then the exact pixel
+      boundary = await fold(boundary + 20, 1);
+      const states: number[] = [];
+      let changes = 0;
+      const watcher = new MutationObserver(records => { changes += records.filter(record => record.attributeName === 'hidden').length; });
+      watcher.observe(el, { attributes: true, attributeFilter: ['hidden'], subtree: true });
+      for (const delta of [0, 1, -1, 2, 0, -2, 1, 0, 3, -1, 0, 1]) { el.style.width = `${boundary + delta}px`; await settle(); states.push(hiddenCount()); }
+      watcher.disconnect();
+      return { boundary, states, changes };
+    });
+    expect(wobble.boundary).toBeGreaterThan(256);
+    // Jitter of a few pixels around the fold width flips at most once, to the roomier state, and then holds.
+    const flips = wobble.states.filter((n, i) => i > 0 && n !== wobble.states[i - 1]).length;
+    expect(flips).toBeLessThanOrEqual(1);
+    expect(wobble.changes).toBeLessThanOrEqual(wobble.states[0] * 2);
   }
   await page.setViewportSize({ width: 390, height: 844 });
   await header.evaluate(el => { el.style.width = ''; el.style.maxWidth = ''; });

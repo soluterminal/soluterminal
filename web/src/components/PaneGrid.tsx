@@ -1,4 +1,4 @@
-import { workspaceViewLayout } from '../lib/workspaceView';
+import { canonicalWorkspaceNode, isTemporaryWorkspaceView, workspaceViewLayout } from '../lib/workspaceView';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import type { ImperativePanelGroupHandle } from 'react-resizable-panels';
@@ -72,7 +72,9 @@ function LayoutNode({ node, paneIndexById }: { node: Layout; paneIndexById: Reco
   const file = useStore((s) => (node.type === 'file' ? s.files[node.fileId] : null));
   const setLayout = useStore((s) => s.setLayout);
   const presentationActive = useStore(s=>s.mainPresentation.kind === 'workspace');
-  const temporaryView = useStore(s => !!s.workspaceView);
+  // Overview splits stay resizable even when built only for the view: the
+  // first drag saves the shown arrangement (beginCustomLayout).
+  const temporaryView = useStore(s => isTemporaryWorkspaceView(s.workspaceView));
   const userResizing = useRef(false);
   const groupRef = useRef<ImperativePanelGroupHandle>(null);
 
@@ -115,7 +117,7 @@ function LayoutNode({ node, paneIndexById }: { node: Layout; paneIndexById: Reco
   const initialA = (splitRatio ?? node.ratio) * 100;
 
   const onLayout = (sizes: number[]) => {
-    if (!presentationActive || useStore.getState().mainPresentation.kind !== 'workspace' || useStore.getState().workspaceView) return;
+    if (!presentationActive || useStore.getState().mainPresentation.kind !== 'workspace' || isTemporaryWorkspaceView(useStore.getState().workspaceView)) return;
     // Read at event time instead of subscribing: a per-node rootLayout
     // subscription meant every LayoutNode re-ran its selector (and
     // re-rendered) on every drag-frame setLayout, at every tree depth.
@@ -130,7 +132,9 @@ function LayoutNode({ node, paneIndexById }: { node: Layout; paneIndexById: Reco
     // different ratio than the one on disk, accumulating error over
     // many sessions.
     if (Math.abs(newRatio - node.ratio) < 0.005) return;
-    const updated = replaceNode(rootLayout, node, { ...node, ratio: newRatio });
+    const source = canonicalWorkspaceNode(node);
+    if (!source) return;
+    const updated = replaceNode(rootLayout, source, { ...source, ratio: newRatio } as Layout);
     if (updated !== rootLayout) setLayout(updated);
   };
 
@@ -169,13 +173,11 @@ function replaceNode(root: Layout, target: Layout, replacement: Layout): Layout 
 
 
 export function PaneGrid() {
-  const savedLayout = useStore((s) => s.layout);
   const view = useStore((s) => s.workspaceView);
-  const panes = useStore((s) => s.panes);
-  const workspaces = useStore((s) => s.workspaces);
   const activeWorkspace = useStore((s) => s.activeWorkspace);
-  const activeBackend = useStore((s) => s.activeBackend);
-  const layout = useMemo(() => workspaceViewLayout({ layout: savedLayout, workspaceView: view, panes, workspaces, activeWorkspace, activeBackend }), [savedLayout, view, panes, workspaces, activeWorkspace, activeBackend]);
+  // Memoised in workspaceView: identity only changes when the shown
+  // arrangement does, never for unrelated pane activity.
+  const layout = useStore(workspaceViewLayout);
   const zoomedPaneId = useStore((s) => s.zoomedPaneId);
   const isMobile = useIsMobile();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -184,7 +186,7 @@ export function PaneGrid() {
   const count = leafCount(layout);
   useEffect(() => {
     const root = rootRef.current;
-    if (!root || isMobile || view) return;
+    if (!root || isMobile || isTemporaryWorkspaceView(view)) return;
     let timer = 0;
     const measure = () => {
       const bounds = root.getBoundingClientRect();
@@ -238,9 +240,7 @@ export function PaneGrid() {
     }
     return out;
   }, [layout]);
-  if (!layout) return view?.kind === 'leads' ? <div className="pane-empty">
-    No live leads. <button type="button" onClick={() => useStore.getState().returnWorkspaceLayout()}>Show full workspace</button>
-  </div> : null;
+  if (!layout) return null;
   // Render only one leaf — either because of zoom (desktop) or because
   // we're on mobile where split rendering isn't useful on small screens.
   if (singleId) {

@@ -1,5 +1,5 @@
 import type { ClosedPane } from './lib/closedPanes';
-import type { CreatePaneReq, Health, McpServer, NativeSettings, OrchestratorHostsInfo, PaneEffort, PaneIdentity, PaneInfo, PaneRole, Port, RecoverySettings, ReleaseCheck, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, Workspace, WorkspaceSummary } from './types';
+import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, NativeSettings, OrchestratorHostsInfo, PaneEffort, PaneIdentity, PaneInfo, PaneRole, Port, RecoverySettings, ReleaseCheck, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, Workspace, WorkspaceSummary } from './types';
 import { isRouterMode } from './dualBackend';
 import { setEnterGapConfig } from './ptySubmit';
 import { openTicketedEventSource, type EventStream } from './lib/ticketedEventSource';
@@ -30,17 +30,6 @@ import {
 
 export { SupportBundleRemoteError };
 export type { SupportBundleResponse, SupportBundleSection } from './lib/supportBundle';
-
-export interface TeamBrokerActivityResponse {
-  window: string;
-  activity: Array<{
-    memberUserId: string;
-    provider: string;
-    accountLabel: string;
-    requestCount: number;
-    lastUsedAtEpoch: number;
-  }>;
-}
 
 export interface DirCandidate {
   path: string;
@@ -593,7 +582,7 @@ export function configureApi(opts: { prefix?: string; token?: string | null }) {
   if (opts.token !== undefined) token = opts.token;
   // A channel the cloud admitted under a previous machine or sign-in must not
   // outlive it. A refreshed token for the same sign-in keeps the channel (as
-  // it keeps open pane sockets); an account switch goes through
+  // it keeps open pane sockets); a different sign-in goes through
   // setApiPrincipal.
   if (prefixChanged || signedOut) closePrivateRelayChannels();
   if (accessContextChanged) {
@@ -4349,6 +4338,19 @@ const coreApi = {
     }>);
   },
 
+  workerArchives: () => apiFetch('/api/worker-archives').then(j<ArchivedWorker[]>),
+  reopenWorkerArchive: (id: string) =>
+    apiFetch(`/api/worker-archives/${encodeURIComponent(id)}/reopen`, { method: 'POST' }).then(j<PaneInfo>),
+  pinWorkerArchive: (id: string, pinned: boolean) =>
+    apiFetch(`/api/worker-archives/${encodeURIComponent(id)}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pinned }),
+    }).then(j<{ pinned: boolean }>),
+  workerSettings: () => apiFetch('/api/worker-settings').then(j<WorkerSettings>),
+  updateWorkerSettings: (patch: Partial<WorkerSettings>) =>
+    apiFetch('/api/worker-settings', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch),
+    }).then(j<WorkerSettings>),
+
   // Recently closed panes on this backend (daemon/closed_panes.go).
   closedPanes: () => apiFetch('/api/panes/closed').then(j<{ panes: ClosedPane[] }>),
 
@@ -4592,7 +4594,7 @@ const coreApi = {
       }),
     }).then(j<PaneInfo>),
 
-  // Reconnect a Codex pane to live account switching. when:'idle' queues the
+  // Reconnect a Codex pane to live credential updates. when:'idle' queues the
   // reconnect for the next idle prompt instead of refusing a busy pane
   // (armed:true); cancel:true withdraws a queued one.
   reconnectCodexAuth: (id: string, opts?: { when?: 'now' | 'idle'; cancel?: boolean }) =>
@@ -5031,7 +5033,7 @@ const coreApi = {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text }),
-    }).then(j<{ bytes: number; outcome: 'submitted' | 'left_in_composer' | 'sent_unconfirmed' }>),
+    }).then(j<{ bytes: number; outcome: 'submitted' | 'queued' | 'left_in_composer' | 'sent_unconfirmed' }>),
 
   // ARIA autoresponder controls. pause flips the global kill switch;
   // status fetches paused state + auto-fires in the last hour.

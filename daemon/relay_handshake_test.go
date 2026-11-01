@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"soluterminal-shared/daemonfeatures"
 	"strings"
 	"testing"
 )
@@ -51,8 +52,8 @@ func TestRelayHandshakeIncludesShellInfo(t *testing.T) {
 	if got := get("backend"); got != "wsl" {
 		t.Errorf("handshake backend = %q, want wsl", got)
 	}
-	if got := get("f"); !strings.Contains(got, "team-broker.codex.v1") {
-		t.Errorf("handshake f = %q, want it to advertise team-broker.codex.v1", got)
+	if got, want := get("f"), daemonfeatures.Encode(daemonFeatures); got != want {
+		t.Errorf("handshake f = %q, want registered features %q", got, want)
 	}
 }
 

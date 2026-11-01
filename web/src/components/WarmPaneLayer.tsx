@@ -1,6 +1,7 @@
 import { useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { effectiveVisiblePaneIds, useStore, warmPanesActive } from '../store';
+import { workspaceViewLayout } from '../lib/workspaceView';
 import { currentRoutingScope, routingPrincipalAllowed } from '../api';
 import { acquirePaneHost } from '../lib/paneHosts';
 import { ensureTerminalSession, registerTerminalPortal, forgetTerminalSession, reconcileTerminalSessions, useTerminalSessions, type TerminalViewSession } from '../lib/terminalViewSessions';
@@ -11,8 +12,9 @@ import { PaneRecovery } from './PaneRecovery';
 
 function TerminalPortal({ session }: { session: TerminalViewSession }) {
   useLayoutEffect(() => registerTerminalPortal(session.key), [session.key]);
-  const layout = useStore((s) => s.layout);
-  // Match Alt+1…9; panes outside this workspace keep zero (no badge).
+  // Match Alt+1…9, which count the panes the grid shows; panes outside it
+  // keep zero (no badge).
+  const layout = useStore(workspaceViewLayout);
   const paneIndex = paneIdsInOrder(layout).indexOf(session.pane.id) + 1;
   return createPortal(
     <ErrorBoundary label={`Pane ${session.pane.id}`}>
@@ -36,7 +38,9 @@ export function WarmPaneLayer() {
  const panes = useStore(s=>s.panes);
  const view = useStore(s=>s.mainPresentation);
  const layout = useStore(s=>s.layout);
- const workspaceView = useStore(s=>s.workspaceView);
+ // What the grid shows (memoised), so view, All panes and tree changes all
+ // mount or retire terminals.
+ const shown = useStore(workspaceViewLayout);
  const focus = useStore(s=>s.focusedPaneId);
  const zoom = useStore(s=>s.zoomedPaneId);
  const parked = useStore(s=>s.parkedPaneIds);
@@ -49,7 +53,9 @@ export function WarmPaneLayer() {
   const visible = new Set(visibleIds);
   const opportunistic = new Set(warmPanesActive() ? parked : []);
   // Filtering the workspace must not dispose its hidden terminal cores/drafts.
-  if (workspaceView) for (const id of paneIdsInOrder(layout)) opportunistic.add(id);
+  // The overview is the default view, so this applies whenever a workspace
+  // is shown: a hidden worker keeps its core until it leaves the layout.
+  if (view.kind === 'workspace') for (const id of paneIdsInOrder(layout)) opportunistic.add(id);
   const retain = view.kind === 'owner';
   // Confirmed active-scope metadata may replace a process; absence from a
   // partial/failed fetch never disposes a retained draft.
@@ -67,6 +73,6 @@ export function WarmPaneLayer() {
    if (pane && pane.kind !== 'native') ensureTerminalSession(scope,pane,retain || pane.role === 'task_owner');
   }
   reconcileTerminalSessions(scope,visible,opportunistic);
- },[panes,view,layout,workspaceView,focus,zoom,parked,backend]);
+ },[panes,view,layout,shown,focus,zoom,parked,backend]);
  return <>{sessions.map(session=><TerminalPortal key={session.key} session={session} />)}</>;
 }

@@ -57,8 +57,7 @@ function healthBelongsToActiveBackend(
 export function ClaudeInstallBanner({ hidden = false }: { hidden?: boolean } = {}) {
   const { health } = useDaemonHealth();
   const storeActiveBackend = useStore((s) => s.activeBackend);
-  // The Claude install/status row lives with the saved accounts in
-  // Credentials, which only team installs have.
+  // An available Credentials section owns the install/status row.
   const team = useTeamFeatures();
   const activeBackend = activeBackendForBanner(storeActiveBackend);
   const activeKey = activeBackend ?? 'local';

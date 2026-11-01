@@ -4,7 +4,7 @@ import { recordSettingsEvent } from './lib/settingsTelemetry';
 import {
   LEGACY_SECTION_TARGETS,
   LEGACY_TAB_TARGETS,
-  SETTINGS_CATEGORIES,
+  settingsCategories,
   resolveSettingsTarget,
   sectionById,
   type LegacySettingsTab,
@@ -14,7 +14,7 @@ import {
 
 // Global open-state for the unified Settings dialog. Decoupled from the
 // dialog's mount point (App.tsx) so any trigger — the topbar gear, the
-// sidebar section right-click, the credentials "Manage team pool…" link —
+// sidebar section right-click, a section's settings link —
 // can open it on a specific tab without prop-drilling. The gear opens with
 // no tab argument, which lands on the last-viewed tab (Appearance at first).
 //
@@ -52,7 +52,8 @@ const FALLBACK_TABS: Record<SettingsCategory, SettingsTab> = {
 function readInitialTarget(): SettingsTarget {
   try {
     const saved = localStorage.getItem('solu.settings.lastCategory');
-    const match = SETTINGS_CATEGORIES.find((category) => category.id === saved);
+    const match = settingsCategories().find((category) => category.id === saved)
+      ?? (saved && Object.prototype.hasOwnProperty.call(FALLBACK_TABS, saved) ? { id: saved as SettingsCategory } : undefined);
     if (match) {
       const section = sectionById(localStorage.getItem('solu.settings.lastSection') ?? '');
       return section?.category === match.id ? { category: match.id, section: section.id } : { category: match.id };
@@ -145,6 +146,7 @@ interface SettingsState {
 
 const initialTarget = readInitialTarget();
 const initialCategory = initialTarget.category;
+let initialTargetPending = true;
 
 export const useSettings = create<SettingsState>((set) => ({
   open: false,
@@ -157,8 +159,10 @@ export const useSettings = create<SettingsState>((set) => ({
   query: '',
   history: [],
   openSettings: (input, legacySection, modelRole) => set((state) => {
+    const currentTarget = initialTargetPending ? readInitialTarget() : state.currentTarget;
+    initialTargetPending = false;
     const inputResolution = input === undefined
-      ? { target: tabTarget(state.currentTarget), legacy: false }
+      ? { target: tabTarget(currentTarget), legacy: false }
       : resolveStoreTarget(input);
     let target = { ...inputResolution.target };
 

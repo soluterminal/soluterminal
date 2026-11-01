@@ -60,10 +60,10 @@ func TestCodexPaneLaunchCommand(t *testing.T) {
 	if got := codexPaneLaunchCommand(cmd); !reflect.DeepEqual(cmd, []string{bin, "resume", "thread-id"}) || len(got) != 4 {
 		t.Fatal("launch mutated persisted command")
 	}
-	// Team broker configuration and approval isolation must reach the same
+	// Provider configuration and approval isolation must reach the same
 	// actual child while the saved resume command stays provider-independent.
 	brokerFlags := []string{"-c", `model_provider="solu_team_broker"`}
-	child := brokerChildCommand(codexPaneLaunchCommand(cmd), brokerFlags)
+	child := routeChildCommand(codexPaneLaunchCommand(cmd), brokerFlags)
 	wantChild := []string{bin, "-c", `model_provider="solu_team_broker"`, "--no-daemon", "resume", "thread-id"}
 	if !reflect.DeepEqual(child, wantChild) || !reflect.DeepEqual(cmd, []string{bin, "resume", "thread-id"}) {
 		t.Fatalf("broker child = %q, canonical command = %q", child, cmd)

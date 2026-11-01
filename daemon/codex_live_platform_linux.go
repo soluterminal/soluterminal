@@ -26,14 +26,14 @@ func codexLivePaneHasBridge(p *Pane) bool {
 	return false
 }
 
-func codexLiveSpawnCommand(self, dir, daemonURL string, cmd []string, brokerOverrides ...[]string) ([]string, error) {
+func codexLiveSpawnCommand(self, dir, daemonURL string, cmd []string, routeOverrides ...[]string) ([]string, error) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		return nil, err
 	}
 	args := []string{self, "codex-terminal", "--data-dir", dir, "--daemon-url", daemonURL}
-	if len(brokerOverrides) > 0 && len(brokerOverrides[0]) > 0 {
-		encoded, _ := json.Marshal(brokerOverrides[0])
+	if len(routeOverrides) > 0 && len(routeOverrides[0]) > 0 {
+		encoded, _ := json.Marshal(routeOverrides[0])
 		args = append(args, "--broker-config", string(encoded))
 	}
 	args = append(args, "--")

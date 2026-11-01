@@ -418,7 +418,8 @@ func (a *apiServer) performSwitchMode(p *Pane, target string, deferred bool, liv
 	}
 
 	// Restore the non-spawn state SpawnOpts doesn't carry — AutoMode (the ARIA
-	// auto-approval policy), flag + memo, prompt history, and original CreatedAt.
+	// auto-approval policy), flag + memo, and prompt history. The creation time
+	// is already installed by Spawn before publication.
 	// Without this a Terminal↔Focus switch silently DROPS them and persists the
 	// wiped pane below (permanent loss) — notably disabling auto-approval on a
 	// pane the user had opted in. Mirrors resume's restoreResumedState.
@@ -555,6 +556,7 @@ func switchSpawnOpts(snap PaneSnapshot, target string, liveCols, liveRows uint16
 		AutoMode:             snap.AutoMode,
 		NeverAutoAnswer:      snap.NeverAutoAnswer,
 		ID:                   snap.ID,
+		CreatedAt:            snap.CreatedAt,
 		Cwd:                  snap.Cwd,
 		Title:                snap.Title,
 		Cols:                 snap.Cols,
@@ -690,6 +692,7 @@ func (a *apiServer) rollbackSwitchMode(snap PaneSnapshot) *Pane {
 		AutoMode:             snap.AutoMode,
 		NeverAutoAnswer:      snap.NeverAutoAnswer,
 		ID:                   snap.ID,
+		CreatedAt:            snap.CreatedAt,
 		Cwd:                  snap.Cwd,
 		Title:                snap.Title,
 		Cols:                 snap.Cols,

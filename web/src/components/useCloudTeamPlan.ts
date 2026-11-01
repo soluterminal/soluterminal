@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 
-// Whether the signed-in hosted-app user is on the team (cloud
+// Whether the signed-in hosted-app user has the team plan (cloud
 // /api/entitlements). The machine picker shows the headless install commands
 // only to the team: public visitors get the desktop app from the website, and
 // the install script fetches from the release host, which stays private.
 // False until the cloud answers, and on any error.
-export function useCloudTeamAccount(bearer: string | null): boolean {
+export function useCloudTeamPlan(bearer: string | null): boolean {
   const [team, setTeam] = useState(false);
   useEffect(() => {
     if (!bearer) {

@@ -127,9 +127,10 @@ fi
 # was stamped channel=local and differed; scripts/test-release-reproduce.sh
 # keeps the three in step).
 SOURCE_SHA="$(git -C "$ROOT" rev-parse HEAD)"
-# Verify the committed resource before computing the clean-source stamp.
-node "$ROOT/scripts/windows-resources.mjs" "$VERSION" --check
+# Prepare and check the exact resource before computing the clean-source stamp.
+DAEMON_BUILD_SOURCE="$(solu_windows_build_source "$ROOT" "$VERSION" "$ROOT/.solu/sidecar-build")"
 LDFLAGS="$(SOLU_BUILD_CHANNEL=release SOLU_SOURCE_SHA="$SOURCE_SHA" solu_daemon_ldflags "$VERSION")"
+
 export SOLU_SOURCE_SHA="$SOURCE_SHA"
 (
   cd "$ROOT"
@@ -141,6 +142,13 @@ export SOLU_SOURCE_SHA="$SOURCE_SHA"
     gzip -n -9 >daemon/agentscripts/operator-agents.tar.gz
   touch daemon/agentscripts/.gitkeep
 )
+
+# Copy the newly embedded assets into a four-part candidate's staged source.
+if [[ "$DAEMON_BUILD_SOURCE" != "$ROOT/daemon" ]]; then
+  rm -rf "$DAEMON_BUILD_SOURCE/webdist" "$DAEMON_BUILD_SOURCE/agentscripts"
+  cp -a "$ROOT/daemon/webdist" "$ROOT/daemon/agentscripts" "$DAEMON_BUILD_SOURCE/"
+fi
+
 echo "==> baking version: ${VERSION}"
 if [[ -n "${SOLU_SUPABASE_URL:-}" && -n "${SOLU_SUPABASE_ANON_KEY:-}" ]]; then
   echo "==> auth gate: ENABLED (Supabase creds baked into sidecars)"
@@ -155,7 +163,7 @@ WIN_OUT_DIR="${WIN_OUT_DIR:-/mnt/c/Users/benja/soluterminal}"
 mkdir -p "$WIN_OUT_DIR"
 
 echo "==> building solud.exe (windows-amd64) → $WIN_OUT_DIR/solud.exe"
-cd "$ROOT/daemon"
+cd "$DAEMON_BUILD_SOURCE"
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
   go build -buildvcs=false -trimpath -ldflags "${LDFLAGS}" -o "$WIN_OUT_DIR/solud.exe" .
 
@@ -166,6 +174,8 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 echo "==> building solud-linux-arm64 (linux-arm64) → $WIN_OUT_DIR/solud-linux-arm64"
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
   go build -buildvcs=false -trimpath -ldflags "${LDFLAGS}" -o "$WIN_OUT_DIR/solud-linux-arm64" .
+cd "$ROOT"
+solu_cleanup_windows_build_source "$ROOT" "$DAEMON_BUILD_SOURCE"
 
 MANIFEST="$WIN_OUT_DIR/.soluterminal-shell-sidecars.sha256"
 {

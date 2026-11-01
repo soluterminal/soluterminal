@@ -69,9 +69,8 @@ export function defaultHidden(team: boolean): MiddleKey[] {
 // sidebar, the right-click menu and the customizer alike.
 export const TEAM_ONLY_SECTIONS: readonly MiddleKey[] = ['owners', 'agents'];
 
-// Sections a team plan carries but a public install doesn't. Credentials holds
-// saved-account switching (team) and API-key rows that only feed team tooling,
-// so a stranger who added it back would find nothing that works for them.
+// Optional sections whose content requires the plan verdict as well as an
+// installed renderer. Keep unavailable sections out of the customizer too.
 export const TEAM_PLAN_SECTIONS: readonly MiddleKey[] = ['credentials'];
 
 // `team` is the operator verdict (task owners, agents); `teamPlan` is the team

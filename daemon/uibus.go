@@ -60,7 +60,7 @@ type uiEvent struct {
 	// plan_gate, decision, failed, budget, completed, cancelled, land_failed,
 	// land_reconciled, fallback, auto_resumed, autopilot).
 	// claudeAutoSelfEmit is local routing metadata, never serialized. It marks
-	// an accounts invalidation produced by the auto-switch controller itself so
+	// a credential invalidation produced by its originating controller so
 	// the daemon subscriber can swallow that feedback edge without counters
 	// that can be orphaned by coalescing or drop-on-full fan-out.
 	claudeAutoSelfEmit bool
@@ -132,12 +132,10 @@ type uiEvent struct {
 	// glance whether our pane-matching logic is off.
 	Cwd string `json:"cwd,omitempty"`
 
-	// Auto-switch fields. Populated ONLY on the "claude-autoswitch-switched"
-	// event the daemon emits when the auto-switch controller moves the
-	// machine-wide Claude login; ignored otherwise. TOKEN-FREE: From/To are
-	// account NAMES, Reason a short human string, FromPct5h the departing
-	// account's 5h util, Trigger one of "auto"|"manual"|"reactive". No
-	// credential value ever rides this event.
+	// Credential-change event fields; ignored on unrelated events.
+	// TOKEN-FREE: From/To are display names, Reason a short human string,
+	// FromPct5h the previous credential's 5h utilization, and Trigger one of
+	// "auto"|"manual"|"reactive". No credential value ever rides this event.
 	From   string `json:"from,omitempty"`
 	To     string `json:"to,omitempty"`
 	Reason string `json:"reason,omitempty"`

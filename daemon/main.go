@@ -1241,9 +1241,10 @@ func main() {
 	updater.SetCloudTeamUpdates(api.entitlements.cloudTeamUpdatesPath)
 	api.entitlements.credsChanged = api.cloudCredsChangedCh
 	api.agentAuthority = newAgentAuthority(*dataDir)
-	// An agent's open request about a pane ends when that pane, or the
-	// asking agent's pane, closes (pane_confirm.go).
-	mgr.SetOnPaneRemoved(api.dropPaneConfirmsFor)
+	// An agent's open request about a pane, and a queued ask_pane to it, end
+	// when that pane or the asking agent's pane closes (pane_confirm.go,
+	// mcp_collab_ask.go).
+	mgr.SetOnPaneRemoved(api.paneRemoved)
 	api.trustedDevices = newTrustedDevices(*dataDir)
 	// Reminder names already mirrored to the cloud are replaced as soon as
 	// approved-only is turned on (schedules_reminders.go reminderPayload).
@@ -1332,8 +1333,10 @@ func main() {
 	// boot-time relayURL flag, so they come up the moment pairing happens.
 	// Inside a private relay channel the device is already authenticated by
 	// the handshake, so its requests skip the per-request device gate.
-	api.privateRelayInner = markRelayTransport(logMiddleware(newShinoqueRelayHandler(workflowHandler, shinoqueTokens)))
-	sup := newRelaySupervisor(ctx, *dataDir, *relayURL, *backendID, markRelayTransport(api.relayDeviceGate(logMiddleware(newShinoqueRelayHandler(workflowHandler, shinoqueTokens)))))
+	var sup *relaySupervisor
+	activeRelayURL := func() string { return sup.activeRelayURL() }
+	api.privateRelayInner = markRelayTransport(logMiddleware(newShinoqueRelayHandler(workflowHandler, shinoqueTokens, activeRelayURL)))
+	sup = newRelaySupervisor(ctx, *dataDir, *relayURL, *backendID, markRelayTransport(api.relayDeviceGate(logMiddleware(newShinoqueRelayHandler(workflowHandler, shinoqueTokens, activeRelayURL)))))
 	api.cloudSup = sup
 	// Revokes this computer in the cloud after Disconnect, and resumes any
 	// revoke an earlier run couldn't deliver (cloud_revoke.go).

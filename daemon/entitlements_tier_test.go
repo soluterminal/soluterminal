@@ -68,7 +68,7 @@ func TestDaemonEntitlementsTierFromCloud(t *testing.T) {
 					t.Errorf("%s = %v, want %v", key, got[key], want)
 				}
 			}
-			if got["smartApprovals"] != tc.smart || got["accountSwitching"] != tc.team || got["teamCredentials"] != tc.team {
+			if got["smartApprovals"] != tc.smart {
 				t.Fatalf("response = %v", got)
 			}
 			if got["source"] != "machine" {

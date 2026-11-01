@@ -17,6 +17,7 @@ var mcpPublicToolNames = map[string]bool{
 	"send_input":           true,
 	"answer_prompt":        true,
 	"spawn_pane":           true,
+	"cancel_queued_worker": true,
 	"kill_pane":            true,
 	"rename_pane":          true,
 	"set_pane_info":        true,

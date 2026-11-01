@@ -24,10 +24,10 @@ func (m *Manager) SetCredentialSelection(selected func(string) string) {
 }
 
 func (m *Manager) selectedCredentialTeam(provider string) string {
-	if paneBroker.selectedTeam == nil {
+	if paneRoute.selectedTeam == nil {
 		return ""
 	}
-	return paneBroker.selectedTeam(m, provider)
+	return paneRoute.selectedTeam(m, provider)
 }
 
 func (p *Pane) credentialTeamSelectionCallback() func(string) string {
@@ -95,7 +95,7 @@ func (m *Manager) paneLaunchCredential(opts SpawnOpts) *paneCredentialInfo {
 		return nil
 	}
 	source := "launch"
-	if paneBrokerActive(opts.Env) {
+	if paneRouteActive(opts.Env) {
 		source = "broker"
 	} else {
 		// Caller overrides can select an independent login. Do not attribute that
@@ -107,13 +107,13 @@ func (m *Manager) paneLaunchCredential(opts SpawnOpts) *paneCredentialInfo {
 		}
 	}
 	account := m.selectedCredentialAccount(provider)
-	if source == "broker" && opts.teamBrokerLabel != "" && paneBroker.accountLabel != nil {
-		account = paneBroker.accountLabel(opts.teamBrokerLabel)
+	if source == "broker" && opts.launchRouteLabel != "" && paneRoute.accountLabel != nil {
+		account = paneRoute.accountLabel(opts.launchRouteLabel)
 	}
 	if account == "" {
 		return nil
 	}
-	return &paneCredentialInfo{Provider: provider, Account: account, Source: source, TeamID: opts.teamBrokerTeamID}
+	return &paneCredentialInfo{Provider: provider, Account: account, Source: source, TeamID: opts.launchRouteTeamID}
 }
 
 func paneCredentialProjection(recorded *paneCredentialInfo, selected func(string) string, selectedTeam ...func(string) string) *paneCredentialInfo {
@@ -135,17 +135,17 @@ func paneCredentialProjection(recorded *paneCredentialInfo, selected func(string
 		return info
 	}
 	if info.Source == "broker" {
-		// Broker requests can follow another team account without restarting;
-		// switching to a personal login requires a new CLI launch.
-		info.RestartRequired = !paneBrokerAccount(info.ActiveAccount)
+		// Proxied requests can follow credential updates without restarting;
+		// moving to a local login requires a new CLI launch.
+		info.RestartRequired = !paneRouteAccount(info.ActiveAccount)
 		if info.TeamID != "" && info.ActiveTeamID != "" {
 			info.RestartRequired = info.TeamID != info.ActiveTeamID
 		}
 	} else if info.Source == "launch" {
 		// Claude reloads file-backed OAuth credentials. Launch metadata alone
-		// cannot establish whether that reload has occurred. Crossing to a team
+		// cannot establish whether that reload has occurred. Crossing to a managed
 		// transport still requires a new launch for either provider.
-		info.RestartRequired = info.Account != info.ActiveAccount && (info.Provider != "claude" || paneBrokerAccount(info.ActiveAccount))
+		info.RestartRequired = info.Account != info.ActiveAccount && (info.Provider != "claude" || paneRouteAccount(info.ActiveAccount))
 	}
 	return info
 }
@@ -221,5 +221,5 @@ func (a *apiServer) credentialAccount(provider string) string {
 }
 
 // activeCredentialAccount resolves the selected account; nil in a build
-// without saved or team accounts.
+// without a credential-selection extension.
 var activeCredentialAccount func(a *apiServer, provider string) string

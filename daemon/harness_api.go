@@ -208,7 +208,7 @@ func (a *apiServer) selectHarnessAccount(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if req.Source == "team" {
-		if err := a.harnessTeamSync(r.Context(), s.provider); err != nil {
+		if err := a.harnessRouteSync(r.Context(), s.provider); err != nil {
 			http.Error(w, err.Error(), 502)
 			return
 		}
@@ -615,7 +615,7 @@ func (a *apiServer) launchHarness(w http.ResponseWriter, r *http.Request) {
 		if row.Selected {
 			selected = true
 			if row.Source == "team" {
-				if err = a.harnessTeamSync(r.Context(), s.provider); err != nil {
+				if err = a.harnessRouteSync(r.Context(), s.provider); err != nil {
 					http.Error(w, err.Error(), 502)
 					return
 				}
@@ -671,7 +671,7 @@ func (a *apiServer) harnessProbeTarget(w http.ResponseWriter, r *http.Request) (
 		return nil, "", "", harnessAccount{}, "", false
 	}
 	if source == "team" {
-		if err = a.harnessTeamSync(r.Context(), s.provider); err != nil {
+		if err = a.harnessRouteSync(r.Context(), s.provider); err != nil {
 			http.Error(w, err.Error(), 502)
 			return nil, "", "", harnessAccount{}, "", false
 		}
@@ -686,11 +686,11 @@ func (a *apiServer) harnessProbeTarget(w http.ResponseWriter, r *http.Request) (
 		return nil, "", "", harnessAccount{}, "", false
 	}
 	if source == "team" {
-		if harnessTeam.route == nil {
+		if harnessRoute.route == nil {
 			http.Error(w, errHarnessTeamUnavailable.Error(), http.StatusConflict)
 			return nil, "", "", harnessAccount{}, "", false
 		}
-		key, routed, status, routeErr := harnessTeam.route(a, s, name, acc)
+		key, routed, status, routeErr := harnessRoute.route(a, s, name, acc)
 		if routeErr != nil {
 			http.Error(w, routeErr.Error(), status)
 			return nil, "", "", harnessAccount{}, "", false
@@ -709,7 +709,7 @@ func (a *apiServer) testHarness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if source == "team" {
-		defer harnessTeam.release(a, acc.APIKey) // minted for this one probe
+		defer harnessRoute.release(a, acc.APIKey) // minted for this one probe
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
@@ -731,7 +731,7 @@ func (a *apiServer) checkHarness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if source == "team" {
-		defer harnessTeam.release(a, acc.APIKey) // minted for this one probe
+		defer harnessRoute.release(a, acc.APIKey) // minted for this one probe
 	}
 	if source == "team" && acc.BrokerOnly {
 		writeJSON(w, 200, harnessTestDTO{Status: "unsupported", At: time.Now().Unix(), Model: acc.Model, Detail: "Use Test Connection to check this shared account."})
@@ -758,13 +758,13 @@ func loopbackDaemonURL(addr string) (string, error) {
 
 var errHarnessTeamUnavailable = errors.New("team accounts are unavailable in this build")
 
-// harnessTeamSync pulls the provider's shared (team) accounts before one is
+// harnessRouteSync refreshes the provider's routed accounts before one is
 // used.
-func (a *apiServer) harnessTeamSync(ctx context.Context, provider string) error {
-	if harnessTeam.sync == nil {
+func (a *apiServer) harnessRouteSync(ctx context.Context, provider string) error {
+	if harnessRoute.sync == nil {
 		return errHarnessTeamUnavailable
 	}
-	return harnessTeam.sync(a, ctx, provider)
+	return harnessRoute.sync(a, ctx, provider)
 }
 
 // harnessImportSecrets is the saved runtime key store a harness account can

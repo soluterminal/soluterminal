@@ -29,7 +29,7 @@ package main
 // default: a team binary that wrongly believes it is public can at worst
 // start on the public build (it loses the team tools until its account moves
 // it back), whereas a public binary that wrongly started on the team channel
-// would install private code on a machine with no team account.
+// would install private code on a machine without the required entitlement.
 //
 // The stamp carries a "solu-build-flavor=" prefix so release tooling can read
 // a cross-compiled binary's flavour from its bytes: a team binary contains

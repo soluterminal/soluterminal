@@ -8,6 +8,8 @@ require soluterminal-shared v0.0.0
 
 require github.com/klauspost/compress v1.18.7
 
+require github.com/pelletier/go-toml/v2 v2.2.3
+
 replace soluterminal-shared => ../shared
 
 require (

@@ -81,13 +81,14 @@ export function BroadcastDialog({ onClose }: { onClose: () => void }) {
       if (!sender || !submitToPane(sender, prompt, { appendEnter })) throw new Error('pane could not receive');
       return appendEnter ? 'sent_unconfirmed' : 'inserted';
     }));
-    const counts = { submitted: 0, sent_unconfirmed: 0, left_in_composer: 0, inserted: 0, failed: 0 };
+    const counts = { submitted: 0, queued: 0, sent_unconfirmed: 0, left_in_composer: 0, inserted: 0, failed: 0 };
     for (const result of results) {
       if (result.status === 'fulfilled') counts[result.value]++;
       else counts.failed++;
     }
     const summary = [
       counts.submitted && `${counts.submitted} submitted`,
+      counts.queued && `${counts.queued} queued until the current turn ends`,
       counts.sent_unconfirmed && `${counts.sent_unconfirmed} sent without confirmation`,
       counts.left_in_composer && `${counts.left_in_composer} left unsent`,
       counts.inserted && `${counts.inserted} inserted`,

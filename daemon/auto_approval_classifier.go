@@ -40,7 +40,7 @@ var (
 	// Latest Codex command/edit modal header, used to decide whether the
 	// header-only fast path describes the NEWEST menu on screen or a stale
 	// modal left in scrollback above a later focused menu.
-	codexApprovalHeaderRE = regexp.MustCompile(`Would you like to (?:run the following command|make the following edits)\?`)
+	codexApprovalHeaderRE = regexp.MustCompile(`Would\s+you\s+like\s+to\s+(?:run\s+the\s+following\s+command|make\s+the\s+following\s+edits)\?`)
 
 	// Trailing key hint / description parentheticals on an option label:
 	// "(y)", "(shift+tab)", "(esc)".
@@ -420,7 +420,9 @@ func autoApprovalDeclineReason(s string, hasCodex bool) string {
 		return ""
 	}
 
-	lower := strings.ToLower(block)
+	// Match phrases across physical wrap rows, as the deny checks already do.
+	// Keep the numbered-row regex on the original text so its anchors survive.
+	lower := normalizePromptText(block)
 	// Permission-gate signal: the "Yes, <qualifier>" escalation row every
 	// Claude/Codex permission prompt offers (approvalOptionRE), "ask again"
 	// (apostrophe-glyph-proof), or a known permission question. Selection

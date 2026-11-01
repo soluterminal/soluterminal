@@ -4,6 +4,7 @@ import type { PaneInfo, Schedule } from '../types';
 import { PaneHeader } from './PaneHeader';
 import { PaneHeaderBadges } from './PaneHeaderBadges';
 import { DialogHost } from './DialogHost';
+import { MEASURE_SENTINEL } from './PaneHeaderOverflow';
 import { useStore } from '../store';
 
 // Focus is retired by default (lib/focusAvailability). These suites cover the
@@ -532,8 +533,9 @@ describe('renderer switch confirmation visibility', () => {
     let resize = () => {};
     vi.stubGlobal('ResizeObserver', class { constructor(cb: () => void) { resize = cb; } observe() {} disconnect() {} });
     vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => available);
-    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(800);
-    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 80, height: 20, top: 0, left: 0, right: 80, bottom: 20, x: 0, y: 0, toJSON() {} });
+    // Every chip is 80px wide and the non-collapsing rest of the header needs more than 320px.
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(80);
+    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(MEASURE_SENTINEL + 800);
     const onSwitchMode = vi.fn();
     const switchPaneMode = vi.spyOn(useStore.getState(), 'switchPaneMode').mockResolvedValue(null);
     const terminalKeys = vi.fn();

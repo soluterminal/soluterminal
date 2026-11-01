@@ -42,7 +42,9 @@ export function insertLeaf(layout: Layout | null, leaf: Layout, direction: 'hori
 //   top/bottom/left/right -> detach source, then insert as a new split
 //   relative to target (left/top = source first, right/bottom = source second)
 export function movePaneInLayoutImpl(root: Layout, source: string, target: string, zone: DropZone): Layout {
-  if (source === target) return root;
+  // Appended/recovered tiles may be visible without belonging to this layout.
+  // Validate both endpoints before detaching anything.
+  if (source === target || !layoutHasLeaf(root, source) || !layoutHasLeaf(root, target)) return root;
   if (zone === 'center') return swapLeaves(root, source, target);
 
   // Capture the source leaf before removing (so we preserve its type -

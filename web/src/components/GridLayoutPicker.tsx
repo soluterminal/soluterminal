@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { useStore } from '../store';
+import { collectLeaves } from '../lib/layout';
+import { workspaceViewLayout } from '../lib/workspaceView';
 import { TopbarPopover } from './TopbarPopover';
 import { IconGrid } from './ui/icons';
 
@@ -18,16 +20,9 @@ const MAX_DIM = 5;
 
 export function GridLayoutPicker() {
   const applyGridLayout = useStore((s) => s.applyGridLayout);
-  const currentLeafCount = useStore((s) => {
-    const l = s.layout;
-    if (!l) return 0;
-    const walk = (n: typeof l): number => {
-      if (!n) return 0;
-      if (n.type !== 'split') return 1;
-      return walk(n.a) + walk(n.b);
-    };
-    return walk(l);
-  });
+  // Count the tiles the grid shows, as applyGridLayout does: in the overview
+  // hidden workers keep their saved place and are not part of the grid.
+  const currentLeafCount = useStore((s) => collectLeaves(workspaceViewLayout(s)).length);
 
   const [hoverR, setHoverR] = useState(0);
   const [hoverC, setHoverC] = useState(0);

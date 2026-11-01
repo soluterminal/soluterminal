@@ -20,15 +20,6 @@ import (
 const (
 	// UIPrefs: this daemon persists sidebar/UI choices across app origins.
 	UIPrefs = "ui-prefs.v1"
-	// TeamBrokerCodex: the daemon can provision a broker-only Codex team set
-	// (no bundle on the wire; model calls go through the cloud broker). Daemons
-	// <= 0.0.1153 cannot — the Oct 1 2026 outage.
-	TeamBrokerCodex = "team-broker.codex.v1"
-	// TeamBrokerClaude: same, for broker-only Claude team sets.
-	TeamBrokerClaude = "team-broker.claude.v1"
-	// WorkflowOwnerDirect: an opted-in terminal owner can author through the
-	// guarded file broker and submit its candidate to mandatory engine gates.
-	WorkflowOwnerDirect = "workflow.owner-direct.v1"
 )
 
 // MaxFeatures bounds how many names one handshake may carry.

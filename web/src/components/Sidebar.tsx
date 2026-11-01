@@ -108,7 +108,7 @@ export function Sidebar({
   const personalView = usePersonalView();
   const serviceCount = useStore(s => workspacePorts(s.ports,s.activeWorkspace,s.activeBackend,s.workspaces).filter(isWebService).length);
 
-  // Credentials is a team-plan section (saved accounts, team-only key rows).
+  // Optional sections follow the plan verdict as well as their registration.
   const teamPlan = useTeamFeatures();
   useEffect(hydratePrefs, []);
   const savedOpen = usePrefs((s) => s.prefs.sidebar?.open);
@@ -449,7 +449,7 @@ export function Sidebar({
     );
     return [...ordered, ...leftovers];
   }, [workspaces, wsOrder]);
-  const treeWorkspaces = useMemo(() => activeWorkspace === '_current' && layout
+  const treeWorkspaces = useMemo(() => activeWorkspace === '_current'
     ? [{ name: '_current', layout, paneIds: paneIdsInOrder(layout), protected: true } as Workspace, ...named]
     : named, [named, activeWorkspace, layout]);
 
@@ -483,7 +483,9 @@ export function Sidebar({
           // any that no workspace claims would otherwise be stranded
           // invisibly — this list is their only recovery surface (reveal →
           // Resume button).
-          (p.status === 'running' || (p.status === 'exited' && p.resumable)) &&
+          // An agent-started pane whose lead and workspace are both gone is
+          // listed here even once it finished: this is its only place.
+          (p.status === 'running' || (p.status === 'exited' && p.resumable) || p.origin?.source === 'agent') &&
           (!isRouterMode() || !activeBackend || !p.backend || p.backend === activeBackend) &&
           p.role !== 'task_owner' && !managedOwnerBindings.has(p.id) &&
           !visibleIds.has(p.id) &&

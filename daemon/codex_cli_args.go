@@ -13,7 +13,7 @@ import (
 
 // paneDaemonURLEnv carries this daemon's loopback address into terminal
 // shells, so a CLI typed in the shell can reach it (the Codex live bridge,
-// and any registered launch broker). The value is an address, never a secret.
+// and any registered launch route). The value is an address, never a secret.
 const paneDaemonURLEnv = "SOLU_TEAM_BROKER_DAEMON_URL"
 
 // codexShellRoutingMessage is what a terminal user sees when a Codex launch
@@ -51,7 +51,7 @@ func codexShellOptionTakesValue(arg string) bool {
 }
 
 // Match the PowerShell hook: utilities and explicit remote transports remain
-// untouched; exec/review/app-server need the same broker as the interactive TUI.
+// untouched; exec/review/app-server need the same route as the interactive TUI.
 func codexUnixModelInvocation(args []string) (model, headless bool) {
 	model = true
 	skip, positional := false, false
@@ -111,7 +111,7 @@ func codexShellProviderOverride(args []string) bool {
 		key, _, _ := strings.Cut(strings.TrimPrefix(config, "="), "=")
 		key = strings.NewReplacer("\"", "", "'", "", " ", "", "\t", "").Replace(key)
 		// cli_auth_credentials_store: "file" or "keyring" would load the
-		// personal login in the user's CODEX_HOME (see planTeamBrokerCLI).
+		// default login in the user's CODEX_HOME instead of the configured provider.
 		if key == "model_provider" || key == "model_providers" || strings.HasPrefix(key, "model_providers.") || strings.HasPrefix(key, "model_providers[") || key == "openai_base_url" || key == "chatgpt_base_url" || key == "cli_auth_credentials_store" {
 			return true
 		}
@@ -131,9 +131,9 @@ func codexShellDaemonURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// brokerChildCommand inserts a launch plan's argv overrides after the CLI
+// routeChildCommand inserts a launch plan's argv overrides after the CLI
 // executable.
-func brokerChildCommand(cmd, overrides []string) []string {
+func routeChildCommand(cmd, overrides []string) []string {
 	if len(overrides) == 0 || len(cmd) == 0 {
 		return cmd
 	}

@@ -28,6 +28,7 @@ import type { AgentReport } from './api';
 import type { AgentKind } from './lib/agentKind';
 import type { MiddleKey } from './components/sidebar/sidebarSections';
 import type { FeatureGate } from './featureGates';
+import type { SettingsRegistryEntries } from './settingsRegistry';
 import type { SettingsTab } from './settings';
 import type { OrchestratorHostInfo, PaneInfo, ScheduleChatRef } from './types';
 
@@ -238,6 +239,8 @@ export interface WebExtension {
   /** The coordinating pane role. Without it no agent can host the role. */
   paneRoleHosts?: PaneRoleHosts;
   inboxReports?: InboxReports;
+  /** Search categories, sections and controls contributed by optional modules. */
+  settingsRegistryEntries?: SettingsRegistryEntries[];
   /** Settings tabs. */
   settingsTabs?: SettingsTabEntry[];
   /** Handlers for daemon UI events, by event type. */
@@ -269,7 +272,7 @@ export interface WebExtension {
 type ListSlot =
   | 'statusBarChips' | 'appHosts' | 'paletteActions' | 'settingsTabs' | 'eventStreamOpened'
   | 'globalKeys' | 'rootOverlays' | 'topbarItems' | 'mobileBarItems' | 'settingsSections'
-  | 'shortcutGroups' | 'featureGates';
+  | 'shortcutGroups' | 'featureGates' | 'settingsRegistryEntries';
 type SingleSlot = 'paneRoleHosts' | 'inboxReports' | 'composerVoice' | 'paneDictation' | 'scheduleChatDelivery';
 
 let registered: WebExtension[] = [];

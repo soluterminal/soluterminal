@@ -2,22 +2,32 @@ import type { Layout, PaneInfo, Workspace } from '../types';
 import { paneIdsInOrder } from './layout';
 import { paneRowStatus, type PaneRowStatus } from './paneStatus';
 
+// Legacy snapshots may only have origin.at; missing/invalid times sort first.
+function creationTime(pane: PaneInfo): number {
+  const created = Date.parse(pane.createdAt);
+  return Number.isFinite(created) && created > 0 ? created : Number.isFinite(pane.origin?.at) ? pane.origin!.at : 0;
+}
+
+function compareCreation(a: PaneInfo, b: PaneInfo): number {
+  return creationTime(a) - creationTime(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
 export interface PaneTreeNode {
   pane: PaneInfo;
   children: PaneTreeNode[];
-  isLead: boolean;
+  isTopLevel: boolean;
   status: PaneRowStatus;
   needsYou: boolean;
   descendantCount: number;
-  hasLeadDescendants: boolean;
 }
 export interface WorkspacePaneTree {
   workspace: Workspace;
   roots: PaneTreeNode[];
+  unattached: PaneTreeNode[];
   paneIds: string[];
   nodes: PaneTreeNode[];
   status: PaneRowStatus;
-  hasLeads: boolean;
+  hasTopLevelPanes: boolean;
 }
 
 /** Immediate starters take precedence over the original lead. A closed starter
@@ -28,7 +38,7 @@ export function buildWorkspacePaneTrees(
   activeWorkspace: string, layout: Layout | null, activeBackend: 'wsl' | 'win' | null = null,
 ): WorkspacePaneTree[] {
   panes = withoutRemovedWorkspacePanes(workspaces, panes, activeBackend);
-  const list = Object.values(panes).filter(p => p.role !== 'task_owner');
+  const list = Object.values(panes).filter(p => p.role !== 'task_owner').sort(compareCreation);
   const parents = new Map<string, string>();
   for (const p of list) {
     if (p.origin?.source !== 'agent') continue;
@@ -45,7 +55,7 @@ export function buildWorkspacePaneTrees(
       id = parents.get(id);
     }
   }
-  const trees: WorkspacePaneTree[] = workspaces.map(workspace => ({ workspace, roots: [], paneIds: [], nodes: [], status: 'idle', hasLeads: false }));
+  const trees: WorkspacePaneTree[] = workspaces.map(workspace => ({ workspace, roots: [], unattached: [], paneIds: [], nodes: [], status: 'idle', hasTopLevelPanes: false }));
   const owner = new Map<string, number>();
   trees.forEach(({ workspace: w }, i) => {
     const active = w.name === activeWorkspace && (!w.backend || w.backend === activeBackend);
@@ -63,11 +73,16 @@ export function buildWorkspacePaneTrees(
   for (const p of list) resolveOwner(p.id);
   for (const p of list) {
     if (owner.has(p.id) || p.origin?.source !== 'agent') continue;
-    const i = trees.findIndex(t => t.workspace.name === p.origin?.workspace && (!t.workspace.backend || !p.backend || t.workspace.backend === p.backend));
+    const i = trees.findIndex(t => t.workspace.name === p.origin?.workspace
+      && (t.workspace.name !== '_current' || !trees.some(other => other.workspace.name !== '_current'))
+      && (!t.workspace.backend || !p.backend || t.workspace.backend === p.backend));
     if (i >= 0) owner.set(p.id, i);
   }
   for (const p of list) resolveOwner(p.id);
-  const nodes = new Map(list.map(pane => [pane.id, { pane, children: [], isLead: false, status: paneRowStatus(pane), needsYou: false, descendantCount: 0, hasLeadDescendants: false } as PaneTreeNode]));
+  // An agent pane with no surviving ancestor and no recorded home belongs to
+  // no workspace: it stays in Background sessions (its one place), instead of
+  // being claimed by whichever workspace sorts first.
+  const nodes = new Map(list.map(pane => [pane.id, { pane, children: [], isTopLevel: pane.origin?.source !== 'agent', status: paneRowStatus(pane), needsYou: false, descendantCount: 0, } as PaneTreeNode]));
   for (const p of list) {
     const i = owner.get(p.id);
     if (i === undefined) continue;
@@ -78,19 +93,35 @@ export function buildWorkspacePaneTrees(
     else trees[i].roots.push(node);
     trees[i].paneIds.push(p.id);
   }
-  // A role label or historical origin alone does not make a lead. The pane
-  // must have started a currently running child, even if that child moved.
-  for (const [child, parent] of parents) if (panes[child]?.status === 'running' && nodes.has(parent)) nodes.get(parent)!.isLead = true;
   const summarize = (node: PaneTreeNode) => {
     node.children.forEach(summarize);
     node.descendantCount = node.children.reduce((count, child) => count + child.descendantCount + 1, 0);
     node.needsYou = node.status === 'needs-you' || node.children.some(child => child.needsYou);
-    node.hasLeadDescendants = node.children.some(child => child.isLead || child.hasLeadDescendants);
   };
   for (const tree of trees) {
+    const w = tree.workspace;
+    const active = w.name === activeWorkspace && (!w.backend || w.backend === activeBackend);
+    const order = paneIdsInOrder(active && layout ? layout : w.layout);
+    const positions = new Map(order.map((id, index) => [id, index]));
+    const compare = (a: PaneTreeNode, b: PaneTreeNode): number => {
+      const ai = positions.get(a.pane.id), bi = positions.get(b.pane.id);
+      if (ai !== undefined || bi !== undefined) {
+        if (ai === undefined) return 1;
+        if (bi === undefined) return -1;
+        return ai - bi;
+      }
+      return compareCreation(a.pane, b.pane);
+    };
+    const sort = (siblings: PaneTreeNode[]) => {
+      siblings.sort(compare);
+      for (const node of siblings) sort(node.children);
+    };
+    sort(tree.roots);
+    tree.unattached = tree.roots.filter(node => !node.isTopLevel);
     tree.roots.forEach(summarize);
     tree.nodes = flattenPaneTree(tree.roots);
-    tree.hasLeads = tree.nodes.some(node => node.isLead);
+    tree.paneIds = tree.nodes.map(node => node.pane.id);
+    tree.hasTopLevelPanes = tree.nodes.some(node => node.isTopLevel);
     tree.status = tree.roots.some(node => node.needsYou) ? 'needs-you'
       : tree.nodes.some(node => node.status === 'busy') ? 'busy'
       : tree.nodes.length > 0 && tree.nodes.every(node => node.status === 'finished') ? 'finished' : 'idle';

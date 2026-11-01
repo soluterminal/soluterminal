@@ -360,7 +360,7 @@ func TestApplyShellRefusesAnInstallerFromThePreviousChannel(t *testing.T) {
 
 func TestTeamVerdictOnAPublicBuildKeepsTheCurrentChannel(t *testing.T) {
 	// A public build has no team update endpoint (only team builds are
-	// stamped with it), so a team account's verdict cannot move it.
+	// stamped with it), so an entitlement verdict cannot move it.
 	setTeamUpdatesPath(t, "")
 	t.Setenv("SOLU_UPDATE_MANIFEST_URL", "")
 	setBuildFlavorStamp(t, "solu-build-flavor=public")

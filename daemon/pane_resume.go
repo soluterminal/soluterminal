@@ -318,6 +318,7 @@ func resumeSpawnOpts(snap PaneSnapshot, liveCols, liveRows uint16) SpawnOpts {
 		AutoMode:                     snap.AutoMode,
 		NeverAutoAnswer:              snap.NeverAutoAnswer,
 		ID:                           snap.ID,
+		CreatedAt:                    snap.CreatedAt,
 		RequireResumableConversation: conversationID != "" && harnessProvider == "",
 		Cwd:                          snap.Cwd,
 		Title:                        snap.Title,
@@ -430,6 +431,7 @@ func (p *Pane) releaseRespawn() { p.respawning.Store(false) }
 // identity, layout reference and metadata remain as a retryable recovery tile.
 func (a *apiServer) respawnInPlace(snap PaneSnapshot, opts SpawnOpts) (*Pane, error) {
 	opts.AutoMode, opts.NeverAutoAnswer = snap.AutoMode, snap.NeverAutoAnswer
+	opts.CreatedAt = snap.CreatedAt
 	// Snapshot the agent's full descendant set BEFORE the kill. A managed
 	// harness client is spawned DETACHED (its own session) by launch.mjs, so the
 	// pane child's process-group teardown never signals it; once its wrapper dies
@@ -517,7 +519,7 @@ func (a *apiServer) respawnInPlace(snap PaneSnapshot, opts SpawnOpts) (*Pane, er
 
 // restoreResumedState copies the pane state that SpawnOpts doesn't carry — the
 // delegation-announcement override, flag, flag memo,
-// prompt history and original createdAt —
+// and prompt history —
 // from the exited snapshot onto the freshly respawned pane, and re-arms the grid
 // when auto-mode is active. Mirrors ResumeClaudePane's restoration so a live
 // resume preserves exactly what a daemon-restart resume does.
@@ -526,9 +528,6 @@ func restoreResumedState(p *Pane, snap PaneSnapshot) {
 		return
 	}
 	p.mu.Lock()
-	if !snap.CreatedAt.IsZero() {
-		p.CreatedAt = snap.CreatedAt
-	}
 	p.AnnounceDelegationEvents = snap.AnnounceDelegationEvents
 	p.Flagged = snap.Flagged
 	p.FlagMemo = snap.FlagMemo

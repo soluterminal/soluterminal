@@ -152,9 +152,18 @@ func runAgent() int {
 	// sets its own. See stripInheritedClaudeEnv. (The PTY/pipe child creation
 	// itself happens in the *noPty branch below, sharing this env.)
 	env := stripInheritedClaudeEnv(os.Environ())
+	if envValueFromList(strings.Split(*envStr, ","), "SOLU_QUOTA_WORKER") == "1" {
+		var keys []string
+		for _, entry := range strings.Split(*envStr, ",") {
+			if key, _, ok := strings.Cut(entry, "="); ok {
+				keys = append(keys, key)
+			}
+		}
+		env = filterOutEnvKeys(env, keys)
+	}
 	if *envStr != "" {
-		if paneBroker.agentInheritedEnv != nil {
-			env = paneBroker.agentInheritedEnv(env, strings.Split(*envStr, ","))
+		if paneRoute.agentInheritedEnv != nil {
+			env = paneRoute.agentInheritedEnv(env, strings.Split(*envStr, ","))
 		}
 	}
 	env = append(env, "TERM=xterm-256color", "COLORTERM=truecolor")
@@ -171,11 +180,11 @@ func runAgent() int {
 			}
 		}
 	}
-	if paneBrokerActive(env) {
+	if paneRouteActive(env) {
 		// Apply after the comma-delimited agent wire format is decoded: a
 		// NO_PROXY list must not be split into unrelated environment entries.
-		if paneBroker.agentEnv != nil {
-			env = paneBroker.agentEnv(env)
+		if paneRoute.agentEnv != nil {
+			env = paneRoute.agentEnv(env)
 		}
 	}
 	// Ensure ~/.local/bin (the native Claude installer's target) is on PATH for

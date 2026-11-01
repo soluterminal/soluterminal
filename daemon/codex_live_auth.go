@@ -41,9 +41,9 @@ func codexLiveEnabled(dir string) bool {
 // Do not turn an ordinary login/API-key/older-CLI launch into a broken bridge.
 // This preflight belongs to the daemon's spawn path, not the pane wrapper.
 func codexLiveLaunchReady(cmd []string, env []string) bool {
-	// Team launches use the same control relay for capacity recovery, with
-	// broker overrides and no personal auth.json login/refresh path.
-	if paneBrokerActive(env) {
+	// Routed launches use the same control relay for capacity recovery, with
+	// route overrides and no personal auth.json login/refresh path.
+	if paneRouteActive(env) {
 		return codexLiveSupported() && codexLiveTerminalArgs(cmd) && codexLiveCLISupported(cmd, env)
 	}
 	if !codexLiveSupported() || !codexLiveTerminalArgs(cmd) || !codexLiveDefaultHome(env) || os.Getenv("CODEX_HOME") != "" {
@@ -210,7 +210,7 @@ func codexPaneAuthProjection(snap PaneSnapshot, st codexLiveStatus, revision, se
 		if info.State == "live" && (st.Revision == "" || st.Revision != revision) {
 			info.State = "switching"
 		}
-		if paneBrokerAccount(selected) {
+		if paneRouteAccount(selected) {
 			info.State = "reconnect-required"
 		} else if info.State == "live" {
 			info.Account = selected
@@ -218,10 +218,10 @@ func codexPaneAuthProjection(snap PaneSnapshot, st codexLiveStatus, revision, se
 		return info
 	}
 	_, resumable := codexLiveResumeCommand(snap.Cmd, snap.CodexThreadID)
-	info.CanReconnect = enabled && resumable && !paneBrokerAccount(selected)
+	info.CanReconnect = enabled && resumable && !paneRouteAccount(selected)
 	switch {
 	case info.CanReconnect:
-	case paneBrokerAccount(selected):
+	case paneRouteAccount(selected):
 		info.Blocker = "team"
 	case !enabled:
 		info.Blocker = "disabled"
@@ -442,7 +442,7 @@ func codexLiveDefaultHome(env []string) bool {
 	return true
 }
 
-// Migration is a one-time explicit action, never the account-switch mechanism.
+// Migration is a one-time explicit action, separate from routine credential updates.
 // Only the currently rendered, empty/placeholder composer is eligible. A draft,
 // unknown chrome, approval or background terminal waits for the user to settle it.
 func codexLiveMigrationScreenSafe(screen string) bool {
@@ -697,6 +697,6 @@ func (a *apiServer) codexLoginUnavailable(w http.ResponseWriter) bool {
 
 // codexLiveAuthRefresh refreshes the live Codex login a bridged terminal
 // rejected (revision is that login's fingerprint). Only a credential manager
-// that owns the login can (codexcreds_live.go); without one the user signs
+// that owns the login can; without one the user signs
 // in again with the Codex CLI.
 var codexLiveAuthRefresh func(a *apiServer, ctx context.Context, revision string) error

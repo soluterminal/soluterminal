@@ -108,11 +108,11 @@ func runCodexInlineShim(cliArgs []string) int {
 		fmt.Fprintln(os.Stderr, "codex: command not found")
 		return 127
 	}
-	// Do this before even probing the CLI. An unavailable selected team route
+	// Do this before even probing the CLI. An unavailable selected account route
 	// must not start a personal login or reuse a stale parent capability.
 	childEnv := codexShimEnvironment(cliArgs, os.Environ())
-	if paneBroker.codexShellLaunch != nil {
-		cliArgs, childEnv, err = paneBroker.codexShellLaunch(bin, cliArgs, childEnv)
+	if paneRoute.codexShellLaunch != nil {
+		cliArgs, childEnv, err = paneRoute.codexShellLaunch(bin, cliArgs, childEnv)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "codex:", err)
@@ -165,7 +165,7 @@ func codexShimEnvironment(args, env []string) []string {
 	return env
 }
 
-// The shim already resolved the user's executable and broker route. PATH is
+// The shim already resolved the user's executable and account route. PATH is
 // therefore no longer an override to resolve; all authentication overrides
 // still pass through the same conservative preflight as direct pane launches.
 func codexLiveShellCommand(args, env []string, shimDir string) []string {
@@ -178,7 +178,7 @@ func codexLiveShellCommand(args, env []string, shimDir string) []string {
 		return nil
 	}
 	dir := filepath.Dir(shimDir)
-	if paneBrokerActive(env) || !codexLiveEnabled(dir) || !codexLiveLaunchReady(args, filterOutEnvKeys(env, []string{"PATH"})) {
+	if paneRouteActive(env) || !codexLiveEnabled(dir) || !codexLiveLaunchReady(args, filterOutEnvKeys(env, []string{"PATH"})) {
 		return nil
 	}
 	self, err := os.Executable()
@@ -189,10 +189,10 @@ func codexLiveShellCommand(args, env []string, shimDir string) []string {
 }
 
 // runShimCLI runs the real Codex CLI for the pane-local shim, through the
-// launch broker's runner when one is registered.
+// launch route's runner when one is registered.
 func runShimCLI(c *exec.Cmd) error {
-	if paneBroker.runShellCLI != nil {
-		return paneBroker.runShellCLI(c)
+	if paneRoute.runShellCLI != nil {
+		return paneRoute.runShellCLI(c)
 	}
 	return runShimProcess(c, nil)
 }

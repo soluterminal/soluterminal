@@ -38,19 +38,6 @@ var muse = Provider{
 		{Match: "spark", Tier: TierStandard},
 	}},
 	Creds: &CredFacts{
-		Mailbox: &MailboxFacts{
-			RouteSegment: "muse", SetTable: "soluterminal_team_muse_cred_set",
-			SyncTable: "soluterminal_team_muse_cred_sync", PolicyTable: "soluterminal_team_muse_cred_policy",
-			PolicyKind: "policy", EnvelopeKey: "museAuth", AuthKinds: []string{"oauth", "api_key"},
-			Validation: "envelope-only", MaxBodyBytes: 256 << 10, MaxEnvelopeBytes: 64 << 10,
-			RestrictAccountLabels: true, ReservedAccountLabel: "__team__",
-		},
-		TeamState: &TeamStateFacts{
-			StateFileName: "muse_team_provision_state.json",
-			// Muse rotates only the live auth.json, never its staged snapshot, so an
-			// untracked byte difference always takes the mailbox copy without skew.
-			ClockSkewHeuristic: false, SnapshotRotatesLocally: false,
-		},
 		Store: &StoreFacts{UsesAuthLockFile: true, LiveFileName: "auth.json", RootDirName: "muse", ManagedFileName: "managed.json", SourcesDirName: "sources", TeamDirName: "team"},
 	},
 }

@@ -45,8 +45,7 @@ type codexFileState struct {
 	GitRemote  string `json:"gitRemote,omitempty"`
 	CLIVersion string `json:"cliVersion,omitempty"`
 	Originator string `json:"originator,omitempty"`
-	// ModelProvider is session_meta.model_provider ("openai", or the team
-	// broker's "solu_team_broker").
+	// ModelProvider is the session_meta.model_provider value reported by the CLI.
 	ModelProvider string `json:"modelProvider,omitempty"`
 	ServiceTier   string `json:"serviceTier,omitempty"`
 	AccountID     string `json:"accountId,omitempty"`

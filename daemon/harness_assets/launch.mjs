@@ -42,12 +42,12 @@ export function selectedAccount(state, provider, now = Date.now()) {
     throw new Error('Select an API account in SoluTerminal → Credentials first.');
   }
   endpoint(provider, account.billing);
-  // Team keys require the paired daemon to keep validating the assignment.
+  // Routed keys require the paired daemon to keep validating the assignment.
   if (source === 'team' && (!state.scope || !state.syncedAt || now / 1000 - state.syncedAt > 120)) {
-    throw new Error('Team account needs a fresh sync. Open SoluTerminal and refresh team credentials.');
+    throw new Error('Account route unavailable. Open SoluTerminal and refresh the selected account.');
   }
   if (source === 'team' && !keylessTeam) {
-    throw new Error('This team credential must be rotated by its owner before it can be used.');
+    throw new Error('Account route unavailable. Ask the account owner to renew access.');
   }
   const model = ['deepseek', 'pi'].includes(provider) ? canonicalDeepseekModel(account.model) : account.model;
   return { ...account, model, source, scope: source === 'team' ? state.scope : '', teamId: keylessTeam ? state.teamId : '' };
@@ -141,7 +141,7 @@ export async function readBrokerMetadata(dataDir, provider) {
   const meta = selectedAccount(state, provider);
   if (meta.source !== 'team' || !meta.brokerOnly || meta.apiKey !== '' ||
       !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(meta.name) || !meta.teamId) {
-    throw new Error('Team broker account metadata is invalid. Refresh team credentials in SoluTerminal.');
+    throw new Error('Account route unavailable. Refresh the selected account in SoluTerminal.');
   }
   endpoint(provider, meta.billing);
   return meta;
@@ -151,21 +151,21 @@ export async function loadedBrokerAccount(dataDir, provider, daemonURL = process
   const meta = await readBrokerMetadata(dataDir, provider);
   if (!daemonURL) {
     try { daemonURL = (await fs.readFile(path.join(dataDir, 'harness-launchers', 'daemon-url'), 'utf8')).trim(); }
-    catch { throw new Error('Team broker daemon address is unavailable. Open SoluTerminal and retry.'); }
+    catch { throw new Error('Account route unavailable. Open SoluTerminal and retry.'); }
   }
   const daemon = new URL(daemonURL);
   if (!['127.0.0.1', '::1', 'localhost'].includes(daemon.hostname) || daemon.protocol !== 'http:') {
-    throw new Error('Team broker daemon URL must be local.');
+    throw new Error('Account route unavailable. The daemon address must be local.');
   }
   const response = await fetch(new URL('/api/team-broker/capability', daemon), {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider, label: meta.name, teamId: meta.teamId }),
   });
-  if (!response.ok) throw new Error('Team broker unavailable. Open SoluTerminal and check the team connection.');
+  if (!response.ok) throw new Error('Account route unavailable. Open SoluTerminal and check the connection.');
   const cap = await response.json();
   if (typeof cap.token !== 'string' || !/^[0-9a-f]{64}$/.test(cap.token) || typeof cap.baseURL !== 'string' ||
       !cap.baseURL.startsWith(`${daemon.origin}/api/team-broker/${provider}/`)) {
-    throw new Error('Team broker returned an invalid session.');
+    throw new Error('Account route unavailable. The session is invalid.');
   }
   return { name: meta.name, model: meta.model, billing: meta.billing, source: 'team', scope: meta.teamId,
     apiKey: cap.token, baseURL: cap.baseURL, broker: true };
@@ -301,7 +301,7 @@ export function piGlmPlan(account, dataDir, args = [], baseEnv = process.env) {
   return piPlanFor('zai', 'ZAI_API_KEY', 'pi-glm', account, dataDir, args, baseEnv);
 }
 
-// Pi reads provider overrides from its managed home. Only a broker launch
+// Pi reads provider overrides from its managed home. Only a route launch
 // writes this file, and an existing user-owned model configuration is never
 // replaced. This preserves the built-in DeepSeek/ZAI model catalog and tool
 // behavior while redirecting provider calls to the daemon.
@@ -311,10 +311,10 @@ export async function configurePiBroker(account, piHome, provider) {
   const marker = path.join(piHome, '.soluterminal-managed-broker');
   let existing = null;
   try { existing = JSON.parse(await fs.readFile(file, 'utf8')); }
-  catch (error) { if (error.code !== 'ENOENT') throw new Error('Pi model configuration is unreadable; team broker routing was not installed.'); }
+  catch (error) { if (error.code !== 'ENOENT') throw new Error('Account route unavailable. Pi model configuration is unreadable.'); }
   const managed = await fs.access(marker).then(() => true, () => false);
   if (existing && !managed && !isManagedPiBrokerConfig(existing)) {
-    throw new Error('Pi has custom models in its managed home. Move them before enabling team broker routing.');
+    throw new Error('Account route unavailable. Move custom models out of the managed Pi home and retry.');
   }
   const key = provider === 'pi' ? 'deepseek' : 'zai';
   const config = { providers: { [key]: {
@@ -526,7 +526,7 @@ export async function launch(argv = process.argv.slice(2)) {
   }
 }
 
-// The daemon counts every broker capability against a fixed store until it is
+// The daemon counts every route capability against a fixed store until it is
 // released or expires, so a launch hands its capability back however it ends.
 // Best effort: a lost release is reclaimed once the store fills.
 export async function releaseBrokerCapability(account, fetchImpl = fetch) {

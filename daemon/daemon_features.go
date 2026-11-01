@@ -2,14 +2,16 @@ package main
 
 import "soluterminal-shared/daemonfeatures"
 
-// daemonFeatures is what THIS build supports, by name (shared/daemonfeatures).
-// It rides the relay handshake (`f`) and /api/health (`features`) so the cloud
-// and web can gate on capability instead of comparing versions. Add a name
-// here in the same change that adds the behaviour; never list something a
-// build cannot actually do.
-var daemonFeatures = []string{
-	daemonfeatures.UIPrefs,
-	daemonfeatures.TeamBrokerCodex,
-	daemonfeatures.TeamBrokerClaude,
-	daemonfeatures.WorkflowOwnerDirect,
+// daemonFeatures is what this build serves. Registration runs during init,
+// alongside the optional implementation. The list is sent in the relay
+// handshake and /api/health so callers can detect supported capabilities.
+var daemonFeatures = []string{daemonfeatures.UIPrefs}
+
+func registerDaemonFeature(name string) {
+	for _, existing := range daemonFeatures {
+		if existing == name {
+			return
+		}
+	}
+	daemonFeatures = append(daemonFeatures, name)
 }

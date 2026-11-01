@@ -5,6 +5,8 @@ import (
 	"log"
 	"sync/atomic"
 	"time"
+
+	"soluterminal/grid"
 )
 
 // Dropped-Enter recovery for auto-approvals.
@@ -50,8 +52,16 @@ func (a *Aria) verifyAutoFireLanded(paneID, paneTitle string, inputMs int64) {
 		return
 	}
 	policy := original.autoModePolicy()
+	a.mu.Lock()
+	repeat := a.autoFireRepeats[paneID]
+	fires := 0
+	if repeat != nil {
+		fires = repeat.fires
+	}
+	a.mu.Unlock()
 	start := time.Now()
 	var lastKey uint64
+	var lastAbsent bool
 	var check func(i int)
 	check = func(i int) {
 		p, ok := a.mgr.Get(paneID)
@@ -63,6 +73,23 @@ func (a *Aria) verifyAutoFireLanded(paneID, paneTitle string, inputMs int64) {
 			return
 		}
 		key := autoFireSettleKey(p)
+		// computeState alone cannot prove an exit: our Enter makes even an
+		// ignored menu read as answered. Require two rendered non-menu checks,
+		// so a transient clear during a Claude repaint does not rearm the loop
+		// guard. Missing emulators are not evidence of an answered prompt.
+		absent := key == 0 && p.renderedChoicePromptAbsent()
+		if absent && lastAbsent {
+			a.mu.Lock()
+			// Bind this reset to the fire we scheduled for, including same-ms
+			// Enters. An old verifier must never erase a later fire's budget.
+			if repeat != nil && a.autoFireRepeats[paneID] == repeat && repeat.fires == fires &&
+				repeat.gridPromptGeneration == 0 && atomic.LoadInt64(&p.LastInputMs) == inputMs {
+				delete(a.autoFireRepeats, paneID)
+			}
+			a.mu.Unlock()
+			return
+		}
+		lastAbsent = absent
 		if key != 0 && key == lastKey {
 			p.reopenRenderedChoicePrompt()
 			if p.computeState() != StateChoicePrompt {
@@ -82,6 +109,27 @@ func (a *Aria) verifyAutoFireLanded(paneID, paneTitle string, inputMs int64) {
 		}
 	}
 	time.AfterFunc(delays[0], func() { check(0) })
+}
+
+// renderedChoicePromptAbsent requires a real rendered observation, with no
+// choice menu in either emulator. Read both under the output-feed lock so a
+// new menu cannot be combined with a previous screen's absence.
+func (p *Pane) renderedChoicePromptAbsent() bool {
+	hasCodex := p.HasCodexDescendant() || p.HasMuseDescendant()
+	p.subsMu.RLock()
+	defer p.subsMu.RUnlock()
+	observed := false
+	for _, em := range []*grid.Emulator{p.gridEmu, p.replayEmu} {
+		if em == nil {
+			continue
+		}
+		text, ok := em.VisibleText()
+		if ok && isGridChoicePromptText(text, hasCodex) {
+			return false
+		}
+		observed = observed || ok
+	}
+	return observed
 }
 
 // reopenRenderedChoicePrompt forgets which rendered menu was last admitted, so

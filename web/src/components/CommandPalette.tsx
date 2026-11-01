@@ -1,3 +1,4 @@
+import { workspaceViewLayout } from '../lib/workspaceView';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEnabled } from '../lib/focusAvailability';
@@ -426,7 +427,7 @@ export function CommandPalette({
         keywords: 'cycle switch',
         shortcut: 'Alt+]',
         run: () => {
-          const order = paneIdsInOrder(st.layout);
+          const order = paneIdsInOrder(workspaceViewLayout(st));
           if (!order.length) return;
           const cur = focusedPaneId ? order.indexOf(focusedPaneId) : -1;
           const next = order[(cur + 1 + order.length) % order.length];
@@ -440,7 +441,7 @@ export function CommandPalette({
         keywords: 'cycle switch',
         shortcut: 'Alt+[',
         run: () => {
-          const order = paneIdsInOrder(st.layout);
+          const order = paneIdsInOrder(workspaceViewLayout(st));
           if (!order.length) return;
           const cur = focusedPaneId ? order.indexOf(focusedPaneId) : -1;
           const prev = order[(cur - 1 + order.length) % order.length];

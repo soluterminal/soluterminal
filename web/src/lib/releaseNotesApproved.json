@@ -85,6 +85,12 @@
       "approvedBy": "Benjamin",
       "date": "2026-11-01",
       "note": "Benjamin in @release-lead's pane: \"yes, 1231 notes\". CMO draft soluterminal-1231-notes.md (d1dcc07); 33 lines. Re-cut as 0.0.1232 after the 0.0.1231 official build failed on a stale Windows resource (v0.0.1231 tag never published); notes text unchanged."
+    },
+    "0.0.1233": {
+      "sha256": "b2bad41e947dfa5960ad049f3746b6748a6e730a15bf6808e127be496d905911",
+      "approvedBy": "Benjamin",
+      "date": "2026-11-01",
+      "note": "Benjamin in @release-lead's pane: \"yes, 1233 notes\" for CMO's five lines (soluterminal-1233-notes.md, #850 line dropped), then chose \"Include it + add a note\" for the #868 sidebar line (six lines)."
     }
   }
 }

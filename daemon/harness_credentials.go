@@ -94,7 +94,7 @@ func validateHarnessAccount(provider string, acc harnessAccount) error {
 	return nil
 }
 
-// Team broker assignments are keyless on member machines. Validate their
+// Cloud-supplied credentials can be keyless on this machine. Validate their
 // metadata with the same model rules as personal accounts without requiring a
 // provider API key to exist locally.
 func validateHarnessTeamAccount(provider string, acc harnessAccount) error {
@@ -585,9 +585,8 @@ func harnessSelectionResolves(st *harnessAccountState) bool {
 	}
 }
 
-// firstHarnessTeamName picks a deterministic team account to adopt when the
-// member has no usable selection. Names sort so every sync on every machine
-// chooses the same account for the same set.
+// firstHarnessTeamName picks a deterministic cloud-supplied credential when
+// no usable selection exists. Sorted names keep synchronization stable.
 func firstHarnessTeamName(accounts map[string]harnessAccount) (string, bool) {
 	names := make([]string, 0, len(accounts))
 	for name := range accounts {
@@ -628,11 +627,9 @@ func (s *harnessCredStore) replaceTeam(scope, teamID string, accounts map[string
 				st.Selected = ""
 			}
 		}
-		// Match Claude (team creds join the auto-switch pool) and Codex
-		// (firstUsableCodexTeamSnapshot applies the first team account when no
-		// live auth exists): adopt a team account when the member has no usable
-		// selection, so an owner-shared key is usable without a manual pick. A
-		// valid personal selection is never overridden.
+		// Match the other providers: use a cloud-supplied credential when
+		// no usable selection exists, so initial setup needs no manual pick.
+		// A valid local selection is never overridden.
 		if !harnessSelectionResolves(st) {
 			if name, ok := firstHarnessTeamName(accounts); ok {
 				st.Selected = "team/" + name

@@ -401,3 +401,35 @@ func TestOwnedProcessScopeMissingKernelPathIsNotProof(t *testing.T) {
 		t.Fatalf("missing path invented closure: %v %v", gone, err)
 	}
 }
+
+func TestOwnedProcessScopeWorkerArchiveReapsBeforeCredentialRelease(t *testing.T) {
+	cmd := exec.Command("sh", "-c", `setsid sleep 60 </dev/null >/dev/null 2>&1 &`)
+	scope := ownedScopeFixtureMode(t, cmd, false)
+	if err := startWithoutCoreDumps(cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitOwnedCommand(cmd); err != nil {
+		t.Fatal(err)
+	}
+	a, p, now := archiveFixture(t)
+	p.mu.Lock()
+	p.Pid = cmd.Process.Pid
+	p.processScope = &scope.identity
+	p.mu.Unlock()
+	released := false
+	q := a.workers()
+	q.mu.Lock()
+	q.requests[0].release = func() {
+		record, err := scope.readRecord()
+		if err != nil || record.Phase != "closed" {
+			t.Fatalf("credentials released before descendants stopped: %+v %v", record, err)
+		}
+		released = true
+	}
+	q.mu.Unlock()
+	a.noteWorkerReplyRead("lead", p, a.paneLatestReply(p))
+	a.tryArchiveWorker(p, now)
+	if !released || len(a.archivedWorkerSummaries()) != 1 {
+		t.Fatal("scoped worker was not archived/released")
+	}
+}

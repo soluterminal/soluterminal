@@ -506,6 +506,7 @@ func mcpCoreTools() []mcpTool {
 				"box (up to ~45 s). If folder trust is waiting, it returns status needs_user immediately, " +
 				"leaves the prompt unsent, and asks the user to trust the folder; afterward use ask_pane to send the original prompt. " +
 				"Otherwise it sends `prompt` as the first message when set; call wait_for_pane for the reply. " +
+				"cmd auto selects a provider that meets needs and the account with the most usable quota headroom (prefer breaks ties), queues beyond the per-lead cap, and returns provider, account, reason, reviewer and reviewer_account. Queued results include queue_id and position; cancel with cancel_queued_worker. Urgent may use one extra slot. " +
 				"Set role to orchestrator to start Claude or Codex with " +
 				"the chief-of-staff brief. Always pass title (a short name, e.g. \"Engine deletion\"), " +
 				"purpose (one sentence) and handle (e.g. \"engine-delete\"): the user sees them on the pane and in " +
@@ -517,9 +518,12 @@ func mcpCoreTools() []mcpTool {
 						"type": "string",
 						"description": "Working directory for the new pane. Absolute path, or path starting with ~. Optional — defaults to the user's home."
 					},
+					"needs": {"type":"array","items":{"type":"string"},"maxItems":16,"description":"cmd auto capabilities, e.g. browser or role-guard. A guarded cwd implies role-guard. Unmet capabilities return an error; qualifying providers without headroom queue."},
+					"prefer": {"type":"string", "enum":["claude","codex"], "description":"cmd auto only: break equal-headroom ties in favor of this provider."},
+					"priority": {"type":"string", "enum":["urgent","normal","later"], "default":"normal", "description":"cmd auto only: queue priority; urgent can exceed the cap by one."},
 					"cmd": {
 						"type": "string",
-						"description": "Command to run in the pane (e.g. \"claude\", \"codex\", \"bash\"). Optional — defaults to the user's shell. Parsed as a single argv0; arguments are not supported here (use model and effort for an agent)."
+						"description": "Command to run: auto chooses provider/account using quota headroom; explicit commands preserve existing behavior (e.g. \"claude\", \"codex\", \"bash\"). Optional — defaults to the user's shell. Parsed as a single argv0; arguments are not supported here (use model and effort for an agent)."
 					},
 					"model": {
 						"type": "string",
@@ -565,6 +569,11 @@ func mcpCoreTools() []mcpTool {
 				},
 				"additionalProperties": false
 			}`),
+		},
+		{
+			Name:        "cancel_queued_worker",
+			Description: "Cancel a queued cmd auto spawn. Only the requesting pane or its lead may cancel. Running panes use kill_pane.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"queue_id":{"type":"string"}},"required":["queue_id"],"additionalProperties":false}`),
 		},
 		{
 			Name: "kill_pane",
@@ -1138,7 +1147,12 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 		}
 		return a.noteCrossPaneTool(crossPane, a.mcpToolAnswerPrompt(p.Arguments))
 	case "spawn_pane":
+		if strings.TrimSpace(mcpArgString(p.Arguments, "cmd")) == "auto" {
+			return a.noteCrossPaneTool(crossPane, a.mcpToolAutoWorker(p.Arguments, callerPane, scope))
+		}
 		return a.noteCrossPaneTool(crossPane, a.mcpToolSpawnPane(p.Arguments, callerPane, false))
+	case "cancel_queued_worker":
+		return a.cancelQueuedWorker(p.Arguments, callerPane)
 	case "kill_pane":
 		return a.mcpToolKillPaneAs(p.Arguments, caller)
 	case "list_workspaces":
@@ -1211,7 +1225,7 @@ func mcpToolRequiresMutationPolicy(tool string) bool {
 		// flag/workspace/preview mutators callable, which made the policy a
 		// false promise of read-only-ness. The removed todo tools left the set:
 		// their stubs change nothing.
-		"kill_pane", "rename_pane", "set_pane_info", "set_pane_flag", "switch_workspace", "preview_file", "answer_prompt":
+		"kill_pane", "cancel_queued_worker", "rename_pane", "set_pane_info", "set_pane_flag", "switch_workspace", "preview_file", "answer_prompt":
 		return true
 	default:
 		return false
@@ -1354,7 +1368,11 @@ type mcpPaneSummary struct {
 	You       bool   `json:"you,omitempty"`
 	// StartedBy says who opened the pane and why, e.g. "#5 Claude — Engine deletion"
 	// (pane_origin.go); empty for panes the user opened or that predate it.
-	StartedBy string `json:"startedBy,omitempty"`
+	StartedBy     string      `json:"startedBy,omitempty"`
+	Origin        *PaneOrigin `json:"origin,omitempty"`
+	Worker        *workerInfo `json:"worker,omitempty"`
+	QueuePosition int         `json:"queuePosition,omitempty"`
+	WorkerError   string      `json:"workerError,omitempty"`
 	// Handle (@api-fix) addresses the pane in any pane_id; WorkingOn is its
 	// current one-line status (pane_identity.go).
 	Handle    string `json:"handle,omitempty"`
@@ -1430,12 +1448,16 @@ func (a *apiServer) mcpToolListPanes(_ map[string]any, callerPane string) any {
 			Workspace:      slot.Workspace,
 			Label:          paneLabel(slot, snap.Title, agent),
 			StartedBy:      paneStartedBy(snap.Origin),
+			Origin:         visibleWorkerOrigin(snap.Origin),
+			Worker:         visibleWorkerInfo(originWorker(snap.Origin)),
 			State:          string(p.computeStateCached()),
 			Handle:         identityHandle(snap.Identity),
 			WorkingOn:      identityWorkingOn(snap.Identity),
 			You:            callerPane != "" && snap.ID == callerPane,
 		})
 	}
+	out = append(out, a.queuedWorkerSummaries()...)
+	out = append(out, a.archivedWorkerSummaries()...)
 	// The UI's order: by workspace, then #n; panes outside any workspace last.
 	sort.SliceStable(out, func(i, j int) bool {
 		wi, wj := out[i].Workspace, out[j].Workspace
@@ -1470,12 +1492,16 @@ func (a *apiServer) mcpToolReadPaneTail(args map[string]any, callerPane string) 
 	if mode != "raw" {
 		p, ok := a.mgr.Get(paneID)
 		if !ok {
+			if text, found := a.archivedWorkerReply(paneID); found {
+				return toolOK(text)
+			}
 			return toolErr("no pane with id " + paneID + " (call list_panes for ids)")
 		}
 		if mode == "screen" {
 			return toolOK(paneScreenText(p))
 		}
 		reply := a.paneLatestReply(p)
+		a.noteWorkerReplyRead(callerPane, p, reply)
 		if mode == "" && reply.Source != "transcript" {
 			return toolOK(reply.Reply)
 		}
@@ -1516,29 +1542,38 @@ func (a *apiServer) mcpToolGetPaneState(args map[string]any) any {
 	return toolOK(string(p.computeStateCached()))
 }
 
+// mcpToolSendInput is an agent's send_input: a message to a running Codex
+// turn is queued or refused, never pressed in as a steer (deliveryNoSteer).
 func (a *apiServer) mcpToolSendInput(args map[string]any, callers ...string) any {
+	res, _ := a.mcpToolSendInputOutcome(args, deliveryNoSteer, callers...)
+	return res
+}
+
+// mcpToolSendInputOutcome is send_input that also returns the verified
+// delivery outcome ("" when the text did not go through agent delivery).
+func (a *apiServer) mcpToolSendInputOutcome(args map[string]any, mode deliveryMode, callers ...string) (any, deliveryOutcome) {
 	paneID, _ := args["pane_id"].(string)
 	text, _ := args["text"].(string)
 	if paneID == "" {
-		return toolErr("pane_id is required")
+		return toolErr("pane_id is required"), ""
 	}
 	if text == "" {
-		return toolErr(`text is empty — use "\n" to send a bare Enter`)
+		return toolErr(`text is empty — use "\n" to send a bare Enter`), ""
 	}
 	p, ok := a.mgr.Get(paneID)
 	if !ok {
-		return toolErr("no pane with id " + paneID + " (call list_panes for ids)")
+		return toolErr("no pane with id " + paneID + " (call list_panes for ids)"), ""
 	}
 	// Reject writes to a pane whose process has already exited — the
 	// PTY is gone and the keystrokes would silently vanish.
 	if p.Snapshot().Status == PaneExited {
-		return toolErr("pane " + paneID + " has exited — cannot send input to it")
+		return toolErr("pane " + paneID + " has exited — cannot send input to it"), ""
 	}
 	// Normalize literal escape sequences (the model often emits "\\n"
 	// instead of a real newline) the same way the ARIA path does.
 	text = unescapeAriaInput(text)
 	if reason := sendInputMenuCollision(p, text); reason != "" {
-		return toolErr(reason)
+		return toolErr(reason), ""
 	}
 	// A message to a Claude or Codex pane (text ending in Enter, multi-line
 	// included) goes through the verified delivery: paste, wait until the
@@ -1550,17 +1585,17 @@ func (a *apiServer) mcpToolSendInput(args map[string]any, callers ...string) any
 				body = a.labelPaneMessage(body, callers[0], paneID)
 				sender = a.paneMessageSender(callers[0], paneID)
 			}
-			wrote, outcome, err := submitAgentMessage(p, body, claude, sender)
+			wrote, outcome, err := deliverAgentMessage(p, body, claude, mode, sender)
 			if err != nil {
-				return toolErr(fmt.Sprintf("wrote %d bytes to pane %s but %v", wrote, paneID, err))
+				return toolErr(fmt.Sprintf("wrote %d bytes to pane %s but %v", wrote, paneID, err)), ""
 			}
 			if len(callers) > 0 {
 				p.recordAgentMessage(callers[0], sender, outcome, time.Now())
 			}
 			if outcome == deliveryLeftInComposer {
-				return toolErr(fmt.Sprintf("Sent %d bytes to pane %s: %s.", wrote, paneID, deliveryNotice(outcome)))
+				return toolErr(fmt.Sprintf("Sent %d bytes to pane %s: %s.", wrote, paneID, deliveryNotice(outcome))), outcome
 			}
-			return toolOK(fmt.Sprintf("Sent %d bytes to pane %s; %s.", wrote, paneID, deliveryNotice(outcome)))
+			return toolOK(fmt.Sprintf("Sent %d bytes to pane %s; %s.", wrote, paneID, deliveryNotice(outcome))), outcome
 		}
 	}
 	// Split body + trailing-Enter so a submitted line is written as a
@@ -1576,7 +1611,7 @@ func (a *apiServer) mcpToolSendInput(args map[string]any, callers ...string) any
 	if body != "" {
 		n, err := write([]byte(body))
 		if err != nil {
-			return toolErr("write to pane " + paneID + " failed: " + err.Error())
+			return toolErr("write to pane " + paneID + " failed: " + err.Error()), ""
 		}
 		wrote += n
 	}
@@ -1586,16 +1621,34 @@ func (a *apiServer) mcpToolSendInput(args map[string]any, callers ...string) any
 		}
 		n, err := write([]byte("\r"))
 		if err != nil {
-			return toolErr(fmt.Sprintf("wrote %d bytes but submit-Enter failed: %v", wrote, err))
+			return toolErr(fmt.Sprintf("wrote %d bytes but submit-Enter failed: %v", wrote, err)), ""
 		}
 		wrote += n
 	}
-	return toolOK(fmt.Sprintf("Sent %d bytes to pane %s.", wrote, paneID))
+	return toolOK(fmt.Sprintf("Sent %d bytes to pane %s.", wrote, paneID)), ""
 }
 
 func (a *apiServer) mcpToolSpawnPane(args map[string]any, callerPane string, automated ...bool) any {
+	opts := SpawnOpts{}
+	if len(automated) > 0 && automated[0] {
+		opts.AutomationOrigin = "automated_spawn"
+	}
+	return a.mcpToolSpawnWorker(args, callerPane, nil, opts)
+}
+
+func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, worker *workerInfo, prepared SpawnOpts) any {
 	cwd, _ := args["cwd"].(string)
 	cmdStr, _ := args["cmd"].(string)
+	if _, declared := args["needs"]; declared || worker != nil {
+		needs, caps, err := workerCapabilityRequirements(args)
+		if err != nil {
+			return toolErr(err.Error())
+		}
+		provider := strings.TrimSpace(cmdStr)
+		if !(workerAccount{Provider: provider, Capabilities: caps[provider]}).qualifies(needs) {
+			return toolErr((&workerCapabilityError{Needs: needs}).Error())
+		}
+	}
 	workspace, _ := args["workspace"].(string)
 	role, _ := args["role"].(string)
 	var cmd []string
@@ -1638,8 +1691,8 @@ func (a *apiServer) mcpToolSpawnPane(args map[string]any, callerPane string, aut
 		agent = agentCodex
 	}
 	origin := ""
-	if len(automated) > 0 && automated[0] {
-		origin = "automated_spawn"
+	if prepared.AutomationOrigin != "" {
+		origin = prepared.AutomationOrigin
 	}
 	// Record who started the pane and why, and give it a real name instead of
 	// "codex"/"bash" (pane_origin.go). Informational only.
@@ -1675,8 +1728,13 @@ func (a *apiServer) mcpToolSpawnPane(args map[string]any, callerPane string, aut
 			paneOrigin.LeadPaneTitle = paneOrigin.ByPaneTitle
 		}
 	}
+	if worker != nil {
+		w := *worker
+		paneOrigin.Worker = &w
+	}
 	spawnTitle := spawnPaneTitle(titleArg, agentFromCmd(cmd), paneOrigin)
-	p, err := a.spawnPaneForRequest(SpawnOpts{Cwd: cwd, Cmd: cmd, Agent: agent, Role: role, AutomationOrigin: origin, Origin: paneOrigin, Title: spawnTitle, Identity: identity})
+	prepared.Cwd, prepared.Cmd, prepared.Agent, prepared.Role, prepared.AutomationOrigin, prepared.Origin, prepared.Title, prepared.Identity = cwd, append(cmd, prepared.Cmd...), agent, role, origin, paneOrigin, spawnTitle, identity
+	p, err := a.spawnPaneForRequest(prepared)
 	if err != nil {
 		return toolErr("spawn failed: " + err.Error())
 	}
@@ -1734,6 +1792,10 @@ func (a *apiServer) mcpToolSpawnPane(args map[string]any, callerPane string, aut
 		}
 	}
 	a.announcePaneSpawn(p, paneOrigin, spawnTitle, workspace, number, show)
+	if worker != nil {
+		a.bindAutoWorker(worker.ID, p.ID)
+	}
+
 	for k, v := range a.spawnFollowUp(p, cmd, args) {
 		resp[k] = v
 	}

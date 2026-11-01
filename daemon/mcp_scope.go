@@ -376,3 +376,18 @@ func (s *mcpScopeStore) Revoke(token string) {
 	delete(s.byToken, token)
 	s.mu.Unlock()
 }
+
+// contains revalidates the original capability, including revocation, before a queued spawn.
+func (s *mcpScopeStore) contains(scope *mcpScope) bool {
+	if s == nil || scope == nil || !time.Now().Before(scope.Expires) {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sc := range s.byToken {
+		if sc == scope {
+			return true
+		}
+	}
+	return false
+}

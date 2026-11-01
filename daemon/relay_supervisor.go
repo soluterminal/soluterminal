@@ -175,6 +175,20 @@ func (s *relaySupervisor) connected() bool {
 	return s.status().RelayState == relayStateOnline
 }
 
+// activeRelayURL is daemon-owned configuration for the currently live tunnel.
+// Callers must read it at request time rather than retaining an old origin.
+func (s *relaySupervisor) activeRelayURL() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.state.RelayState != relayStateOnline {
+		return ""
+	}
+	return s.relayURL
+}
+
 func (s *relaySupervisor) setState(mut func(*cloudStatus)) {
 	s.mu.Lock()
 	mut(&s.state)

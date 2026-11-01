@@ -27,7 +27,7 @@ import (
 //
 //   - Roots are $CODEX_HOME/sessions and ~/.codex/sessions plus their
 //     archived_sessions siblings, collapsed through EvalSymlinks. Workflow
-//     lanes and team-broker homes link their sessions/ back to ~/.codex, so
+//     lanes and managed homes link their sessions/ back to ~/.codex, so
 //     they are covered without being walked twice.
 //   - The context a record needs (thread, model, cwd, account) arrives in
 //     earlier lines, so each cursor persists a codexFileState.
@@ -435,7 +435,7 @@ type codexAttributionResult struct {
 // codexAttributionStronger reports whether newKey adds a field the stored key
 // lacked (in-app learned, or an account/workflow field filled). Only then is a
 // replay useful: the cloud's upsert fills empty fields and never downgrades, so
-// a weaker or merely different key (an auto-switch moving the live login, a
+// a weaker or merely different key (a changed live login, a
 // ledger prune) must not re-upload the whole rollout.
 func codexAttributionStronger(newKey, oldKey string) bool {
 	if newKey == "" || newKey == oldKey {
@@ -476,8 +476,8 @@ func (a codexAttributionResult) apply(rec *ccUsageRecord) {
 //     with the invocation's credential lane (authoritative). Subagent threads
 //     fall back to their root session's entry.
 //   - account otherwise: the rollout's creator account matched to a saved
-//     Codex login. Team-broker threads are skipped — the creator identity there
-//     is not the pooled account that paid.
+//     Codex login. Proxied threads are skipped because their creator identity
+//     does not establish billing attribution.
 func codexAttribution(ledger *inAppLedger, accounts codexAccountResolver, st codexFileState) codexAttributionResult {
 	var r codexAttributionResult
 	if st.ThreadID == "" {

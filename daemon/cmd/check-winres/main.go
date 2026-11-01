@@ -16,7 +16,7 @@ import (
 
 func main() {
 	if len(os.Args) != 3 {
-		fail("usage: check-winres EXE X.Y.Z")
+		fail("usage: check-winres EXE X.Y.Z[.N]")
 	}
 	if err := check(os.Args[1], os.Args[2]); err != nil {
 		fail("%v", err)
@@ -101,16 +101,16 @@ func check(name, version string) error {
 	if err != nil {
 		return err
 	}
-	// Fixed file/product versions must both equal X.Y.Z.0.
+	// Three-part versions retain revision zero; four-part versions use N.
 	fixed := bytes.Index(ver, []byte{0xbd, 0x04, 0xef, 0xfe})
 	if fixed < 0 || fixed+24 > len(ver) {
 		return fmt.Errorf("missing VS_FIXEDFILEINFO")
 	}
 	parts := strings.Split(version, ".")
-	if len(parts) != 3 {
+	if len(parts) != 3 && len(parts) != 4 {
 		return fmt.Errorf("invalid version")
 	}
-	nums := make([]uint32, 3)
+	nums := make([]uint32, 4)
 	for i, p := range parts {
 		n, e := strconv.ParseUint(p, 10, 16)
 		if e != nil {
@@ -118,7 +118,7 @@ func check(name, version string) error {
 		}
 		nums[i] = uint32(n)
 	}
-	for i, want := range []uint32{nums[0]<<16 | nums[1], nums[2] << 16, nums[0]<<16 | nums[1], nums[2] << 16} {
+	for i, want := range []uint32{nums[0]<<16 | nums[1], nums[2]<<16 | nums[3], nums[0]<<16 | nums[1], nums[2]<<16 | nums[3]} {
 		if binary.LittleEndian.Uint32(ver[fixed+8+4*i:]) != want {
 			return fmt.Errorf("fixed version does not match %s", version)
 		}

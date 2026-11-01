@@ -6,12 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const version = process.argv[2] || JSON.parse(readFileSync(path.join(root, 'desktop/src-tauri/tauri.conf.json'))).version;
-if (!/^\d+\.\d+\.\d+$/.test(version) || version.split('.').some(n => Number(n) > 65535)) {
-  throw new Error('Windows release version must be X.Y.Z with components <= 65535');
+if (!/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(version) || version.split('.').some(n => Number(n) > 65535)) {
+  throw new Error('Windows release version must be X.Y.Z or X.Y.Z.N with components <= 65535');
 }
-// Release builds verify the committed input without changing the source tree.
+const fixedVersion = version.split('.').length === 3 ? version + '.0' : version;
+// Default to the committed input; team builds check a generated scratch input.
 const check = process.argv[3] === '--check';
-const target = path.resolve(check ? path.join(root, 'daemon/rsrc_windows_amd64.syso') :
+const target = path.resolve(check ? process.argv[4] || path.join(root, 'daemon/rsrc_windows_amd64.syso') :
   process.argv[3] || path.join(root, 'daemon/rsrc_windows_amd64.syso'));
 const temp = mkdtempSync(path.join(tmpdir(), 'solu-winres-'));
 const out = check ? path.join(temp, 'resource.syso') : target;
@@ -28,7 +29,7 @@ try {
   };
   writeFileSync(path.join(temp, 'winres.json'), JSON.stringify({
     RT_VERSION: { '#1': { '0000': {
-      fixed: { file_version: version + '.0', product_version: version + '.0' },
+      fixed: { file_version: fixedVersion, product_version: fixedVersion },
       info: { '0409': info },
     } } },
     RT_MANIFEST: { '#1': { '0409': 'solud.manifest' } },
@@ -47,6 +48,9 @@ try {
     env: { ...env, GOOS, GOARCH }, stdio: 'inherit',
   });
   if (check && !readFileSync(out).equals(readFileSync(target))) {
+    if (process.argv[4]) {
+      throw new Error('Generated Windows resource is stale for ' + version + ': ' + target);
+    }
     throw new Error('Committed Windows resource is stale; regenerate with node scripts/windows-resources.mjs ' + version + ' and commit daemon/rsrc_windows_amd64.syso');
   }
 } finally { rmSync(temp, { recursive: true, force: true }); }

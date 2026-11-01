@@ -168,6 +168,10 @@ func (a *apiServer) runConditionalSubmit(parent context.Context, id string, req 
 			return
 		}
 		defer p.agentWriteMu.Unlock()
+		if p.workerArchiving.Load() {
+			result = conditionalNotSent(http.StatusConflict, "worker_archived")
+			return
+		}
 		if ctx.Err() != nil {
 			result = conditionalNotSent(http.StatusPreconditionFailed, "deadline_exceeded")
 			return

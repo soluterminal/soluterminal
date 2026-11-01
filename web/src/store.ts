@@ -1,4 +1,5 @@
-import { workspaceViewLayout, type WorkspaceView } from './lib/workspaceView';
+import { createWorkspacePaneTreeSelector } from './lib/workspacePaneTree';
+import { workspaceViewLayout, effectiveWorkspaceView, graftHiddenWorkspaceLeaves, isDerivedWorkspaceLayout, workspaceViewForPane, workspaceRootOf, workspaceViewHasSelection, isFilteredWorkspaceOverview, isTemporaryWorkspaceView, readWorkspaceAllPanes, saveWorkspaceAllPanes, workspaceViewKey, type WorkspaceView } from './lib/workspaceView';
 import { appendAutoPane, balancedLayout, DEFAULT_LAYOUT_ASPECT, DEFAULT_LAYOUT_COLUMNS, MAX_LAYOUT_COLUMNS, MIN_AUTO_PANE_WIDTH, removeCustomPane, resizedGridConfig, splitLargestPane } from './lib/autoLayout';
 import { createWorkspaceSaveQueue } from './lib/workspaceSaveQueue';
 import { holdTerminalPlacement, reconcileConfirmedTerminalPanes } from './lib/terminalViewSessions';
@@ -844,8 +845,12 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   returnToWorkspace: () => void;
   workspaceView: WorkspaceView | null;
   showWorkspacePaneView: (paneId: string, team: boolean) => void;
-  toggleWorkspaceLeadsOnly: () => void;
-  returnWorkspaceLayout: () => void;
+  workspaceAllPanes: Record<string, boolean>;
+  showWorkspaceOverview: (preserveZoom?: boolean) => void;
+  /** Toggle (and persist) All panes for a workspace; defaults to the active one. */
+  toggleWorkspaceAllPanes: (workspace?: string, backend?: 'wsl' | 'win' | null) => void;
+  /** Open this pane's view the moment its workspace finishes loading. */
+  queueWorkspaceReveal: (reveal: PendingWorkspaceReveal | null) => void;
   activeWorkspace: string;
   activeWorkspaceMoveVersion: number;
   activeWorkspaceLayoutVersion: number;
@@ -854,6 +859,8 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   layoutAspect: number;
   retilePanes: () => void;
   beginCustomLayout: () => void;
+  /** Save a derived overview arrangement as the canonical layout. */
+  commitWorkspaceOverview: () => boolean;
   updateLayoutViewport: (width: number, height: number) => void;
   activeWorkspaceKnownPaneIds: string[];
   showSpawnedPane: (paneId: string, workspace: string) => void;
@@ -2992,6 +2999,14 @@ function loadPaneLastViewed(): Record<string, number> {
     return {};
   }
 }
+// A reveal that has to load another workspace first. The subscriber applies
+// it the moment that workspace becomes active, so the grid goes straight to
+// the view containing the pane instead of showing the overview in between.
+type PendingWorkspaceReveal = { workspace: string; backend: 'wsl' | 'win' | null; paneId: string; kind?: 'single' | 'team' };
+let pendingWorkspaceReveal: PendingWorkspaceReveal | null = null;
+const revealTreeSelector = createWorkspacePaneTreeSelector();
+const paneTreesForReveal = (s: State) => revealTreeSelector(s.workspaces, s.panes, s.activeWorkspace, s.layout, s.activeBackend);
+
 export const useStore = create<State>((rawSet, get, storeApi) => {
   const set = ((partial: Partial<State> | ((s: State) => Partial<State>)) => rawSet((s) => {
     const update = typeof partial === 'function' ? partial(s) : partial;
@@ -3031,19 +3046,30 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     set({ workspaceView: { workspace: s.activeWorkspace, backend: s.activeBackend, kind: team ? 'team' : 'single', paneId }, zoomedPaneId: null });
     get().setFocus(paneId);
   },
-  toggleWorkspaceLeadsOnly: () => {
+  workspaceAllPanes: readWorkspaceAllPanes(),
+  showWorkspaceOverview: (preserveZoom = false) => {
     const s = get();
     if (s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace)) return;
-    set({ workspaceView: s.workspaceView?.kind === 'leads' ? null : { workspace: s.activeWorkspace, backend: s.activeBackend, kind: 'leads' }, zoomedPaneId: null });
-    const visible = collectPaneIds(workspaceViewLayout(get()));
+    // No stored view is the overview: top-level panes, or every pane when
+    // this workspace's All panes setting is on.
+    const visible = collectLeaves(workspaceViewLayout({ ...s, workspaceView: null })).map(leafId).filter((id): id is string => !!id);
+    set({ workspaceView: null, zoomedPaneId: preserveZoom && s.zoomedPaneId && visible.includes(s.zoomedPaneId) ? s.zoomedPaneId : null });
     if (!s.focusedPaneId || !visible.includes(s.focusedPaneId)) get().setFocus(visible[0] ?? null);
   },
-  returnWorkspaceLayout: () => {
+  toggleWorkspaceAllPanes: (workspace, backend) => {
     const s = get();
-    const ids = collectPaneIds(s.layout);
-    set({ workspaceView: null, zoomedPaneId: null });
-    if (s.focusedPaneId && !ids.includes(s.focusedPaneId)) get().setFocus(ids[0] ?? null);
+    const name = workspace ?? s.activeWorkspace;
+    const scope = (workspace === undefined ? s.activeBackend : backend ?? s.activeBackend) ?? null;
+    const active = name === s.activeWorkspace && scope === (s.activeBackend ?? null);
+    if (active && (s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace))) return;
+    const key = workspaceViewKey(name, scope);
+    const next = { ...s.workspaceAllPanes, [key]: !s.workspaceAllPanes[key] };
+    saveWorkspaceAllPanes(next);
+    set({ workspaceAllPanes: next });
+    if (active) get().showWorkspaceOverview();
   },
+  queueWorkspaceReveal: (reveal) => { pendingWorkspaceReveal = reveal; },
+
   activeWorkspace: CURRENT_WS,
   activeWorkspaceMoveVersion: 0, activeWorkspaceLayoutVersion: 0, workspaceLayoutDirty: false, layoutColumns: DEFAULT_LAYOUT_COLUMNS, layoutAspect: DEFAULT_LAYOUT_ASPECT, activeWorkspaceKnownPaneIds: [],
   activeBackend: isRouterMode() ? activeBackendFromUrl() : null,
@@ -3407,6 +3433,10 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       navigationGeneration: restoredGeneration,
       ...(valid ? { focusedPaneId: focus, lastUserFocusId: context.lastUserFocusId,
         zoomedPaneId: context.zoomedPaneId && layoutHasLeaf(state.layout, context.zoomedPaneId) ? context.zoomedPaneId : null } : {}) });
+    // A restored focus inside a hidden team reopens the view that shows it.
+    const restored = get();
+    const restoredView = restored.focusedPaneId ? workspaceViewForPane(restored, restored.focusedPaneId) : undefined;
+    if (restoredView !== undefined) set({ workspaceView: restoredView });
     if (valid && context.element?.isConnected) requestAnimationFrame(() => requestAnimationFrame(() => {
       if(get().navigationGeneration !== restoredGeneration || get().activeWorkspace !== context.workspace || context.scope.key !== currentRoutingScope().key || get().mainPresentation.kind !== 'workspace')return;
       if(isMobileViewport() && context.element?.matches('textarea,input,[contenteditable="true"]'))return;
@@ -3515,29 +3545,44 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     get().beginCustomLayout();
   },
   beginCustomLayout: () => {
-    if (get().workspaceView) return;
+    if (isTemporaryWorkspaceView(get().workspaceView)) return;
     if (get().mainPresentation.kind !== 'workspace' || workspaceMovedTo(get().activeWorkspace)) return;
+    // Resizing an arrangement built only for the overview first saves that
+    // arrangement, so the drag continues from exactly what is on screen.
+    if (get().commitWorkspaceOverview()) return;
     if (get().paneLayoutMode === 'free') return;
     set({ paneLayoutMode: 'free' });
     scheduleAutosave(get);
   },
+  commitWorkspaceOverview: () => {
+    const s = get();
+    if (s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace) || isTemporaryWorkspaceView(effectiveWorkspaceView(s))) return false;
+    const shown = workspaceViewLayout(s);
+    if (!shown || !isDerivedWorkspaceLayout(shown)) return false;
+    const layout = graftHiddenWorkspaceLeaves(s, shown);
+    set({ layout, paneLayoutMode: 'free', workspaceView: null });
+    scheduleAutosave(get);
+    return true;
+  },
   retilePanes: () => {
-    if (get().workspaceView) { get().applyLayoutPreset('grid'); return; }
+    if (isTemporaryWorkspaceView(get().workspaceView)) { get().applyLayoutPreset('grid'); return; }
     const s = get();
     if (s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace)) return;
     const bounds = typeof document === 'undefined' ? undefined : document.querySelector('.workspace-pane-grid')?.getBoundingClientRect();
     const columns = bounds && bounds.width > 0 && !isMobileViewport() ? Math.max(1, Math.min(MAX_LAYOUT_COLUMNS, Math.floor(bounds.width / MIN_AUTO_PANE_WIDTH))) : s.layoutColumns;
     const aspect = bounds && bounds.width > 0 && bounds.height > 0 && !isMobileViewport() ? bounds.width / bounds.height : s.layoutAspect;
-    set({ paneLayoutMode: 'auto', layoutColumns: columns, layoutAspect: aspect, layout: balancedLayout(s.layout, columns, aspect) });
+    // The overview of an auto layout balances its visible tiles itself.
+    set({ paneLayoutMode: 'auto', layoutColumns: columns, layoutAspect: aspect, layout: balancedLayout(s.layout, columns, aspect), workspaceView: null });
     scheduleAutosave(get);
   },
   updateLayoutViewport: (width, height) => {
     const s = get();
-    if (s.workspaceView || s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace) || isMobileViewport() || width <= 0 || height <= 0) return;
+    if (isTemporaryWorkspaceView(s.workspaceView) || s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace) || isMobileViewport() || width <= 0 || height <= 0) return;
     if (s.paneLayoutMode === 'free') return;
     const previous = { columns: s.layoutColumns, aspect: s.layoutAspect };
     const cached = pickWorkspaceByName(s.workspaces, s.activeWorkspace, s.activeBackend);
-    const config = cached?.layoutColumns ? resizedGridConfig(leafCount(s.layout), width, height, previous)
+    // Hysteresis follows the grid the user sees, not hidden workers.
+    const config = cached?.layoutColumns ? resizedGridConfig(leafCount(workspaceViewLayout(s)), width, height, previous)
       : { columns: Math.max(1, Math.min(MAX_LAYOUT_COLUMNS, Math.floor(width / MIN_AUTO_PANE_WIDTH))), aspect: width / height };
     const layout = balancedLayout(s.layout, config.columns, config.aspect);
     if (config === previous && sameJsonValue(layout, s.layout)) return;
@@ -3569,8 +3614,15 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     set({ showPromptHistory: v });
   },
   applyLayoutPreset: (preset) => {
-    if (get().workspaceView) {
+    if (isTemporaryWorkspaceView(get().workspaceView)) {
       set(s => ({ workspaceView: { ...s.workspaceView!, preset, grid: undefined } }));
+      return;
+    }
+    if (isFilteredWorkspaceOverview(get())) {
+      // Arrange what the overview shows and save it; hidden workers keep a
+      // place beside their top-level pane.
+      set(s => ({ workspaceView: { ...effectiveWorkspaceView(s), preset, grid: undefined } }));
+      if (!get().commitWorkspaceOverview()) set({ workspaceView: null });
       return;
     }
     set((s) => {
@@ -3584,13 +3636,17 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     const total = rows * cols;
     if (total <= 0) return;
     const s0 = get();
-    if (s0.workspaceView) {
+    // A team view only reflows what it shows; it never opens panes.
+    if (isTemporaryWorkspaceView(s0.workspaceView)) {
       if (total < collectLeaves(workspaceViewLayout(s0)).length) return;
-      set({ workspaceView: { ...s0.workspaceView, grid: { rows, cols }, preset: undefined } });
+      set({ workspaceView: { ...s0.workspaceView!, grid: { rows, cols }, preset: undefined } });
       return;
     }
+    // A filtered overview fills the grid around the tiles it shows; hidden
+    // workers keep their saved place (see commitWorkspaceOverview).
+    const overview = isFilteredWorkspaceOverview(s0);
     const origin = autosaveSnapshotFromState(s0);
-    const existingLeaves = collectLeaves(s0.layout);
+    const existingLeaves = collectLeaves(overview ? workspaceViewLayout(s0) : s0.layout);
     if (total < existingLeaves.length) return; // picker shouldn't allow this
     const delta = total - existingLeaves.length;
 
@@ -3658,6 +3714,22 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       return;
     }
 
+    if (overview) {
+      set((st) => ({
+        panes: newPanes.reduce((acc, p) => ({ ...acc, [p.id]: p }), st.panes),
+        // New shells are top-level, so the overview shows them; the grid
+        // below places them.
+        layout: newPanes.reduce<Layout | null>((layout, p) => layout
+          ? { type: 'split', direction: 'horizontal', ratio: 0.5, a: layout, b: { type: 'pane', paneId: p.id } }
+          : { type: 'pane', paneId: p.id }, st.layout),
+        focusedPaneId: newPanes.length > 0 ? newPanes[0].id : st.focusedPaneId,
+        lastViewedMs: newPanes.reduce((acc, p) => ({ ...acc, [p.id]: Date.now() }), st.lastViewedMs),
+        workspaceView: { ...effectiveWorkspaceView(st), grid: { rows, cols }, preset: undefined },
+      }));
+      if (!get().commitWorkspaceOverview()) { set({ workspaceView: null }); scheduleAutosave(get); }
+      await flushAutosave(get, undefined, { throwOnError: true });
+      return;
+    }
     set((st) => {
       const allLeaves: Layout[] = [
         ...collectLeaves(st.layout),
@@ -3879,9 +3951,12 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     }
     // Any layout leaf — pane, file, browser, diff, or tasks — can zoom. The
     // grid already renders all leaf types through its zoomed single-leaf path.
-    if (collectLeaves(s.layout).length < 2) return;
+    // Zoom within what the grid shows (a team view may include a recovered
+    // worker that is not in the saved layout).
+    const shown = workspaceViewLayout(s);
+    if (collectLeaves(shown).length < 2) return;
     const target = paneId ?? s.focusedPaneId;
-    if (!target || !layoutHasLeaf(s.layout, target)) return;
+    if (!target || !layoutHasLeaf(shown, target)) return;
     set({ zoomedPaneId: target, focusedPaneId: target, lastUserFocusId: target });
   },
 
@@ -6601,20 +6676,27 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     scheduleAutosave(get);
   },
 
-  setFocus: (id) => set((s) => s.mainPresentation.kind === 'owner' ? {} : ({
-    ...(s.workspaceView && id && !collectPaneIds(workspaceViewLayout(s)).includes(id) ? { workspaceView: null } : {}),
-    focusedPaneId: id,
-    // Deliberate user focus change — stamp lastUserFocusId so the target pane's
-    // focus effect routes DOM focus even if the user was mid-typing in the pane
-    // they're navigating away from (keyboard nav / click must move the caret).
-    lastUserFocusId: id,
-    lastViewedMs: id ? { ...s.lastViewedMs, [id]: Date.now() } : s.lastViewedMs,
-    // Zoom follows focus: if the user jumps to pane 3 via Alt+3 while
-    // zoomed on pane 1, they expect to see pane 3 (not pane 1 with
-    // invisible focus on 3). Only update if zoom was already active —
-    // don't implicitly zoom when not zoomed.
-    zoomedPaneId: s.zoomedPaneId && id ? id : s.zoomedPaneId,
-  })),
+  setFocus: (id) => set((s) => {
+    if (s.mainPresentation.kind === 'owner') return {};
+    // Focusing a pane the current view hides (attention, toast, palette,
+    // reveal) switches to a view that contains it: the overview for a
+    // top-level pane, otherwise its top-level ancestor's team.
+    const view = id ? workspaceViewForPane(s, id) : undefined;
+    return {
+      ...(view !== undefined ? { workspaceView: view } : {}),
+      focusedPaneId: id,
+      // Deliberate user focus change — stamp lastUserFocusId so the target pane's
+      // focus effect routes DOM focus even if the user was mid-typing in the pane
+      // they're navigating away from (keyboard nav / click must move the caret).
+      lastUserFocusId: id,
+      lastViewedMs: id ? { ...s.lastViewedMs, [id]: Date.now() } : s.lastViewedMs,
+      // Zoom follows focus: if the user jumps to pane 3 via Alt+3 while
+      // zoomed on pane 1, they expect to see pane 3 (not pane 1 with
+      // invisible focus on 3). Only update if zoom was already active —
+      // don't implicitly zoom when not zoomed.
+      zoomedPaneId: s.zoomedPaneId && id ? id : s.zoomedPaneId,
+    };
+  }),
 
   // One-shot: clear the deliberate-selection marker once a pane's focus effect
   // has used it to grab the caret. Guarded so it's a no-op (no extra render) when
@@ -6675,7 +6757,10 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
 
   movePaneInLayout: (source, target, zone) => {
     // A temporary presentation cannot reorder or autosave the workspace.
-    if (get().workspaceView) return;
+    if (isTemporaryWorkspaceView(get().workspaceView) || !layoutHasLeaf(get().layout, source) || !layoutHasLeaf(get().layout, target) || source === target) return;
+    // Move within what is on screen: an auto-balanced overview is saved
+    // first, so leaving auto layout doesn't re-expose the hidden geometry.
+    get().commitWorkspaceOverview();
     set((s) => {
       if (!s.layout) return {};
       const next = movePaneInLayoutImpl(s.layout, source, target, zone);
@@ -7485,31 +7570,34 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
         }
       }, 3000);
     };
+    // The owning workspace includes workers that only inherit membership
+    // from their lead, so read it from the hierarchy, not paneIds alone.
+    const owner = s.workspaces.find(
+      (w) => w.name !== CURRENT_WS && (w.paneIds ?? []).includes(paneId),
+    ) ?? paneTreesForReveal(s).find(t => t.workspace.name !== CURRENT_WS && t.paneIds.includes(paneId))?.workspace;
+    const inWorkspace = (state: State) => layoutHasLeaf(state.layout, paneId) || workspaceRootOf(state, paneId) !== null;
     // 1. Cross-backend: switch to the pane's backend if we're in router
     //    mode and it lives on the other side. switchBackend already
     //    accepts an optional workspace name to load after the swap, so
     //    we pass the owning workspace if we can find one — saves a
     //    second state update on arrival.
-    const owner = s.workspaces.find(
-      (w) => w.name !== CURRENT_WS && (w.paneIds ?? []).includes(paneId),
-    );
     if (isRouterMode() && pane.backend && pane.backend !== s.activeBackend) {
-      await get().switchBackend(pane.backend, owner?.name);
+      pendingWorkspaceReveal = { workspace: owner?.name ?? CURRENT_WS, backend: pane.backend, paneId };
+      try { await get().switchBackend(pane.backend, owner?.name); } finally { pendingWorkspaceReveal = null; }
       // The post-switch bootstrap refetches everything; finish focusing
       // the pane after the new state lands.
       const after = get();
       if (after.panes[paneId]) {
-        if (!collectPaneIds(after.layout).includes(paneId)) {
-          after.addPaneToLayout(paneId);
-        }
-        after.setFocus(paneId);
+        if (!inWorkspace(after)) after.addPaneToLayout(paneId);
+        get().setFocus(paneId);
         scrollPaneIntoView(paneId);
         markRevealed();
       }
       return;
     }
-    // 2. Already in the current layout → just focus + scroll.
-    if (collectPaneIds(s.layout).includes(paneId)) {
+    // 2. Already in the current workspace → focus (which opens a view that
+    //    shows it) + scroll.
+    if (inWorkspace(s)) {
       get().setFocus(paneId);
       scrollPaneIntoView(paneId);
       markRevealed();
@@ -7517,7 +7605,8 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     }
     // 3. Owned by a named workspace that isn't the active one → load it.
     if (owner && s.activeWorkspace !== owner.name) {
-      await get().loadWorkspace(owner.name);
+      pendingWorkspaceReveal = { workspace: owner.name, backend: s.activeBackend ?? null, paneId };
+      try { await get().loadWorkspace(owner.name); } finally { pendingWorkspaceReveal = null; }
       get().setFocus(paneId);
       scrollPaneIntoView(paneId);
       markRevealed();
@@ -7775,17 +7864,48 @@ subscribeMachineAccess(()=>{
 });
 
 useStore.subscribe((s, previous) => {
-  if (!s.workspaceView) return;
-  if (s.activeWorkspace !== previous.activeWorkspace || s.activeBackend !== previous.activeBackend || s.mainPresentation.kind !== previous.mainPresentation.kind) {
-    useStore.setState({ workspaceView: null });
-  } else if (s.focusedPaneId !== previous.focusedPaneId && s.focusedPaneId && layoutHasLeaf(s.layout, s.focusedPaneId)
-    && !collectPaneIds(workspaceViewLayout(s)).includes(s.focusedPaneId)) {
-    // Spawn/open actions also focus tiles directly. Reveal a newly selected
-    // canonical pane/browser/file/diff while preserving that tile's focus.
-    useStore.setState({ workspaceView: null, zoomedPaneId: null });
-  } else if (s.workspaceView.kind !== 'leads' && (s.panes !== previous.panes || s.layout !== previous.layout || s.workspaces !== previous.workspaces) && workspaceViewLayout(s) === s.layout) {
-    // The selected pane vanished or moved: end the presentation as well as
-    // falling back visually, so Arrange and splitter persistence work again.
-    s.returnWorkspaceLayout();
+  if (s.mainPresentation.kind !== 'workspace') {
+    if (s.workspaceView) useStore.setState({ workspaceView: null });
+    return;
   }
+  // A view for another workspace is stale. No stored view is the overview,
+  // so every switch path (sidebar, palette, reconnect, backend) lands on it.
+  if (s.workspaceView && (s.workspaceView.workspace !== s.activeWorkspace || s.workspaceView.backend !== (s.activeBackend ?? null))) {
+    useStore.setState({ workspaceView: null });
+    return;
+  }
+  const reveal = pendingWorkspaceReveal;
+  if (reveal && reveal.workspace === s.activeWorkspace && reveal.backend === (s.activeBackend ?? null) && s.layout && s.panes[reveal.paneId]) {
+    pendingWorkspaceReveal = null;
+    const view = reveal.kind ? { workspace: s.activeWorkspace, backend: s.activeBackend ?? null, kind: reveal.kind, paneId: reveal.paneId } : workspaceViewForPane(s, reveal.paneId);
+    useStore.setState({ ...(view !== undefined ? { workspaceView: view } : {}), focusedPaneId: reveal.paneId, zoomedPaneId: null });
+    return;
+  }
+  if (s.focusedPaneId === previous.focusedPaneId && s.zoomedPaneId === previous.zoomedPaneId && s.layout === previous.layout
+    && s.panes === previous.panes && s.workspaces === previous.workspaces && s.workspaceView === previous.workspaceView
+    && s.workspaceAllPanes === previous.workspaceAllPanes && s.activeWorkspace === previous.activeWorkspace
+    && s.activeBackend === previous.activeBackend && s.paneLayoutMode === previous.paneLayoutMode) return;
+  if (isTemporaryWorkspaceView(s.workspaceView) && !workspaceViewHasSelection(s)) {
+    // The selected pane vanished or moved: the grid already fell back to the
+    // overview; end the view too so Arrange and splitters work again.
+    useStore.setState({ workspaceView: null });
+    return;
+  }
+  const shown = workspaceViewLayout(s);
+  if (!shown) return;
+  const focus = s.focusedPaneId;
+  if (focus && !layoutHasLeaf(shown, focus)) {
+    // A deliberate focus (spawn, reopen, split) or a newly opened file,
+    // browser or diff tile opens a view that shows it.
+    const opened = focus !== previous.focusedPaneId && (s.lastUserFocusId === focus || (layoutHasLeaf(s.layout, focus) && !s.panes[focus]));
+    const view = opened ? workspaceViewForPane(s, focus) : undefined;
+    if (view !== undefined) { useStore.setState({ workspaceView: view }); return; }
+    // Incidental focus (a close, a load, a background worker) never moves
+    // the view: stay on the pane you were on, else the first one shown.
+    const keep = previous.focusedPaneId && layoutHasLeaf(shown, previous.focusedPaneId) ? previous.focusedPaneId
+      : collectLeaves(shown).map(leafId).find(Boolean) ?? null;
+    if (keep !== focus) useStore.setState({ focusedPaneId: keep });
+    return;
+  }
+  if (s.zoomedPaneId && !layoutHasLeaf(shown, s.zoomedPaneId)) useStore.setState({ zoomedPaneId: null });
 });

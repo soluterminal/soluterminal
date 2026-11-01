@@ -5,7 +5,7 @@ import { confirmDialog, alertDialog } from '../lib/dialog';
 import { DialogHost } from './DialogHost';
 import { detectVisitorOS } from './DesktopInstallerLink';
 import { GET_STARTED_TITLE, GetStartedCard, SiteInstallerLink, usesWindowsDownload } from './GetStartedCard';
-import { useCloudTeamAccount } from './useCloudTeamAccount';
+import { useCloudTeamPlan } from './useCloudTeamPlan';
 import { BrandBar, brandShellClass, useHostedBrand } from './CloudBrand';
 import { RotateTokenButton } from './RotateTokenButton';
 import { useIsMobileDevice } from './useIsMobileView';
@@ -172,7 +172,7 @@ function MachinePicker() {
   const [showClaim, setShowClaim] = useState(false);
   const [showHost, setShowHost] = useState(false);
   const bearer = session?.access_token ?? null;
-  const team = useCloudTeamAccount(bearer);
+  const team = useCloudTeamPlan(bearer);
   const email = session?.user?.email ?? null;
   // Until the first list arrives, an empty list says nothing: a returning
   // user must not see the new-account steps flash past.

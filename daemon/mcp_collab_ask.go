@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,19 +24,29 @@ const (
 	spawnReadyTimeout      = 45 * time.Second
 )
 
-// collabSleep is swapped by tests.
-var collabSleep = time.Sleep
+// collabSleep, collabScreenText, collabPaneState and queuedAskTTL are
+// swapped by tests.
+var (
+	collabSleep      = time.Sleep
+	collabScreenText = paneVisibleScreen
+	collabPaneState  = func(p *Pane) PaneRuntimeState { return p.computeStateCached() }
+	// queuedAskTTL bounds how long a queued ask is waited on, as long as the
+	// daemon follows the message in Codex's queue (queueWatchLimit).
+	queuedAskTTL = queueWatchLimit
+)
 
 type collabResult struct {
 	Pane          string  `json:"pane"`
 	PaneID        string  `json:"pane_id"`
-	Status        string  `json:"status"` // replied | needs_approval | still_working | exited | idle
+	Status        string  `json:"status"` // replied | needs_approval | still_working | exited | idle | unsent | expired
 	State         string  `json:"state"`
 	Source        string  `json:"source,omitempty"`
 	Reply         string  `json:"reply,omitempty"`
 	Screen        string  `json:"screen,omitempty"`
 	WaitedSeconds float64 `json:"waited_seconds"`
 	Hint          string  `json:"hint,omitempty"`
+	// Delivery is "queued" when a working Codex queued ask_pane's message.
+	Delivery string `json:"delivery,omitempty"`
 }
 
 func collabTimeout(args map[string]any, def time.Duration) time.Duration {
@@ -71,6 +82,13 @@ type paneTurnBaseline struct {
 	Since    time.Time // when the message was sent; zero = wait for any turn
 	Path     string
 	PromptAt time.Time
+	// Queued is the message when a working Codex queued it. Other queued
+	// requests can run first, so only a turn whose prompt is this message
+	// counts, and none while Codex still lists it as queued.
+	Queued string
+	// Continued: wait_for_pane picking up a timed-out queued ask_pane; the
+	// work it waited on already started, so a settled screen can end it.
+	Continued bool
 }
 
 func (a *apiServer) paneTurnBaselineFor(p *Pane) paneTurnBaseline {
@@ -87,19 +105,114 @@ func (b paneTurnBaseline) freshTurn(r paneReply) bool {
 	if b.Since.IsZero() {
 		return true
 	}
+	if b.Queued != "" && !queuedPromptMatches(r.Prompt, b.Queued) {
+		return false
+	}
 	if r.PromptAt.IsZero() || r.PromptAt.Before(b.Since.Add(-3*time.Second)) {
 		return false
 	}
 	return b.Path == "" || r.Path != b.Path || r.PromptAt.After(b.PromptAt)
 }
 
-func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time.Duration) collabResult {
+// queuedPromptMatches reports whether a turn's prompt is the queued message:
+// the whole prompt equals the whole message once the sender labels are off
+// and whitespace is ignored. Not a prefix (queued requests can start alike)
+// and not a substring (a short "yes" is inside many other prompts). Codex
+// sends one queued input per turn, so the prompt is exactly the message.
+func queuedPromptMatches(prompt, queued string) bool {
+	want := conditionalDraftText(stripSenderLabel(queued))
+	return want != "" && conditionalDraftText(stripSenderLabel(prompt)) == want
+}
+
+// queuedAskOpen reports a wait result after which the queued ask is still
+// waiting for its own reply: still working, or held by an approval menu
+// (often in the turn ahead of it) that wait_for_pane continues after.
+func queuedAskOpen(status string) bool {
+	return status == "still_working" || status == "needs_approval"
+}
+
+// queuedAskBaselines remembers, per target pane and caller, the baseline of
+// an ask_pane whose message a working Codex queued and that timed out before
+// the reply. The caller's wait_for_pane continues from it, so a request queued
+// ahead of theirs is not returned as their reply. An entry ends with a final
+// status, after queuedAskTTL, or when either pane closes.
+type queuedAskBaselines struct {
+	mu sync.Mutex
+	m  map[queuedAskKey]paneTurnBaseline
+}
+
+type queuedAskKey struct{ pane, caller string }
+
+func (q *queuedAskBaselines) put(pane, caller string, b paneTurnBaseline) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.m == nil {
+		q.m = map[queuedAskKey]paneTurnBaseline{}
+	}
+	// A caller that never came back leaves its entry; clear long-dead ones.
+	for k, old := range q.m {
+		if time.Since(old.Since) >= 2*queuedAskTTL {
+			delete(q.m, k)
+		}
+	}
+	q.m[queuedAskKey{pane, caller}] = b
+}
+
+func (q *queuedAskBaselines) get(pane, caller string) (paneTurnBaseline, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	b, ok := q.m[queuedAskKey{pane, caller}]
+	return b, ok
+}
+
+func (q *queuedAskBaselines) drop(pane, caller string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.m, queuedAskKey{pane, caller})
+}
+
+// dropPane forgets the queued asks to or from a closed pane, so a reused id
+// never inherits them.
+func (q *queuedAskBaselines) dropPane(id string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for k := range q.m {
+		if k.pane == id || k.caller == id {
+			delete(q.m, k)
+		}
+	}
+}
+
+// paneRemoved runs when a pane closes: agents' open requests about it and
+// queued asks to or from it end.
+func (a *apiServer) paneRemoved(id string) {
+	a.dropPaneConfirmsFor(id)
+	a.queuedAsks.dropPane(id)
+}
+
+// queuedAskPutBack reports that the pane's unsent receipt is this queued
+// message: an interrupted turn moved it back into the input box.
+func queuedAskPutBack(p *Pane, queued string) bool {
+	msg := p.Snapshot().UnsentMessage
+	return msg != nil && queuedPromptMatches(msg.body, queued)
+}
+
+func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time.Duration, callers ...string) collabResult {
 	start := time.Now()
 	res := collabResult{Pane: a.collabPaneLabel(p), PaneID: p.ID}
 	var settledSince, promptSince time.Time
-	sawWork := base.Since.IsZero()
+	sawWork := base.Since.IsZero() || base.Continued
+	agent, claude := paneAgentProvider(p)
+	codex := agent && !claude
 	for {
-		state := p.computeStateCached()
+		state := collabPaneState(p)
+		// Output age can read a quiet Codex turn, or its closing redraws, as
+		// settled; Codex's own Working row and queue hint do not.
+		if codex && (state == StateIdle || state == StateRecent || state == StateAwaitingInput) {
+			if screen := collabScreenText(p); codexTurnRunningText(screen) || (base.Queued != "" && codexQueueHolds(screen, base.Queued)) {
+				state = StateBusy
+			}
+		}
 		res.State = string(state)
 		res.WaitedSeconds = time.Since(start).Round(100 * time.Millisecond).Seconds()
 		if p.Snapshot().Status == PaneExited || state == StateExited {
@@ -107,8 +220,27 @@ func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time
 			res.Screen = paneScreenText(p)
 			return res
 		}
-		reply := a.paneLatestReply(p)
+		if base.Queued != "" && queuedAskPutBack(p, base.Queued) {
+			res.Status = "unsent"
+			res.Screen = paneScreenText(p)
+			res.Hint = "The turn was interrupted and Codex put your queued message back in its input box, unsent. The pane shows it as an unsent message; tell the user rather than resending."
+			return res
+		}
+		if base.Queued != "" && time.Since(base.Since) >= queuedAskTTL {
+			res.Status = "expired"
+			res.Screen = paneScreenText(p)
+			res.Hint = fmt.Sprintf("Your queued message got no reply within %s of being queued, so this wait has ended. Check the pane with read_pane_tail, or tell the user, before resending.", queuedAskTTL)
+			return res
+		}
+		reply := a.paneReplyTo(p, base)
 		res.Source = reply.Source
+		// The turn that ran a queued message is finished at its task_complete,
+		// whatever the turns queued behind it are doing now.
+		if base.Queued != "" && reply.Source == "transcript" && reply.Complete && base.freshTurn(reply) {
+			res.Status = "replied"
+			res.Reply = reply.Reply
+			return res
+		}
 		switch state {
 		case StateBusy, StateRecent:
 			sawWork = true
@@ -134,6 +266,9 @@ func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time
 			if base.freshTurn(reply) && reply.Complete && state != StateBusy && state != StateChoicePrompt {
 				res.Status = "replied"
 				res.Reply = reply.Reply
+				if len(callers) > 0 {
+					a.noteWorkerReplyRead(callers[0], p, reply)
+				}
 				return res
 			}
 		} else if sawWork && !settledSince.IsZero() && time.Since(settledSince) >= collabSettleScreen {
@@ -174,17 +309,40 @@ func (a *apiServer) mcpToolAskPane(args map[string]any, callerPane string) any {
 	case StateChoicePrompt:
 		return toolErr("pane " + paneID + " is waiting on an approval menu; answer it with answer_prompt first, or tell the user")
 	case StateBusy:
-		return toolErr("pane " + paneID + " is busy; call wait_for_pane first, then ask again")
+		// A working Codex queues the message itself (pane_delivery.go), so
+		// only other agents are turned away while busy.
+		if agent, claude := paneAgentProvider(p); !agent || claude {
+			return toolErr("pane " + paneID + " is busy; call wait_for_pane first, then ask again")
+		}
 	}
 	if !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}
 	base := a.paneTurnBaselineFor(p)
-	sent := a.mcpToolSendInput(map[string]any{"pane_id": paneID, "text": text}, callerPane)
+	// Never steer: a working Codex that offers no queue key gets no Enter.
+	sent, outcome := a.mcpToolSendInputOutcome(map[string]any{"pane_id": paneID, "text": text}, deliveryNoSteer, callerPane)
 	if m, ok := sent.(map[string]any); ok && m["isError"] == true {
 		return sent
 	}
-	return collabJSON(a.waitForPaneTurn(p, base, collabTimeout(args, askPaneDefaultTimeout)))
+	if outcome == deliveryQueued {
+		// send_input turns a typed "\n" into a line break; match what was sent.
+		base.Queued = strings.TrimRight(unescapeAriaInput(text), "\r\n")
+	}
+	res := a.waitForPaneTurn(p, base, collabTimeout(args, askPaneDefaultTimeout), callerPane)
+	a.queuedAsks.drop(paneID, callerPane)
+	if outcome == deliveryQueued {
+		res.Delivery = string(deliveryQueued)
+		if queuedAskOpen(res.Status) {
+			a.queuedAsks.put(paneID, callerPane, base)
+		}
+		switch res.Status {
+		case "still_working":
+			res.Hint = "That Codex agent was mid-turn, so your message is in its queue and goes in when the current turn ends. Call wait_for_pane to keep waiting for the reply; do not resend."
+		case "needs_approval":
+			res.Hint += " Your message is still in its queue; do not resend."
+		}
+	}
+	return collabJSON(res)
 }
 
 func (a *apiServer) mcpToolWaitForPane(args map[string]any, callerPane string) any {
@@ -200,7 +358,23 @@ func (a *apiServer) mcpToolWaitForPane(args map[string]any, callerPane string) a
 	if !ok {
 		return toolErr("no pane with id " + paneID)
 	}
-	res := a.waitForPaneTurn(p, paneTurnBaseline{}, collabTimeout(args, waitPaneDefaultTimeout))
+	// Continue a queued ask_pane that timed out: only its own turn counts,
+	// and the wait ends for good once it is answered, put back, or expired.
+	base, queued := a.queuedAsks.get(paneID, callerPane)
+	base.Continued = queued
+	res := a.waitForPaneTurn(p, base, collabTimeout(args, waitPaneDefaultTimeout), callerPane)
+	if queued {
+		res.Delivery = string(deliveryQueued)
+		switch {
+		case res.Status == "still_working":
+			res.Hint = "Your queued message has not been answered yet. Call wait_for_pane again to keep waiting; do not resend."
+		case res.Status == "needs_approval":
+			res.Hint += " Your queued message has not been answered yet; do not resend."
+		}
+		if !queuedAskOpen(res.Status) {
+			a.queuedAsks.drop(paneID, callerPane)
+		}
+	}
 	if res.Status == "replied" {
 		res.Status = "idle"
 	}

@@ -1,3 +1,4 @@
+import { slotList } from '../../extensions';
 import type { SettingsCategory } from '../../settingsRegistry';
 
 /**
@@ -5,7 +6,7 @@ import type { SettingsCategory } from '../../settingsRegistry';
  * This must not be derived from settingsRegistry: registry refactors must not
  * be able to make the zero-setting-loss check pass by construction.
  */
-export const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
+const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
   appearance: [
     'App theme', 'Color theme', 'Font size', 'Line height', 'Focus text offset', 'Sidebar text size',
   ],
@@ -30,13 +31,24 @@ export const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
     'Enable the Warden', 'Automatic pane flags', 'Model', 'Triage after', 'Max runs / hour', 'Run a fleet brief now',
   ],
   credentials: [
-    'Provider accounts', 'Runtime API keys', 'Auto-switch', 'Team pool health',
+    'Provider accounts', 'Runtime API keys',
     'Hide identities (screen share)',
   ],
-  team: ['Team pool'],
+  team: [],
   devices: [
     'Desktop app', 'Phone access', 'Launch on startup', 'Automatic updates',
     'Desktop app restarts', 'Send an anonymous daily check-in',
     'Let Claude Code and Codex use SoluTerminal',
   ],
 };
+
+export function settingsInventory(): Record<SettingsCategory, string[]> {
+  const result = { ...SETTINGS_INVENTORY };
+  for (const entry of slotList('settingsRegistryEntries')) {
+    for (const [category, labels] of Object.entries(entry.inventory ?? {})) {
+      const key = category as SettingsCategory;
+      result[key] = [...result[key], ...labels];
+    }
+  }
+  return result;
+}

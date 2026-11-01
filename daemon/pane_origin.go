@@ -19,7 +19,8 @@ type PaneOrigin struct {
 	// Source is "user" (opened from the app), "agent" (spawn_pane from
 	// another pane), "schedule", or "api" (any other caller). A pane without
 	// an origin predates this record: show nothing rather than guess.
-	Source string `json:"source"`
+	Source string      `json:"source"`
+	Worker *workerInfo `json:"worker,omitempty"`
 	// ByPaneID/ByPaneTitle/ByAgent name the pane whose agent started this
 	// one, as it was labelled at that moment.
 	ByPaneID    string `json:"byPaneId,omitempty"`
@@ -51,6 +52,10 @@ func (o *PaneOrigin) clone() *PaneOrigin {
 		return nil
 	}
 	c := *o
+	if o.Worker != nil {
+		w := *o.Worker
+		c.Worker = &w
+	}
 	return &c
 }
 

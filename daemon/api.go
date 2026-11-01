@@ -14,6 +14,9 @@ import (
 
 type apiServer struct {
 	uiPrefs *uiPrefsStore
+	// queuedAsks keeps a timed-out queued ask_pane's baseline for the
+	// caller's wait_for_pane (mcp_collab_ask.go).
+	queuedAsks queuedAskBaselines
 	// ext holds optional features' per-server state (extSlot, extensions.go).
 	ext extState
 	// Agent-requested reveals share a cooldown across workspaces and clients.
@@ -1888,6 +1891,14 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	paneOrigin, restoredTitle := createPaneOrigin(req, workspace, time.Now())
+	paneOrigin = a.validatedWorkerOrigin(paneOrigin, req)
+	if req.Restore && req.Origin != nil && req.Origin.Worker != nil && (paneOrigin == nil || paneOrigin.Worker == nil) {
+		http.Error(w, "worker restore requires a matching daemon-saved conversation; resume the original pane or start a new auto worker", http.StatusBadRequest)
+		return
+	}
+	if req.Restore && paneOrigin != nil && paneOrigin.Worker != nil && !a.requireHuman(w, r, "restore worker account credentials") {
+		return
+	}
 	restoredIdentity, releaseHandle := a.restoredPaneIdentity(req)
 	defer releaseHandle()
 	// A restored pane's starter or lead may have come back under a new id in

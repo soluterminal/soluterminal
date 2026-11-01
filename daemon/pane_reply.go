@@ -29,14 +29,15 @@ import (
 const paneReplyTailBytes = 2 << 20
 
 type paneReply struct {
-	Agent      string    `json:"agent,omitempty"`
-	Source     string    `json:"source"` // "transcript" | "screen"
-	Prompt     string    `json:"prompt,omitempty"`
-	PromptAt   time.Time `json:"-"`
-	Reply      string    `json:"reply"`
-	Complete   bool      `json:"complete"`
-	PromptSeen bool      `json:"-"`
-	Path       string    `json:"-"` // the transcript or rollout read
+	Agent       string    `json:"agent,omitempty"`
+	Source      string    `json:"source"` // "transcript" | "screen"
+	Prompt      string    `json:"prompt,omitempty"`
+	PromptAt    time.Time `json:"-"`
+	CompletedAt time.Time `json:"-"`
+	Reply       string    `json:"reply"`
+	Complete    bool      `json:"complete"`
+	PromptSeen  bool      `json:"-"`
+	Path        string    `json:"-"` // the transcript or rollout read
 }
 
 // claudeLatestReply projects a Claude Code transcript tail.
@@ -70,11 +71,14 @@ func claudeLatestReply(buf []byte) paneReply {
 				r.PromptAt = parseTranscriptTime(env.Timestamp)
 				r.PromptSeen = true
 				r.Complete = false
+				r.CompletedAt = time.Time{}
 				parts = parts[:0]
 			case claudeUserToolResult:
 				r.Complete = false
+				r.CompletedAt = time.Time{}
 			case claudeUserInterrupt:
 				r.Complete = true
+				r.CompletedAt = time.Time{}
 			}
 		case "assistant":
 			var msg struct {
@@ -93,6 +97,10 @@ func claudeLatestReply(buf []byte) paneReply {
 				}
 			}
 			r.Complete = msg.Stop == "end_turn" || msg.Stop == "stop_sequence"
+			r.CompletedAt = time.Time{}
+			if r.Complete {
+				r.CompletedAt = parseTranscriptTime(env.Timestamp)
+			}
 		}
 	}
 	r.Reply = strings.Join(parts, "\n\n")
@@ -177,6 +185,7 @@ func codexLatestReply(buf []byte) paneReply {
 			r.PromptAt = parseTranscriptTime(env.Timestamp)
 			r.PromptSeen = true
 			r.Complete = false
+			r.CompletedAt = time.Time{}
 			parts = parts[:0]
 		case env.Type == "response_item" && env.Payload.Type == "message" && env.Payload.Role == "assistant":
 			for _, c := range env.Payload.Content {
@@ -186,6 +195,7 @@ func codexLatestReply(buf []byte) paneReply {
 			}
 		case env.Type == "event_msg" && env.Payload.Type == "task_complete":
 			r.Complete = true
+			r.CompletedAt = parseTranscriptTime(env.Timestamp)
 			if last := strings.TrimSpace(env.Payload.Last); last != "" {
 				// The final message is the answer; earlier progress notes stay
 				// only when the final one is missing.
@@ -193,9 +203,85 @@ func codexLatestReply(buf []byte) paneReply {
 			}
 		case env.Type == "event_msg" && env.Payload.Type == "turn_aborted":
 			r.Complete = true
+			r.CompletedAt = time.Time{}
 		}
 	}
 	r.Reply = strings.Join(parts, "\n\n")
+	return r
+}
+
+// codexReplyTo finds, in a Codex rollout tail, the newest turn that ran a
+// user message satisfying match, and that turn's reply. Unlike
+// codexLatestReply it still finds the turn after later turns have run: a
+// queued message's answer is followed by the turns queued behind it. A turn
+// runs to its task_complete (or turn_aborted); user messages before that are
+// steers into the same turn.
+func codexReplyTo(buf []byte, match func(prompt string) bool) paneReply {
+	r := paneReply{Agent: agentCodex, Source: "transcript"}
+	var parts []string
+	open, ours := false, false
+	for _, line := range bytes.Split(buf, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var env struct {
+			Type      string `json:"type"`
+			Timestamp string `json:"timestamp"`
+			Payload   struct {
+				Type    string `json:"type"`
+				Role    string `json:"role"`
+				Last    string `json:"last_agent_message"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(line, &env) != nil {
+			continue
+		}
+		switch {
+		case env.Type == "response_item" && env.Payload.Type == "message" && env.Payload.Role == "user":
+			var texts []string
+			for _, c := range env.Payload.Content {
+				if strings.TrimSpace(c.Text) != "" && !codexInjectedUserText(c.Text) {
+					texts = append(texts, strings.TrimSpace(c.Text))
+				}
+			}
+			if len(texts) == 0 {
+				continue
+			}
+			if !open {
+				open, ours = true, false
+			}
+			if prompt := strings.Join(texts, "\n"); !ours && match(prompt) {
+				ours = true
+				r = paneReply{Agent: agentCodex, Source: "transcript", Prompt: prompt, PromptAt: parseTranscriptTime(env.Timestamp), PromptSeen: true}
+				parts = parts[:0]
+			}
+		case env.Type == "response_item" && env.Payload.Type == "message" && env.Payload.Role == "assistant":
+			if ours {
+				for _, c := range env.Payload.Content {
+					if strings.TrimSpace(c.Text) != "" {
+						parts = append(parts, strings.TrimSpace(c.Text))
+					}
+				}
+			}
+		case env.Type == "event_msg" && (env.Payload.Type == "task_complete" || env.Payload.Type == "turn_aborted"):
+			if ours {
+				r.Complete = true
+				if last := strings.TrimSpace(env.Payload.Last); last != "" {
+					parts = []string{last}
+				}
+				r.Reply = strings.Join(parts, "\n\n")
+			}
+			open, ours = false, false
+		}
+	}
+	if ours {
+		r.Reply = strings.Join(parts, "\n\n")
+	}
 	return r
 }
 
@@ -295,6 +381,53 @@ func (a *apiServer) paneLatestReply(p *Pane) paneReply {
 		}
 	}
 	return paneReply{Agent: agent, Source: "screen", Reply: paneScreenText(p)}
+}
+
+// paneReplyTo is paneLatestReply for an ask_pane whose message a working
+// Codex queued: the reply is the turn that ran that message, found even after
+// the turns queued behind it have run. Until the message shows up in the
+// rollout the reply is an empty transcript reply, so the wait goes on.
+func (a *apiServer) paneReplyTo(p *Pane, base paneTurnBaseline) paneReply {
+	if base.Queued == "" {
+		return a.paneLatestReply(p)
+	}
+	snap := p.Snapshot()
+	if paneSummaryAgent(p, snap) == agentCodex {
+		if path := codexRolloutPath(snap.CodexThreadID); path != "" {
+			if buf, err := tailReadBounded(path, paneReplyTailBytes); err == nil {
+				r := codexReplyTo(buf, func(prompt string) bool { return queuedPromptMatches(prompt, base.Queued) })
+				r.Path = path
+				r.Reply = redactTerminalTail(r.Reply)
+				return r
+			}
+		}
+	}
+	return a.paneLatestReply(p)
+}
+
+// codexRolloutFresh bounds how stale a rollout may be for its open turn to
+// count: a Codex killed mid-turn never writes the turn's end.
+const codexRolloutFresh = 10 * time.Minute
+
+// codexRolloutTurnOpen reports that the pane's Codex rollout has a turn that
+// started and has not ended (no task_complete or turn_aborted yet), and was
+// written recently. It sees a turn while its answer streams, when the
+// Working row is not drawn.
+func codexRolloutTurnOpen(p *Pane) bool {
+	snap := p.Snapshot()
+	path := codexRolloutPath(snap.CodexThreadID)
+	if path == "" {
+		return false
+	}
+	if fi, err := os.Stat(path); err != nil || time.Since(fi.ModTime()) > codexRolloutFresh {
+		return false
+	}
+	buf, err := tailReadBounded(path, paneReplyTailBytes)
+	if err != nil {
+		return false
+	}
+	r := codexLatestReply(buf)
+	return r.PromptSeen && !r.Complete
 }
 
 // claudeTranscriptBelongsToPane rejects a transcript that transcriptForPane

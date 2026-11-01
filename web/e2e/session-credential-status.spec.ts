@@ -32,7 +32,7 @@ for (const theme of ['dark', 'light']) {
     await personal.click();
     await expect(page.getByRole('dialog', { name: 'Still using personal-old' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Restart session' })).toBeVisible();
-    // A broker following the active team account is healthy: no chip.
+    // A proxied session following the active credential is healthy: no chip.
     await expect(broker).toHaveCount(0);
     panes[1].credential = { ...panes[1].credential!, activeTeamId: 'another-team', restartRequired: true };
     await page.reload();

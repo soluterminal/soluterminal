@@ -158,6 +158,9 @@ func resumeTestServer(t *testing.T, exited *Pane) (*apiServer, *[]SpawnOpts, *[]
 		spawnPane: func(o SpawnOpts) (*Pane, error) {
 			*spawnOpts = append(*spawnOpts, o)
 			np := switchTestPane(o.ID, o.Kind, o.Cmd, o.ClaudeSessionID)
+			if !o.CreatedAt.IsZero() {
+				np.CreatedAt = o.CreatedAt
+			}
 			np.AutoMode = o.AutoMode
 			np.NeverAutoAnswer = o.NeverAutoAnswer
 			np.Agent = o.Agent

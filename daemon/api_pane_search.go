@@ -60,7 +60,7 @@ func (a *apiServer) searchPanes(w http.ResponseWriter, r *http.Request) {
 	panes := a.mgr.List()
 	// Most-recently-active panes first, so both the per-pane and the overall caps
 	// keep the matches a user is most likely looking for — recent activity over
-	// stale panes. List() ranges a map (random order), which never did this.
+	// stale panes. List() uses creation order, so search explicitly ranks activity.
 	sort.SliceStable(panes, func(i, j int) bool {
 		return atomic.LoadInt64(&panes[i].LastActivityMs) > atomic.LoadInt64(&panes[j].LastActivityMs)
 	})

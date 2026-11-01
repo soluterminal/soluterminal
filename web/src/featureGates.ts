@@ -40,8 +40,8 @@ export const FEATURE_GATES: readonly FeatureGate[] = [
   { file: 'components/StatusBar.tsx', flag: 'operator', surface: 'Release chips and system detail' },
   { file: 'components/system/SystemPage.tsx', flag: 'operator', surface: 'Workflow, release and cleanup cards' },
   // Team: what a customer team plan could carry.
-  { file: 'components/settings/AccountTab.tsx', flag: 'team', surface: '"Team account" label' },
-  { file: 'components/PaneCredentialBadge.tsx', flag: 'team', surface: 'Saved-account detail on the pane badge' },
+  { file: 'components/settings/AccountTab.tsx', flag: 'team', surface: '"Team plan" label' },
+  { file: 'components/PaneCredentialBadge.tsx', flag: 'team', surface: 'Selected-login detail on the pane badge' },
   { file: 'components/SmartApprovalsHint.tsx', flag: 'team', surface: 'Team smart-approval limits' },
   { file: 'components/Sidebar.tsx', flag: 'team', surface: 'Credentials section' },
   { file: 'components/sidebar/SidebarCustomizer.tsx', flag: 'team', surface: 'Credentials in the customiser' },

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -65,9 +68,58 @@ func shinoqueDiscoveryHome(home string) string {
 func (c *shinoqueDiscoveryCache) discover() (shinoqueRelayConfig, bool, string) {
 	config, found, reason := c.readDiscovery()
 	if reason != "" {
-		c.path, c.config = "", shinoqueRelayConfig{}
+		c.path, c.content, c.config = "", nil, shinoqueRelayConfig{}
+	}
+	if found && reason == "" && shinoqueSoludListening(config.port) {
+		return shinoqueRelayConfig{}, true, "discovery port belongs to solud"
 	}
 	return config, found, reason
+}
+
+// Defense in depth for Linux-visible listeners, checked even on cache hits.
+// Inspect only solud descriptors, without HTTP probes or sending the token.
+// WSL cannot see native Windows listeners here; stripping browser authority
+// headers in the proxy remains necessary on every platform and destination.
+func shinoqueSoludListening(port string) bool {
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return false
+	}
+	sockets := make(map[string]bool)
+	for _, entry := range append(parseProcNetTCP("/proc/net/tcp", "tcp"), parseProcNetTCP("/proc/net/tcp6", "tcp6")...) {
+		if entry.port == uint16(n) {
+			sockets["socket:["+strconv.FormatUint(entry.inode, 10)+"]"] = true
+		}
+	}
+	if len(sockets) == 0 {
+		return false
+	}
+	processes, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, process := range processes {
+		pid, err := strconv.Atoi(process.Name())
+		if err != nil {
+			continue
+		}
+		name := strings.TrimSuffix(strings.ToLower(readComm(pid)), ".exe")
+		if name != "solud" {
+			continue
+		}
+		dir := filepath.Join("/proc", process.Name(), "fd")
+		fds, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			target, err := os.Readlink(filepath.Join(dir, fd.Name()))
+			if err == nil && sockets[target] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, string) {
@@ -78,18 +130,15 @@ func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, str
 	}
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		c.path = ""
+		c.path, c.content, c.config = "", nil, shinoqueRelayConfig{}
 		return shinoqueRelayConfig{}, false, ""
 	}
 	if err != nil {
 		return fail("cannot stat discovery")
 	}
-	inode, reason := shinoqueDiscoveryMetadata(info)
+	_, reason := shinoqueDiscoveryMetadata(info)
 	if reason != "" {
 		return fail(reason)
-	}
-	if c.path == path && c.mtime.Equal(info.ModTime()) && c.size == info.Size() && c.inode == inode {
-		return c.config, true, shinoqueDiscoveryHome(c.config.home)
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -121,14 +170,14 @@ func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, str
 	if _, reason := shinoqueDiscoveryMetadata(after); reason != "" {
 		return fail(reason)
 	}
-	var record struct {
-		Version int    `json:"version"`
-		Port    int    `json:"port"`
-		Home    string `json:"home"`
+	// Reuse parsed discovery only after reading and validating the current file.
+	// Different contents can share the same inode, size and mtime.
+	if c.path == path && bytes.Equal(c.content, content) {
+		return c.config, true, shinoqueDiscoveryHome(c.config.home)
 	}
-	// Never include parse errors or contents in logs: discovery is untrusted.
-	if err := json.Unmarshal(content, &record); err != nil {
-		return fail("invalid discovery JSON (version and port must be integers)")
+	record, err := parseShinoqueDiscovery(content)
+	if err != nil {
+		return fail("invalid discovery JSON")
 	}
 	if record.Version != 1 {
 		return fail("unsupported discovery version")
@@ -139,7 +188,64 @@ func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, str
 	if reason := shinoqueDiscoveryHome(record.Home); reason != "" {
 		return fail(reason)
 	}
-	config := shinoqueRelayConfig{port: strconv.Itoa(record.Port), home: record.Home}
-	c.path, c.mtime, c.size, c.inode, c.config = path, info.ModTime(), info.Size(), inode, config
+	config := shinoqueRelayConfig{port: strconv.Itoa(record.Port), home: record.Home, relayAuth: record.RelayAuth, privateDeviceProof: record.PrivateDeviceProof}
+	c.path, c.content, c.config = path, content, config
 	return config, true, ""
+}
+
+// Accepted fields are version, port, home, relayAuth and privateDeviceProof.
+// Optional capability versions must be JSON integers; absent fields are zero.
+type shinoqueDiscoveryRecord struct {
+	Version, Port, RelayAuth, PrivateDeviceProof int
+	Home                                         string
+}
+
+func parseShinoqueDiscovery(content []byte) (shinoqueDiscoveryRecord, error) {
+	var record shinoqueDiscoveryRecord
+	invalid := errors.New("invalid discovery record")
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return record, invalid
+	}
+	seen := make(map[string]bool)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return record, invalid
+		}
+		name, ok := token.(string)
+		if !ok || seen[name] {
+			return record, invalid
+		}
+		seen[name] = true
+		var value any
+		switch name {
+		case "version":
+			value = &record.Version
+		case "port":
+			value = &record.Port
+		case "home":
+			value = &record.Home
+		case "relayAuth":
+			value = &record.RelayAuth
+		case "privateDeviceProof":
+			value = &record.PrivateDeviceProof
+		default:
+			return record, invalid
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return record, invalid
+		}
+		if err := json.Unmarshal(raw, value); err != nil {
+			return record, invalid
+		}
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return record, invalid
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return record, invalid
+	}
+	return record, nil
 }

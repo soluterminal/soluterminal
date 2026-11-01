@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -41,7 +42,7 @@ func shinoqueDiscoveryFixture(t *testing.T) (string, string) {
 
 func writeShinoqueDiscovery(t *testing.T, path, home string, port int) {
 	t.Helper()
-	data, err := json.Marshal(map[string]any{"version": 1, "port": port, "home": home, "host": "attacker.invalid"})
+	data, err := json.Marshal(map[string]any{"version": 1, "port": port, "home": home, "relayAuth": 2, "privateDeviceProof": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,7 @@ func TestShinoqueDiscoveryRejects(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/shinoque/", nil)
 			req.Header.Set("X-Forwarded-Prefix", "/m/test")
 			w := httptest.NewRecorder()
-			newShinoqueRelayHandler(http.NotFoundHandler(), cache).ServeHTTP(w, req)
+			newShinoqueRelayHandler(http.NotFoundHandler(), cache, nil).ServeHTTP(w, req)
 			if w.Code != 503 || strings.TrimSpace(w.Body.String()) != shinoqueUnavailable {
 				t.Fatalf("response = %d %q", w.Code, w.Body.String())
 			}
@@ -303,10 +304,74 @@ func TestShinoqueDiscoveryCacheInvalidation(t *testing.T) {
 	}
 }
 
+func TestShinoqueDiscoveryContentChangeWithSameMetadata(t *testing.T) {
+	path, home := shinoqueDiscoveryFixture(t)
+	writeShinoqueDiscovery(t, path, home, 1234)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &shinoqueDiscoveryCache{}
+	write := func(t *testing.T, content []byte) {
+		t.Helper()
+		if len(content) != len(original) {
+			t.Fatal("replacement size changed")
+		}
+		// Rewriting the same inode and restoring mtime deterministically models
+		// the metadata collision of an atomic replacement that reuses an inode.
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) {
+			t.Fatal("replacement must retain inode, size and mtime")
+		}
+	}
+	for _, tc := range []struct {
+		name, old, replacement string
+		auth, proof            int
+		valid                  bool
+	}{
+		{"private capability", `"privateDeviceProof":1`, `"privateDeviceProof":0`, 2, 0, true},
+		{"relay capability", `"relayAuth":2`, `"relayAuth":3`, 3, 1, true},
+		{"port", `"port":1234`, `"port":2345`, 2, 1, true},
+		{"invalid content", `"privateDeviceProof":1`, `"privateDeviceProof":x`, 0, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			write(t, original)
+			if got, ok := cache.resolve(); !ok || got.relayAuth != 2 || got.privateDeviceProof != 1 || got.port != "1234" {
+				t.Fatalf("initial config = %+v ok=%t", got, ok)
+			}
+			changed := bytes.Replace(original, []byte(tc.old), []byte(tc.replacement), 1)
+			if bytes.Equal(changed, original) {
+				t.Fatal("replacement did not change discovery contents")
+			}
+			write(t, changed)
+			got, ok := cache.resolve()
+			if ok != tc.valid || got.relayAuth != tc.auth || got.privateDeviceProof != tc.proof {
+				t.Fatalf("content change missed: config=%+v ok=%t", got, ok)
+			}
+			if tc.name == "port" && got.port != "2345" {
+				t.Fatalf("port=%s want=2345", got.port)
+			}
+		})
+	}
+}
+
 func TestShinoqueDiscoveryRelayPortMove(t *testing.T) {
 	path, home := shinoqueDiscoveryFixture(t)
 	tokens := &shinoqueTokenCache{}
-	handler := newShinoqueRelayHandler(http.NotFoundHandler(), tokens)
+	handler := newShinoqueRelayHandler(http.NotFoundHandler(), tokens, nil)
 	for _, response := range []string{"first", "second"} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !strings.HasPrefix(r.Host, "127.0.0.1:") || r.Header.Get("X-Shinoque-Relay") != "installed-secret" {
@@ -345,6 +410,64 @@ func TestShinoqueDiscoveryRelayPortMove(t *testing.T) {
 	}
 }
 
+func TestShinoqueDiscoveryRejectsSoludListener(t *testing.T) {
+	for _, name := range []string{"solud", "solud.exe"} {
+		t.Run(name, func(t *testing.T) {
+			path, home := shinoqueDiscoveryFixture(t)
+			listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			port := listener.Addr().(*net.TCPAddr).Port
+			writeShinoqueDiscovery(t, path, home, port)
+			tokens := &shinoqueTokenCache{}
+			if _, ok := tokens.discovery.resolve(); !ok {
+				t.Fatal("ordinary listener rejected")
+			}
+			// Inherit a real listening socket into a process named solud. The
+			// discovery is already cached: listener ownership must be rechecked.
+			sleep, err := exec.LookPath("sleep")
+			if err != nil {
+				t.Fatal(err)
+			}
+			binary := filepath.Join(t.TempDir(), name)
+			if err := os.Symlink(sleep, binary); err != nil {
+				t.Fatal(err)
+			}
+			file, err := listener.File()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			cmd := exec.Command(binary, "60")
+			cmd.ExtraFiles = []*os.File{file}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+			deadline := time.Now().Add(5 * time.Second)
+			for readComm(cmd.Process.Pid) != name {
+				if time.Now().After(deadline) {
+					t.Fatal("listener process did not start")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if _, ok := tokens.discovery.resolve(); ok || tokens.discovery.rejection != "discovery port belongs to solud" {
+				t.Fatalf("solud listener accepted: %q", tokens.discovery.rejection)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/shinoque/api/settings", nil)
+			req.Header.Set("X-Forwarded-Prefix", "/m/test")
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			w := httptest.NewRecorder()
+			newShinoqueRelayHandler(http.NotFoundHandler(), tokens, nil).ServeHTTP(w, req)
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("forged destination response = %d", w.Code)
+			}
+		})
+	}
+}
+
 // Installed Shinoque publishes discovery only while cross-device access is on.
 // Deletion must revoke the discovered endpoint on the very next request.
 func TestShinoqueDiscoveryDeletedFileFallsBack(t *testing.T) {
@@ -368,7 +491,7 @@ func TestShinoqueDiscoveryDeletedFileFallsBack(t *testing.T) {
 	}
 	writeShinoqueDiscovery(t, path, home, n)
 	tokens := &shinoqueTokenCache{}
-	handler := newShinoqueRelayHandler(http.NotFoundHandler(), tokens)
+	handler := newShinoqueRelayHandler(http.NotFoundHandler(), tokens, nil)
 	request := func() *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, "/shinoque/", nil)
@@ -383,9 +506,9 @@ func TestShinoqueDiscoveryDeletedFileFallsBack(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	// The isolated development home has no relay-token, so fallback is the
-	// normal disabled response, rather than another request to the installed core.
-	if w := request(); w.Code != 503 || strings.TrimSpace(w.Body.String()) != shinoqueUnavailable || hits != 1 {
+	// Development defaults have no advertised relay capabilities, so deleting
+	// discovery requires an update before remote use can resume.
+	if w := request(); w.Code != 503 || strings.TrimSpace(w.Body.String()) != shinoqueUpdateRequired || hits != 1 {
 		t.Fatalf("deleted discovery: status=%d body=%q hits=%d", w.Code, w.Body.String(), hits)
 	}
 	if tokens.discovery.source != "default" || tokens.discovery.lastConfig.port != "4760" || tokens.discovery.lastConfig.home != filepath.Join(os.Getenv("HOME"), ".shinoque") {

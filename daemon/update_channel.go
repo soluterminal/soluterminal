@@ -11,8 +11,7 @@ package main
 // The channel follows the account:
 //
 //   - An install whose account the cloud confirms as team-entitled follows
-//     the team channel (a public install moves to the team build on sign-in
-//     to a team account).
+//     the team channel (a public install moves to the entitled build on sign-in).
 //   - An install whose account the cloud confirms as NOT team-entitled follows
 //     the public channel (a team install moves to the public build).
 //   - Nothing else moves an install: signing out, an expired or anonymous
@@ -274,8 +273,8 @@ func (u *Updater) syncChannel() {
 		var ok bool
 		url, viaCloud, ok = channelSource(rec.Channel, teamPath != "")
 		if !ok {
-			// This build has no source for that channel yet: a team account
-			// on a public build whose paired cloud has not named its team
+			// This build has no source for that channel yet: an entitled
+			// public install whose paired cloud has not named its team
 			// update endpoint (the first fresh entitlements answer does, a
 			// few seconds after pairing). Keep following the current
 			// channel rather than stranding the install with nothing to

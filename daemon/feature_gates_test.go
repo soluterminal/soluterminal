@@ -105,7 +105,7 @@ func TestEntitlementsEndpointReportsOperatorAndView(t *testing.T) {
 		return out
 	}
 	out := read()
-	if out["operator"] != true || out["team"] != true || out["teamCredentials"] != true || out["viewPersonal"] != false {
+	if out["operator"] != true || out["team"] != true || out["viewPersonal"] != false {
 		t.Fatalf("operator install: %v", out)
 	}
 	if _, err := a.view.set(true); err != nil {
@@ -122,7 +122,7 @@ func TestEntitlementsEndpointReportsOperatorAndView(t *testing.T) {
 	team.handleEntitlements(rec, httptest.NewRequest(http.MethodGet, "/api/entitlements", nil))
 	var tp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &tp)
-	if tp["team"] != true || tp["operator"] != false || tp["teamCredentials"] != false || tp["accountSwitching"] != true {
+	if tp["team"] != true || tp["operator"] != false {
 		t.Fatalf("team-plan install: %v", tp)
 	}
 }

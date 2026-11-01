@@ -168,11 +168,8 @@ func validateProviders(entries []Provider) error {
 				seenLevels[level] = true
 			}
 		}
-		if p.Creds != nil {
+		if p.Creds != nil && p.Creds.Mailbox != nil {
 			m := p.Creds.Mailbox
-			if m == nil {
-				return fmt.Errorf("provider %q credential mailbox is missing", p.Slug)
-			}
 			if m.RouteSegment == "" || m.SetTable == "" || m.SyncTable == "" || m.PolicyTable == "" || m.EnvelopeKey == "" {
 				return fmt.Errorf("provider %q credential mailbox facts are incomplete", p.Slug)
 			}
@@ -207,7 +204,9 @@ func validateProviders(entries []Provider) error {
 				}
 				tables[m.ActiveTable] = p.Slug
 			}
-			if p.Creds.TeamState == nil || p.Creds.TeamState.StateFileName == "" || p.Creds.Store == nil {
+		}
+		if p.Creds != nil && p.Creds.TeamState != nil {
+			if p.Creds.TeamState.StateFileName == "" || p.Creds.Store == nil {
 				return fmt.Errorf("provider %q credential daemon facts are incomplete", p.Slug)
 			}
 		}

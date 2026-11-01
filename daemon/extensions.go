@@ -393,14 +393,14 @@ func registerPaneShellInit(bashEnv, powerShellInit string) {
 	paneShellPowerShellInit += "\n" + powerShellInit
 }
 
-// paneBroker routes provider CLIs launched in panes through an optional
-// credential broker. Its zero value is "no broker": every pane runs the CLI
+// paneRoute routes provider CLIs launched in panes through an optional
+// account route. Its zero value is "no route": every pane runs the CLI
 // with the user's own login, and the helpers below answer accordingly.
-var paneBroker paneBrokerHooks
+var paneRoute paneRouteHooks
 
-type paneBrokerHooks struct {
+type paneRouteHooks struct {
 	// prepare plans a pane spawn's route: argv overrides inserted after the
-	// CLI executable (brokerChildCommand), and a release for anything minted
+	// CLI executable (routeChildCommand), and a release for anything minted
 	// for the spawn, called when the spawn fails.
 	prepare func(m *Manager, opts *SpawnOpts) (overrides []string, release func(), err error)
 	// active reports whether a launch environment carries a prepared route.
@@ -408,9 +408,9 @@ type paneBrokerHooks struct {
 	// accountLabel is the credential label a routed launch reports.
 	accountLabel func(label string) string
 	// isAccount reports whether a selected credential label is a routed
-	// (broker) account rather than the user's own login.
+	// account rather than the user's own login.
 	isAccount func(label string) bool
-	// selectedTeam is the team of the provider's selected routed account.
+	// selectedTeam is the scope of the provider's selected routed account.
 	selectedTeam func(m *Manager, provider string) string
 	// agentInheritedEnv and agentEnv prepare a routed child's environment in
 	// the pane agent process (before and after its --env entries).
@@ -425,17 +425,17 @@ type paneBrokerHooks struct {
 	codexLiveConfigValid func(overrides []string) bool
 }
 
-func paneBrokerActive(env []string) bool { return paneBroker.active != nil && paneBroker.active(env) }
+func paneRouteActive(env []string) bool { return paneRoute.active != nil && paneRoute.active(env) }
 
-func paneBrokerAccount(label string) bool {
-	return paneBroker.isAccount != nil && paneBroker.isAccount(label)
+func paneRouteAccount(label string) bool {
+	return paneRoute.isAccount != nil && paneRoute.isAccount(label)
 }
 
-func paneBrokerPrepare(m *Manager, opts *SpawnOpts) ([]string, func(), error) {
-	if paneBroker.prepare == nil {
+func paneRoutePrepare(m *Manager, opts *SpawnOpts) ([]string, func(), error) {
+	if paneRoute.prepare == nil {
 		return nil, nil, nil
 	}
-	return paneBroker.prepare(m, opts)
+	return paneRoute.prepare(m, opts)
 }
 
 // bodyLimitHooks may raise the request body limit for a feature's own routes
@@ -453,14 +453,20 @@ func requestBodyLimit(r *http.Request, limit int64) int64 {
 	return limit
 }
 
-// harnessTeam supplies native-harness accounts shared by a team. Its zero
+// harnessRoute supplies native-harness accounts from optional routes. Its zero
 // value means a harness uses the user's own keys only.
-var harnessTeam struct {
-	// sync pulls the provider's shared accounts.
+var harnessRoute struct {
+	// sync refreshes the provider's routed accounts.
 	sync func(a *apiServer, ctx context.Context, provider string) error
-	// route gives a shared account a scoped route for one probe: the key and
+	// route gives a selected account a scoped route for one probe: the key and
 	// base URL to call, or an HTTP status and error.
 	route func(a *apiServer, s *harnessCredStore, name string, acc harnessAccount) (key, base string, status int, err error)
-	// release ends a route route minted.
+	// release ends the capability minted for a probe.
 	release func(a *apiServer, key string)
 }
+
+// Quota-aware worker policy is public; saved-account data and isolation are optional.
+var quotaWorkerAccounts func(*apiServer, time.Time) []workerAccount
+var prepareQuotaWorker func(*apiServer, workerInfo, string, *SpawnOpts) (func(), error)
+
+var recoverQuotaWorker func(*apiServer, *Pane, workerInfo) (func(), error)

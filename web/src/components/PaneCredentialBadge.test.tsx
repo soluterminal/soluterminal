@@ -152,7 +152,7 @@ describe('the popover fixes the problem', () => {
  it('restart uses the guarded pane restart flow', async () => {
   const restart = vi.spyOn(paneRestart, 'restartPaneFlow').mockResolvedValue(undefined);
   render(<PaneCredentialBadge pane={{ ...thread, codexAuth: { state: 'reconnect-required', blocker: 'team' } }} />);
-  fireEvent.click(screen.getByText('restart for team'));
+  fireEvent.click(screen.getByText('restart for account'));
   fireEvent.click(screen.getByRole('button', { name: 'Restart session' }));
   await waitFor(() => expect(restart).toHaveBeenCalledWith('pane_test'));
  });

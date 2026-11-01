@@ -44,7 +44,7 @@ export function AccountTab() {
         </SettingsRow>
       )}
       {signedInEmail !== null && (
-        <SettingsRow label="Account" hint={team ? 'Team account.' : 'Free beta account.'}>
+        <SettingsRow label="Account" hint={team ? 'Team plan.' : 'Free beta account.'}>
           <span className="settings-status">{signedInEmail ? `Signed in as ${signedInEmail}` : 'Signed in'}</span>
           <button
             type="button"

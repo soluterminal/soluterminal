@@ -12,11 +12,11 @@ const codexInlineBashEnv = "BASH_FUNC_codex%%=" + codexPaneBashFunction
 // Only fixed categories and a validated HTTP status may reach the terminal.
 // Exceptions can contain daemon addresses, response bodies or credentials;
 // never render their Message/ToString or traverse an unbounded inner chain.
-// teamBrokerPowerShellRelease releases the capability a terminal hook's plan
-// minted, once the CLI has exited. $managedEnv is filled only from a team plan,
-// so a personal launch passes no token. Best effort and silent: a lost release
+// Release the capability minted for a terminal hook once the CLI exits.
+// $managedEnv is filled only for a managed launch, so a default launch
+// passes no token. Best effort and silent: a lost release
 // is reclaimed when the daemon's store is full.
-const teamBrokerPowerShellRelease = `{ param($daemon, [string]$token)
+const launchRoutePowerShellRelease = `{ param($daemon, [string]$token)
   if (-not $daemon -or $token -cnotmatch '^[0-9a-f]{64}$') { return }
   try {
     $release = [Net.HttpWebRequest]::Create(([Uri]$daemon).AbsoluteUri.TrimEnd('/') + '/api/team-broker/capability/release')
@@ -121,12 +121,12 @@ const codexInlinePowerShellInit = `if (-not (Get-Command codex -CommandType Alia
             catch { $routingEvidence.phase = 'invalid_json'; throw }
           } finally { $response.Dispose() }
           if (@('personal','team') -cnotcontains $result.mode) { $routingEvidence.phase = 'invalid_mode'; throw 'Invalid launch plan' }
-          if ($result.mode -ceq 'team' -and (-not $result.environment -or -not $result.overrides)) { $routingEvidence.phase = 'invalid_team_plan'; throw 'Invalid team launch plan' }
+          if ($result.mode -ceq 'team' -and (-not $result.environment -or -not $result.overrides)) { $routingEvidence.phase = 'invalid_team_plan'; throw 'Account route unavailable. Invalid launch plan.' }
           return $result
         }
         # Ask for the user's own CODEX_HOME first; personal routing costs nothing
         # more. Only Codex 0.93+ accepts the ephemeral credential store that keeps
-        # the personal login out of a team session, so an older Codex (or an
+        # the personal login out of a selected account, so an older Codex (or an
         # unreadable version) gets the isolated home instead.
         $plan = & $fetchPlan '?config=user'
         if ($plan.mode -ceq 'team' -and -not (@($plan.environment) -clike 'CODEX_HOME=*')) {
@@ -157,22 +157,22 @@ const codexInlinePowerShellInit = `if (-not (Get-Command codex -CommandType Alia
         elseif (@('--enable','--disable','--remote-auth-token-env','-i','--image','-m','--model','-p','--profile','-s','--sandbox','-C','--cd','--add-dir','-a','--ask-for-approval','--output-last-message','-o','--output-schema') -ccontains $arg) { $i++; continue }
         if ($config) {
           $key = $config.Split('=')[0].Replace('"','').Replace("'",'').Trim()
-          if ($key -match '^(model_provider$|model_providers[.\[]|openai_base_url$|chatgpt_base_url$|cli_auth_credentials_store$)') { throw 'Select a personal account before overriding team Codex provider routing.' }
+          if ($key -match '^(model_provider$|model_providers[.\[]|openai_base_url$|chatgpt_base_url$|cli_auth_credentials_store$)') { throw 'Account route unavailable. Select a personal account before overriding Codex provider routing.' }
         }
-        if ($arg -ceq '--oss' -or $arg -ceq '--local-provider' -or $arg.StartsWith('--local-provider=')) { throw 'Select a personal account before overriding team Codex provider routing.' }
+        if ($arg -ceq '--oss' -or $arg -ceq '--local-provider' -or $arg.StartsWith('--local-provider=')) { throw 'Account route unavailable. Select a personal account before overriding Codex provider routing.' }
       }
       foreach ($entry in $plan.environment) {
         $entry = [string]$entry; $separator = $entry.IndexOf('=')
-        if ($separator -le 0) { throw 'Invalid SoluTerminal team launch environment' }
+        if ($separator -le 0) { throw 'Account route unavailable. Invalid launch environment.' }
         $name = $entry.Substring(0,$separator); $value = $entry.Substring($separator+1)
-        if (@('CODEX_HOME','SOLU_TEAM_BROKER_TOKEN','SOLU_TEAM_BROKER_PROVIDER') -cnotcontains $name -or -not $value) { throw 'Invalid SoluTerminal team launch environment' }
+        if (@('CODEX_HOME','SOLU_TEAM_BROKER_TOKEN','SOLU_TEAM_BROKER_PROVIDER') -cnotcontains $name -or -not $value) { throw 'Account route unavailable. Invalid launch environment.' }
         $managedEnv[$name] = $value
       }
-      if (-not $managedEnv['SOLU_TEAM_BROKER_TOKEN'] -or $managedEnv['SOLU_TEAM_BROKER_PROVIDER'] -cne 'codex') { throw 'Incomplete SoluTerminal team launch environment' }
+      if (-not $managedEnv['SOLU_TEAM_BROKER_TOKEN'] -or $managedEnv['SOLU_TEAM_BROKER_PROVIDER'] -cne 'codex') { throw 'Account route unavailable. Incomplete launch environment.' }
       # Without an isolated CODEX_HOME the plan runs in the user's own home: only
       # for a Codex verified above, and only with the ephemeral credential store.
-      if (-not $managedEnv['CODEX_HOME'] -and (-not $userConfig -or @($plan.overrides) -cnotcontains 'cli_auth_credentials_store="ephemeral"')) { throw 'Incomplete SoluTerminal team launch environment' }
-      # Only our loopback broker bypasses a proxy. Preserve all existing
+      if (-not $managedEnv['CODEX_HOME'] -and (-not $userConfig -or @($plan.overrides) -cnotcontains 'cli_auth_credentials_store="ephemeral"')) { throw 'Account route unavailable. Incomplete launch environment.' }
+      # Only our loopback route bypasses a proxy. Preserve all existing
       # exclusions and HTTP(S)/ALL_PROXY settings for external traffic.
       $noProxy = (@($env:NO_PROXY,$env:no_proxy,'127.0.0.1','localhost','::1') | Where-Object { $_ }) -join ','
       $managedEnv['NO_PROXY'] = $noProxy; $managedEnv['no_proxy'] = $noProxy
@@ -185,7 +185,7 @@ const codexInlinePowerShellInit = `if (-not (Get-Command codex -CommandType Alia
         $forward = @($plan.overrides) + $forward
       } else {
         # Older Codex exec builds read subcommand config overrides, not the
-        # parent's -c flags. Keep broker flags in that parser's scope.
+        # parent's -c flags. Keep route flags in that parser's scope.
         $delimiter = -1
         for ($i = 0; $i -lt $forward.Count; $i++) {
           if ($forward[$i] -ceq '--') { $delimiter = $i; break }
@@ -208,7 +208,7 @@ const codexInlinePowerShellInit = `if (-not (Get-Command codex -CommandType Alia
       $childExitCode = $LASTEXITCODE
     } finally {
       foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name,$savedEnv[$name],'Process') }
-      & ` + teamBrokerPowerShellRelease + ` $daemon $managedEnv['SOLU_TEAM_BROKER_TOKEN']
+      & ` + launchRoutePowerShellRelease + ` $daemon $managedEnv['SOLU_TEAM_BROKER_TOKEN']
     }
     if ($null -ne $childExitCode) { $global:LASTEXITCODE = $childExitCode }
   }

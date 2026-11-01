@@ -10,7 +10,7 @@ type agentMessageReceipt struct {
 	FromPaneID string `json:"fromPaneId"`
 	FromLabel  string `json:"fromLabel"` // "#3 Codex", as the "[from …]" prefix names it
 	At         int64  `json:"at"`
-	// Outcome: submitted | sent_unconfirmed (left_in_composer is shown as
+	// Outcome: submitted | queued | sent_unconfirmed (left_in_composer is shown as
 	// the unsent-message chip instead).
 	Outcome string `json:"outcome"`
 }

@@ -194,6 +194,28 @@ signed.
 - Windows code signing (Authenticode) of the installer is not part of this
   workflow yet.
 
+## Defender qualification
+
+GitHub-hosted Windows runners have passive Defender and are not a release scan
+gate. The official-build workflow logs their protection status informationally.
+Before publication, scan the exact verified Windows daemon and NSIS installer
+with the Windows Sandbox launcher in [scripts/defender-sandbox/README.md](../scripts/defender-sandbox/README.md).
+The formerly flagged 0.0.1230 binary is downloaded only inside the guest and is
+never staged on the host. Microsoft has cleared it, so its verdict is now
+informational. Qualification requires successful MAPS connectivity, EICAR caught
+on access, the pinned 0.0.1227 control clean, updated signatures, and active
+real-time/cloud protection (Normal mode, MAPS Advanced) at the end. Reports
+explicitly record reduced assurance because no flagged calibration sample is
+available. Optional `REQUIRE_CLOUD_CALIBRATION=1` requires a pinned sample detected
+with MAPS on and clean with MAPS off; only this opt-in may temporarily change
+MAPS inside the guest. Real-time protection is never disabled.
+
+`publish-official.sh` requires the calibration plus a clean report in
+`~/.solu/defender-reports/`, with exact release asset hashes and scan times within
+24 hours. Only an explicit non-empty `--skip-defender-check=REASON` overrides
+this precondition; the reason is printed prominently. It does not waive release
+approval, provenance or successful official-build requirements.
+
 ## Windows executable identity
 
 The committed `daemon/rsrc_windows_amd64.syso` contains VERSIONINFO and an

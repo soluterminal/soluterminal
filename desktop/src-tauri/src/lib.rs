@@ -396,10 +396,9 @@ fn start_backends(
                                     // OWN claim.json on its OWN filesystem.
                                     // Web-UI pairing only pairs the one that
                                     // served the request, leaving the other
-                                    // daemon unpaired → it never pulls the
-                                    // team-credential set → team auto-switch
-                                    // never fires on that backend. Mirror the
-                                    // claim between both so both connect and
+                                    // daemon unpaired, so cloud-supplied
+                                    // credentials never reach that backend.
+                                    // Mirror the claim so both connect and
                                     // provision. See daemon::start_dual_claim_mirror.
                                     daemon::start_dual_claim_mirror();
                                     startup_screen::step("Connecting the WSL and Windows services");

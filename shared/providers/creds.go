@@ -9,7 +9,7 @@ type CredFacts struct {
 	Store     *StoreFacts
 }
 
-// MailboxFacts contains the live cloud mailbox contract. Table and route
+// MailboxFacts contains the optional remote delivery contract. Table and route
 // identifiers are trusted compiled-in values, never request input.
 type MailboxFacts struct {
 	RouteSegment     string
@@ -41,8 +41,8 @@ type TeamStateFacts struct {
 	// file wins after the daemon's one-hour cross-machine clock-skew margin.
 	ClockSkewHeuristic bool
 	// SnapshotRotatesLocally says the staged snapshot may legitimately diverge
-	// from its mailbox bundle through local token rotation. When false, an
-	// untracked byte difference means the mailbox copy must be restored.
+	// from its assigned bundle through local token rotation. When false, an
+	// untracked byte difference means the assigned copy must be restored.
 	SnapshotRotatesLocally bool
 }
 

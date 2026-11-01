@@ -198,6 +198,17 @@ jobs:
             echo "node $(node --version)"
             echo "runner $ImageOS $ImageVersion"
           } > "$RUNNER_TEMP/installer/BUILDINFO-desktop.txt"
+      - name: Test Sandbox scanner and PowerShell 5.1 JSON fixtures (mocked Defender)
+        shell: powershell
+        env:
+          REQUIRE_POWERSHELL_FIXTURE: '1'
+        run: python scripts/test_defender_powershell_fixture.py
+      - name: Defender runner status (informational only)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Warning 'Hosted-runner Defender is not release qualification. A calibrated Windows Sandbox report is required by publish-official.sh.'
+          Get-MpComputerStatus | Select-Object AMEngineVersion, AMProductVersion, AntivirusSignatureVersion, AMRunningMode, RealTimeProtectionEnabled | Format-List
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-installer

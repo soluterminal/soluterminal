@@ -1,0 +1,23 @@
+<Configuration>
+  <vGPU>Disable</vGPU>
+  <Networking>Enable</Networking>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
+  <AudioInput>Disable</AudioInput>
+  <VideoInput>Disable</VideoInput>
+  <PrinterRedirection>Disable</PrinterRedirection>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>__INPUT__</HostFolder>
+      <SandboxFolder>C:\SoluInput</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>__OUTPUT__</HostFolder>
+      <SandboxFolder>C:\SoluOutput</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File C:\SoluInput\sandbox-entry.ps1</Command>
+  </LogonCommand>
+</Configuration>

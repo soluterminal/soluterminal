@@ -74,18 +74,6 @@ var codex = Provider{
 		"gpt-5.4":       {"low", "medium", "high", "xhigh"},
 	}},
 	Creds: &CredFacts{
-		Mailbox: &MailboxFacts{
-			RouteSegment: "codex", SetTable: "soluterminal_team_codex_cred_set",
-			SyncTable: "soluterminal_team_codex_cred_sync", PolicyTable: "soluterminal_team_codex_cred_policy",
-			PolicyKind: "policy", EnvelopeKey: "codexAuth",
-			AuthKinds: []string{"access_token", "api_key"}, Validation: "auth-kind", MaxBodyBytes: 256 << 10, HasStatusRoute: true,
-		},
-		TeamState: &TeamStateFacts{
-			StateFileName: "codex_team_provision_state.json",
-			// Codex staged OAuth snapshots can rotate locally. Its legacy migration
-			// also lets a clearly newer owner re-mint replace an untracked snapshot.
-			ClockSkewHeuristic: true, SnapshotRotatesLocally: true,
-		},
 		Store: &StoreFacts{LiveFileName: "auth.json", RootDirName: "codex", ManagedFileName: "managed.json", SourcesDirName: "sources", TeamDirName: "team"},
 	},
 }

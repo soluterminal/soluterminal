@@ -1,10 +1,11 @@
+import { isTemporaryWorkspaceView } from '../lib/workspaceView';
 import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type DragEventHandler, type MouseEvent as ReactMouseEvent, type SetStateAction, type ReactNode } from 'react';
 import { IconMaximize, IconMinimize } from './ui/icons';
 import type { PaneInfo } from '../types';
 import { useStore } from '../store';
 import { confirmClosePane } from './usePaneContextMenu';
 import { useIsMobileView } from './useIsMobileView';
-import { PaneHeaderOverflow, PaneDetail, usePaneDetailVisible } from './PaneHeaderOverflow';
+import { PaneHeaderOverflow, PaneDetail, usePaneDetailVisible, DETAIL_PRIORITY } from './PaneHeaderOverflow';
 import { PaneHeaderBadges } from './PaneHeaderBadges';
 import { UnsentMessageChip } from './UnsentMessageChip';
 import { PaneOriginButton } from './PaneOriginButton';
@@ -158,7 +159,7 @@ export function PaneHeader({
   onSwitchMode,
   onOpenMenu,
 }: PaneHeaderProps) {
-  const paneMovesAllowed = useStore(s => !s.workspaceView);
+  const paneMovesAllowed = useStore(s => !isTemporaryWorkspaceView(s.workspaceView));
   const isMobileView = useIsMobileView();
   const warningReview = !isMobileView && (pane.review?.verdict === 'request-changes' || pane.review?.verdict === 'comment');
   const headerRef = useRef<HTMLDivElement>(null);
@@ -229,10 +230,10 @@ export function PaneHeader({
           </span>
         </Tooltip>
       )}
-      <PaneDetail><PaneIdentityChip pane={pane} deduplicateTitle={!isMobileView} /></PaneDetail>
-      <PaneDetail>{combineMessage ? <span className="pane-origin-message"><PaneOriginButton pane={pane} /><PaneMessageChip pane={pane} /></span> : <PaneOriginButton pane={pane} />}</PaneDetail>
-      {!warningReview && <PaneDetail><PaneReviewChip pane={pane} /></PaneDetail>}
-      {!combineMessage && <PaneDetail><PaneMessageChip pane={pane} /></PaneDetail>}
+      <PaneDetail priority={DETAIL_PRIORITY.identity}><PaneIdentityChip pane={pane} deduplicateTitle={!isMobileView} /></PaneDetail>
+      <PaneDetail priority={combineMessage ? DETAIL_PRIORITY.message : DETAIL_PRIORITY.origin}>{combineMessage ? <span className="pane-origin-message"><PaneOriginButton pane={pane} /><PaneMessageChip pane={pane} /></span> : <PaneOriginButton pane={pane} />}</PaneDetail>
+      {!warningReview && <PaneDetail priority={DETAIL_PRIORITY.review}><PaneReviewChip pane={pane} /></PaneDetail>}
+      {!combineMessage && <PaneDetail priority={DETAIL_PRIORITY.message}><PaneMessageChip pane={pane} /></PaneDetail>}
       <HeaderAttention enabled={!isMobileView}>
       {warningReview && <PaneReviewChip pane={pane} />}
       {!isMobileView && <PaneHeaderBadges pane={pane} paneIndex={paneIndex} section="attention" showAutoMode={isAutoApproveCapable(pane)} />}
@@ -249,13 +250,13 @@ export function PaneHeader({
       <UnsentMessageChip pane={pane} actionGuard={actionGuard} />
       </HeaderAttention>
       <div className="pane-actions">
-        <PaneDetail><PaneModeControl pane={pane} onSwitchMode={onSwitchMode} /></PaneDetail>
+        <PaneDetail priority={DETAIL_PRIORITY.mode}><PaneModeControl pane={pane} onSwitchMode={onSwitchMode} /></PaneDetail>
         {/* Agent memory readout (display-only on Term): the selected provider's
             resident RAM, sampled ~60s. No tap-to-restart here — Term reclaims
             via Ctrl+C + resume or reopen
             (one-tap restart lives in Focus mode). Amber when heavy. */}
         {agentMemMB > 0 && (
-          <PaneDetail><Tooltip label={`Agent memory ${memLabel(agentMemMB)}. To reclaim: Ctrl+C to exit the agent then resume, or use Restart pane in the ⋯ menu.`}>
+          <PaneDetail priority={DETAIL_PRIORITY.memory}><Tooltip label={`Agent memory ${memLabel(agentMemMB)}. To reclaim: Ctrl+C to exit the agent then resume, or use Restart pane in the ⋯ menu.`}>
             <span
               className={`iconbtn pane-mem-chip readonly${agentMemMB >= 500 ? ' heavy' : ''}`}
               aria-label={`Agent memory ${memLabel(agentMemMB)}`}
@@ -265,7 +266,7 @@ export function PaneHeader({
           </Tooltip></PaneDetail>
         )}
         {canZoom && (
-          <PaneDetail><Tooltip label={isZoomed ? 'Restore layout (Alt+Z)' : 'Maximise pane (Alt+Z)'}>
+          <PaneDetail priority={DETAIL_PRIORITY.maximise}><Tooltip label={isZoomed ? 'Restore layout (Alt+Z)' : 'Maximise pane (Alt+Z)'}>
             <button
               className="iconbtn pane-zoom-btn"
               aria-label={isZoomed ? 'Restore pane' : 'Maximise pane'}

@@ -9,6 +9,50 @@
 
 SOLU_DEFAULT_UPDATE_MANIFEST_PUBKEY="sm+MMrCMET4jQkfdIHySZ7RJWHLSV22qcBqKUVeU5k4="
 
+# solu_windows_build_source ROOT VERSION SCRATCH: return the daemon directory
+# to compile. Four-part team candidates have build-derived resources, not a
+# resource committed on main. Stage the source, regenerate and
+# strictly check the exact candidate, without dirtying the pinned source.
+# Three-part and public builds keep checking the committed resource.
+solu_windows_build_source() (
+  set -e
+  resource_root="$1" resource_version="$2" resource_scratch="$3"
+  resource_flavor="$(solu_build_flavor "$resource_root/daemon")" || exit $?
+  case "$resource_flavor:$resource_version" in
+    team:*.*.*.*)
+      mkdir -p "$resource_scratch" || exit $?
+      resource_scratch="$(cd "$resource_scratch" && pwd)" || exit $?
+      # Interrupted builds can leave their copy behind. Never sweep fresh
+      # copies another build may be using, symlinks, or a broader path pattern.
+      find "$resource_scratch" -mindepth 1 -maxdepth 1 -type d -name 'windows-source.??????' -mmin +1440 -print | while IFS= read -r stale_stage; do
+        solu_cleanup_windows_build_source "$resource_root" "$stale_stage/daemon" || exit $?
+      done
+      resource_stage="$(mktemp -d "$resource_scratch/windows-source.XXXXXX")" || exit $?
+      trap 'solu_cleanup_windows_build_source "$resource_root" "$resource_stage/daemon"' EXIT
+      cp -a "$resource_root/daemon" "$resource_stage/daemon" || exit $?
+      cp -a "$resource_root/shared" "$resource_stage/shared" || exit $?
+      resource_target="$resource_stage/daemon/rsrc_windows_amd64.syso"
+      node "$resource_root/scripts/windows-resources.mjs" "$resource_version" "$resource_target" || exit $?
+      node "$resource_root/scripts/windows-resources.mjs" "$resource_version" --check "$resource_target" || exit $?
+      printf '%s\n' "$resource_stage/daemon"
+      trap - EXIT
+      ;;
+    *)
+      node "$resource_root/scripts/windows-resources.mjs" "$resource_version" --check || exit $?
+      printf '%s\n' "$resource_root/daemon"
+      ;;
+  esac
+)
+
+# Remove only the scratch copy created above, never the canonical source.
+solu_cleanup_windows_build_source() (
+  [ "$2" != "$1/daemon" ] || exit 0
+  case "$2" in
+    */windows-source.??????/daemon) rm -rf "${2%/daemon}" ;;
+    *) echo "error: refusing to remove unexpected Windows build source: $2" >&2; exit 1 ;;
+  esac
+)
+
 # Extract the canonical frontend provenance marker from either webdist.json or
 # a daemon binary containing the embedded file. Unique output makes duplicate
 # linker/string-table copies harmless while still letting parity checks reject

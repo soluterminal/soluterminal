@@ -97,12 +97,12 @@ func WriteError(w http.ResponseWriter, err error, limit int64) {
 	switch kind {
 	case "request_too_large":
 		status = http.StatusRequestEntityTooLarge
-		message = fmt.Sprintf("SoluTerminal's team broker request limit is %d MiB. Image previews retained in conversation history count toward this limit, even on a short text turn. Compact the conversation with /compact, or continue in a fresh chat using the saved files.", limit>>20)
+		message = fmt.Sprintf("SoluTerminal's credential service request limit is %d MiB. Image previews retained in conversation history count toward this limit, even on a short text turn. Compact the conversation with /compact, or continue in a fresh chat using the saved files.", limit>>20)
 	case "invalid_request_error":
 		message = "SoluTerminal requires a valid JSON object for the model request."
 	case "unsupported_content_encoding":
 		status = http.StatusUnsupportedMediaType
-		message = "SoluTerminal's team broker accepts plain JSON or gzip request bodies."
+		message = "SoluTerminal's credential service accepts plain JSON or gzip request bodies."
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

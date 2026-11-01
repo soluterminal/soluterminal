@@ -3720,10 +3720,9 @@ fn read_wsl_token_with(timeout: Duration, bypass_cache: bool) -> Result<String, 
 // reads its cloud claim.json from its OWN data dir on its OWN filesystem
 // (WSL `$HOME/.solu` vs Windows `%USERPROFILE%\.solu`). Web-UI pairing
 // only writes the claim to whichever daemon served the request, so the
-// other daemon stays UNPAIRED: it never dials the relay, never pulls the
-// team-credential set, and so team-account auto-switch silently never
-// fires on that backend. (Confirmed in the wild: a member's relay logs
-// showed only backend=wsl ever connecting.)
+// other daemon stays UNPAIRED: it never dials the relay or receives
+// cloud-supplied credentials. (Confirmed in the wild: relay logs showed
+// only backend=wsl ever connecting.)
 //
 // The documented Dual design is "one shared claim, two backend IDs", so
 // the fix is to keep both daemons' claim.json in sync. A background loop

@@ -22,15 +22,19 @@ import (
 )
 
 type SpawnOpts struct {
+	workerAccount string // internal auto-worker account pin; never accepted from HTTP
+	workerTeamID  string
+	// Internal resume timestamp, installed before the pane is published.
+	CreatedAt time.Time
 	// Restored before publication: security settings must never lag the live pane.
 	AutoMode        string
 	NeverAutoAnswer bool
 
-	teamBrokerTeamID string // nonsecret scope captured with the minted route
-	teamBrokerLabel  string
-	// teamBrokerCapability is the capability minted for this spawn. It is
+	launchRouteTeamID string // nonsecret scope captured with the minted route
+	launchRouteLabel  string
+	// The request capability is minted for this spawn. It is
 	// never persisted; Spawn revokes it if the pane does not start.
-	teamBrokerCapability string
+	launchRouteCapability string
 	// Internal provenance only; never accepted from a pane creation request.
 	AutomationOrigin string
 
@@ -711,6 +715,35 @@ func startSupervisedAgentChild(cmd *exec.Cmd) (<-chan struct{}, error) {
 
 // Spawn forks a new agent process and attaches to it.
 func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
+	var release func()
+	if opts.Origin != nil && opts.Origin.Worker != nil && opts.workerAccount == "" {
+		prepare := workerCredentialSlot.ensure(&m.ext).prepare
+		if prepare == nil {
+			return nil, &SpawnError{msg: "worker account recovery is not ready; resume after daemon startup"}
+		}
+		opts.Origin = opts.Origin.clone()
+		var err error
+		release, err = prepare(&opts)
+		if err != nil {
+			return nil, err
+		}
+	}
+	p, err := m.spawnPreparedPane(opts)
+	if release != nil {
+		if err != nil {
+			release()
+		} else {
+			p.mu.Lock()
+			p.quotaWorkerCleanupOwned = true
+			done := p.done
+			p.mu.Unlock()
+			go func() { <-done; release() }()
+		}
+	}
+	return p, err
+}
+
+func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	_, ok := normalizeAgentKind(opts.Agent, opts.Cmd, opts.CodexThreadID)
 	if !ok {
 		return nil, &SpawnError{msg: "unknown agent: " + strings.TrimSpace(opts.Agent)}
@@ -832,7 +865,7 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 	if opts.Kind == "native" {
 		switch effectiveAgentKind(opts.Agent) {
 		case agentCodex:
-			opts.Cmd = nativeCodexArgv()
+			opts.Cmd = quotaNativeCodexArgv(opts)
 		case agentMuse:
 			// Muse has no long-lived interactive protocol, so the pane's
 			// child is our own muse-driver subcommand bridging one-shot
@@ -865,7 +898,7 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 	}
 	opts.Cmd = spawnCmdForRole(opts.Kind, opts.Role, opts.Agent, opts.Cmd)
 	opts.Cmd = spawnCmdForContextPack(opts.Cmd, contextPack)
-	// A new pane's ID is chosen here rather than below so the team broker
+	// A new pane's ID is chosen here rather than below so the request
 	// capability can record which pane holds it.
 	if strings.TrimSpace(opts.ID) == "" {
 		id, err := randomID()
@@ -874,15 +907,15 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 		}
 		opts.ID = id
 	}
-	teamBrokerOverrides, releaseBroker, err := paneBrokerPrepare(m, &opts)
+	launchRouteOverrides, releaseRoute, err := paneRoutePrepare(m, &opts)
 	if err != nil {
 		return nil, &SpawnError{msg: err.Error()}
 	}
 	started := false
-	if releaseBroker != nil {
+	if releaseRoute != nil {
 		defer func() {
 			if !started {
-				releaseBroker()
+				releaseRoute()
 			}
 		}()
 	}
@@ -987,7 +1020,7 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 	resolved, err := exec.LookPath(opts.Cmd[0])
 	loginWrapped := false
 	if err != nil {
-		if paneBrokerActive(opts.Env) {
+		if paneRouteActive(opts.Env) {
 			return nil, &SpawnError{msg: "team CLI executable is unavailable on the daemon PATH"}
 		}
 		// Login-shell fallback (Unix only). The daemon inherits the
@@ -1042,10 +1075,10 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 		}
 	}
 	if opts.Kind == "" {
-		if codexUnixShellNeedsDaemonAddress(opts.Cmd) && !paneBrokerActive(opts.Env) && m.codexDaemonURL != "" {
+		if codexUnixShellNeedsDaemonAddress(opts.Cmd) && !paneRouteActive(opts.Env) && m.codexDaemonURL != "" {
 			// Non-secret address only; generic Unix shells obtain account and
 			// capability afresh through their Codex shim. Managed CLI/login
-			// wrappers retain their existing already-prepared broker plan.
+			// wrappers retain their existing already-prepared route plan.
 			opts.Env = append(filterOutEnvKeys(opts.Env, []string{paneDaemonURLEnv}), paneDaemonURLEnv+"="+m.codexDaemonURL)
 		}
 		if shellCmd := codexInlinePowerShellCmd(opts.Cmd); len(shellCmd) > 0 {
@@ -1165,7 +1198,7 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 	}
 	argv = append(argv, "--")
 	if len(codexLiveCmd) > 0 {
-		childCmd, bridgeErr := codexLiveSpawnCommand(selfExe, m.dataDir, m.codexDaemonURL, codexLiveCmd, teamBrokerOverrides)
+		childCmd, bridgeErr := codexLiveSpawnCommand(selfExe, m.dataDir, m.codexDaemonURL, codexLiveCmd, launchRouteOverrides)
 		if bridgeErr != nil {
 			return nil, bridgeErr
 		}
@@ -1175,7 +1208,7 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 		if opts.Kind == "" {
 			childCmd = codexPaneLaunchCommand(childCmd)
 		}
-		childCmd = brokerChildCommand(childCmd, teamBrokerOverrides)
+		childCmd = routeChildCommand(childCmd, launchRouteOverrides)
 		// Keep the driver command visible to provider/broker planning above;
 		// only adapt argv0 at the final process launch boundary.
 		if opts.Kind == "native" && len(childCmd) > 1 && childCmd[1] == "muse-driver" {
@@ -1234,6 +1267,10 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 	}
 
 	now := time.Now()
+	createdAt := opts.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now.UTC()
+	}
 	p := &Pane{
 		Credential:              launchCredential,
 		credentialSelection:     m.selectedCredentialAccount,
@@ -1247,7 +1284,7 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 		Cmd:                     opts.Cmd,
 		Title:                   opts.Title,
 		Status:                  PaneRunning,
-		CreatedAt:               now.UTC(),
+		CreatedAt:               createdAt,
 		Cols:                    opts.Cols,
 		Rows:                    opts.Rows,
 		Pid:                     agentPid,
@@ -1741,6 +1778,7 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 	}
 	p, err := m.Spawn(SpawnOpts{
 		ID:                           info.ID,
+		CreatedAt:                    info.CreatedAt,
 		ReplaceSuspended:             suspended,
 		AutoMode:                     info.AutoMode,
 		NeverAutoAnswer:              info.NeverAutoAnswer,
@@ -1782,9 +1820,6 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 		return p, err
 	}
 	p.mu.Lock()
-	if !info.CreatedAt.IsZero() {
-		p.CreatedAt = info.CreatedAt
-	}
 	p.Kind = info.Kind
 	p.AnnounceDelegationEvents = info.AnnounceDelegationEvents
 	p.Flagged = info.Flagged

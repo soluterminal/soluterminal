@@ -172,6 +172,9 @@ func (p *Pane) releaseOwnerViewersLocked(lease *ownerViewerLease) {
 	}
 }
 func (p *Pane) ownerRetirementInputBarrier() error {
+	if p.workerArchiving.Load() {
+		return fmt.Errorf("worker archived; reopen it before sending input")
+	}
 	p.ownerRetirementGate.Lock()
 	defer p.ownerRetirementGate.Unlock()
 	if p.ownerRetirementCommitted {

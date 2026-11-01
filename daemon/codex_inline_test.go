@@ -58,7 +58,7 @@ func TestCodexInlineAndIsolationCombinedLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	canonical := []string{bin, "resume", "thread"}
-	child := brokerChildCommand(codexPaneLaunchCommand(codexInlineTerminalCmd(canonical)), []string{"-c", "model_provider=team"})
+	child := routeChildCommand(codexPaneLaunchCommand(codexInlineTerminalCmd(canonical)), []string{"-c", "model_provider=team"})
 	want := []string{bin, "-c", "model_provider=team", "--no-daemon", "--no-alt-screen", "resume", "thread"}
 	if !slices.Equal(child, want) || !slices.Equal(canonical, []string{bin, "resume", "thread"}) {
 		t.Fatalf("combined launch = %q, canonical = %q; want %q", child, canonical, want)
@@ -255,7 +255,7 @@ func TestCodexInlineLoginWrapperKeepsCanonicalResumeCommand(t *testing.T) {
 func TestCodexInlineLaunchKeepsTeamBrokerFlagsAheadOfResume(t *testing.T) {
 	canonical := []string{"codex", "resume", "thread"}
 	flags := []string{"-c", "model_provider=team"}
-	launch := brokerChildCommand(codexInlineTerminalCmd(canonical), flags)
+	launch := routeChildCommand(codexInlineTerminalCmd(canonical), flags)
 	want := []string{"codex", "-c", "model_provider=team", "--no-alt-screen", "resume", "thread"}
 	if !slices.Equal(launch, want) {
 		t.Fatalf("Codex team launch = %q, want %q", launch, want)

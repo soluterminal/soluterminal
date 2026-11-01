@@ -624,10 +624,9 @@ export const useCloud = create<CloudState>((set, get) => ({
  * Cloud sign-in alone is not remote: the local daemon serves `/api/config`
  * with `isLocal: true` (daemon/config.go), and API calls stay un-prefixed.
  * This mirrors StatusBar ConnChip (`relayed = !isLocal` in cloud mode) and
- * BackendSwitcher (`cloudMode === 'cloud' && !cloudIsLocal`). Team-pool
- * surfaces (CredentialsSection subtitle, TeamProvisioning,
- * TeamCredentialsPanel, and settings/TeamTab) deliberately keep gating on
- * cloud mode because they require a cloud session, not a relay.
+ * BackendSwitcher (`cloudMode === 'cloud' && !cloudIsLocal`). Settings
+ * that require a cloud session deliberately keep gating on cloud mode,
+ * independently of whether a relay is in use.
  */
 // Fixed SoluTerminal address for sign-ins started in the desktop app, whose
 // window origin is the local daemon. It is on the project's redirect allow-list.

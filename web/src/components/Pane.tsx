@@ -1,3 +1,4 @@
+import { isTemporaryWorkspaceView } from '../lib/workspaceView';
 import { terminalRetirementViewerId } from '../lib/terminalRetirementViewer';
 import { notePaneTyped, paneDictating, usePaneDictation } from '../extensions';
 import { PreservedTerminalInput } from './PreservedTerminalInput';
@@ -21,7 +22,7 @@ import { recordIme } from '../imeTrace';
 import { isMobileViewport } from '../lib/mobile';
 import { resolveTerminalTheme, useStore } from '../store';
 import { DRAG_MIME, computeZone, type DropZone } from '../lib/paneDnd';
-import { collectPaneIds } from '../lib/layout';
+import { collectPaneIds, layoutHasLeaf } from '../lib/layout';
 import { computePaneRestoreTarget } from '../lib/paneRestoreFit';
 import { newOscStripState, stripOscColorQueries } from '../lib/oscStrip';
 import { ReplayAnswerGate } from '../lib/terminalReplies';
@@ -3432,7 +3433,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       onContextMenu={openContextMenu}
       onDragOver={(e) => {
         // Only engage with our own drag payload.
-        if (useStore.getState().workspaceView || !e.dataTransfer.types.includes(DRAG_MIME)) return;
+        if (isTemporaryWorkspaceView(useStore.getState().workspaceView) || !layoutHasLeaf(useStore.getState().layout, pane.id) || !e.dataTransfer.types.includes(DRAG_MIME)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         setDropZone(computeZone(e));
@@ -3443,7 +3444,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         if (!e.currentTarget.contains(related)) setDropZone(null);
       }}
       onDrop={(e) => {
-        if (!actionValid() || ownerPresentation || useStore.getState().workspaceView || !e.dataTransfer.types.includes(DRAG_MIME)) return;
+        if (!actionValid() || ownerPresentation || isTemporaryWorkspaceView(useStore.getState().workspaceView) || !layoutHasLeaf(useStore.getState().layout, pane.id) || !e.dataTransfer.types.includes(DRAG_MIME)) return;
         e.preventDefault();
         const src = e.dataTransfer.getData(DRAG_MIME);
         const zone = computeZone(e);

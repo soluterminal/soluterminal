@@ -1,5 +1,6 @@
 import { useStore } from '../../store';
 import { createWorkspacePaneTreeSelector, type WorkspacePaneTree } from '../../lib/workspacePaneTree';
+import { workspaceViewKey } from '../../lib/workspaceView';
 import { paneRowStatus } from '../../lib/paneStatus';
 import { WorkspacePaneRows } from './WorkspacePaneRows';
 import { useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent as ReactDragEvent, type MutableRefObject, type RefObject, type SetStateAction } from 'react';
@@ -139,6 +140,7 @@ export function WorkspaceSection({
   });
   const [focusedTreeKey, setFocusedTreeKey] = useState(() => named[0] ? workspaceKey(named[0]) : '');
   const workspaceView = useStore(s => s.workspaceView);
+  const allPanesPreferences = useStore(s => s.workspaceAllPanes);
   const treeRef = useRef<HTMLDivElement>(null);
   const selectionVersion = useRef(0);
   useEffect(() => {
@@ -150,12 +152,34 @@ export function WorkspaceSection({
     try { localStorage.setItem('solu.sidebarTreeCollapsed.v1', JSON.stringify(next)); } catch { /* storage may be unavailable */ }
     return next;
   });
+  const isActiveWorkspace = (w: Workspace) => {
+    const state = useStore.getState();
+    return state.activeWorkspace === w.name && (!w.backend || state.activeBackend === w.backend);
+  };
+  // A failed load already reports itself; it must not leave a stale view
+  // request behind or surface as an unhandled rejection.
+  const load = async (w: Workspace): Promise<boolean> => {
+    try { await onLoadWorkspace(w); return true; } catch { return false; }
+  };
   const selectPane = async (w: Workspace, paneId: string, team: boolean) => {
     const version = ++selectionVersion.current;
-    await onLoadWorkspace(w);
     const state = useStore.getState();
-    if (version !== selectionVersion.current || state.activeWorkspace !== w.name || (w.backend && state.activeBackend !== w.backend)) return;
-    state.showWorkspacePaneView(paneId, team);
+    if (isActiveWorkspace(w) && state.mainPresentation.kind === 'workspace') { state.showWorkspacePaneView(paneId, team); return; }
+    // Arrive directly in the pane's view, without the overview in between.
+    state.queueWorkspaceReveal({ workspace: w.name, backend: w.backend ?? state.activeBackend ?? null, paneId, kind: team ? 'team' : 'single' });
+    const loaded = await load(w);
+    useStore.getState().queueWorkspaceReveal(null);
+    if (!loaded || version !== selectionVersion.current || !isActiveWorkspace(w)) return;
+    useStore.getState().showWorkspacePaneView(paneId, team);
+  };
+  const selectWorkspace = async (w: Workspace) => {
+    const version = ++selectionVersion.current;
+    const state = useStore.getState();
+    // The newest click wins over a pane view still waiting for its load.
+    state.queueWorkspaceReveal(null);
+    if (isActiveWorkspace(w) && state.mainPresentation.kind === 'workspace') state.showWorkspaceOverview();
+    if (!await load(w) || version !== selectionVersion.current || !isActiveWorkspace(w)) return;
+    useStore.getState().showWorkspaceOverview();
   };
 
   // Every delete path (the row's × and right-click › Delete) confirms first:
@@ -383,7 +407,9 @@ export function WorkspaceSection({
           const tree = trees.find(t => workspaceKey(t.workspace) === wKey);
           const nodes = tree?.nodes ?? [];
           const treeStatus = tree?.status ?? 'idle';
-          const leadsOnly = isActive && workspaceView?.kind === 'leads';
+          const paneSelected = isActive && (workspaceView?.kind === 'team' || workspaceView?.kind === 'single');
+          const workspaceSelected = isActive && !paneSelected;
+          const allPanes = allPanesPreferences[workspaceViewKey(w.name, w.backend ?? activeBackend)] === true;
           const treeOpen = !treeCollapsed[wKey];
           const dropPos = dropTarget?.key === wKey ? dropTarget.pos : null;
           const metaParts = [
@@ -399,16 +425,12 @@ export function WorkspaceSection({
               aria-level={1}
               aria-label={w.name === '_current' ? 'Current workspace' : w.name}
               aria-expanded={nodes.length > 0 ? treeOpen : undefined}
-              aria-selected={isActive && !workspaceView}
+              aria-selected={workspaceSelected} aria-current={workspaceSelected ? 'true' : undefined}
               data-tree-key={wKey}
               tabIndex={focusedTreeKey === wKey || (!focusedTreeKey && w === named[0]) ? 0 : -1}
-              onClick={() => {
-                selectionVersion.current++;
-                useStore.getState().returnWorkspaceLayout();
-                void onLoadWorkspace(w);
-              }}>
+              onClick={() => { void selectWorkspace(w); }}>
             <div
-              className={`row ws-row workspace-tree-row ${isActive ? 'active' : ''} ${dropPos ? `ws-drop-${dropPos}` : ''} ${summary.hasUnread ? 'ws-unread' : ''}`}
+              className={`row ws-row workspace-tree-row ${workspaceSelected ? 'active' : paneSelected ? 'contains-selection' : ''} ${dropPos ? `ws-drop-${dropPos}` : ''} ${summary.hasUnread ? 'ws-unread' : ''}`}
               title={summary.tooltip}
               draggable={w.name !== '_current'}
               onDragStart={(e) => {
@@ -536,15 +558,14 @@ export function WorkspaceSection({
                   )}
                 </span>
               )}
-              <button type="button" className="tree-leads-toggle" aria-label={`Leads only in ${w.name}`} aria-pressed={leadsOnly} disabled={!leadsOnly && !tree?.hasLeads}
+              <button type="button" className="tree-leads-toggle" aria-label={`All panes in ${w.name}`} aria-pressed={allPanes}
                 onClick={e => {
                   e.stopPropagation();
-                  const version = ++selectionVersion.current;
-                  void Promise.resolve(onLoadWorkspace(w)).then(() => {
-                    const state = useStore.getState();
-                    if (version === selectionVersion.current && state.activeWorkspace === w.name && (!w.backend || state.activeBackend === w.backend)) state.toggleWorkspaceLeadsOnly();
-                  });
-                }}>Leads only</button>
+                  // Save the setting first so the workspace opens straight
+                  // into it instead of switching views after loading.
+                  useStore.getState().toggleWorkspaceAllPanes(w.name, w.backend ?? activeBackend);
+                  void selectWorkspace(w);
+                }}>All panes</button>
               {!w.protected && (
                 <button
                   className="iconbtn ws-delete"
@@ -555,8 +576,13 @@ export function WorkspaceSection({
               )}
             </div>
             {treeOpen && <div role="group">
-              <WorkspacePaneRows nodes={tree?.roots ?? []} workspaceKey={wKey} collapsed={treeCollapsed} toggle={toggleTree}
-                focusedKey={focusedTreeKey} leadsOnly={leadsOnly} select={node => { void selectPane(w, node.pane.id, node.isLead); }} />
+              <WorkspacePaneRows nodes={(tree?.roots ?? []).filter(node => node.isTopLevel)} workspaceKey={wKey} collapsed={treeCollapsed} toggle={toggleTree}
+                focusedKey={focusedTreeKey} select={node => { void selectPane(w, node.pane.id, node.children.length > 0 || node.isTopLevel); }} />
+              {!!tree?.unattached.length && <div role="group" aria-label="Unattached">
+                <div role="presentation" className="pane-tree-unattached">Unattached</div>
+                <WorkspacePaneRows nodes={tree.unattached} workspaceKey={wKey} collapsed={treeCollapsed} toggle={toggleTree}
+                  focusedKey={focusedTreeKey} select={node => { void selectPane(w, node.pane.id, node.children.length > 0); }} />
+              </div>}
             </div>}
             </div>
           );

@@ -1,6 +1,6 @@
 
-import { Fragment, useEffect, useMemo, useState } from 'react';
-import { PaneDetail } from './PaneHeaderOverflow';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { PaneDetail, DETAIL_PRIORITY } from './PaneHeaderOverflow';
 import { IconBolt, IconClock } from './ui/icons';
 import type { PaneInfo } from '../types';
 import { useStore } from '../store';
@@ -203,6 +203,12 @@ interface PaneHeaderBadgesProps {
 // (PaneHeader) and native (NativePane) headers so the two stay in lockstep.
 // All three badges live inside a draggable header, so each escapes drag-start
 // via stopPropagation + onMouseDownCapture (mirrors the mode toggle).
+// Only the split desktop sections collapse into +N; the combined (phone and
+// Focus) header keeps its own tiers. Module-level so the type stays stable.
+function Detail({ section, priority, children }: { section?: string; priority: number; children: ReactNode }) {
+  return section ? <PaneDetail priority={priority}>{children}</PaneDetail> : <>{children}</>;
+}
+
 export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section }: PaneHeaderBadgesProps) {
   const accountWarning = paneAccountStatus(pane, account => account || 'unknown')?.tone === 'warn';
   const toast = useStore((s) => s.toast);
@@ -236,7 +242,6 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
     }
   };
 
-  const Detail = section ? PaneDetail : Fragment;
 
   return (
     <>
@@ -251,9 +256,9 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
           Deliberately NOT the ⚙ glyph (that means an in-session workflow, see
           StatusBar.tsx). Rendered in the shared cluster, so it shows in both the
           terminal (PaneHeader) and Focus (NativePane) headers. */}
-      {pane.role === 'task_owner' && <Detail><span className="pane-role-badge" title="Interactive task owner — dispatches specialists for its assigned task">owner</span></Detail>}
+      {pane.role === 'task_owner' && <Detail section={section} priority={DETAIL_PRIORITY.role}><span className="pane-role-badge" title="Interactive task owner — dispatches specialists for its assigned task">owner</span></Detail>}
       {pane.role === 'orchestrator' && (
-        <Detail><span
+        <Detail section={section} priority={DETAIL_PRIORITY.role}><span
           className="pane-role-badge"
           title={`Orchestrator pane (${agentLabel(paneAgent)}) — delegates work to tasks and agents. Right-click the pane to change its role.`}
           aria-label={`Orchestrator pane (${agentLabel(paneAgent)}) — delegates work to tasks and agents. Right-click the pane to change its role.`}
@@ -263,7 +268,7 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
         >orch</span></Detail>
       )}
       {pane.contextPack && (
-        <Detail><span
+        <Detail section={section} priority={DETAIL_PRIORITY.pack}><span
           className={`pane-pack-badge pane-pack-${packStatus}`}
           title={packTitle}
           aria-label={packTitle}
@@ -272,8 +277,8 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
           onClick={(e) => e.stopPropagation()}
         >pack</span></Detail>
       )}
-      {(!section || !accountWarning) && <Detail><PaneCredentialBadge pane={pane} /></Detail>}
-      <Detail><NextScheduleChip pane={pane} /></Detail>
+      {(!section || !accountWarning) && <Detail section={section} priority={DETAIL_PRIORITY.credential}><PaneCredentialBadge pane={pane} /></Detail>}
+      <Detail section={section} priority={DETAIL_PRIORITY.schedule}><NextScheduleChip pane={pane} /></Detail>
       {/* Delegated work runs through the team-only Tasks engine. */}
 
 
@@ -283,7 +288,7 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
       {(!section || section === 'details') && <>
       {/* Opens a three-option menu; never changes the mode on its own, and
           Always approve asks first (PaneAutoModeChip). */}
-      {(showAutoMode || pane.neverAutoAnswer) && <Detail><PaneAutoModeChip pane={pane} /></Detail>}
+      {(showAutoMode || pane.neverAutoAnswer) && <Detail section={section} priority={DETAIL_PRIORITY.autoMode}><PaneAutoModeChip pane={pane} /></Detail>}
       {/* AFTER the auto badge: the transient chip reads as a status hanging off
           the control it belongs to, and — because it mounts/unmounts mid-turn —
           appearing to the badge's RIGHT never shoves the badge sideways under
@@ -292,7 +297,7 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
       {(!section || section === 'attention') && showAutoMode && <AutoApprovingChip pane={pane} />}
       {(!section || section === 'details') && <>
       {conversationID && pane.resumeReady && (
-        <Detail><button
+        <Detail section={section} priority={DETAIL_PRIORITY.resume}><button
           type="button"
           className={`pane-resume-badge${copiedResume ? ' copied' : ''}`}
           aria-label={`Copy ${paneAgentLabel} ${paneAgent === 'codex' ? 'thread' : 'session'} id ${conversationID}`}

@@ -9,31 +9,27 @@ interface Props {
   toggle: (key: string) => void;
   select: (node: PaneTreeNode) => void;
   focusedKey: string;
-  leadsOnly?: boolean;
   depth?: number;
   parentKey?: string;
 }
 
-export function WorkspacePaneRows({ nodes, workspaceKey, collapsed, toggle, select, focusedKey, leadsOnly, depth = 2, parentKey = workspaceKey }: Props) {
-  const focusedPaneId = useStore(s => s.focusedPaneId);
+export function WorkspacePaneRows({ nodes, workspaceKey, collapsed, toggle, select, focusedKey, depth = 2, parentKey = workspaceKey }: Props) {
   const view = useStore(s => s.workspaceView);
   return <>{nodes.map(node => {
-    if (leadsOnly && !node.isLead) return <WorkspacePaneRows key={node.pane.id} nodes={node.children}
-      workspaceKey={workspaceKey} collapsed={collapsed} toggle={toggle} select={select}
-      focusedKey={focusedKey} leadsOnly depth={depth} parentKey={parentKey} />;
     const { pane, children } = node;
     const key = `${workspaceKey}:pane:${pane.id}`;
     const open = !collapsed[key];
-    const hasVisibleChildren = leadsOnly ? node.hasLeadDescendants : children.length > 0;
+    const hasVisibleChildren = children.length > 0;
+    const selected = (view?.kind === 'team' || view?.kind === 'single') && view.paneId === pane.id;
     const { status, needsYou, descendantCount } = node;
     const title = pane.title || pane.cmd.join(' ');
     const finishedWorker = pane.origin?.source === 'agent' && status === 'finished';
     return <div key={pane.id} role="treeitem" aria-level={depth}
       aria-label={title} aria-expanded={hasVisibleChildren ? open : undefined}
-      aria-selected={!!view && focusedPaneId === pane.id}
+      aria-selected={selected} aria-current={selected ? 'true' : undefined}
       data-tree-key={key} data-tree-parent={parentKey} tabIndex={focusedKey === key ? 0 : -1}
       onClick={e => { e.stopPropagation(); select(node); }}>
-      <div className={`workspace-pane-row${focusedPaneId === pane.id && view ? ' is-selected' : ''}`}
+      <div className={`workspace-pane-row${selected ? ' is-selected' : ''}`}
         style={{ paddingLeft: 8 + Math.min(depth - 1, 3) * 12 }} title={title}>
         {hasVisibleChildren ? <button type="button" className="tree-chevron" tabIndex={-1}
           aria-label={`${open ? 'Collapse' : 'Expand'} ${title}`}
@@ -44,10 +40,9 @@ export function WorkspacePaneRows({ nodes, workspaceKey, collapsed, toggle, sele
           <span className="pane-tree-title">{title}</span>
           <span className={`pane-tree-status${status === 'needs-you' ? ' needs-you' : ''}`}>
             {status === 'needs-you' ? 'needs you' : status}
-            {!open && descendantCount > 0 ? ` · ${descendantCount} worker${descendantCount === 1 ? '' : 's'}` : ''}
+            {descendantCount > 0 ? ` · ${descendantCount} worker${descendantCount === 1 ? '' : 's'}` : ''}
           </span>
         </span>
-        {node.isLead && <span className="pane-tree-role">lead</span>}
         {finishedWorker && <button type="button" className="iconbtn pane-tree-close" aria-label={`Close ${title}`} title="Close pane"
           onClick={e => {
             e.stopPropagation();
@@ -55,7 +50,7 @@ export function WorkspacePaneRows({ nodes, workspaceKey, collapsed, toggle, sele
           }}>×</button>}
       </div>
       {open && hasVisibleChildren && <div role="group">
-        <WorkspacePaneRows nodes={children} workspaceKey={workspaceKey} collapsed={collapsed} toggle={toggle} select={select} focusedKey={focusedKey} leadsOnly={leadsOnly} depth={depth + 1} parentKey={key} />
+        <WorkspacePaneRows nodes={children} workspaceKey={workspaceKey} collapsed={collapsed} toggle={toggle} select={select} focusedKey={focusedKey} depth={depth + 1} parentKey={key} />
       </div>}
     </div>;
   })}</>;

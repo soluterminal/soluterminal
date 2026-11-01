@@ -43,19 +43,6 @@ var claude = Provider{
 		{Match: "fable", Tier: TierFrontier},
 	}},
 	Creds: &CredFacts{
-		Mailbox: &MailboxFacts{
-			RouteSegment: "claude", SetTable: "soluterminal_team_cred_set",
-			SyncTable: "soluterminal_team_cred_sync", PolicyTable: "soluterminal_team_cred_rules",
-			ActiveTable: "soluterminal_team_member_active", PolicyKind: "rules",
-			EnvelopeKey: "claudeAiOauth", Validation: "oauth-object",
-			MaxBodyBytes: 256 << 10, HasStatusRoute: true,
-		},
-		TeamState: &TeamStateFacts{
-			StateFileName: "claude_team_provision_state.json",
-			// Claude snapshots rotate locally, but a clearly newer owner mint must
-			// still replace an untracked pre-state-file snapshot.
-			ClockSkewHeuristic: true, SnapshotRotatesLocally: true,
-		},
 		Store: &StoreFacts{LiveFileName: ".credentials.json"},
 	},
 }

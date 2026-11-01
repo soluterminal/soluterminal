@@ -33,7 +33,8 @@ import { ScrollToLatestButton, STICK_BOTTOM_SLOP } from './ScrollToLatestButton'
 import { PaneFindBar } from './PaneFindBar';
 import { useNativeFind } from './useNativeFind';
 import { NativeFindContext } from '../native/nativeFindContext';
-import { collectLeaves, collectPaneIds } from '../lib/layout';
+import { collectLeaves, collectPaneIds, layoutHasLeaf } from '../lib/layout';
+import { isTemporaryWorkspaceView, workspaceViewLayout } from '../lib/workspaceView';
 import { isTypingElsewhere } from '../lib/focusGuard';
 import { isMobileViewport } from '../lib/mobile';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
@@ -140,7 +141,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
   const paneAgentLabel = agentLabel(paneAgent);
   const setFocus = useStore((s) => s.setFocus);
   const focused = useStore((s) => s.focusedPaneId === pane.id);
-  const paneMovesAllowed = useStore(s => !s.workspaceView);
+  const paneMovesAllowed = useStore(s => !isTemporaryWorkspaceView(s.workspaceView));
   const movePane = useStore((s) => s.movePaneInLayout);
   const setDraggingPane = useStore((s) => s.setDraggingPane);
   // Per-machine opt-in for Claude's "next-prompt" suggestions (default OFF).
@@ -164,7 +165,8 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
   const launchShellHere = useStore((s) => s.launchShellHere);
   const launchClaudeHere = useStore((s) => s.launchClaudeHere);
   const isZoomed = useStore((s) => s.zoomedPaneId === pane.id);
-  const layout = useStore((s) => s.layout);
+  // The shown grid: index badges and zoom count only the panes on screen.
+  const layout = useStore(workspaceViewLayout);
   const paneIndex = useMemo(() => {
     const i = collectLeaves(layout).findIndex((l) => l.type === 'pane' && l.paneId === pane.id);
     return i + 1;
@@ -1722,7 +1724,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
       onPointerDownCapture={() => setFocus(pane.id)}
       onContextMenu={openContextMenu}
       onDragOver={(e) => {
-        if (useStore.getState().workspaceView || !e.dataTransfer.types.includes(DRAG_MIME)) return;
+        if (isTemporaryWorkspaceView(useStore.getState().workspaceView) || !layoutHasLeaf(useStore.getState().layout, pane.id) || !e.dataTransfer.types.includes(DRAG_MIME)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         setDropZone(computeZone(e));
@@ -1732,7 +1734,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
         if (!e.currentTarget.contains(related)) setDropZone(null);
       }}
       onDrop={(e) => {
-        if (useStore.getState().workspaceView || !e.dataTransfer.types.includes(DRAG_MIME)) return;
+        if (isTemporaryWorkspaceView(useStore.getState().workspaceView) || !layoutHasLeaf(useStore.getState().layout, pane.id) || !e.dataTransfer.types.includes(DRAG_MIME)) return;
         e.preventDefault();
         const src = e.dataTransfer.getData(DRAG_MIME);
         const zone = computeZone(e);
@@ -1750,7 +1752,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
           toggleZoom(pane.id);
         }}
         onDragStart={(e) => {
-          if (useStore.getState().workspaceView) { e.preventDefault(); return; }
+          if (isTemporaryWorkspaceView(useStore.getState().workspaceView) || !layoutHasLeaf(useStore.getState().layout, pane.id)) { e.preventDefault(); return; }
           e.dataTransfer.setData(DRAG_MIME, pane.id);
           e.dataTransfer.effectAllowed = 'move';
           setBeingDragged(true);

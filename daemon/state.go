@@ -92,7 +92,8 @@ var (
 	// focused "› 1. Yes" option row in the reconstructed grid. The
 	// header + command/edit body is still an actionable approval prompt.
 	// This is only consulted for panes with a Codex descendant.
-	codexApprovalPromptRE = regexp.MustCompile(`(?ms)Would you like to (?:run the following command|make the following edits)\?.*(?:\n[\s\p{Zs}]*\$[\s\p{Zs}]*\S|Press enter to confirm|Esc to cancel)`)
+	// Preserve raw offsets while tolerating word-wrapped titles and footers.
+	codexApprovalPromptRE = regexp.MustCompile(`(?ms)Would\s+you\s+like\s+to\s+(?:run\s+the\s+following\s+command|make\s+the\s+following\s+edits)\?.*(?:\n[\s\p{Zs}]*\$[\s\p{Zs}]*\S|Press\s+enter\s+to\s+confirm|Esc\s+to\s+cancel)`)
 
 	// Current Codex MCP permission modal observed in v0.0.985 on
 	// pane_8a14cbd9b3ca9a83: "Allow the soluterminal MCP server to run tool
@@ -1145,6 +1146,141 @@ var (
 	codexFooterLineRE   = regexp.MustCompile(`(?mi)^\s*(?:Context\s+\d+%\s+used\s+·\s+)?(?:gpt|codex)[^\n·]*\s+·\s+(?:[/~]|[a-z]:[\\/]).*$`)
 	codexActiveTurnRE   = regexp.MustCompile(`(?mi)^\s*[•·]?\s*Working\s*\([^\n)]*esc to interrupt[^\n)]*\)`)
 )
+
+// Codex 0.166 chrome around a running turn. With a draft in the box the footer
+// reads "<key> to queue message" ("<key> to queue" when narrow) only while a
+// turn runs. <key> is the configured binding as Codex labels it: "tab" by
+// default, a rebound Ctrl key as "^q" (Linux), "ctrl+q" (Windows) or "⌃q"
+// (macOS). Held input is listed above the box under one of the preview
+// headers, each message on a "↳" row (three rows at most, then "…"), until
+// Codex sends it.
+var (
+	codexQueueHintRE    = regexp.MustCompile(`(?i)^\s*(tab|(?:\^|⌃|ctrl\+)[a-z]) to queue(?: message)?(?:\s|·|$)`)
+	codexHeldHeaderRE   = regexp.MustCompile(`(?m)^\s*•\s*(?:Queued follow-up inputs|Messages to be submitted (?:after next tool call|at end of turn))\b.*$`)
+	codexHeldEditHintRE = regexp.MustCompile(`(?i)edit last queued message`)
+)
+
+// codexQueueOffered reports that the footer under Codex's input box offers a
+// queue key SoluTerminal can press, i.e. a turn is running and the box is not
+// empty.
+func codexQueueOffered(screen string) bool {
+	_, ok := codexQueueKey(screen)
+	return ok
+}
+
+// codexQueueKey returns the bytes of the queue key the footer under Codex's
+// input box names. Only Tab and Ctrl+letter are pressed: they are one byte
+// each. Ctrl keys whose byte a terminal reads as another key (^i Tab, ^m
+// Enter, which would steer) or that stop Codex (^c, ^d, ^z) are refused, and
+// so is anything else (Alt starts with Esc, which interrupts the turn).
+func codexQueueKey(screen string) ([]byte, bool) {
+	lines := strings.Split(screen, "\n")
+	start := -1
+	for i, line := range lines {
+		if codexComposerLineRE.MatchString(line) {
+			start = i
+		}
+	}
+	if start < 0 {
+		return nil, false
+	}
+	for _, line := range lines[start:] {
+		m := codexQueueHintRE.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		label := strings.ToLower(m[1])
+		if label == "tab" {
+			return []byte("\t"), true
+		}
+		c := label[len(label)-1]
+		if strings.IndexByte("cdimz", c) >= 0 {
+			return nil, false
+		}
+		return []byte{c - 'a' + 1}, true
+	}
+	return nil, false
+}
+
+// codexHeldMessage is one message Codex lists as held: its text without the
+// sender label or whitespace, and whether the preview cut it short.
+type codexHeldMessage struct {
+	text string
+	cut  bool
+}
+
+// codexHeldMessages returns the messages Codex lists as queued or pending
+// above its input box.
+func codexHeldMessages(screen string) []codexHeldMessage {
+	loc := codexHeldHeaderRE.FindStringIndex(screen)
+	if loc == nil {
+		return nil
+	}
+	var held []codexHeldMessage
+	var rows []string
+	cut := false
+	flush := func() {
+		if len(rows) > 0 {
+			text := conditionalDraftText(stripSenderLabel(strings.TrimSpace(strings.Join(rows, " "))))
+			held = append(held, codexHeldMessage{text: text, cut: cut})
+		}
+		rows, cut = nil, false
+	}
+	for _, line := range strings.Split(screen[loc[1]:], "\n") {
+		if codexComposerLineRE.MatchString(line) {
+			break
+		}
+		switch t := strings.TrimSpace(line); {
+		case codexHeldEditHintRE.MatchString(line) || codexHeldHeaderRE.MatchString(line):
+			flush()
+		case strings.HasPrefix(t, "↳"):
+			flush()
+			rows = append(rows, strings.TrimSpace(strings.TrimPrefix(t, "↳")))
+		case t == "…":
+			cut = true
+		case len(rows) > 0 && !cut:
+			rows = append(rows, t)
+		}
+	}
+	flush()
+	return held
+}
+
+// codexQueueHolds reports whether Codex lists body as held input: the whole
+// text, or, when the preview cut it short, everything the preview shows. The
+// "[from …]" label is skipped on both sides (callers pass the unlabelled
+// text too).
+func codexQueueHolds(screen, body string) bool {
+	want := conditionalDraftText(stripSenderLabel(body))
+	if want == "" {
+		return false
+	}
+	for _, m := range codexHeldMessages(screen) {
+		if m.text == want || (m.cut && m.text != "" && strings.HasPrefix(want, m.text)) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripSenderLabel drops the "[from …] " prefix labelPaneMessage adds.
+func stripSenderLabel(body string) string {
+	if strings.HasPrefix(body, "[from ") {
+		if i := strings.Index(body, "] "); i > 0 && strings.TrimSpace(body[i+2:]) != "" {
+			return body[i+2:]
+		}
+	}
+	return body
+}
+
+// codexTurnRunningText reports a live Codex turn on its rendered screen: the
+// "Working (… esc to interrupt)" row, or the queue hint. The Working row is
+// hidden while the answer streams. computeState goes by output age alone,
+// which a quiet stretch or a turn's closing redraws can misread, so callers
+// that act on a Codex pane check the screen too.
+func codexTurnRunningText(screen string) bool {
+	return codexActiveTurnRE.MatchString(screen) || codexQueueOffered(screen)
+}
 
 func looksLikeCodexPrompt(s string) bool {
 	return codexComposerLineRE.MatchString(s) && codexFooterLineRE.MatchString(s)

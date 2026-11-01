@@ -1,3 +1,5 @@
+import { slotList } from './extensions';
+
 /**
  * Canonical, UI-independent Settings information architecture. Keep routing,
  * search and command-palette callers on this registry so a label move never
@@ -65,18 +67,17 @@ export interface SettingsControlDef {
   dangerous?: boolean;
 }
 
-export const SETTINGS_CATEGORIES: SettingsCategoryDef[] = [
+const SETTINGS_CATEGORIES: SettingsCategoryDef[] = [
   { id: 'appearance', label: 'Appearance', description: 'Theme, terminal colours and text sizing.' },
   { id: 'workspace', label: 'Panes & sidebar', description: 'Pane layout, mouse behaviour and sidebar sections.' },
   { id: 'sessions', label: 'Claude sessions', description: 'New-session, recovery, prompt and Focus behaviour.' },
   { id: 'workflows', label: 'Services', description: 'Model gateway, release train and resource limits.' },
   { id: 'agents', label: 'Agents', description: 'Warden controls.' },
   { id: 'credentials', label: 'Credentials', description: 'Protected provider accounts, runtime keys and repair status.' },
-  { id: 'team', label: 'Team pool', description: 'Team membership and shared credential pool.' },
   { id: 'devices', label: 'Devices & updates', description: 'Pairing, desktop behaviour, updates and diagnostics.', mobile: false },
 ];
 
-function defineSection(
+export function defineSection(
   id: string,
   category: SettingsCategory,
   title: string,
@@ -94,7 +95,7 @@ function defineSection(
   };
 }
 
-export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
+const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   defineSection('appearance.theme', 'appearance', 'Theme', 'App and terminal colour themes.', { aliases: ['dark mode', 'light mode', 'theme'] }),
   defineSection('appearance.text', 'appearance', 'Text size', 'Terminal, Focus and sidebar sizing.', { aliases: ['font size', 'zoom', 'scale'] }),
   defineSection('workspace.panes', 'workspace', 'Panes', 'Pane layout, arrangement and mouse behaviour.'),
@@ -109,10 +110,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   defineSection('agents.warden', 'agents', 'Warden', 'Fleet caretaker behaviour and briefs.'),
   defineSection('credentials.accounts', 'credentials', 'Provider accounts', 'Sign in, re-authenticate and review provider accounts.', { aliases: ['sign in', 'login', 'account', 're-auth'] }),
   defineSection('credentials.keys', 'credentials', 'Runtime API keys', 'Local runtime API keys and tokens.', { aliases: ['api key', 'token'] }),
-  defineSection('credentials.autoSwitch', 'credentials', 'Auto-switch', 'Account exhaustion and switching policy.', { aliases: ['exhausted', 'switch account'] }),
-  defineSection('credentials.team', 'credentials', 'Team pool health', 'Redacted team credential repair status.', { aliases: ['team repair', 're-auth'] }),
   defineSection('credentials.privacy', 'credentials', 'Screen-share safety', 'Mask identities across operator surfaces.', { aliases: ['screen share', 'privacy', 'mask'] }),
-  defineSection('team.pool', 'team', 'Team pool', 'Membership and shared provider credentials.'),
   // Settings › Devices split into four tabs (2026-10-31); the three new tabs
   // are sections of the devices category so their links resolve exactly.
   defineSection('devices.account', 'devices', 'Account', 'Sign-in, product emails and personal view.', { aliases: ['sign in', 'sign out', 'email'] }),
@@ -189,10 +187,7 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['agents.warden', 'runBrief', 'Run a fleet brief now'],
   ['credentials.accounts', 'providerAccounts', 'Provider accounts', ['sign in', 'login', 'account', 're-auth']],
   ['credentials.keys', 'runtimeKeys', 'Runtime API keys', ['api key', 'token']],
-  ['credentials.autoSwitch', 'autoSwitch', 'Auto-switch'],
-  ['credentials.team', 'teamHealth', 'Team pool health'],
   ['credentials.privacy', 'hideIdentities', 'Hide identities (screen share)', ['screen share', 'privacy', 'mask']],
-  ['team.pool', 'teamPool', 'Team pool'],
   ['devices.pairing', 'desktopApp', 'Desktop app'],
   ['devices.pairing', 'phoneAccess', 'Phone access', ['phone', 'pair', 'qr']],
   ['devices.pairing', 'launchStartup', 'Launch on startup'],
@@ -202,7 +197,7 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['devices.privacy', 'agentIntegration', 'Let Claude Code and Codex use SoluTerminal', ['mcp', 'claude', 'codex', 'hooks', 'integration', 'uninstall']],
 ];
 
-export const SETTINGS_CONTROLS: SettingsControlDef[] = CONTROL_SEEDS.map(([
+const SETTINGS_CONTROLS: SettingsControlDef[] = CONTROL_SEEDS.map(([
   parent,
   key,
   label,
@@ -220,6 +215,35 @@ export const SETTINGS_CONTROLS: SettingsControlDef[] = CONTROL_SEEDS.map(([
   dangerous,
   sensitive: parent.startsWith('credentials.'),
 }));
+
+export interface SettingsRegistryEntries {
+  categories?: Array<SettingsCategoryDef & { after: SettingsCategory }>;
+  sections?: Array<SettingsSectionDef & { after: string }>;
+  controls?: Array<SettingsControlDef & { after: string }>;
+  /** Independent label snapshot for the setting-loss check. */
+  inventory?: Partial<Record<SettingsCategory, string[]>>;
+}
+
+function withEntries<T extends { id: string }>(core: T[], additions: Array<T & { after: string }>): T[] {
+  const result = [...core];
+  for (const entry of additions) {
+    const index = result.findIndex(({ id }) => id === entry.after);
+    result.splice(index < 0 ? result.length : index + 1, 0, entry);
+  }
+  return result;
+}
+
+export function settingsCategories(): SettingsCategoryDef[] {
+  return withEntries(SETTINGS_CATEGORIES, slotList('settingsRegistryEntries').flatMap((entry) => entry.categories ?? []));
+}
+
+export function settingsSections(): SettingsSectionDef[] {
+  return withEntries(SETTINGS_SECTIONS, slotList('settingsRegistryEntries').flatMap((entry) => entry.sections ?? []));
+}
+
+export function settingsControls(): SettingsControlDef[] {
+  return withEntries(SETTINGS_CONTROLS, slotList('settingsRegistryEntries').flatMap((entry) => entry.controls ?? []));
+}
 
 export const LEGACY_TAB_TARGETS: Record<LegacySettingsTab, SettingsTarget> = {
   appearance: { category: 'appearance' },
@@ -246,13 +270,13 @@ export const LEGACY_SECTION_TARGETS: Record<string, SettingsTarget> = {
   'tasks.modelsFallbacks': { category: 'workflows', section: 'workflows.modelsFallbacks' },
 };
 
-const categoryIds = new Set(SETTINGS_CATEGORIES.map((item) => item.id));
-const sectionsById = new Map(SETTINGS_SECTIONS.map((item) => [item.id, item]));
-const controlsById = new Map(SETTINGS_CONTROLS.map((item) => [item.id, item]));
+const categoryIds = () => new Set(settingsCategories().map((item) => item.id));
+const sectionsById = () => new Map(settingsSections().map((item) => [item.id, item]));
+const controlsById = () => new Map(settingsControls().map((item) => [item.id, item]));
 
 export function resolveSettingsTarget(input: string | SettingsTarget): { target: SettingsTarget; legacy: boolean } {
   if (typeof input !== 'string') {
-    return categoryIds.has(input.category)
+    return categoryIds().has(input.category)
       ? { target: { ...input }, legacy: false }
       : { target: { category: 'appearance' }, legacy: false };
   }
@@ -260,18 +284,18 @@ export function resolveSettingsTarget(input: string | SettingsTarget): { target:
   if (Object.prototype.hasOwnProperty.call(LEGACY_SECTION_TARGETS, input)) {
     return { target: { ...LEGACY_SECTION_TARGETS[input] }, legacy: true };
   }
-  if (categoryIds.has(input as SettingsCategory)) {
+  if (categoryIds().has(input as SettingsCategory)) {
     return { target: { category: input as SettingsCategory }, legacy: false };
   }
   if (Object.prototype.hasOwnProperty.call(LEGACY_TAB_TARGETS, input)) {
     return { target: { ...LEGACY_TAB_TARGETS[input as LegacySettingsTab] }, legacy: true };
   }
 
-  const section = sectionsById.get(input);
+  const section = sectionsById().get(input);
   if (section) return { target: { category: section.category, section: section.id }, legacy: false };
-  const control = controlsById.get(input);
+  const control = controlsById().get(input);
   if (control) {
-    const parent = sectionsById.get(control.section)!;
+    const parent = sectionsById().get(control.section)!;
     return {
       target: { category: parent.category, section: parent.id, control: control.id },
       legacy: false,
@@ -306,14 +330,17 @@ export function searchSettings(query: string, options: SettingsSearchOptions): S
   const tokens = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return [];
 
-  const categoryOrder = new Map(SETTINGS_CATEGORIES.map((item, index) => [item.id, index]));
+  const categories = settingsCategories();
+  const sections = settingsSections();
+  const controls = settingsControls();
+  const categoryOrder = new Map(categories.map((item, index) => [item.id, index]));
   const results: SettingsSearchHit[] = [];
-  for (const section of SETTINGS_SECTIONS) {
-    const category = SETTINGS_CATEGORIES.find((item) => item.id === section.category)!;
+  for (const section of sections) {
+    const category = categories.find((item) => item.id === section.category)!;
     if (options.mobile && category.mobile === false) continue;
     const candidates: Array<SettingsControlDef | undefined> = [
       undefined,
-      ...SETTINGS_CONTROLS.filter((control) => control.section === section.id
+      ...controls.filter((control) => control.section === section.id
         && !(options.shellAutoApplyPaused && HIDDEN_WHILE_SHELL_AUTO_APPLY_PAUSED.has(control.id))),
     ];
     for (const control of candidates) {
@@ -356,7 +383,7 @@ export function searchSettings(query: string, options: SettingsSearchOptions): S
   return results.sort((left, right) => (
     right.score - left.score
     || categoryOrder.get(left.category.id)! - categoryOrder.get(right.category.id)!
-    || SETTINGS_SECTIONS.indexOf(left.section) - SETTINGS_SECTIONS.indexOf(right.section)
+    || sections.indexOf(left.section) - sections.indexOf(right.section)
     || Number(Boolean(left.control)) - Number(Boolean(right.control))
     || (left.control?.label ?? '').localeCompare(right.control?.label ?? '')
   )).slice(0, 30);
@@ -373,13 +400,13 @@ export function parseSettingsHash(raw: string): SettingsTarget | null {
 }
 
 export function categoryById(id: SettingsCategory): SettingsCategoryDef {
-  return SETTINGS_CATEGORIES.find((item) => item.id === id)!;
+  return settingsCategories().find((item) => item.id === id)!;
 }
 
 export function sectionById(id: string | undefined): SettingsSectionDef | undefined {
-  return id ? sectionsById.get(id) : undefined;
+  return id ? sectionsById().get(id) : undefined;
 }
 
 export function controlById(id: string | undefined): SettingsControlDef | undefined {
-  return id ? controlsById.get(id) : undefined;
+  return id ? controlsById().get(id) : undefined;
 }
