@@ -856,6 +856,7 @@ func TestCodexQueueKeyReadsTheFooterBinding(t *testing.T) {
 		{"^g to queue", "\x07"},
 		{"^m to queue message", ""}, // the byte is Enter: it would steer
 		{"^i to queue message", ""}, // the byte is Tab
+		{"^j to queue message", ""}, // LF: ConPTY can read it as Enter
 		{"^c to queue message", ""}, // stops Codex
 		{"^d to queue message", ""},
 		{"^z to queue message", ""},

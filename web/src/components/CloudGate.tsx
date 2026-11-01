@@ -80,7 +80,9 @@ export function CloudGate({ children }: { children: ReactNode }) {
   // cloud mode (covers both cloud-relay and local-auth flows)
   if (error && !session) return <CenteredMessage>Error: {error}</CenteredMessage>;
   // Local daemon used without an account: the daemon's loopback/token gate
-  // already protects its API; signing in only adds cloud features.
+  // already protects its API; signing in only adds cloud features. Bootstrap
+  // defaults embeds here without persisting the standalone skip preference;
+  // Settings > Account can clear withoutAccount to show Login on request.
   if (isLocal && withoutAccount && !session && !recoveryPending) return <>{children}</>;
   if (!session || recoveryPending) return <Login />;
 

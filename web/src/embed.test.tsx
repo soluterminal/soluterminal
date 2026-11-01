@@ -43,13 +43,57 @@ describe('embed activation', () => {
     [{ search: '', saved: 'shinoque' }, true, origin],
     [{ ancestorOrigin: '', referrer: 'https://localhost:14700/a' }, true, 'https://localhost:14700'],
     [{ ancestorOrigin: 'http://[::1]:4700/' }, true, 'http://[::1]:4700'],
+    [{ ancestorOrigin: 'http://window.shinoque.localhost:14700' }, true, 'http://window.shinoque.localhost:14700'],
+    [{ ancestorOrigin: 'http://window.shinoque.localhost:14800/path' }, true, 'http://window.shinoque.localhost:14800'],
+    // Browsers normalize explicit :80 to a portless origin; both qualify.
+    [{ ancestorOrigin: 'http://window.shinoque.localhost:80/' }, true, 'http://window.shinoque.localhost'],
+    [{ ancestorOrigin: 'http://window.shinoque.localhost' }, true, 'http://window.shinoque.localhost'],
+    [{ ancestorOrigin: 'http://window.shinoque.localhost:1' }, true, 'http://window.shinoque.localhost:1'],
+    [{ ancestorOrigin: 'http://window.shinoque.localhost:65535' }, true, 'http://window.shinoque.localhost:65535'],
+    [{ ancestorOrigin: '', referrer: 'http://window.shinoque.localhost:14700/app' }, true, 'http://window.shinoque.localhost:14700'],
+    ...[
+      'http://window.shinoque.localhost.evil.com:14700',
+      'http://evil-window.shinoque.localhost:14700',
+      'http://evil.shinoque.localhost:14700',
+      'http://evil.shinoque.localhost',
+      'http://window.shinoque.localhost.evil.com',
+      'http://window-shinoque.localhost:14700',
+      'http://window-shinoque.localhost',
+      'https://window.shinoque.localhost.attacker',
+      'http://other.shinoque.localhost:14700',
+      'http://other.localhost:14700',
+      'http://window.shinoque.localhost.:14700',
+      'http://window.shinoque.localhost:65536',
+      'http://window.shinoque.localhost:bad',
+      'https://window.shinoque.localhost:14700',
+      'https://window.shinoque.localhost:443',
+      'https://window.shinoque.localhost',
+      'http://user@window.shinoque.localhost:14700',
+      'http://window.shinoque.localhost:14700@evil.com',
+    ].map((ancestorOrigin) => [{ ancestorOrigin }, false, null] as const),
     [{ ancestorOrigin: 'https://evil.example/', referrer: `http://127.0.0.1:4700/` }, false, null],
     [{ ancestorOrigin: '', referrer: '' }, false, null],
     [{ ancestorOrigin: 'file:///tmp/host.html' }, false, null],
-  ] as const)('checks frame, request and loopback parent %#', (change, expected, parent) => {
+  ] as const)('checks frame, request and allowed parent %#', (change, expected, parent) => {
     __recomputeEmbedForTests({ ...base, ...change });
     expect(isEmbedded()).toBe(expected);
     expect(embedParentOrigin()).toBe(parent);
+  });
+
+  it.each([
+    ['http://window.shinoque.localhost:14700/code', 'http://window.shinoque.localhost:14700'],
+    ['http://window.shinoque.localhost/code', 'http://window.shinoque.localhost'],
+    ['http://evil.shinoque.localhost:14700/code', null],
+    ['http://window.shinoque.localhost.evil.com:14700/code', null],
+    ['http://window-shinoque.localhost:14700/code', null],
+    ['https://window.shinoque.localhost.attacker/code', null],
+    ['https://window.shinoque.localhost:14700/code', null],
+  ])('keeps the exact HTTP host rule in the Firefox referrer fallback: %s', (referrer, expected) => {
+    // Firefox has no ancestorOrigins; an absent/empty ancestor uses referrer
+    // through the same URL parser and exact-host check, never a looser rule.
+    __recomputeEmbedForTests({ ...base, ancestorOrigin: '', referrer });
+    expect(embedParentOrigin()).toBe(expected);
+    expect(isEmbedded()).toBe(expected !== null);
   });
 
   it('isolates workspace identity from the standalone main window', () => {
@@ -92,6 +136,23 @@ describe('embed activation', () => {
 });
 
 describe('host protocol', () => {
+  it('binds Shinoque window messages to the exact parent origin and port', () => {
+    const parent = 'http://window.shinoque.localhost:14700';
+    __recomputeEmbedForTests({ ...base, ancestorOrigin: parent });
+    const message = { source: 'shinoque', v: 1, kind: 'theme', theme: 'light' };
+    expect(parseHostMessage(host(message, parent))).toEqual({ kind: 'theme', theme: 'light' });
+    for (const other of [
+      'http://window.shinoque.localhost:14800', 'http://window.shinoque.localhost',
+      'https://window.shinoque.localhost:14700', 'http://127.0.0.1:14700',
+      'http://evil-window.shinoque.localhost:14700',
+      'http://window.shinoque.localhost.evil.com:14700',
+    ]) expect(parseHostMessage(host(message, other))).toBeNull();
+    expect(parseHostMessage(host(message, parent, null))).toBeNull();
+    const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
+    sendEmbedReady();
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ kind: 'ready' }), parent);
+  });
+
   it('accepts only the exact parent, source, version and valid fields', () => {
     const init = { source: 'shinoque', v: 1, kind: 'init', theme: 'dark', hostKeys: ['mod+j', 'mod+shift+k'] };
     expect(parseHostMessage(host(init))).toEqual({ kind: 'init', theme: 'dark', hostKeys: init.hostKeys });

@@ -3535,6 +3535,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
             closeContextMenu();
             setIdentityDialogOpen(true);
           }}
+          onSetTeamKind={pane.role !== 'task_owner' ? ctxMenuActions.setTeamKind : undefined}
           onConvertRole={pane.role !== 'task_owner' && operatorFeaturesAllowed() && roleConvertAllowed(pane, useStore.getState().orchestratorHosts) ? ctxMenuActions.convertRole : undefined}
           onChangeContextPack={() => {
             if(!actionValid())return;

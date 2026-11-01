@@ -82,9 +82,9 @@ type paneTurnBaseline struct {
 	Since    time.Time // when the message was sent; zero = wait for any turn
 	Path     string
 	PromptAt time.Time
-	// Queued is the message when a working Codex queued it. Other queued
-	// requests can run first, so only a turn whose prompt is this message
-	// counts, and none while Codex still lists it as queued.
+	// Queued is the message when a working Codex or Claude queued it. Other
+	// queued requests can run first, so only a turn whose prompt is this
+	// message counts, and none while the agent still lists it as queued.
 	Queued string
 	// Continued: wait_for_pane picking up a timed-out queued ask_pane; the
 	// work it waited on already started, so a settled screen can end it.
@@ -207,9 +207,11 @@ func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time
 	for {
 		state := collabPaneState(p)
 		// Output age can read a quiet Codex turn, or its closing redraws, as
-		// settled; Codex's own Working row and queue hint do not.
-		if codex && (state == StateIdle || state == StateRecent || state == StateAwaitingInput) {
-			if screen := collabScreenText(p); codexTurnRunningText(screen) || (base.Queued != "" && codexQueueHolds(screen, base.Queued)) {
+		// settled; Codex's own Working row and queue hint do not. A message
+		// still in Codex's or Claude's queue has not gone in yet.
+		if agent && (state == StateIdle || state == StateRecent || state == StateAwaitingInput) {
+			screen := collabScreenText(p)
+			if (codex && codexTurnRunningText(screen)) || (base.Queued != "" && agentQueueHolds(screen, codex, base.Queued)) {
 				state = StateBusy
 			}
 		}
@@ -223,7 +225,7 @@ func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time
 		if base.Queued != "" && queuedAskPutBack(p, base.Queued) {
 			res.Status = "unsent"
 			res.Screen = paneScreenText(p)
-			res.Hint = "The turn was interrupted and Codex put your queued message back in its input box, unsent. The pane shows it as an unsent message; tell the user rather than resending."
+			res.Hint = "Your queued message was put back in the agent's input box, unsent (an interrupted Codex turn, or Up in Claude). The pane shows it as an unsent message; tell the user rather than resending."
 			return res
 		}
 		if base.Queued != "" && time.Since(base.Since) >= queuedAskTTL {
@@ -274,6 +276,9 @@ func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time
 		} else if sawWork && !settledSince.IsZero() && time.Since(settledSince) >= collabSettleScreen {
 			res.Status = "replied"
 			res.Reply = reply.Reply
+			if base.Queued != "" {
+				res.Hint = "Your message was queued behind other work and the pane's transcript could not be found, so this is the settled screen, not a verified reply to your message: look for your answer in it (it may also hold the earlier work's output)."
+			}
 			return res
 		}
 		if time.Since(start) >= timeout {
@@ -303,17 +308,18 @@ func (a *apiServer) mcpToolAskPane(args map[string]any, callerPane string) any {
 	if !ok {
 		return toolErr("no pane with id " + paneID)
 	}
-	switch state := p.computeStateCached(); state {
+	state := p.computeStateCached()
+	switch state {
 	case StateExited:
 		return toolErr("pane " + paneID + " has exited")
 	case StateChoicePrompt:
 		return toolErr("pane " + paneID + " is waiting on an approval menu; answer it with answer_prompt first, or tell the user")
-	case StateBusy:
-		// A working Codex queues the message itself (pane_delivery.go), so
-		// only other agents are turned away while busy.
-		if agent, claude := paneAgentProvider(p); !agent || claude {
-			return toolErr("pane " + paneID + " is busy; call wait_for_pane first, then ask again")
-		}
+	}
+	agent, claude := paneAgentProvider(p)
+	// A busy pane with no queue SoluTerminal knows gets nothing typed, however
+	// short the message (send_input's guard skips one- and two-letter keys).
+	if !agent && p.Snapshot().Kind != "native" && sendInputPaneBusy(p) {
+		return a.refuseBusyPane(p, strings.TrimRight(unescapeAriaInput(text), "\r\n"), callerPane)
 	}
 	if !strings.HasSuffix(text, "\n") {
 		text += "\n"
@@ -324,20 +330,24 @@ func (a *apiServer) mcpToolAskPane(args map[string]any, callerPane string) any {
 	if m, ok := sent.(map[string]any); ok && m["isError"] == true {
 		return sent
 	}
-	if outcome == deliveryQueued {
+	// A working Codex or Claude queues the message itself (pane_delivery.go);
+	// other panes refuse a busy pane in send_input. A message to a busy
+	// Claude is matched by its text even when its queue was not seen: Claude
+	// may take it with the running turn's next tool result.
+	if outcome == deliveryQueued || (agent && claude && (state == StateBusy || state == StateRecent)) {
 		// send_input turns a typed "\n" into a line break; match what was sent.
 		base.Queued = strings.TrimRight(unescapeAriaInput(text), "\r\n")
 	}
 	res := a.waitForPaneTurn(p, base, collabTimeout(args, askPaneDefaultTimeout), callerPane)
 	a.queuedAsks.drop(paneID, callerPane)
+	if base.Queued != "" && queuedAskOpen(res.Status) {
+		a.queuedAsks.put(paneID, callerPane, base)
+	}
 	if outcome == deliveryQueued {
 		res.Delivery = string(deliveryQueued)
-		if queuedAskOpen(res.Status) {
-			a.queuedAsks.put(paneID, callerPane, base)
-		}
 		switch res.Status {
 		case "still_working":
-			res.Hint = "That Codex agent was mid-turn, so your message is in its queue and goes in when the current turn ends. Call wait_for_pane to keep waiting for the reply; do not resend."
+			res.Hint = "That agent was mid-turn, so your message is in its queue and goes in when the agent takes it. Call wait_for_pane to keep waiting for the reply; do not resend."
 		case "needs_approval":
 			res.Hint += " Your message is still in its queue; do not resend."
 		}

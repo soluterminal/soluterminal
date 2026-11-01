@@ -21,6 +21,11 @@ type PaneOrigin struct {
 	// an origin predates this record: show nothing rather than guess.
 	Source string      `json:"source"`
 	Worker *workerInfo `json:"worker,omitempty"`
+	// TeamKind is "lead", "worker" or "" (the user's own pane), and LeadRole
+	// a lead's role name ("security"). Daemon-owned like Worker: never taken
+	// from a client on restore (pane_team.go).
+	TeamKind string `json:"teamKind,omitempty"`
+	LeadRole string `json:"leadRole,omitempty"`
 	// ByPaneID/ByPaneTitle/ByAgent name the pane whose agent started this
 	// one, as it was labelled at that moment.
 	ByPaneID    string `json:"byPaneId,omitempty"`
@@ -28,6 +33,9 @@ type PaneOrigin struct {
 	ByAgent     string `json:"byAgent,omitempty"`
 	// LeadPaneID/LeadPaneTitle name the top of a chain of spawns: the
 	// creator itself, or the creator's own lead when it was agent-started.
+	// Sub-leads stay in their chain: the worker spend cap (MaxRunning) and
+	// close authority key on this. The nearest lead, which reads a worker's
+	// result, is derived (pane_team.go workerLeadFor).
 	LeadPaneID    string `json:"leadPaneId,omitempty"`
 	LeadPaneTitle string `json:"leadPaneTitle,omitempty"`
 	// Purpose is what the pane was started for, as given at start. It is

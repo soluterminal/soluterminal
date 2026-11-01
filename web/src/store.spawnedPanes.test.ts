@@ -217,6 +217,39 @@ describe('server spawned panes in the open workspace', () => {
     input.remove(); element.remove();
   });
 
+  for (const panesFirst of [true, false]) {
+    it(`keeps a background spawn in its saved workspace (panes first: ${panesFirst})`, async () => {
+      const active: Workspace = {
+        name: 'Active', activeAt: '', paneIds: ['other'], panes: [{ ...other, kind: undefined }],
+        layout: { type: 'pane', paneId: 'other' },
+      };
+      // The live starter has only origin attribution; the daemon saved its worker in Desk.
+      const unsavedStarter = { ...starter, origin: { source: 'user' as const, workspace: 'Desk', at: 1 } };
+      const spawned = { ...worker, origin: { ...worker.origin, leadPaneId: 'starter', workspace: 'Desk' } };
+      const destination: Workspace = {
+        name: 'Desk', activeAt: '', paneIds: ['worker'], panes: [{ ...spawned, kind: undefined }],
+        layout: { type: 'pane', paneId: 'worker' },
+      };
+      useStore.setState({
+        activeWorkspace: 'Active', activeWorkspaceKnownPaneIds: ['other'], layout: active.layout,
+        focusedPaneId: 'other', zoomedPaneId: null, panes: { starter: unsavedStarter, other },
+        workspaces: [{ ...destination, paneIds: [], panes: [], layout: null }, active],
+      });
+      vi.mocked(api.listWorkspaces).mockResolvedValue([destination, active]);
+      vi.spyOn(api, 'listPanes').mockResolvedValue([unsavedStarter, other, spawned]);
+      if (panesFirst) await useStore.getState().refreshPanes();
+      await useStore.getState().refreshWorkspaces({ full: true });
+      if (!panesFirst) await useStore.getState().refreshPanes();
+      useStore.getState().showSpawnedPane('worker', 'Desk');
+      const s = useStore.getState();
+      expect(s.activeWorkspace).toBe('Active');
+      expect(collectPaneIds(s.layout)).toEqual(['other']);
+      expect(s.focusedPaneId).toBe('other');
+      expect(collectPaneIds(s.workspaces.find(w => w.name === 'Desk')!.layout)).toEqual(['worker']);
+      expect(s.panes.worker.origin?.workspace).toBe('Desk');
+    });
+  }
+
   it('show leaves a different workspace and owner view alone', () => {
     useStore.getState().showSpawnedPane('worker', 'Elsewhere');
     expect(useStore.getState().zoomedPaneId).toBe('starter');

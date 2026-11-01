@@ -171,3 +171,41 @@ describe('PaneContextMenu automatic-answer lock', () => {
     expect(change).not.toHaveBeenCalled();
   });
 });
+
+describe('lead and worker items', () => {
+  const names = () => screen.queryAllByRole('menuitem').map(b => b.textContent).filter(t => /lead|worker/i.test(t ?? ''));
+  it('offers Make lead and Remove lead on your own pane, never Make worker', () => {
+    const onSetTeamKind = vi.fn();
+    const { unmount } = renderMenu({ origin: { source: 'user', at: 1 } }, { onSetTeamKind });
+    expect(names()).toEqual(['Make lead…']);
+    fireEvent.click(screen.getByText('Make lead…'));
+    expect(onSetTeamKind).toHaveBeenCalledWith('lead');
+    unmount();
+    renderMenu({ origin: { source: 'user', at: 1, teamKind: 'lead', leadRole: 'cmo' } }, { onSetTeamKind });
+    expect(names()).toEqual(['Rename lead role…', 'Remove lead']);
+    fireEvent.click(screen.getByText('Remove lead'));
+    expect(onSetTeamKind).toHaveBeenLastCalledWith('none');
+  });
+  it('offers both on an agent pane from before kinds, and the other one after', () => {
+    const agent = { source: 'agent' as const, byPaneId: 'cmo', leadPaneId: 'cmo', at: 1 };
+    const { unmount } = renderMenu({ origin: agent }, { onSetTeamKind: vi.fn() });
+    expect(names()).toEqual(['Make lead…', 'Make worker']);
+    unmount();
+    const second = renderMenu({ origin: { ...agent, teamKind: 'worker' } }, { onSetTeamKind: vi.fn() });
+    expect(names()).toEqual(['Make lead…']);
+    second.unmount();
+    const third = renderMenu({ origin: { ...agent, teamKind: 'lead', leadRole: 'social' } }, { onSetTeamKind: vi.fn() });
+    expect(names()).toEqual(['Rename lead role…', 'Make worker']);
+    third.unmount();
+    // An #850 auto worker is already a worker to the daemon.
+    renderMenu({ origin: { ...agent, worker: { state: 'running' } } }, { onSetTeamKind: vi.fn() });
+    expect(names()).toEqual(['Make lead…']);
+  });
+  it('hides them on an exited pane or without the action', () => {
+    const { unmount } = renderMenu({ status: 'exited', origin: { source: 'user', at: 1 } }, { onSetTeamKind: vi.fn() });
+    expect(names()).toEqual([]);
+    unmount();
+    renderMenu({ origin: { source: 'user', at: 1 } });
+    expect(names()).toEqual([]);
+  });
+});

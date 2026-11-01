@@ -1,4 +1,5 @@
 import { workspaceViewLayout } from '../lib/workspaceView';
+import { paneRowLabel } from '../lib/paneRowLabel';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEnabled } from '../lib/focusAvailability';
@@ -755,7 +756,7 @@ export function CommandPalette({
     const orderedIds = paneIdsInOrder(st.layout);
     const lastViewed = st.lastViewedMs || {};
     const clientActivity = st.clientActivityMs || {};
-    type PaneEntry = { id: string; title: string; unread: boolean; activityAge: number };
+    type PaneEntry = { id: string; title: string; handle: string; unread: boolean; activityAge: number };
     const paneEntries: PaneEntry[] = [];
     for (const id of orderedIds) {
       const p = st.panes[id];
@@ -764,9 +765,11 @@ export function CommandPalette({
       const effectiveActivity = Math.max(serverActivity, clientActivity[id] ?? 0);
       const viewed = lastViewed[id] ?? 0;
       const unread = id !== focusedPaneId && paneUnread(p, viewed, effectiveActivity) !== null;
+      const label = paneRowLabel(p, p.title || (p.cmd && p.cmd[0]) || id);
       paneEntries.push({
         id,
-        title: p.title || (p.cmd && p.cmd[0]) || id,
+        title: label.text,
+        handle: label.handle,
         unread,
         activityAge: Date.now() - effectiveActivity,
       });
@@ -799,7 +802,7 @@ export function CommandPalette({
         label: `${mark}Focus pane: ${e.title}`,
         hint: e.unread ? 'Unread — new activity since last viewed' : undefined,
         category: 'Pane',
-        keywords: `${e.title} pane focus switch${e.unread ? ' unread new activity' : ''}`,
+        keywords: `${e.title}${e.handle ? ` ${e.handle.slice(1)} handle` : ''} pane focus switch${e.unread ? ' unread new activity' : ''}`,
         run: () => void useStore.getState().revealPane(e.id),
       });
     }

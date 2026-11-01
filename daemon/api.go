@@ -1892,11 +1892,13 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 	}
 	paneOrigin, restoredTitle := createPaneOrigin(req, workspace, time.Now())
 	paneOrigin = a.validatedWorkerOrigin(paneOrigin, req)
-	if req.Restore && req.Origin != nil && req.Origin.Worker != nil && (paneOrigin == nil || paneOrigin.Worker == nil) {
+	// A plain worker with no saved record restores as a plain pane; a claimed
+	// account worker must match one.
+	if req.Restore && req.Origin != nil && workerHoldsCredentials(req.Origin.Worker) && (paneOrigin == nil || paneOrigin.Worker == nil) {
 		http.Error(w, "worker restore requires a matching daemon-saved conversation; resume the original pane or start a new auto worker", http.StatusBadRequest)
 		return
 	}
-	if req.Restore && paneOrigin != nil && paneOrigin.Worker != nil && !a.requireHuman(w, r, "restore worker account credentials") {
+	if req.Restore && paneOrigin != nil && workerHoldsCredentials(paneOrigin.Worker) && !a.requireHuman(w, r, "restore worker account credentials") {
 		return
 	}
 	restoredIdentity, releaseHandle := a.restoredPaneIdentity(req)

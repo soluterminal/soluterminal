@@ -1171,8 +1171,9 @@ func codexQueueOffered(screen string) bool {
 // codexQueueKey returns the bytes of the queue key the footer under Codex's
 // input box names. Only Tab and Ctrl+letter are pressed: they are one byte
 // each. Ctrl keys whose byte a terminal reads as another key (^i Tab, ^m
-// Enter, which would steer) or that stop Codex (^c, ^d, ^z) are refused, and
-// so is anything else (Alt starts with Esc, which interrupts the turn).
+// Enter, which would steer, and ^j LF, which ConPTY can read as Enter) or
+// that stop Codex (^c, ^d, ^z) are refused, and so is anything else (Alt
+// starts with Esc, which interrupts the turn).
 func codexQueueKey(screen string) ([]byte, bool) {
 	lines := strings.Split(screen, "\n")
 	start := -1
@@ -1194,7 +1195,7 @@ func codexQueueKey(screen string) ([]byte, bool) {
 			return []byte("\t"), true
 		}
 		c := label[len(label)-1]
-		if strings.IndexByte("cdimz", c) >= 0 {
+		if strings.IndexByte("cdijmz", c) >= 0 {
 			return nil, false
 		}
 		return []byte{c - 'a' + 1}, true

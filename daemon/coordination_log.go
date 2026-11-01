@@ -33,9 +33,10 @@ type coordinationEvent struct {
 	// Own: a close by the pane's starter or lead.
 	Own bool `json:"own,omitempty"`
 	// Outcome: deliver → submitted | sent_unconfirmed | left_in_composer |
-	// queued | menu | would_steer | error; queued (a queued Codex message
-	// leaving the queue) → submitted | left_in_composer | gone; unsent →
-	// send | clear (confirmed) or send_unresolved | clear_unresolved.
+	// queued | menu | would_steer | busy (not typed) | error; queued (a
+	// queued Codex or Claude message leaving the queue) → submitted |
+	// left_in_composer | gone; unsent → send | clear (confirmed) or
+	// send_unresolved | clear_unresolved.
 	Outcome string `json:"outcome,omitempty"`
 	AgeSec  int64  `json:"ageSec,omitempty"`
 }

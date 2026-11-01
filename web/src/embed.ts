@@ -16,11 +16,16 @@ type ActivationInput = {
   referrer: string;
 };
 
-function loopbackOrigin(raw: string): string | null {
+function embedAncestorOrigin(raw: string): string | null {
   try {
     const url = new URL(raw);
     if ((url.protocol === 'http:' || url.protocol === 'https:') &&
       ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return url.origin;
+    // Browsers resolve *.localhost to loopback, so only a local process can
+    // serve this host: the same trust class as the existing loopback parents.
+    // Accept any port (including normalized :80), but only this exact HTTP host.
+    if (url.protocol === 'http:' && url.hostname === 'window.shinoque.localhost' &&
+      !url.username && !url.password) return url.origin;
   } catch { /* missing or malformed origin */ }
   return null;
 }
@@ -35,7 +40,7 @@ function activation(input?: ActivationInput): Activation {
   try { requested ||= (input ? input.saved : sessionStorage.getItem('solu.embed')) === 'shinoque'; } catch { /* blocked storage */ }
   if (!requested) return off;
   const ancestors = (window.location as Location & { ancestorOrigins?: DOMStringList }).ancestorOrigins;
-  const origin = loopbackOrigin((input ? input.ancestorOrigin : ancestors?.[0]) || (input ? input.referrer : document.referrer));
+  const origin = embedAncestorOrigin((input ? input.ancestorOrigin : ancestors?.[0]) || (input ? input.referrer : document.referrer));
   if (!origin) return off;
   let id = params.get('embedWindow');
   if (!params.has('embedWindow')) {

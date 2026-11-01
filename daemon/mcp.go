@@ -501,7 +501,7 @@ func mcpCoreTools() []mcpTool {
 				"fresh terminal session for the user — a shell, a Claude Code session, a " +
 				"REPL. All arguments are optional: cwd defaults to the user's home, cmd " +
 				"defaults to the user's shell, and workspace defaults to the calling pane's named " +
-				"workspace (or the most recently active visible workspace when the caller is unknown). " +
+				"workspace (layout, then recorded origin, then its lead; finally the most recently active visible workspace). " +
 				"For an agent (cmd \"claude\" or \"codex\") it waits until the agent shows its input " +
 				"box (up to ~45 s). If folder trust is waiting, it returns status needs_user immediately, " +
 				"leaves the prompt unsent, and asks the user to trust the folder; afterward use ask_pane to send the original prompt. " +
@@ -536,7 +536,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"workspace": {
 						"type": "string",
-						"description": "Optional visible named workspace to attach the new pane to, matched case-insensitively. Defaults to the calling pane's workspace, then the most recently active visible workspace. The response contains the canonical stored workspace name."
+						"description": "Optional visible named workspace to attach the new pane to, matched case-insensitively. Defaults to the calling pane's layout workspace, recorded origin workspace, then its lead's workspace, before the most recently active visible workspace. The response contains the canonical stored workspace name."
 					},
 					"title": {
 						"type": "string",
@@ -552,7 +552,11 @@ func mcpCoreTools() []mcpTool {
 					},
 					"role": {
 						"type": "string",
-						"description": "Optional pane role. \"orchestrator\" spawns the pane with the chief-of-staff orchestrator brief; requires cmd \"claude\" or \"codex\"."
+						"description": "Optional pane role. \"orchestrator\" spawns the pane with the chief-of-staff orchestrator brief; requires cmd \"claude\" or \"codex\". An orchestrator is a lead."
+					},
+					"lead": {
+						"type": "string",
+						"description": "Start a LEAD: a long-lived role pane that owns an area, named by its role (e.g. \"security\", \"social\"). It nests under you as a sub-lead and is never closed automatically. Without lead, the pane is a WORKER: a task for you, closed and archived automatically once it has finished, you have read its result, and its work is committed and pushed."
 					},
 					"prompt": {
 						"type": "string",
@@ -822,7 +826,8 @@ func mcpCoreTools() []mcpTool {
 				"line on what the pane is doing now, shown on the pane and in list_panes; keep your own " +
 				"current as your work moves on. Defaults to your own pane. Another pane needs to be one " +
 				"you started; for anyone else's, pass user_requested: true only when the user asked, " +
-				"and they are asked to allow it in the SoluTerminal app. An empty string clears a field.",
+				"and they are asked to allow it in the SoluTerminal app. An empty string clears a field. " +
+				"kind makes a pane a lead or a worker (see kind).",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -837,6 +842,15 @@ func mcpCoreTools() []mcpTool {
 					"working_on": {
 						"type": "string",
 						"description": "One line (≤ 140 characters) on what the pane is doing now. \"\" clears it."
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["lead", "worker"],
+						"description": "Make a pane you started a LEAD (a long-lived role pane, never closed automatically; needs lead_role) or a WORKER (a task for its lead, archived automatically once finished, read and pushed). Set it in its own call, without handle or working_on. Your own pane, or one you did not start, needs user_requested; a pane the user opened can only be changed by the user."
+					},
+					"lead_role": {
+						"type": "string",
+						"description": "With kind \"lead\": the role name (≤ 32 characters), e.g. \"security\"."
 					},
 					"user_requested": {
 						"type": "boolean",
@@ -1368,7 +1382,11 @@ type mcpPaneSummary struct {
 	You       bool   `json:"you,omitempty"`
 	// StartedBy says who opened the pane and why, e.g. "#5 Claude — Engine deletion"
 	// (pane_origin.go); empty for panes the user opened or that predate it.
-	StartedBy     string      `json:"startedBy,omitempty"`
+	StartedBy string `json:"startedBy,omitempty"`
+	// TeamKind is "lead" or "worker" ("" = the user's own pane); LeadRole
+	// names a lead's role (pane_team.go).
+	TeamKind      string      `json:"teamKind,omitempty"`
+	LeadRole      string      `json:"leadRole,omitempty"`
 	Origin        *PaneOrigin `json:"origin,omitempty"`
 	Worker        *workerInfo `json:"worker,omitempty"`
 	QueuePosition int         `json:"queuePosition,omitempty"`
@@ -1448,6 +1466,8 @@ func (a *apiServer) mcpToolListPanes(_ map[string]any, callerPane string) any {
 			Workspace:      slot.Workspace,
 			Label:          paneLabel(slot, snap.Title, agent),
 			StartedBy:      paneStartedBy(snap.Origin),
+			TeamKind:       paneTeamKind(snap.Origin),
+			LeadRole:       paneLeadRole(snap.Origin),
 			Origin:         visibleWorkerOrigin(snap.Origin),
 			Worker:         visibleWorkerInfo(originWorker(snap.Origin)),
 			State:          string(p.computeStateCached()),
@@ -1598,6 +1618,13 @@ func (a *apiServer) mcpToolSendInputOutcome(args map[string]any, mode deliveryMo
 			return toolOK(fmt.Sprintf("Sent %d bytes to pane %s; %s.", wrote, paneID, deliveryNotice(outcome))), outcome
 		}
 	}
+	// A busy pane with no input queue SoluTerminal knows (a shell running a
+	// command, another agent mid-reply) is not typed into: the line would
+	// land in the running program or mix with its output. Keys without a
+	// line (Ctrl+C, Esc, a one-letter reply) still go through.
+	if line, ok := agentMessageBody(text); ok && mode == deliveryNoSteer && p.Snapshot().Kind != "native" && sendInputPaneBusy(p) {
+		return a.refuseBusyPane(p, line, callers...), ""
+	}
 	// Split body + trailing-Enter so a submitted line is written as a
 	// separate CR frame after the standard gap — see pty_submit.go.
 	body, submit := splitTrailingEnter(text)
@@ -1625,8 +1652,39 @@ func (a *apiServer) mcpToolSendInputOutcome(args map[string]any, mode deliveryMo
 		}
 		wrote += n
 	}
+	if line, ok := agentMessageBody(text); ok {
+		p.dropUntypedMessageFor(line)
+	}
 	return toolOK(fmt.Sprintf("Sent %d bytes to pane %s.", wrote, paneID)), ""
 }
+
+// refuseBusyPane turns away a message to a busy pane that has no input queue
+// SoluTerminal knows: nothing is typed, and the message is kept as the
+// pane's not-typed receipt when it can be. A pane locked against automatic
+// answers refuses an agent's input as any write would, and keeps nothing.
+func (a *apiServer) refuseBusyPane(p *Pane, line string, callers ...string) any {
+	if p.Snapshot().NeverAutoAnswer {
+		return toolErr(fmt.Sprintf("write to pane %s failed: %v", p.ID, fmt.Errorf("%w: pane is locked against automatic answers", errAutoModePolicyChanged)))
+	}
+	sender := ""
+	if len(callers) > 0 && callers[0] != "" {
+		sender = a.paneMessageSender(callers[0], p.ID)
+	}
+	if sender == "" {
+		sender = "SoluTerminal"
+	}
+	kept := p.recordUntypedMessage(sender, line)
+	coordLog.record(coordinationEvent{Kind: "deliver", Pane: p.ID, By: sender, Outcome: "busy"})
+	notice := "The pane shows it as an unsent message the person can read and send."
+	if !kept {
+		notice = "It was not kept for the person either (the pane already shows another unsent message, or the text has line breaks, tabs, control or invisible formatting characters, or is too long)."
+	}
+	return toolErr(fmt.Sprintf("pane %s is busy and has no input queue SoluTerminal can use, so the message was not sent (nothing was typed). %s Call wait_for_pane until it settles, then send it again (that clears the notice), or tell the user.", p.ID, notice))
+}
+
+// sendInputPaneBusy: the pane's output is still running (computeState's
+// busy, which keystroke echo does not count as).
+var sendInputPaneBusy = func(p *Pane) bool { return p.computeStateCached() == StateBusy }
 
 func (a *apiServer) mcpToolSpawnPane(args map[string]any, callerPane string, automated ...bool) any {
 	opts := SpawnOpts{}
@@ -1665,6 +1723,19 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 	if !validPaneRole(role) {
 		return toolErr("unknown role: " + role + " (only \"orchestrator\" is supported)")
 	}
+	leadRole := ""
+	if raw, ok := args["lead"].(string); ok && strings.TrimSpace(raw) != "" {
+		if worker != nil {
+			return toolErr("lead can't be combined with cmd \"auto\": an auto worker is a worker")
+		}
+		r, err := normalizeLeadRole(raw)
+		if err != nil {
+			return toolErr("lead: " + err.Error())
+		}
+		leadRole = r
+	} else if role == paneRoleOrchestrator && worker == nil {
+		leadRole = paneRoleOrchestrator
+	}
 	if role != "" && !a.operatorFeaturesOn() {
 		return toolErr("the orchestrator role is not available in this edition of soluterminal")
 	}
@@ -1682,7 +1753,7 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 		}
 	}
 	var workspaceErr error
-	workspace, workspaceErr = resolveMCPSpawnWorkspace(a.ws, workspace, callerPane)
+	workspace, workspaceErr = a.resolveMCPSpawnWorkspace(workspace, callerPane)
 	if workspaceErr != nil {
 		return toolErr(workspaceErr.Error())
 	}
@@ -1731,6 +1802,10 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 	if worker != nil {
 		w := *worker
 		paneOrigin.Worker = &w
+	}
+	// A lead when the spawn names a role, else a worker for its starter.
+	if err := applySpawnTeam(paneOrigin, leadRole, agentFromCmd(cmd)); err != nil {
+		return toolErr("spawn failed: " + err.Error())
 	}
 	spawnTitle := spawnPaneTitle(titleArg, agentFromCmd(cmd), paneOrigin)
 	prepared.Cwd, prepared.Cmd, prepared.Agent, prepared.Role, prepared.AutomationOrigin, prepared.Origin, prepared.Title, prepared.Identity = cwd, append(cmd, prepared.Cmd...), agent, role, origin, paneOrigin, spawnTitle, identity
@@ -1811,7 +1886,8 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 // caller attribution and finally the daemon's most recently active named
 // workspace. The name tie-break keeps fallback deterministic despite the
 // workspace store's map-backed iteration order.
-func resolveMCPSpawnWorkspace(ws *WorkspaceStore, requested, callerPane string) (string, error) {
+func (a *apiServer) resolveMCPSpawnWorkspace(requested, callerPane string) (string, error) {
+	ws := a.ws
 	if ws == nil {
 		return "", errors.New("workspace store not initialized")
 	}
@@ -1831,10 +1907,8 @@ func resolveMCPSpawnWorkspace(ws *WorkspaceStore, requested, callerPane string) 
 		return resolved, nil
 	}
 
-	if callerPane = strings.TrimSpace(callerPane); callerPane != "" {
-		if callerWorkspace := ws.NameForPane(callerPane); callerWorkspace != "" {
-			return callerWorkspace, nil
-		}
+	if callerWorkspace := a.starterWorkspace(callerPane); callerWorkspace != "" {
+		return callerWorkspace, nil
 	}
 
 	var newest *Workspace
@@ -1850,6 +1924,7 @@ func resolveMCPSpawnWorkspace(ws *WorkspaceStore, requested, callerPane string) 
 	if newest == nil {
 		return "", errors.New("no visible named workspace available")
 	}
+	log.Printf("spawn_pane: workspace fallback for caller %q: using most recently active visible workspace %q", callerPane, newest.Name)
 	return newest.Name, nil
 }
 

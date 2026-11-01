@@ -44,6 +44,10 @@ type workerInfo struct {
 	ArchiveID          string `json:"archiveId,omitempty"`
 	ArchivedAt         int64  `json:"archivedAt,omitempty"`
 	Pinned             bool   `json:"pinned,omitempty"`
+	// Plain marks a worker started with cmd claude or codex: it follows the
+	// same finish/read/archive lifecycle and holds no account credentials
+	// (pane_team.go workerHoldsCredentials).
+	Plain bool `json:"plain,omitempty"`
 }
 
 // prefer breaks equal-headroom ties; it never overrides a healthier account.
@@ -252,7 +256,7 @@ func (a *apiServer) mcpToolAutoWorker(args map[string]any, caller string, scope 
 	if priority != "urgent" && priority != "normal" && priority != "later" {
 		return toolErr("priority must be urgent, normal or later")
 	}
-	workspace, err := resolveMCPSpawnWorkspace(a.ws, mcpArgString(args, "workspace"), caller)
+	workspace, err := a.resolveMCPSpawnWorkspace(mcpArgString(args, "workspace"), caller)
 	if err != nil {
 		return toolErr(err.Error())
 	}
@@ -261,6 +265,9 @@ func (a *apiServer) mcpToolAutoWorker(args map[string]any, caller string, scope 
 	}
 	if role := mcpArgString(args, "role"); !validPaneRole(role) {
 		return toolErr("unknown role: " + role)
+	}
+	if strings.TrimSpace(mcpArgString(args, "lead")) != "" {
+		return toolErr("lead can't be combined with cmd \"auto\": an auto worker is a worker")
 	}
 	if h := mcpArgString(args, "handle"); h != "" {
 		if _, err := normalizePaneHandle(h); err != nil {
@@ -545,6 +552,18 @@ func (a *apiServer) tickWorkers(now time.Time) {
 		trackedWorkers[r.Info.ID] = true
 	}
 	var releases []func()
+	// Plain workers join the queue without cmd auto, so bound history here
+	// too: finished entries leave a day after they started.
+	kept := q.requests[:0]
+	for _, r := range q.requests {
+		if (r.Info.State != "closed" && r.Info.State != "archived") || r.release != nil || now.Sub(r.Created) < 24*time.Hour {
+			kept = append(kept, r)
+		}
+	}
+	for i := len(kept); i < len(q.requests); i++ {
+		q.requests[i] = nil
+	}
+	q.requests = kept
 	for _, p := range a.mgr.List() {
 		snap := p.Snapshot()
 		if snap.Origin == nil || snap.Origin.Worker == nil {
@@ -583,7 +602,7 @@ func (a *apiServer) tickWorkers(now time.Time) {
 			continue
 		}
 		r := &workerRequest{Info: w, Caller: snap.Origin.ByPaneID, Lead: snap.Origin.LeadPaneID, PaneID: snap.ID, Workspace: snap.Origin.Workspace, Created: snap.CreatedAt}
-		if snap.Status == PaneRunning && recoverQuotaWorker != nil {
+		if snap.Status == PaneRunning && recoverQuotaWorker != nil && workerHoldsCredentials(&w) {
 			release, err := recoverQuotaWorker(a, p, w)
 			if err != nil {
 				r.Error = "credential recovery: " + err.Error()
@@ -618,7 +637,8 @@ func (a *apiServer) tickWorkers(now time.Time) {
 				// pointer must never recreate an archived pane's saved record.
 				a.mgr.withCurrentPane(p, func() {
 					p.mu.Lock()
-					if p.Origin != nil {
+					// A kind change may have dropped this record (pane_team.go).
+					if p.Origin != nil && p.Origin.Worker != nil && p.Origin.Worker.ID == r.Info.ID {
 						o := p.Origin.clone()
 						w := r.Info
 						o.Worker = &w
@@ -771,27 +791,74 @@ type workerCredentialHooks struct {
 var workerCredentialSlot extSlot[workerCredentialHooks]
 
 func (a *apiServer) validatedWorkerOrigin(origin *PaneOrigin, req createPaneReq) *PaneOrigin {
-	if origin == nil || origin.Worker == nil {
+	if !req.Restore && (origin == nil || (origin.Worker == nil && origin.TeamKind == "" && origin.LeadRole == "")) {
 		return origin
 	}
-	supplied := origin.Worker
-	origin = origin.clone()
-	origin.Worker = nil
+	var supplied *workerInfo
+	if origin != nil {
+		supplied = origin.Worker
+		origin = origin.clone()
+		origin.Worker, origin.TeamKind, origin.LeadRole = nil, "", ""
+	}
 	if !req.Restore {
 		return origin
 	}
 	matches := func(o *PaneOrigin, claude, codex string) bool {
-		return o != nil && o.Worker != nil && o.Worker.ID == supplied.ID && ((o.Worker.Provider == "claude" && req.ClaudeSessionID != "" && req.ClaudeSessionID == claude) || (o.Worker.Provider == "codex" && req.CodexThreadID != "" && req.CodexThreadID == codex))
+		return supplied != nil && o != nil && o.Worker != nil && o.Worker.ID == supplied.ID && ((o.Worker.Provider == "claude" && req.ClaudeSessionID != "" && req.ClaudeSessionID == claude) || (o.Worker.Provider == "codex" && req.CodexThreadID != "" && req.CodexThreadID == codex))
 	}
+	sameConversation := func(claude, codex string) bool {
+		return (req.ClaudeSessionID != "" && req.ClaudeSessionID == claude) || (req.CodexThreadID != "" && req.CodexThreadID == codex)
+	}
+	var kindFrom *PersistedPane
 	if a.panes != nil {
-		for _, p := range a.panes.List() {
+		stored := a.panes.List()
+		for _, p := range stored {
 			if matches(p.Origin, p.ClaudeSessionID, p.CodexThreadID) {
-				return p.Origin.clone()
+				restored := p.Origin.clone()
+				// A plain worker gets a fresh lifecycle record: two panes must
+				// never share one queue entry.
+				if !workerHoldsCredentials(restored.Worker) {
+					if fresh, err := plainWorker(restored.Worker.Provider); err == nil {
+						restored.Worker = fresh
+					} else {
+						restored.Worker = nil
+					}
+				}
+				return restored
+			}
+		}
+		// The team kind of the same conversation, newest record first.
+		for i := range stored {
+			p := &stored[i]
+			if p.Origin != nil && sameConversation(p.ClaudeSessionID, p.CodexThreadID) && (kindFrom == nil || p.CreatedAt.After(kindFrom.CreatedAt)) {
+				kindFrom = p
+			}
+		}
+	}
+	if kindFrom != nil {
+		// Saved layouts may predate the kind (or carry no origin at all): the
+		// daemon's record of the conversation decides.
+		if origin == nil {
+			origin = kindFrom.Origin.clone()
+			origin.Worker = nil
+		}
+		origin.TeamKind, origin.LeadRole = kindFrom.Origin.TeamKind, kindFrom.Origin.LeadRole
+		// Only an agent-started pane can be a worker (nextTeamOrigin).
+		if origin.TeamKind == paneTeamWorker && origin.Source != paneOriginAgent {
+			origin.TeamKind = ""
+			return origin
+		}
+		// A plain worker gets a fresh lifecycle record, so the lifecycle
+		// continues without two panes sharing one queue entry. Account
+		// records only ever come back whole, above.
+		if w := kindFrom.Origin.Worker; w != nil && !workerHoldsCredentials(w) {
+			if fresh, err := plainWorker(w.Provider); err == nil {
+				origin.Worker = fresh
 			}
 		}
 	}
 	// Workspace definitions are client-writable layout data, never credential
-	// authority. Only the daemon's pane store may authenticate a worker origin.
+	// or kind authority. Only the daemon's pane store may authenticate them.
 	return origin
 }
 

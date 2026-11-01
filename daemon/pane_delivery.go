@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -34,6 +35,11 @@ import (
 // the queue is watched: Codex sends it when the turn ends, but an
 // interrupted turn puts queued messages back into the input box, which then
 // becomes the unsent-message receipt instead of silent leftover text.
+//
+// Claude Code queues on Enter itself while a turn runs (pane_delivery_claude.go):
+// Enter stays the key, and a message to a working Claude is checked against
+// its queue, reported as queued and watched the same way. Up moves Claude's
+// queue back into the input box, which then becomes the receipt.
 
 // errDeliveryLeftInComposer marks a message that reached the input box but
 // was not submitted. The text is still there, so callers must not retype or
@@ -74,8 +80,8 @@ const (
 	// deliveryUnconfirmed: Enter was sent but the input box could not be
 	// read, so delivery could not be checked (unknown layout).
 	deliveryUnconfirmed deliveryOutcome = "sent_unconfirmed"
-	// deliveryLeftInComposer: the text is still in the input box after a
-	// second Enter; the user (or caller) has to act on it.
+	// deliveryLeftInComposer: the text is still in the input box after the
+	// retried Enter, or a retry was unsafe; the user (or caller) has to act.
 	deliveryLeftInComposer deliveryOutcome = "left_in_composer"
 	// deliveryQueued: Codex was mid-turn, so the message went into its own
 	// follow-up queue; Codex sends it when the current turn ends.
@@ -96,8 +102,14 @@ var (
 	deliveryQueueListPolls = 5
 	// deliveryCodexTurnOpen reports a Codex turn still open in the rollout.
 	deliveryCodexTurnOpen = codexRolloutTurnOpen
-	deliverySleep         = time.Sleep
-	deliveryScreenText    = paneVisibleScreen
+	// deliveryPaneBusy reads the pane's state before anything is typed (the
+	// paste's own echo reads as busy afterwards).
+	deliveryPaneBusy = func(p *Pane) bool {
+		s := p.computeStateCached()
+		return s == StateBusy || s == StateRecent
+	}
+	deliverySleep      = time.Sleep
+	deliveryScreenText = paneVisibleScreen
 	// deliveryMenuLive confirms a menu on screen is still unanswered.
 	deliveryMenuLive = func(p *Pane) bool { return p.computeStateCached() == StateChoicePrompt }
 	// A queued Codex message is followed until it leaves the queue. Turns
@@ -127,8 +139,10 @@ func paneVisibleScreen(p *Pane) string {
 // whether the layout was recognised.
 func composerDraft(screen string, codex bool) (string, bool) {
 	if !codex {
-		_, draft, known := conditionalClaudeComposer(screen)
-		return draft, known
+		if _, draft, known := conditionalClaudeComposer(screen); known {
+			return draft, true
+		}
+		return claudePlainComposer(screen)
 	}
 	lines := strings.Split(screen, "\n")
 	start := -1
@@ -168,6 +182,23 @@ func composerHolds(screen string, codex bool, body string) (holds, known bool) {
 	}
 	return strings.Contains(draft, deliveryMarker(body)), true
 }
+
+// composerHoldsExactly reports whether the input box shows body and nothing
+// else, or only the placeholder a long or multi-line paste collapses into.
+func composerHoldsExactly(screen string, codex bool, body string) bool {
+	draft, known := composerDraft(screen, codex)
+	if !known || draft == "" {
+		return false
+	}
+	if draft == conditionalDraftText(body) {
+		return true
+	}
+	return (len(body) > 200 || strings.Contains(body, "\n")) && pastePlaceholderRE.MatchString(draft)
+}
+
+// pastePlaceholderRE: a whole box that is one collapsed paste, as
+// conditionalDraftText leaves it ("[Pastedtext#1+12lines]").
+var pastePlaceholderRE = regexp.MustCompile(`^\[Pasted[^\]]*\]$`)
 
 // deliveryMarker is the start of the body as the composer renders it: no
 // whitespace, at most 24 runes (wrapping and collapsing keep the start).
@@ -239,6 +270,8 @@ func deliverAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode
 		}
 	}()
 	codex := !hasClaude
+	// A working Claude queues the Enter; only then is its queue read.
+	claudeBusy := hasClaude && (deliveryPaneBusy(p) || claudeTurnRunningText(deliveryScreenText(p)))
 	first := []byte(body)
 	if codex {
 		first = []byte("\x1b[200~" + body + "\x1b[201~")
@@ -252,6 +285,7 @@ func deliverAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode
 	deliverySleep(EnterGap(hasClaude))
 	seen, _ := waitComposer(p, codex, body, true, deliveryVisibleTimeout)
 	key, queue, stop := chooseSubmitKey(p, codex, mode)
+	queue = queue || claudeBusy
 	if stop != nil {
 		return wrote, "", p.stopAfterPaste(stop, seen, sender, body, hasClaude)
 	}
@@ -260,18 +294,30 @@ func deliverAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode
 	if err != nil {
 		return wrote, "", errors.New("submit key failed: " + err.Error())
 	}
+	typed := p.inputRevision.Load()
 	holds, known := waitComposer(p, codex, body, false, deliveryRetryAfter)
 	if !known {
 		return wrote, deliveryUnconfirmed, nil
 	}
 	if !holds {
-		return wrote, p.leftComposerOutcome(queue, body, senders...), nil
+		return wrote, p.leftComposerOutcome(codex, queue, body, senders...), nil
 	}
-	// Still in the box: the first key became a newline inside the paste.
+	// Still in the box after the settle delay: the first key landed too soon
+	// (a newline inside the paste, or before Claude took the paste in). It is
+	// pressed once more only when nothing was typed since and Claude's box
+	// holds exactly this message; otherwise it is left for the person. The
+	// receipt is pinned to the input before any later typing, so a box mixed
+	// with someone else's text shows no Send/Clear. The body is never typed
+	// again.
+	if p.inputRevision.Load() != typed || (!codex && !composerHoldsExactly(deliveryScreenText(p), codex, body)) {
+		revision = typed
+		return wrote, deliveryLeftInComposer, nil
+	}
 	// The turn may have ended meanwhile, so the key is chosen again.
 	if key, queue, stop = chooseSubmitKey(p, codex, mode); stop != nil {
 		return wrote, "", p.stopAfterPaste(stop, true, sender, body, hasClaude)
 	}
+	queue = queue || claudeBusy
 	revision = p.inputRevision.Load() + 1
 	n, err = p.Write(key)
 	wrote += n
@@ -285,7 +331,7 @@ func deliverAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode
 	case holds:
 		return wrote, deliveryLeftInComposer, nil
 	}
-	return wrote, p.leftComposerOutcome(queue, body, senders...), nil
+	return wrote, p.leftComposerOutcome(codex, queue, body, senders...), nil
 }
 
 // chooseSubmitKey picks the key for the pasted draft, or says why none may
@@ -359,12 +405,12 @@ func deliverySubmitKey(p *Pane, codex bool) (key []byte, queue bool) {
 	return []byte("\r"), false
 }
 
-// leftComposerOutcome classifies text that left the input box. After the
-// queue key it is queued when Codex's queue shows it (the list can draw a
-// frame after the box empties, so it is read a few times); otherwise the
-// turn ended between reading the footer and the key, and Codex submitted it
-// as a new turn.
-func (p *Pane) leftComposerOutcome(queue bool, body string, senders ...string) deliveryOutcome {
+// leftComposerOutcome classifies text that left the input box. After Codex's
+// queue key, or Enter into a working Claude, it is queued when the agent's
+// queue shows it (the list can draw a frame after the box empties, so it is
+// read a few times); otherwise the turn ended first and the agent submitted
+// it as a new turn.
+func (p *Pane) leftComposerOutcome(codex, queue bool, body string, senders ...string) deliveryOutcome {
 	if !queue {
 		return deliverySubmitted
 	}
@@ -372,12 +418,12 @@ func (p *Pane) leftComposerOutcome(queue bool, body string, senders ...string) d
 		if i > 0 {
 			deliverySleep(deliveryPollInterval)
 		}
-		if codexQueueHolds(deliveryScreenText(p), body) {
+		if agentQueueHolds(deliveryScreenText(p), codex, body) {
 			by := ""
 			if len(senders) > 0 {
 				by = senders[0]
 			}
-			go p.watchQueuedMessage(body, by)
+			go p.watchQueuedMessage(body, by, codex)
 			return deliveryQueued
 		}
 	}
@@ -390,11 +436,19 @@ func (p *Pane) recordUnsentMessage(sender, body string, claude bool, revision ui
 	p.mu.Unlock()
 }
 
-// watchQueuedMessage follows a message in Codex's queue until it leaves it.
-// Codex sends queued messages when the turn ends; an interrupted turn moves
-// them back into the input box instead, and then the message is recorded as
-// unsent so the pane shows its Send/Clear receipt.
-func (p *Pane) watchQueuedMessage(body, by string) {
+// agentQueueHolds reports whether Codex's or Claude's queue lists body.
+func agentQueueHolds(screen string, codex bool, body string) bool {
+	if codex {
+		return codexQueueHolds(screen, body)
+	}
+	return claudeQueueHolds(screen, body)
+}
+
+// watchQueuedMessage follows a message in the agent's queue until it leaves
+// it. The agent sends queued messages itself; an interrupted Codex turn, or
+// Up in Claude, moves them back into the input box instead, and then the
+// message is recorded as unsent so the pane shows its Send/Clear receipt.
+func (p *Pane) watchQueuedMessage(body, by string, codex bool) {
 	sender := by
 	if sender == "" {
 		sender = "SoluTerminal"
@@ -419,18 +473,18 @@ func (p *Pane) watchQueuedMessage(body, by string) {
 		}
 		screen := deliveryScreenText(p)
 		// An approval modal covers the queue and the input box.
-		if codexQueueHolds(screen, body) || isGridChoicePromptText(screen, true) {
+		if agentQueueHolds(screen, codex, body) || isGridChoicePromptText(screen, codex) {
 			continue
 		}
 		p.deliveryMu.Lock()
 		screen = deliveryScreenText(p)
-		holds, known := composerHolds(screen, true, body)
+		holds, known := composerHolds(screen, codex, body)
 		switch {
-		case codexQueueHolds(screen, body) || isGridChoicePromptText(screen, true) || !known:
+		case agentQueueHolds(screen, codex, body) || isGridChoicePromptText(screen, codex) || !known:
 			p.deliveryMu.Unlock()
 			continue
 		case holds:
-			p.recordUnsentMessage(sender, body, false, p.inputRevision.Load())
+			p.recordUnsentMessage(sender, body, !codex, p.inputRevision.Load())
 			outcome = string(deliveryLeftInComposer)
 		default:
 			outcome = string(deliverySubmitted)
@@ -470,11 +524,11 @@ func deliveryNotice(o deliveryOutcome) string {
 	case deliverySubmitted:
 		return "the agent received it"
 	case deliveryLeftInComposer:
-		return "NOT submitted: the text is still in that pane's input box (pressing Enter twice did not send it); tell the user, do not resend"
+		return "NOT submitted: the text is still in that pane's input box (Enter did not send it, and it is never typed twice); the pane shows it as an unsent message the person can send or clear. Tell the user, do not resend"
 	case deliveryUnconfirmed:
 		return "Enter was sent but delivery could not be confirmed from the screen"
 	case deliveryQueued:
-		return "queued: that Codex agent is mid-turn, so the message is in its queue and goes in when the current turn ends; do not resend"
+		return "queued: that agent is mid-turn, so the message is in its own queue and goes in when the agent takes it (Codex at the end of the turn, Claude with its next step); do not resend"
 	}
 	return string(o)
 }

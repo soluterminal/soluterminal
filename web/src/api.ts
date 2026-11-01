@@ -1,5 +1,5 @@
 import type { ClosedPane } from './lib/closedPanes';
-import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, NativeSettings, OrchestratorHostsInfo, PaneEffort, PaneIdentity, PaneInfo, PaneRole, Port, RecoverySettings, ReleaseCheck, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, Workspace, WorkspaceSummary } from './types';
+import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, NativeSettings, OrchestratorHostsInfo, PaneEffort, PaneIdentity, PaneInfo, PaneOrigin, PaneRole, Port, RecoverySettings, ReleaseCheck, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, Workspace, WorkspaceSummary } from './types';
 import { isRouterMode } from './dualBackend';
 import { setEnterGapConfig } from './ptySubmit';
 import { openTicketedEventSource, type EventStream } from './lib/ticketedEventSource';
@@ -4660,6 +4660,14 @@ const coreApi = {
   // an existing conversation is resumed and a session-less host starts fresh.
   // The changed pid drives reconnect/replay; busy panes return 409 and a true
   // no-op returns the current pane without restarting.
+  // Lead / worker / the user's own pane (daemon pane_team.go). People only.
+  setPaneTeam: (id: string, kind: 'lead' | 'worker' | 'none', role: string, scope?: RoutingScope) =>
+    workflowFetch(scope, `/api/panes/${id}/team`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind, role }),
+    }).then(j<{ origin: PaneOrigin }>),
+
   setPaneRole: (id: string, role: PaneRole | '', cols?: number, rows?: number, scope?: RoutingScope) =>
     workflowFetch(scope, `/api/panes/${id}/role`, {
       method: 'POST',

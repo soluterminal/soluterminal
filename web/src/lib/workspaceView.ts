@@ -2,6 +2,7 @@ import { balancedLayout, DEFAULT_LAYOUT_ASPECT, DEFAULT_LAYOUT_COLUMNS } from '.
 import type { Layout, PaneInfo, Workspace } from '../types';
 import { buildNxMFromLeaves, buildPresetLayout, collectLeaves, layoutHasLeaf, leafId, type LayoutPresetId } from './layout';
 import { createWorkspacePaneTreeSelector, flattenPaneTree, type PaneTreeNode } from './workspacePaneTree';
+import { paneTeamKind } from './paneTeam';
 
 export interface WorkspaceView {
   workspace: string;
@@ -88,6 +89,18 @@ export function workspaceRootOf(s: WorkspaceViewState, paneId: string): string |
   return id;
 }
 
+/** The pane whose team shows paneId: its nearest lead (itself included) or
+ * else its top-level ancestor. A sub-lead's worker opens the sub-lead's team. */
+export function workspaceLeadOf(s: WorkspaceViewState, paneId: string): string | null {
+  const parent = new Map<string, PaneTreeNode>();
+  const nodes = workspaceNodes(s);
+  for (const node of nodes) for (const child of node.children) parent.set(child.pane.id, node);
+  let node = nodes.find(n => n.pane.id === paneId);
+  if (!node) return null;
+  while (parent.has(node.pane.id) && paneTeamKind(node.pane) !== 'lead') node = parent.get(node.pane.id)!;
+  return node.pane.id;
+}
+
 export const workspaceViewHasSelection = (s: WorkspaceViewState): boolean => workspaceNodes(s).some(n => n.pane.id === s.workspaceView?.paneId);
 /** The overview shows something other than the saved layout (hidden workers,
  * recovered tiles, a view-only preset or an auto-balanced projection). */
@@ -167,9 +180,9 @@ export function workspaceViewForPane(s: WorkspaceViewState, paneId: string): Wor
   if (layoutHasLeaf(workspaceViewLayout(s), paneId)) return undefined;
   const overview = { ...s, workspaceView: null };
   if (layoutHasLeaf(buildWorkspaceViewLayout(overview, effectiveWorkspaceView(overview)), paneId)) return null;
-  const root = workspaceRootOf(s, paneId);
-  if (!root) return undefined;
-  return { workspace: s.activeWorkspace, backend: s.activeBackend ?? null, kind: 'team', paneId: root };
+  const lead = workspaceLeadOf(s, paneId);
+  if (!lead) return undefined;
+  return { workspace: s.activeWorkspace, backend: s.activeBackend ?? null, kind: 'team', paneId: lead };
 }
 
 /** Turn the shown overview into a saved layout. Each hidden leaf sits beside

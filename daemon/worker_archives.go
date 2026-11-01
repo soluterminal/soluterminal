@@ -42,6 +42,7 @@ type workerArchiveState struct {
 	entries      []workerArchiveEntry
 	reads        map[string]workerReadReceipt
 	checked      map[string]time.Time
+	flagged      map[string]string // pane id → the retention already flagged to its lead
 	beforeCommit func()            // test-only race seam; nil in production
 	teardown     func(*Pane) error // test-only failure seam; nil in production
 	context      context.Context
@@ -65,6 +66,7 @@ func (a *apiServer) loadWorkerArchivesLocked(s *workerArchiveState) {
 	s.loaded = true
 	s.reads = map[string]workerReadReceipt{}
 	s.checked = map[string]time.Time{}
+	s.flagged = map[string]string{}
 	if a.dataDir == "" {
 		s.err = errors.New("archive storage unavailable")
 		return
@@ -118,7 +120,9 @@ func workerReplyKey(reply paneReply) string {
 }
 func (a *apiServer) noteWorkerReplyRead(caller string, p *Pane, reply paneReply) {
 	snap := p.Snapshot()
-	if snap.Origin == nil || snap.Origin.Worker == nil || caller == "" || caller != snap.Origin.LeadPaneID {
+	// The lead reading the result: the worker's starter when that pane leads
+	// workers, or the lead recorded at spawn (pane_team.go workerLeadFor).
+	if snap.Origin == nil || snap.Origin.Worker == nil || caller == "" || (caller != snap.Origin.LeadPaneID && caller != a.workerLeadFor(snap.Origin)) {
 		return
 	}
 	key := workerReplyKey(reply)
@@ -269,7 +273,8 @@ func (a *apiServer) archiveFinishedWorkers(now time.Time) {
 }
 func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	snap := p.Snapshot()
-	if a.ws == nil || a.panes == nil || snap.Origin == nil || snap.Origin.Worker == nil || snap.Origin.Worker.State != "finished" {
+	// Only workers are archived: never a lead or the user's own pane.
+	if a.ws == nil || a.panes == nil || snap.Origin == nil || snap.Origin.Worker == nil || snap.Origin.Worker.State != "finished" || paneTeamKind(snap.Origin) != paneTeamWorker {
 		return
 	}
 	reply := a.paneLatestReply(p)
@@ -324,7 +329,17 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 				}
 				reason += "final reply unread by lead"
 			}
-			a.flagWorkerLead(snap.Origin.LeadPaneID, snap.ID, reason)
+			// Tell the lead once per final reply and reason: a person who
+			// clears the flag isn't flagged again until something changes.
+			lead := a.workerLeadFor(snap.Origin)
+			note := lead + "\x00" + key + "\x00" + reason
+			s.mu.Lock()
+			again := s.flagged[p.ID] == note
+			s.flagged[p.ID] = note
+			s.mu.Unlock()
+			if !again {
+				a.flagWorkerLead(lead, snap.ID, reason)
+			}
 		}
 		return
 	}
@@ -391,7 +406,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			return
 		}
 		current := p.Snapshot()
-		if current.Origin == nil || current.Origin.Worker == nil || current.Origin.Worker.State != "finished" {
+		if current.Origin == nil || current.Origin.Worker == nil || current.Origin.Worker.State != "finished" || paneTeamKind(current.Origin) != paneTeamWorker {
 			return
 		}
 		q.archivePolicyMu.RLock()
@@ -429,7 +444,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			keep = false
 		}
 		p.workerArchiving.Store(false)
-		a.flagWorkerLead(snap.Origin.LeadPaneID, p.ID, "archive layout persistence failed")
+		a.flagWorkerLead(a.workerLeadFor(snap.Origin), p.ID, "archive layout persistence failed")
 		return
 	}
 	teardown := a.detachArchivedWorker
@@ -443,12 +458,12 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		if restored && a.discardWorkerArchive(archiveID) == nil {
 			keep = false
 		}
-		a.flagWorkerLead(snap.Origin.LeadPaneID, p.ID, "archive process shutdown failed")
+		a.flagWorkerLead(a.workerLeadFor(snap.Origin), p.ID, "archive process shutdown failed")
 		return
 	}
 	if a.panes != nil {
 		if err = a.panes.Remove(p.ID); err != nil {
-			a.flagWorkerLead(snap.Origin.LeadPaneID, p.ID, "archive pane-store cleanup failed")
+			a.flagWorkerLead(a.workerLeadFor(snap.Origin), p.ID, "archive pane-store cleanup failed")
 			return
 		}
 	}
@@ -638,9 +653,9 @@ func (a *apiServer) reopenWorkerArchive(w http.ResponseWriter, r *http.Request) 
 	if o := a.originAliases.resolveOrigin(entry.Snap.Origin); o != nil {
 		lead = o.LeadPaneID
 	}
-	workspace, err := resolveMCPSpawnWorkspace(a.ws, entry.Workspace, lead)
+	workspace, err := a.resolveMCPSpawnWorkspace(entry.Workspace, lead)
 	if err != nil {
-		workspace, err = resolveMCPSpawnWorkspace(a.ws, "", lead)
+		workspace, err = a.resolveMCPSpawnWorkspace("", lead)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), 409)

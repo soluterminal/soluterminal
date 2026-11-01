@@ -1,0 +1,38 @@
+▝▜██████▀  Haiku 5.5 · Claude Ultra
+ ▝▝   ▝▝   ~/projects/demo
+
+❯ /clear
+
+❯ Write a 3000-word short story about a lighthouse keeper, in plain prose. End with the line THE END.
+
+● The Last Watch at Gannet Rock
+
+  The letter reached Gannet Rock in March, folded inside a brown envelope with the harbour authority's crest in the
+  corner. Walter Dunning read it twice at the kitchen table. It said that the station would be decommissioned at the end
+  of the navigation season, that the optic would be removed to a museum in the city, that his long service was deeply
+  appreciated, and that a pension review would follow in due course. He folded it along its creases and slid it under
+  the sugar bowl, where it stayed for three days.
+
+  He was sixty-eight. He had been keeper of the Gannet Rock light for thirty-one years, and for the last eleven of them
+  he had been keeper of very little. The lamp had been automated in the year his daughter turned seventeen. Since then
+  the light turned by itself, the fog signal sounded when the sensor said fog, and the radio beacon sent its
+  identification every thirty seconds whether anyone was listening or not. Walter's job had become a list of checks. He
+  walked the gallery each morning and read the gauges. He wrote the log. He cleaned the lens on Thursdays, though it
+  hardly needed it, because the new lamp was sealed and the salt air could not get at it the way it used to.
+
+  On the fourth morning after the letter, he took it out from under the sugar bowl, read it once more, and went up the
+  tower to do the checks.
+
+  The stairs were a hundred and twelve steps of cast iron, painted white so many times that the paint had a soft,
+  rounded look at the edges. Walter counted them out of habit. He had counted them in the first week, carrying his
+  wife's suitcase up with one hand and holding his daughter against his shoulder with the other, and he had counted them
+  every day since, though he could no longer remember why he started. At the top the lamp room was warm from the lamp,
+  and the glass of the lantern threw the morning back at him in pieces.
+
+  From the gallery he could see the whole of the sea. On clear days you could make out the mainland as a low grey line,
+  and the harbour lights at the far end of it, and in the evenings the lights of the ferry coming and going. Today there
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ queued probe: say CHERRY
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

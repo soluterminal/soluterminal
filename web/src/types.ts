@@ -105,6 +105,8 @@ export interface PaneWorker {
   archiveId?: string;
   archivedAt?: number;
   pinned?: boolean;
+  /** Started with cmd claude or codex: the worker lifecycle without an account. */
+  plain?: boolean;
 }
 
 export interface ArchivedWorker {
@@ -137,6 +139,11 @@ export interface PaneOrigin {
   purpose?: string;
   workspace?: string;
   at: number;
+  /** 'lead' (a role pane, never closed automatically), 'worker' (a task for
+   *  its lead) or absent for the user's own pane. Daemon-owned (pane_team.go). */
+  teamKind?: 'lead' | 'worker';
+  /** A lead's role name, e.g. "security". */
+  leadRole?: string;
 }
 
 /** The latest independent review (scripts/solu-review) of the work in a pane,
@@ -165,7 +172,9 @@ export interface PaneReview {
 
 export interface PaneInfo {
   neverAutoAnswer?: boolean;
-  unsentMessage?: { id: string; sender: string };
+  /** text: the whole message a busy pane was not given (notTyped), shown
+   *  before Send types it. */
+  unsentMessage?: { id: string; sender: string; notTyped?: boolean; text?: string };
 	// Current live-auth evidence, distinct from selection captured at launch.
 	codexAuth?: {
 		state: string; account?: string; canReconnect?: boolean; recovery?: string; retryAt?: number;

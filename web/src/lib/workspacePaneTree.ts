@@ -1,6 +1,7 @@
 import type { Layout, PaneInfo, Workspace } from '../types';
 import { paneIdsInOrder } from './layout';
 import { paneRowStatus, type PaneRowStatus } from './paneStatus';
+import { nearestLeadId, paneTeamKind } from './paneTeam';
 
 // Legacy snapshots may only have origin.at; missing/invalid times sort first.
 function creationTime(pane: PaneInfo): number {
@@ -30,9 +31,12 @@ export interface WorkspacePaneTree {
   hasTopLevelPanes: boolean;
 }
 
-/** Immediate starters take precedence over the original lead. A closed starter
- * falls back to the surviving lead. Explicit workspace membership always wins
- * over ancestry, so moving a worker never drags it back to its old workspace. */
+/** A worker nests under its immediate starter, falling back to its lead when
+ * the starter has closed. A lead nests under its starter, or else its lead,
+ * when that pane is open and not a worker (a sub-lead); with neither it is
+ * top level, like the user's own panes. Explicit workspace membership always
+ * wins over ancestry, so moving a worker never drags it back to its old
+ * workspace. */
 export function buildWorkspacePaneTrees(
   workspaces: Workspace[], panes: Record<string, PaneInfo>,
   activeWorkspace: string, layout: Layout | null, activeBackend: 'wsl' | 'win' | null = null,
@@ -41,8 +45,12 @@ export function buildWorkspacePaneTrees(
   const list = Object.values(panes).filter(p => p.role !== 'task_owner').sort(compareCreation);
   const parents = new Map<string, string>();
   for (const p of list) {
-    if (p.origin?.source !== 'agent') continue;
-    const id = [p.origin.byPaneId, p.origin.leadPaneId].find(id => id && id !== p.id && panes[id] && panes[id].role !== 'task_owner');
+    const kind = paneTeamKind(p);
+    if (!kind || !p.origin) continue;
+    // A lead nests under the lead it works for, past any workers between.
+    const candidates = kind === 'worker' ? [p.origin.byPaneId, p.origin.leadPaneId] : [nearestLeadId(p, panes)];
+    const id = candidates.find(id => id && id !== p.id && panes[id] && panes[id].role !== 'task_owner'
+      && (kind === 'worker' || paneTeamKind(panes[id]) !== 'worker'));
     if (id) parents.set(p.id, id);
   }
   // Bad/legacy metadata must never hide a cycle or recurse forever.
@@ -82,15 +90,18 @@ export function buildWorkspacePaneTrees(
   // An agent pane with no surviving ancestor and no recorded home belongs to
   // no workspace: it stays in Background sessions (its one place), instead of
   // being claimed by whichever workspace sorts first.
-  const nodes = new Map(list.map(pane => [pane.id, { pane, children: [], isTopLevel: pane.origin?.source !== 'agent', status: paneRowStatus(pane), needsYou: false, descendantCount: 0, } as PaneTreeNode]));
+  // Workers are never top level; a lead is unless it nests under another pane.
+  const nodes = new Map(list.map(pane => [pane.id, { pane, children: [], isTopLevel: paneTeamKind(pane) !== 'worker', status: paneRowStatus(pane), needsYou: false, descendantCount: 0, } as PaneTreeNode]));
   for (const p of list) {
     const i = owner.get(p.id);
     if (i === undefined) continue;
     const node = nodes.get(p.id)!;
     const parentId = parents.get(p.id);
     const parent = parentId && owner.get(parentId) === i ? nodes.get(parentId) : undefined;
-    if (parent) parent.children.push(node);
-    else trees[i].roots.push(node);
+    if (parent) {
+      parent.children.push(node);
+      node.isTopLevel = false;
+    } else trees[i].roots.push(node);
     trees[i].paneIds.push(p.id);
   }
   const summarize = (node: PaneTreeNode) => {

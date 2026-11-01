@@ -20,7 +20,9 @@ export function WorkspaceHandoffBoundary({ children }: { children: ReactNode }) 
   );
   const load = useStore((state) => state.loadWorkspace);
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+    // .workspace-handoff is the grid column's flex item (styles.css): it must
+    // shrink to leave the footer StatusBar its row.
+    <div className="workspace-handoff" style={{ position: 'relative', width: '100%', height: '100%' }}>
       <div
         style={{
           width: '100%',

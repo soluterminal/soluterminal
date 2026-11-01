@@ -1,0 +1,39 @@
+  while and then added, Daughter coming out, weather permitting.
+
+  ---
+
+  April was mild, and then May was wet, and June came in with long light evenings that made the lamp seem almost
+  foolish. The fishing boats from the harbour came out past the rock in greater numbers, and Walter took to counting
+  them. Forty-one in one day. He wrote the number down. He wrote down the weather and the sea state and the visibility,
+  which was always good, because he was the sort of man who wrote things down whether or not anyone would ever read
+  them.
+
+  Lise did not come in June. The boat was full of cement and new winches for the harbour master's office, and Declan
+  said there would
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ queued probe: say CHERRY
+
+● CHERRY
+
+✻ Brewed for 2s · done 4:27 PM
+
+❯ Write a 3000-word short story about a clockmaker, in plain prose. End with the line THE END.
+
+✻ Churned for 1m 9s · done 4:29 PM
+
+❯ Run these with the Bash tool, one command per tool call, in order: ls /, ls /usr, ls /etc, ls /var, ls /opt, ls /srv.
+  After all six, write a 600-word summary of a typical Linux filesystem layout.
+
+  Listing 2 directories… (ctrl+o to expand)
+  ⎿  $ ls /usr
+
+❯ third probe: say PEAR
+  ctrl+x ctrl+s to send now
+
+· Flummoxing… (4s · ↓ 288 tokens · thought for 1s)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← 4 agents

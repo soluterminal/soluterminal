@@ -107,6 +107,90 @@ func claudeLatestReply(buf []byte) paneReply {
 	return r
 }
 
+// claudeReplyTo finds, in a Claude Code transcript tail, the newest place a
+// user message satisfying match went in, and what Claude said after it. A
+// queued message goes in either as its own turn (a prompt with promptSource
+// "queued") or, mid-turn, with the next tool result (a queued_command
+// attachment); either way the reply runs to the end of that turn, and it
+// is found after later turns have run. Messages queued together go in
+// together, as back-to-back prompts with one reply, so a prompt only ends
+// ours once Claude has answered something since ours went in.
+func claudeReplyTo(buf []byte, match func(prompt string) bool) paneReply {
+	r := paneReply{Agent: agentClaude, Source: "transcript"}
+	var parts []string
+	ours, answered := false, false
+	start := func(prompt, at string) {
+		ours, answered = true, false
+		r = paneReply{Agent: agentClaude, Source: "transcript", Prompt: prompt, PromptAt: parseTranscriptTime(at), PromptSeen: true}
+		parts = parts[:0]
+	}
+	for _, line := range bytes.Split(buf, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var env struct {
+			Type         string          `json:"type"`
+			Timestamp    string          `json:"timestamp"`
+			Sidechain    bool            `json:"isSidechain"`
+			PromptSource string          `json:"promptSource"`
+			Meta         bool            `json:"isMeta"`
+			Compact      bool            `json:"isCompactSummary"`
+			Visible      bool            `json:"isVisibleInTranscriptOnly"`
+			Message      json.RawMessage `json:"message"`
+			Attachment   struct {
+				Type   string `json:"type"`
+				Prompt string `json:"prompt"`
+			} `json:"attachment"`
+		}
+		if json.Unmarshal(line, &env) != nil || env.Sidechain {
+			continue
+		}
+		switch env.Type {
+		case "attachment":
+			if env.Attachment.Type == "queued_command" && match(env.Attachment.Prompt) {
+				start(strings.TrimSpace(env.Attachment.Prompt), env.Timestamp)
+			}
+		case "user":
+			switch classifyClaudeUserRecord(env.PromptSource, env.Meta, env.Compact, env.Visible, env.Message) {
+			case claudeUserPrompt:
+				if prompt := claudeMessageText(env.Message); match(prompt) {
+					start(prompt, env.Timestamp)
+				} else if ours && answered {
+					r.Complete = true // a later turn began, so ours is over
+				}
+			case claudeUserInterrupt:
+				if ours {
+					r.Complete = true
+				}
+			}
+		case "assistant":
+			if !ours || r.Complete {
+				continue
+			}
+			answered = true
+			var msg struct {
+				Stop    string `json:"stop_reason"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			if json.Unmarshal(env.Message, &msg) != nil {
+				continue
+			}
+			for _, b := range msg.Content {
+				if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+					parts = append(parts, strings.TrimSpace(b.Text))
+				}
+			}
+			r.Complete = msg.Stop == "end_turn" || msg.Stop == "stop_sequence"
+		}
+	}
+	r.Reply = strings.Join(parts, "\n\n")
+	return r
+}
+
 func claudeMessageText(raw json.RawMessage) string {
 	var m struct {
 		Content json.RawMessage `json:"content"`
@@ -384,18 +468,30 @@ func (a *apiServer) paneLatestReply(p *Pane) paneReply {
 }
 
 // paneReplyTo is paneLatestReply for an ask_pane whose message a working
-// Codex queued: the reply is the turn that ran that message, found even after
-// the turns queued behind it have run. Until the message shows up in the
-// rollout the reply is an empty transcript reply, so the wait goes on.
+// Codex or Claude queued: the reply is what followed that message, found even
+// after the turns queued behind it have run. Until the message shows up in
+// the rollout or transcript the reply is an empty transcript reply, so the
+// wait goes on.
 func (a *apiServer) paneReplyTo(p *Pane, base paneTurnBaseline) paneReply {
 	if base.Queued == "" {
 		return a.paneLatestReply(p)
 	}
 	snap := p.Snapshot()
-	if paneSummaryAgent(p, snap) == agentCodex {
+	match := func(prompt string) bool { return queuedPromptMatches(prompt, base.Queued) }
+	switch paneSummaryAgent(p, snap) {
+	case agentClaude:
+		if path := a.transcriptForPane(p); path != "" && claudeTranscriptBelongsToPane(path, snap) {
+			if buf, err := tailReadBounded(path, paneReplyTailBytes); err == nil {
+				r := claudeReplyTo(buf, match)
+				r.Path = path
+				r.Reply = redactTerminalTail(r.Reply)
+				return r
+			}
+		}
+	case agentCodex:
 		if path := codexRolloutPath(snap.CodexThreadID); path != "" {
 			if buf, err := tailReadBounded(path, paneReplyTailBytes); err == nil {
-				r := codexReplyTo(buf, func(prompt string) bool { return queuedPromptMatches(prompt, base.Queued) })
+				r := codexReplyTo(buf, match)
 				r.Path = path
 				r.Reply = redactTerminalTail(r.Reply)
 				return r

@@ -62,3 +62,34 @@ describe('workspace move destination picker', () => {
     await waitFor(() => expect(move).not.toHaveBeenCalled());
   });
 });
+
+describe('Make lead from the pane menu', () => {
+  it('sends the role to the pane\'s own daemon and updates its origin', async () => {
+    const { api } = await import('../api');
+    const origin = { source: 'user' as const, at: 1, teamKind: 'lead' as const, leadRole: 'security' };
+    const set = vi.spyOn(api, 'setPaneTeam').mockResolvedValue({ origin });
+    const { result } = hook(); render(<DialogHost />);
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.actions.setTeamKind('lead'); });
+    await screen.findByRole('dialog', { name: 'Make lead' });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@security ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Make lead' }));
+    await act(async () => { await pending; });
+    expect(set).toHaveBeenCalledWith('moving', 'lead', 'security', expect.objectContaining({ key: expect.any(String) }));
+    expect(useStore.getState().panes.moving.origin).toEqual(origin);
+  });
+
+  it('drops a pending role after the user navigates elsewhere', async () => {
+    const { api } = await import('../api');
+    const set = vi.spyOn(api, 'setPaneTeam').mockResolvedValue({ origin: { source: 'user', at: 1 } });
+    const { result } = hook(); render(<DialogHost />);
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.actions.setTeamKind('lead'); });
+    await screen.findByRole('dialog');
+    act(() => useStore.setState({ navigationGeneration: 1 }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'qa' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Make lead' }));
+    await act(async () => { await pending; });
+    expect(set).not.toHaveBeenCalled();
+  });
+});

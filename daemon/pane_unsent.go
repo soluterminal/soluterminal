@@ -2,15 +2,25 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
+	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
 type unsentPaneMessage struct {
-	ID         string `json:"id"`
-	Sender     string `json:"sender"`
+	ID     string `json:"id"`
+	Sender string `json:"sender"`
+	// NotTyped: the pane was busy, so nothing was typed (a shell or an agent
+	// with no queue SoluTerminal knows). Send types it; Clear discards it.
+	// Text is the whole message, so the person reads exactly what Send
+	// would type (a typed receipt's text is on screen already).
+	NotTyped   bool   `json:"notTyped,omitempty"`
+	Text       string `json:"text,omitempty"`
 	body       string
 	claude     bool
 	revision   uint64
@@ -23,7 +33,7 @@ var errUnsentChanged = errors.New("input changed or cannot be verified; the pane
 // also removes the chip after the user submits or edits the draft themselves.
 // Caller holds mu; receipts are immutable, so sharing the pointer is safe.
 func (p *Pane) currentUnsentMessageLocked() *unsentPaneMessage {
-	if p.unsentMessage != nil && p.Status == PaneRunning && p.Kind != "native" && !p.respawning.Load() && p.unsentMessage.connection == p.agentConn && p.unsentMessage.revision == p.inputRevision.Load() {
+	if p.unsentMessage != nil && p.Status == PaneRunning && p.Kind != "native" && !p.respawning.Load() && p.unsentMessage.connection == p.agentConn && (p.unsentMessage.NotTyped || p.unsentMessage.revision == p.inputRevision.Load()) {
 		return p.unsentMessage
 	}
 	return nil
@@ -63,7 +73,8 @@ func composerShowsExactLine(screen string, codex bool, body string) bool {
 		return false
 	}
 	for _, rest := range lines[start+1:] {
-		if (codex && codexFooterLineRE.MatchString(rest)) || (!codex && newPromptFooterRE.MatchString(rest)) {
+		// Claude closes its box with a rule; older layouts end at the footer.
+		if (codex && codexFooterLineRE.MatchString(rest)) || (!codex && (newPromptFooterRE.MatchString(rest) || claudeBoxRule(rest))) {
 			return true
 		}
 		if strings.Trim(strings.TrimSpace(rest), "─") != "" {
@@ -72,6 +83,8 @@ func composerShowsExactLine(screen string, codex bool, body string) bool {
 	}
 	return false
 }
+
+const untypedSendAction = "send a message a busy pane was not given"
 
 func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.mgr.Get(r.PathValue("id"))
@@ -94,6 +107,14 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "human_required", http.StatusForbidden)
 		return
 	}
+	// Sending a message the pane was never given types an agent's text: only
+	// the person, who was shown it, may do that.
+	if msg := p.Snapshot().UnsentMessage; msg != nil && msg.ID == req.ID && msg.NotTyped && req.Action == "send" && !a.requireHuman(w, r, untypedSendAction) {
+		return
+	}
+	// The provider check can scan the process tree, so it runs before the
+	// delivery and writer locks.
+	agent, claude := paneAgentProvider(p)
 	p.deliveryMu.Lock()
 	defer p.deliveryMu.Unlock()
 	msg := p.Snapshot().UnsentMessage
@@ -101,14 +122,22 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unsent message changed", http.StatusConflict)
 		return
 	}
+	// The receipt can change between the check above and the lock: check the
+	// one Send would act on.
+	if msg.NotTyped && req.Action == "send" && !a.requireHuman(w, r, untypedSendAction) {
+		return
+	}
+	if msg.NotTyped {
+		a.actOnUntypedMessage(w, p, msg, req.Action, agent)
+		return
+	}
 	keys := "\r"
 	if req.Action == "clear" {
 		keys = "\x01\x0b"
 	} // start of line, kill to end
 	revision := msg.revision + 1
-	// The provider check can scan the process tree, so it runs before the
-	// writer lock; the screen and receipt are rechecked under it.
-	if agent, claude := paneAgentProvider(p); !agent || claude != msg.claude {
+	// The screen and receipt are rechecked under the writer lock.
+	if !agent || claude != msg.claude {
 		http.Error(w, errUnsentChanged.Error(), http.StatusConflict)
 		return
 	}
@@ -169,4 +198,143 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	p.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"outcome": outcome})
+}
+
+// actOnUntypedMessage resolves a message a busy pane was never given: Send
+// types it now, the way send_input would have (line, gap, Enter), and Clear
+// discards it. Nothing is in an input box to check, so the outcome is what
+// was done. Send refuses, typing nothing, when the pane is locked against
+// automatic answers (the text is an agent's), is busy again, shows a menu or
+// a password prompt, or has started an agent since; the receipt stays.
+func (a *apiServer) actOnUntypedMessage(w http.ResponseWriter, p *Pane, msg *unsentPaneMessage, action string, agent bool) {
+	same := func() error {
+		snap := p.Snapshot()
+		if snap.Status != PaneRunning || snap.UnsentMessage != msg {
+			return errUnsentChanged
+		}
+		return nil
+	}
+	ready := func() error {
+		if err := same(); err != nil {
+			return err
+		}
+		switch screen := deliveryScreenText(p); {
+		case p.Snapshot().NeverAutoAnswer:
+			return errUntypedLocked
+		case agent:
+			return errUntypedAgent
+		case sendInputPaneBusy(p):
+			return errUntypedBusy
+		case p.computeStateCached() == StateChoicePrompt || isGridChoicePromptText(screen, true) || isGridChoicePromptText(screen, false) || passwordPromptRE.MatchString(lastScreenLine(screen)):
+			return errUntypedPrompt
+		}
+		return nil
+	}
+	// Enter follows the line: the receipt and the lock are checked again, not
+	// busyness (the line's own echo is output).
+	unlocked := func() error {
+		if err := same(); err != nil {
+			return err
+		}
+		if p.Snapshot().NeverAutoAnswer {
+			return errUntypedLocked
+		}
+		return nil
+	}
+	outcome := "cleared"
+	if action == "send" {
+		for i, step := range []struct {
+			b     string
+			check func() error
+		}{{msg.body, ready}, {"\r", unlocked}} {
+			if i > 0 {
+				time.Sleep(EnterGap(false))
+			}
+			if _, err := p.writeWithPrecondition([]byte(step.b), true, false, step.check); err != nil {
+				status := http.StatusInternalServerError
+				if errors.Is(err, errUnsentChanged) || errors.Is(err, errUntypedRefused) {
+					status = http.StatusConflict
+				}
+				if i > 0 {
+					err = fmt.Errorf("the line was typed but Enter was not pressed: %w", err)
+				}
+				http.Error(w, err.Error(), status)
+				return
+			}
+		}
+		outcome = string(deliverySubmitted)
+	} else if err := same(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	p.dropUnsentMessage(msg)
+	coordLog.record(coordinationEvent{Kind: "unsent", Pane: p.ID, By: msg.Sender, Outcome: action})
+	writeJSON(w, http.StatusOK, map[string]any{"outcome": outcome})
+}
+
+func (p *Pane) dropUnsentMessage(msg *unsentPaneMessage) {
+	p.mu.Lock()
+	if p.unsentMessage == msg {
+		p.unsentMessage = nil
+	}
+	p.mu.Unlock()
+}
+
+var (
+	errUntypedRefused = errors.New("not typed")
+	errUntypedLocked  = fmt.Errorf("%w: the pane is locked against automatic answers", errUntypedRefused)
+	errUntypedAgent   = fmt.Errorf("%w: an agent has started in the pane since", errUntypedRefused)
+	errUntypedBusy    = fmt.Errorf("%w: the pane is busy again; send it once it settles", errUntypedRefused)
+	errUntypedPrompt  = fmt.Errorf("%w: the pane is asking a question (a menu or a password)", errUntypedRefused)
+)
+
+// passwordPromptRE: a shell waiting for a password or passphrase (sudo, ssh).
+var passwordPromptRE = regexp.MustCompile(`(?i)\b(password|passphrase|pin)\b[^:\n]{0,40}:\s*$`)
+
+func lastScreenLine(screen string) string {
+	lines := strings.Split(strings.TrimRight(screen, " \n"), "\n")
+	return lines[len(lines)-1]
+}
+
+// untypedReceiptMaxBytes bounds a not-typed receipt: the whole text is shown
+// to the person, and pane snapshots carry it.
+const untypedReceiptMaxBytes = 4096
+
+// hiddenOrControlRune: a control character (C0, DEL or C1; Send would type
+// it raw) or an invisible format character (bidi overrides and isolates,
+// zero-width characters), which can make text a person approves read
+// differently from the bytes that are typed. #878's normalizeLeadRole uses
+// the same rule.
+func hiddenOrControlRune(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }
+
+// recordUntypedMessage keeps a message a busy pane was not given as its
+// unsent receipt, and reports whether it did. It never replaces another
+// sender's receipt (that sender was told the pane shows it), keeps nothing
+// with control or invisible format characters (the Send… dialog must show
+// exactly what is typed) or over the size bound, and keeps nothing for a
+// pane locked against automatic answers.
+func (p *Pane) recordUntypedMessage(sender, body string) bool {
+	if body == "" || len(body) > untypedReceiptMaxBytes || strings.IndexFunc(body, hiddenOrControlRune) >= 0 {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.NeverAutoAnswer {
+		return false
+	}
+	if cur := p.currentUnsentMessageLocked(); cur != nil {
+		return cur.NotTyped && cur.body == body
+	}
+	p.unsentMessage = &unsentPaneMessage{ID: fmt.Sprintf("%d", time.Now().UnixNano()), Sender: sender, NotTyped: true, Text: body, body: body, connection: p.agentConn}
+	return true
+}
+
+// dropUntypedMessageFor clears the not-typed receipt for body once the same
+// message has been typed after all, so the person cannot send it twice.
+func (p *Pane) dropUntypedMessageFor(body string) {
+	p.mu.Lock()
+	if m := p.unsentMessage; m != nil && m.NotTyped && m.body == body {
+		p.unsentMessage = nil
+	}
+	p.mu.Unlock()
 }

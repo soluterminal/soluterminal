@@ -11,6 +11,36 @@ const workspace = (name = 'Project', paneIds = ['lead']): Workspace => ({ name, 
 const build = (panes: PaneInfo[], workspaces = [workspace()]) => buildWorkspacePaneTrees(workspaces, Object.fromEntries(panes.map(p => [p.id, p])), 'Project', layout);
 
 describe('workspace pane hierarchy', () => {
+  it('nests sub-leads under a lead or your own pane, workers under their lead, and keeps leads top level otherwise', () => {
+    const lead = (id: string, by?: string, leadId?: string): PaneInfo => ({ ...pane(id, by, leadId), origin: { source: by ? 'agent' : 'user', ...(by ? { byPaneId: by, leadPaneId: leadId ?? by } : {}), at: 1, teamKind: 'lead', leadRole: id } } as PaneInfo);
+    const worker = (id: string, by: string, leadId?: string): PaneInfo => ({ ...pane(id, by, leadId), origin: { ...pane(id, by, leadId).origin!, teamKind: 'worker' } } as PaneInfo);
+    const leaf = (paneId: string): Layout => ({ type: 'pane', paneId });
+    const row = (ids: string[]): Layout => ids.length === 1 ? leaf(ids[0]) : { type: 'split', direction: 'horizontal', ratio: 0.5, a: leaf(ids[0]), b: row(ids.slice(1)) };
+    const [tree] = buildWorkspacePaneTrees([workspace()], Object.fromEntries([
+      pane('lead'), // your own pane, no kind: @cmo
+      lead('social', 'lead'), // a sub-lead under your pane
+      // leadPaneId is the top of the spawn chain (the daemon's cap and authority key).
+      worker('post', 'social', 'lead'), // a sub-lead's worker
+      lead('video', 'post', 'lead'), // a lead started by a worker nests under that worker's lead
+      lead('qa', 'gone'), // its starter closed: top level
+      lead('secure'), // a user pane made a lead: top level
+      worker('task', 'lead'),
+      worker('lost', 'gone'), // a worker with no surviving lead: unattached
+    ].map(p => [p.id, p])), 'Project', row(['lead', 'lost', 'qa', 'secure']));
+    const shape = (n: { pane: PaneInfo; children: unknown[] }): unknown => [n.pane.id, (n.children as typeof tree.roots).map(shape)];
+    expect(tree.roots.map(shape)).toEqual([
+      ['lead', [['social', [['post', []], ['video', []]]], ['task', []]]],
+      ['lost', []], ['qa', []], ['secure', []],
+    ]);
+    expect(tree.nodes.filter(n => n.isTopLevel).map(n => n.pane.id)).toEqual(['lead', 'qa', 'secure']);
+    expect(tree.unattached.map(n => n.pane.id)).toEqual(['lost']);
+  });
+  it('keeps a sub-lead top level in a workspace other than its parent', () => {
+    const social = { ...pane('social', 'lead'), origin: { source: 'agent', byPaneId: 'lead', leadPaneId: 'lead', at: 1, teamKind: 'lead', leadRole: 'social' } } as PaneInfo;
+    const trees = build([pane('lead'), social], [workspace(), workspace('Other', ['social'])]);
+    expect(trees[1].roots.map(n => [n.pane.id, n.isTopLevel])).toEqual([['social', true]]);
+    expect(trees[1].unattached).toEqual([]);
+  });
   it('nests immediate starters and recovers workers missing from every layout', () => {
     const [tree] = build([pane('lead'), pane('worker', 'lead'), pane('sub', 'worker', 'lead')]);
     expect(tree.roots.map(n => n.pane.id)).toEqual(['lead']);
@@ -177,4 +207,13 @@ describe('workspace pane hierarchy', () => {
     expect(closed[0].roots[0].descendantCount).toBe(0);
   });
 
+});
+
+describe('worker records', () => {
+  it('nests an auto worker whose caller had closed, but never your own pane', () => {
+    const api = { ...pane('auto'), origin: { source: 'api', byPaneId: 'lead', leadPaneId: 'lead', at: 1, worker: { state: 'running' } } } as PaneInfo;
+    const mine = { ...pane('mine'), origin: { source: 'user', at: 1, worker: { state: 'running' } } } as PaneInfo;
+    const [tree] = buildWorkspacePaneTrees([workspace('Project', ['lead', 'auto', 'mine'])], { lead: pane('lead'), auto: api, mine }, 'Other', null);
+    expect(tree.nodes.filter(n => n.isTopLevel).map(n => n.pane.id).sort()).toEqual(['lead', 'mine']);
+  });
 });

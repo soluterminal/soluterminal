@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { api, currentRoutingScope, type RoutingScope } from '../api';
 import { useStore } from '../store';
-import { confirmDialog, selectDialog } from '../lib/dialog';
+import { confirmDialog, promptDialog, selectDialog } from '../lib/dialog';
+import { paneLeadRole } from '../lib/paneTeam';
 import { confirmAutoModeChange } from '../lib/autoModeConfirm';
 import type { PaneInfo } from '../types';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
@@ -226,6 +227,35 @@ export function usePaneContextMenu({
         const toOrchestrator = pane.role !== 'orchestrator';
         if (await confirmConvertPaneRole(pane, toOrchestrator) && valid()) {
           void updatePane(()=>api.setPaneRole(pane.id,toOrchestrator ? 'orchestrator':'',pane.cols,pane.rows,scope));
+        }
+      },
+      setTeamKind: async (kind: 'lead' | 'worker' | 'none') => {
+        if (managedOwner || !actionGuard()) return;
+        setCtxMenu(null);
+        // The dialog awaits the person: send to the daemon this pane lives
+        // on, and only if they are still looking at it.
+        const originScope = scope ?? currentRoutingScope();
+        const generation = useStore.getState().navigationGeneration;
+        const valid = captureGuard?.() ?? (() => actionGuard() && originScope.key === currentRoutingScope().key
+          && generation === useStore.getState().navigationGeneration);
+        let role = '';
+        if (kind === 'lead') {
+          const entered = await promptDialog({
+            title: paneLeadRole(pane) ? 'Rename lead role' : 'Make lead',
+            message: `A lead is a long-lived role pane: it owns an area, keeps its name and is never closed automatically. What role does “${pane.title || 'this pane'}” lead?`,
+            defaultValue: paneLeadRole(pane) || pane.identity?.handle || '',
+            placeholder: 'e.g. security, social, QA',
+            confirmLabel: paneLeadRole(pane) ? 'Rename' : 'Make lead',
+          });
+          role = entered?.trim().replace(/^@/, '') ?? '';
+          if (!role) return;
+        }
+        if (!valid()) return;
+        try {
+          const { origin } = await api.setPaneTeam(pane.id, kind, role, originScope);
+          if (valid()) useStore.setState(s => s.panes[pane.id]?.pid === pane.pid ? { panes: { ...s.panes, [pane.id]: { ...s.panes[pane.id], origin } } } : {});
+        } catch (e) {
+          useStore.getState().toast(e instanceof Error ? e.message : 'Could not change the pane', { kind: 'error' });
         }
       },
       closePane: async () => {

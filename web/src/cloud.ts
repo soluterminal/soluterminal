@@ -1,4 +1,5 @@
 import { noteMachineBackends } from './lib/deviceIdentity';
+import { isEmbedded } from './embed';
 import { setApiPrincipal, setApiPrincipalAccess, routingPrincipalEpoch } from './api';
 import type { SupabaseClient, Session } from '@supabase/supabase-js';
 import { create } from 'zustand';
@@ -278,7 +279,7 @@ export const useCloud = create<CloudState>((set, get) => ({
       const accountOptional = cfg.isLocal === true && cfg.accountOptional === true;
       set({
         supabase: sb,
-        mode: 'cloud',
+        mode: accountOptional && isEmbedded() ? 'detecting' : 'cloud',
         isLocal: cfg.isLocal === true,
         vapidPublicKey: cfg.vapidPublicKey ?? null,
         accountOptional,
@@ -292,6 +293,14 @@ export const useCloud = create<CloudState>((set, get) => ({
       // left restored sessions stuck at authorised=null until another auth
       // event happened to fire.
       const { data } = await sb.auth.getSession();
+      set({
+        // Optional embeds stay detecting until the session/default is known:
+        // no Login flash or skipped-account state for a restored session.
+        mode: 'cloud',
+        // This default is memory-only. Settings can requestSignIn(); a new
+        // standalone document reads only the explicit skip preference.
+        withoutAccount: accountOptional && (storedWithoutAccount() || (isEmbedded() && !data.session)),
+      });
       applySession(set, data.session);
       if (data.session) void get().checkAuthorisation();
       if (data.session && !cfg.isLocal) void get().refreshMachines();

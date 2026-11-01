@@ -1,4 +1,12 @@
 {
+  "0.0.1234": [
+    "Messages an agent sends to a busy pane no longer get stuck in its text box. In a Claude pane, SoluTerminal tries once more if the message wasn’t taken; if it still isn’t, it waits on the pane as an unsent message you can Send or Clear. A busy shell isn’t typed into, and the agent is told the message wasn’t sent. A question an agent asks a busy pane now waits until that pane is free.",
+    "In the sidebar, every pane row now shows an × to close it when you point at it. Typing in a pane no longer makes it show as busy.",
+    "Panes an agent starts for a task are now workers. Once a Claude or Codex worker has been idle for about 5 minutes, the pane that started it has read the result, and its work is committed and pushed, it closes by itself. Panes you start never close by themselves, and nor do leads, long-lived panes with a role such as “security”. Workers sit under their nearest lead in the sidebar, and a pane’s menu now has “Make lead…” and “Make worker”.",
+    "Sidebar rows now start with the pane’s @handle, with its title dimmed after it, and the sidebar search finds panes by handle.",
+    "A pane an agent starts now opens in that agent’s own workspace, not whichever workspace you’re looking at.",
+    "Fixed: the status bar at the bottom of the window could be cut off, for example after a restart or an update with the window maximised, until you restored and maximised the window again."
+  ],
   "0.0.1233": [
     "The sidebar’s workspace tree now keeps panes in the same order as your workspace, so they no longer jump around when something changes.",
     "Clicking a workspace in the sidebar now shows just its top-level panes. Panes an agent starts sit under the pane that started them, and All panes shows everything.",

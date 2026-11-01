@@ -53,9 +53,10 @@ export function WarmPaneLayer() {
   const visible = new Set(visibleIds);
   const opportunistic = new Set(warmPanesActive() ? parked : []);
   // Filtering the workspace must not dispose its hidden terminal cores/drafts.
-  // The overview is the default view, so this applies whenever a workspace
-  // is shown: a hidden worker keeps its core until it leaves the layout.
-  if (view.kind === 'workspace') for (const id of paneIdsInOrder(layout)) opportunistic.add(id);
+  // Only while the grid hides saved panes (an overview with hidden workers,
+  // or a pane/team view): a hidden worker keeps its core until it leaves the
+  // layout. With nothing hidden, mobile and zoom still mount one terminal.
+  if (view.kind === 'workspace' && shown !== layout) for (const id of paneIdsInOrder(layout)) opportunistic.add(id);
   const retain = view.kind === 'owner';
   // Confirmed active-scope metadata may replace a process; absence from a
   // partial/failed fetch never disposes a retained draft.

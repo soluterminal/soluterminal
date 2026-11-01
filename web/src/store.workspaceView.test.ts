@@ -204,6 +204,20 @@ describe('temporary workspace views', () => {
     expect(useStore.getState().workspaceView).toBeNull();
     expect(visible()).toEqual(['lead', 'human']);
   });
+  it('opens a sub-lead\'s team, not its parent\'s, for its hidden worker', () => {
+    // w1 becomes a sub-lead (@social under the lead); sub is its worker.
+    useStore.setState(s => ({ panes: { ...s.panes,
+      w1: { ...s.panes.w1, origin: { ...s.panes.w1.origin!, teamKind: 'lead', leadRole: 'social' } },
+      sub: { ...s.panes.sub, origin: { ...s.panes.sub.origin!, teamKind: 'worker' } } } }));
+    expect(visible()).toEqual(['lead', 'human']);
+    useStore.getState().setFocus('sub');
+    expect(useStore.getState().workspaceView).toMatchObject({ kind: 'team', paneId: 'w1' });
+    expect(visible()).toEqual(['w1', 'sub']);
+    // A hidden sub-lead opens its own team too.
+    useStore.getState().showWorkspaceOverview();
+    useStore.getState().setFocus('w1');
+    expect(useStore.getState().workspaceView).toMatchObject({ kind: 'team', paneId: 'w1' });
+  });
   it('keeps the view and the current pane when focus lands on a hidden pane incidentally', () => {
     useStore.getState().showWorkspacePaneView('w1', true);
     expect(useStore.getState().focusedPaneId).toBe('w1');

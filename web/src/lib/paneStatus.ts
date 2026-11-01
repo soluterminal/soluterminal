@@ -10,7 +10,10 @@ export type PaneRowStatus = 'busy' | 'idle' | 'finished' | 'needs-you';
 export function paneRowStatus(p: PaneInfo): PaneRowStatus {
   if (p.status === 'exited') return 'finished';
   if (p.attention === 'needs-user' || isPromptForUser(p)) return 'needs-you';
-  if (p.turn?.active || p.agentMidTurn || p.workflowStatus?.running || p.state === 'busy' || p.state === 'recent') return 'busy';
+  // 'recent' is only the 3s tail after any screen change, including the user's
+  // own typing and composer redraws. 'busy' is fresh output, with immediate
+  // keystroke echo already reported idle by the daemon.
+  if (p.turn?.active || p.agentMidTurn || p.workflowStatus?.running || p.state === 'busy') return 'busy';
   const last = p.turn?.last;
   // Completion evidence, not an idle timeout: idle alone doesn't mean done.
   if (p.attention !== 'auto-pending' && !p.turn?.uncertain && last && !last.historical && last.outcome !== 'failed' && last.outcome !== 'interrupted') return 'finished';

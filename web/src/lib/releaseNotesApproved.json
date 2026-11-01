@@ -91,6 +91,12 @@
       "approvedBy": "Benjamin",
       "date": "2026-11-01",
       "note": "Benjamin in @release-lead's pane: \"yes, 1233 notes\" for CMO's five lines (soluterminal-1233-notes.md, #850 line dropped), then chose \"Include it + add a note\" for the #868 sidebar line (six lines)."
+    },
+    "0.0.1234": {
+      "sha256": "f2b68a3624f432ba0e4f5e42e677d7d9094feefa64c7ac8bd7f2928c2ab3d9c7",
+      "approvedBy": "Benjamin",
+      "date": "2026-11-02",
+      "note": "Benjamin in @release-lead's pane: \"yes, 1234 notes\" for CMO's six lines (soluterminal-1234-notes.md, launch 29872b1); line 3 reworded to the code facts before approval."
     }
   }
 }

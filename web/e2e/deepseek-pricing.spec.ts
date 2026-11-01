@@ -76,6 +76,33 @@ for (const theme of ['dark', 'light']) {
   });
 }
 
+test('a dismissed popover stays closed when it uncovers its badge under the pointer', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 560 });
+  const { badge } = await openPricing(page, 'dark');
+  const details = page.getByRole('dialog', { name: 'DeepSeek pricing details' });
+  await badge.click();
+  await expect(details).toBeVisible();
+  const target = (await badge.boundingBox())!;
+  const panel = (await details.boundingBox())!;
+  const x = target.x + target.width / 2;
+  const y = target.y + target.height / 2;
+  // The short viewport clamps the popover over its own badge.
+  expect(x > panel.x && x < panel.x + panel.width && y > panel.y && y < panel.y + panel.height).toBe(true);
+  await page.mouse.move(x, y);
+  await page.keyboard.press('Escape');
+  await expect(details).toBeHidden();
+  // Give the browser frames to re-hit-test the still pointer.
+  await page.waitForTimeout(250);
+  await expect(details).toBeHidden();
+  await expect(badge).toHaveAttribute('aria-expanded', 'false');
+  // Moving onto the badge is a real hover and still opens the details.
+  await page.mouse.move(x + 4, y);
+  await expect(details).toBeHidden();
+  await page.mouse.move(target.x + target.width + 40, y - 80);
+  await page.mouse.move(x, y);
+  await expect(details).toBeVisible();
+});
+
 test('a failed wake refresh withdraws stale discounts and recovers', async ({ page }) => {
   const fixture = await openPricing(page, 'dark');
   await expect(fixture.badge).toContainText('50% cheaper');

@@ -2035,7 +2035,11 @@ input:focus, select:focus, textarea:focus {
   min-width: 0;
   height: 100%;
 }
-.grid-panel > .grid-area { flex: 1 1 auto; min-height: 0; }
+/* The pane area (inside WorkspaceHandoffBoundary's .workspace-handoff) must
+   shrink below its contents so the footer keeps its row. Without min-height: 0
+   a terminal fitted to an earlier, taller layout pushes the StatusBar below the
+   window, where .main clips it. */
+.grid-panel > .workspace-handoff { flex: 1 1 auto; min-height: 0; }
 .grid-panel > .statusbar { flex: 0 0 var(--footer-h); }
 
 .sidebar {
@@ -16073,12 +16077,24 @@ button.pane-account-chip.is-warn:hover { border-color: var(--warn); color: var(-
 .pane-tree-dot.is-needs-you { background: var(--danger, #e5484d); box-shadow: 0 0 0 2px #e5484d22; }
 .pane-tree-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .pane-tree-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.pane-tree-title-line { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.pane-tree-title-line > .pane-tree-title { min-width: 0; }
+.pane-tree-handle { color: var(--fg); font-weight: 500; }
+.pane-tree-title-detail { color: var(--fg-dim); }
+.pane-tree-lead-pill { flex: 0 1 auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--accent); border-radius: 999px; color: var(--accent); font-size: 9px; line-height: 13px; padding: 0 5px; }
 .pane-tree-status, .pane-tree-role { color: var(--fg-dim); font-size: 10px; }
 .pane-tree-status.needs-you { color: var(--danger, #e5484d); }
 .tree-leads-toggle { flex: 0 0 auto; border: 0; border-radius: 4px; background: transparent; color: var(--fg-dim); font-size: 9px; padding: 3px; cursor: pointer; }
 .tree-leads-toggle[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
 .ws-row .ws-text { min-width: 0; }
 .pane-tree-close { flex-shrink: 0; }
+/* Every row can be closed; the × appears on hover or keyboard focus so the
+   tree stays calm. A finished worker keeps it visible as a hint to tidy up. */
+.workspace-pane-row > .pane-tree-close:not(.is-pinned) { opacity: 0; }
+.workspace-pane-row:hover > .pane-tree-close,
+[data-tree-key]:focus-visible > .workspace-pane-row > .pane-tree-close,
+.workspace-pane-row:focus-within > .pane-tree-close { opacity: 1; }
+@media (hover: none) { .workspace-pane-row > .pane-tree-close:not(.is-pinned) { opacity: 1; } }
 @media (max-width: 800px) { .workspace-pane-row { min-height: 44px; } .tree-chevron { min-height: 28px; } }
 [data-tree-key]:focus-visible > .ws-row { outline: 1px solid var(--accent); outline-offset: -1px; }
 .workspace-tree-row { grid-template-columns: 16px auto minmax(0, 1fr) auto; column-gap: 4px; }

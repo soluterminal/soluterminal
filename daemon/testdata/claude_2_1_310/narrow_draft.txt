@@ -1,0 +1,15 @@
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Ultra
+ ▝▝   ▝▝   ~/…/acme/demo
+
+❯ Reply with just the word PEAR.
+
+● PEAR
+
+✻ Brewed for 2s · done 8:25 PM
+
+──────────────────────────────────────────────
+❯ queued probe: say CHERRY
+──────────────────────────────────────────────
+  …/projects/acme/demo-service-check [Haiku…
+  ⏵⏵ auto mode on (shift+tab to cycle)

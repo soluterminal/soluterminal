@@ -460,3 +460,131 @@ test('mobile lists only top-level panes and an attention jump shows the worker',
   await page.locator('.bottombar-picker').click();
   await expect(options).toHaveCount(5);
 });
+
+test('leads are roles: sub-leads nest with the lead pill, workers under their lead, Make lead from the pane menu', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 960 });
+  const at = (n: number) => ({ at: n, workspace: 'Leads project' });
+  const base = { cwd: '/project', cmd: ['sh'], status: 'running', state: 'idle', cols: 80, rows: 24, createdAt: '2026-10-30T00:00:00Z', lastActivityMs: 0 };
+  const panes = [
+    { ...base, id: 'k-cmo', title: 'CMO', pid: 1, origin: { source: 'user', ...at(1) } },
+    { ...base, id: 'k-social', title: 'Social', pid: 2, origin: { source: 'agent', byPaneId: 'k-cmo', leadPaneId: 'k-cmo', teamKind: 'lead', leadRole: 'social', ...at(2) } },
+    { ...base, id: 'k-post', title: 'Draft post', pid: 3, origin: { source: 'agent', byPaneId: 'k-social', leadPaneId: 'k-cmo', teamKind: 'worker', ...at(3) } },
+    { ...base, id: 'k-qa', title: 'QA', pid: 4, origin: { source: 'agent', byPaneId: 'closed', leadPaneId: 'closed', teamKind: 'lead', leadRole: 'qa', ...at(4) } },
+    { ...base, id: 'k-shell', title: 'My shell', pid: 5, origin: { source: 'user', ...at(5) } },
+  ] as PaneInfo[];
+  const paneIds = panes.map(p => p.id);
+  const layout = buildNxMFromLeaves(paneIds.map(paneId => ({ type: 'pane', paneId } as Layout)), 2, 3);
+  const workspace = { name: 'Leads project', layoutMode: 'free', paneIds, panes, layout, activeAt: '2026-10-30T00:00:00Z' } as Workspace;
+  const teamCalls: unknown[] = [];
+  await page.route('**/api/panes', route => route.fulfill({ json: panes }));
+  await page.route('**/api/workspaces**', route => route.fulfill({ json: route.request().method() === 'POST' ? route.request().postDataJSON() : [workspace] }));
+  await page.route('**/api/panes/*/team', route => {
+    const body = route.request().postDataJSON();
+    teamCalls.push({ id: new URL(route.request().url()).pathname.split('/').at(-2), ...body });
+    const origin = { source: 'user', ...at(5), teamKind: 'lead', leadRole: body.role };
+    panes[4] = { ...panes[4], origin } as PaneInfo;
+    return route.fulfill({ json: { origin } });
+  });
+  await page.routeWebSocket(/\/api\/panes\/.*\/io/, ws => {
+    ws.send(JSON.stringify({ type: 'ownership', owned: true, owner: 'you' }));
+    ws.send(Buffer.from('\r\nLeads fixture\r\n'));
+  });
+  await page.goto('/?ws=Leads%20project');
+  const shown = (expected: string[]) => expect.poll(async () => {
+    const out = [];
+    for (const id of paneIds) if (await page.locator(`[data-pane-id="${id}"] .xterm`).isVisible()) out.push(id);
+    return out;
+  }).toEqual(paneIds.filter(id => expected.includes(id)));
+  // Your own panes and a lead whose starter closed are top level; the
+  // sub-lead nests under the pane that started it, its worker under it.
+  await shown(['k-cmo', 'k-qa', 'k-shell']);
+  await expect(row(page, 'CMO')).toHaveAttribute('aria-level', '2');
+  await expect(row(page, 'Social')).toHaveAttribute('aria-level', '3');
+  await expect(row(page, 'Draft post')).toHaveAttribute('aria-level', '4');
+  await expect(row(page, 'QA')).toHaveAttribute('aria-level', '2');
+  await expect(row(page, 'Social').locator(':scope > .workspace-pane-row .pane-tree-lead-pill')).toHaveText('lead · social');
+  await expect(row(page, 'QA').locator(':scope > .workspace-pane-row .pane-tree-lead-pill')).toHaveText('lead · qa');
+  await expect(row(page, 'CMO').locator(':scope > .workspace-pane-row .pane-tree-lead-pill')).toHaveCount(0);
+  await expect(row(page, 'CMO').locator(':scope > .workspace-pane-row .pane-tree-status')).toHaveText('idle · 1 worker · 1 lead');
+  // A lead with no running workers is still a lead, and its header says so.
+  await expect(page.locator('[data-pane-id="k-qa"] .pane-header')).toContainText('Lead · qa');
+  // Clicking a sub-lead shows its own team; its parent shows the whole subtree.
+  await row(page, 'Social').locator(':scope > .workspace-pane-row').click();
+  await shown(['k-social', 'k-post']);
+  await row(page, 'CMO').locator(':scope > .workspace-pane-row').click();
+  await shown(['k-cmo', 'k-social', 'k-post']);
+  await page.locator('.ws-row .ws-name').click();
+  await shown(['k-cmo', 'k-qa', 'k-shell']);
+  // Make lead on your own pane asks for the role and shows the pill.
+  await page.locator('[data-pane-id="k-shell"] .pane-header').click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: 'Make worker' })).toHaveCount(0);
+  await page.getByRole('menuitem', { name: 'Make lead…' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('textbox').fill('@security');
+  await dialog.getByRole('button', { name: 'Make lead' }).click();
+  await expect(row(page, 'My shell').locator(':scope > .workspace-pane-row .pane-tree-lead-pill')).toHaveText('lead · security');
+  expect(teamCalls).toEqual([{ id: 'k-shell', kind: 'lead', role: 'security' }]);
+  // Still top level, nothing else moved.
+  await shown(['k-cmo', 'k-qa', 'k-shell']);
+});
+
+test('pane rows lead with the @handle, then the title without repeating it', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 960 });
+  const base = { cwd: '/project', cmd: ['sh'], status: 'running', state: 'idle', cols: 80, rows: 24, createdAt: '2026-10-30T00:00:00Z', lastActivityMs: 0 };
+  const panes = [
+    { ...base, id: 'h-cmo', title: '@cmo · launch', pid: 1, origin: { source: 'user', at: 1 }, identity: { handle: 'cmo', workingOn: 'Drafting the launch post' } },
+    { ...base, id: 'h-sec', title: 'Security review', pid: 2, origin: { source: 'user', at: 2 }, identity: { handle: 'secure' } },
+    { ...base, id: 'h-only', title: '@qa', pid: 3, origin: { source: 'user', at: 3 }, identity: { handle: 'qa' } },
+    { ...base, id: 'h-plain', title: 'My shell', pid: 4, origin: { source: 'user', at: 4 } },
+  ] as PaneInfo[];
+  const paneIds = panes.map(p => p.id);
+  const layout = buildNxMFromLeaves(paneIds.map(paneId => ({ type: 'pane', paneId } as Layout)), 2, 2);
+  const workspace = { name: 'Handles', layoutMode: 'free', paneIds, panes, layout, activeAt: '2026-10-30T00:00:00Z' } as Workspace;
+  await page.route('**/api/panes', route => route.fulfill({ json: panes }));
+  await page.route('**/api/workspaces**', route => route.fulfill({ json: route.request().method() === 'POST' ? route.request().postDataJSON() : [workspace] }));
+  await page.routeWebSocket(/\/api\/panes\/.*\/io/, ws => { ws.send(JSON.stringify({ type: 'ownership', owned: true, owner: 'you' })); });
+  await page.goto('/?ws=Handles');
+  const line = (name: string) => row(page, name).locator(':scope > .workspace-pane-row');
+  await expect(line('@cmo · launch').locator('.pane-tree-handle')).toHaveText('@cmo');
+  await expect(line('@cmo · launch').locator('.pane-tree-title-detail')).toHaveText('launch');
+  await expect(line('@cmo · launch')).toHaveAttribute('title', '@cmo · launch\nDrafting the launch post');
+  await expect(line('@secure · Security review').locator('.pane-tree-title')).toHaveText('@secure Security review');
+  await expect(line('@qa').locator('.pane-tree-handle')).toHaveText('@qa');
+  await expect(line('@qa').locator('.pane-tree-title-detail')).toHaveCount(0);
+  await expect(line('My shell').locator('.pane-tree-title')).toHaveText('My shell');
+  await expect(line('My shell').locator('.pane-tree-handle')).toHaveCount(0);
+  // The handle reads dimmer-free; the title after it is dim.
+  const colors = await line('@cmo · launch').evaluate(el => [el.querySelector('.pane-tree-handle'), el.querySelector('.pane-tree-title-detail')].map(n => getComputedStyle(n!).color));
+  expect(colors[0]).not.toBe(colors[1]);
+});
+
+test('every pane row offers × on hover or focus; a finished worker keeps it shown', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await setup(page);
+  const close = (name: string) => row(page, name).locator(':scope > .workspace-pane-row > .pane-tree-close');
+  const opacity = (name: string) => close(name).evaluate(el => getComputedStyle(el).opacity);
+  await expect(row(page, 'My shell')).toBeVisible();
+  await page.mouse.move(0, 0);
+  await expect.poll(() => opacity('My shell')).toBe('0');
+  await expect.poll(() => opacity('Release lead')).toBe('0');
+  await expect.poll(() => opacity('Finished worker')).toBe('1');
+  await row(page, 'My shell').locator(':scope > .workspace-pane-row').hover();
+  await expect.poll(() => opacity('My shell')).toBe('1');
+  await page.mouse.move(0, 0);
+  await row(page, 'Release lead').focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowUp');
+  await expect(row(page, 'Release lead')).toBeFocused();
+  await expect.poll(() => opacity('Release lead')).toBe('1');
+  // A running pane asks first; cancelling leaves it and its view alone.
+  let killed = false;
+  await page.route('**/api/panes/tree-human', route => { if (route.request().method() === 'DELETE') killed = true; return route.fulfill({ json: {} }); });
+  await row(page, 'My shell').locator(':scope > .workspace-pane-row').hover();
+  await close('My shell').click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('My shell');
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(killed).toBe(false);
+  await expect(row(page, 'My shell')).toBeVisible();
+});

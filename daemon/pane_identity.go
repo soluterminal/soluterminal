@@ -284,6 +284,12 @@ func (a *apiServer) mcpToolSetPaneInfoAs(args map[string]any, c paneCaller) any 
 	if !ok {
 		return toolErr("no pane " + target + " (call list_panes for ids)")
 	}
+	if _, ok := args["kind"]; ok {
+		return a.mcpSetPaneTeam(args, c, p)
+	}
+	if _, ok := args["lead_role"]; ok {
+		return toolErr("lead_role goes with kind: \"lead\"")
+	}
 	var handle, workingOn *string
 	if v, ok := args["handle"].(string); ok {
 		handle = &v

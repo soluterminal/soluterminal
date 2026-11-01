@@ -5,6 +5,7 @@ import { EFFORTS, effortMenuLabel } from '../lib/effort';
 import { useClampedMenuPosition } from './useClampedMenuPosition';
 import { agentFromCommand, effectivePaneAgent } from '../lib/agentKind';
 import { SmartApprovalsHint } from './SmartApprovalsHint';
+import { declaredPaneTeamKind } from '../lib/paneTeam';
 
 type PaneAutoMode = NonNullable<PaneInfo['autoMode']>;
 
@@ -48,6 +49,10 @@ interface PaneContextMenuProps {
   // Supported hosts only: set or remove the orchestrator role. Respawns the
   // pane's command; absent means the item is hidden.
   onConvertRole?: () => void;
+  // Mark the pane a lead (a role pane, never closed automatically), a worker
+  // (a task for its lead, archived once finished) or, for your own pane, back
+  // to neither. Absent ⇒ hidden.
+  onSetTeamKind?: (kind: 'lead' | 'worker' | 'none') => void;
   onRedraw?: () => void;
   // Terminal panes only: re-measure and re-assert this device's width so the
   // shared PTY resizes back to match — the fix for gibberish after an app
@@ -101,6 +106,7 @@ export function PaneContextMenu({
   onRename,
   onEditIdentity,
   onConvertRole,
+  onSetTeamKind,
   onRedraw,
   onRealign,
   onRestartPane,
@@ -283,6 +289,19 @@ export function PaneContextMenu({
           {pane.role === 'orchestrator' ? 'Remove orchestrator role…' : 'Convert to orchestrator…'}
         </button>
       )}
+      {!managedOwner && onSetTeamKind && pane.status === 'running' && pane.role !== 'task_owner' && (() => {
+        const kind = declaredPaneTeamKind(pane);
+        const agentStarted = pane.origin?.source === 'agent';
+        return <>
+          {kind !== 'lead' && <button role="menuitem" onClick={() => onSetTeamKind('lead')}
+            title="A long-lived role pane (security, CMO…). Shown with the lead pill; never closed automatically">Make lead…</button>}
+          {kind === 'lead' && <button role="menuitem" onClick={() => onSetTeamKind('lead')} title="Change this lead's role name">Rename lead role…</button>}
+          {agentStarted && kind !== 'worker' && <button role="menuitem" onClick={() => onSetTeamKind('worker')}
+            title="A task for its lead: archived automatically once finished, read by its lead, and committed and pushed">Make worker</button>}
+          {!agentStarted && kind === 'lead' && <button role="menuitem" onClick={() => onSetTeamKind('none')}
+            title="Back to a plain pane of yours">Remove lead</button>}
+        </>;
+      })()}
       {!isNative && onRealign && pane.status === 'running' && (
         <button
           role="menuitem"

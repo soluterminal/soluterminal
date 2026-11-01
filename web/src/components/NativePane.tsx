@@ -1958,6 +1958,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
             closeContextMenu();
             setIdentityDialogOpen(true);
           }}
+          onSetTeamKind={pane.role !== 'task_owner' ? ctxMenuActions.setTeamKind : undefined}
           onConvertRole={operatorFeaturesAllowed() && roleConvertAllowed(pane, useStore.getState().orchestratorHosts) ? ctxMenuActions.convertRole : undefined}
           onChangeContextPack={() => {
             closeContextMenu();

@@ -13,3 +13,9 @@ it('honours daemon attention and suppresses auto-approval alerts', () => {
   expect(paneRowStatus({ ...p, state: 'choice-prompt', attention: 'auto-pending' })).toBe('idle');
   expect(paneRowStatus({ ...p, state: 'choice-prompt', attention: 'none', turn: undefined })).toBe('idle');
 });
+it('counts agent output as busy but not the recent tail after typing', () => {
+  expect(paneRowStatus({ ...p, state: 'busy' })).toBe('busy');
+  expect(paneRowStatus({ ...p, state: 'recent' })).toBe('finished');
+  expect(paneRowStatus({ ...p, state: 'recent', turn: undefined })).toBe('idle');
+  expect(paneRowStatus({ ...p, state: 'recent', agentMidTurn: true })).toBe('busy');
+});

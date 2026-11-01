@@ -5,10 +5,11 @@ import { useStore } from '../store';
 import { formatAgo } from '../lib/turnTime';
 import { useAnchoredCard } from './useAnchoredCard';
 import { paneIdsInOrder } from '../lib/layout';
+import { declaredPaneTeamKind, nearestLeadId, paneLeadRole } from '../lib/paneTeam';
 
-// A pane's place in agent work, said in words on its header: "Worker · lead
-// #2" on a pane an agent started, "Lead · 2 workers" on a pane whose agent
-// started others (yours included), or who else started it (a schedule,
+// A pane's place in agent work, said in words on its header: "Lead ·
+// security" on a lead, "Worker · lead #2" on a worker, "2 workers" on your
+// own pane whose agent started others, or who else started it (a schedule,
 // another program). The card has the details and the lead's workers. A pane
 // you opened that leads no one shows nothing: no label means yours.
 
@@ -29,11 +30,11 @@ export function livePaneLabel(id: string | undefined, saved: string | undefined,
   return n > 0 ? `#${n} ${name}` : name;
 }
 
-/** The open panes a lead's agent started (directly or through its workers),
- *  oldest first: the Squad it leads. */
+/** The open workers a lead's agent started (directly or through its workers),
+ *  oldest first: the Squad it leads. Sub-leads are leads, not workers. */
 export function workersOf(leadId: string, panes: Record<string, PaneInfo>): PaneInfo[] {
   return Object.values(panes)
-    .filter((p) => p.id !== leadId && p.origin?.source === 'agent' && p.origin.leadPaneId === leadId)
+    .filter((p) => p.id !== leadId && declaredPaneTeamKind(p) !== 'lead' && nearestLeadId(p, panes) === leadId)
     .sort((a, b) => (a.origin?.at ?? 0) - (b.origin?.at ?? 0));
 }
 
@@ -43,10 +44,14 @@ const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
 export function roleLabel(pane: PaneInfo, panes: Record<string, PaneInfo>, order: string[]): string {
   const o = pane.origin;
   let label = '';
-  if (o?.source === 'agent') {
-    if (o.leadPaneId && o.leadPaneId !== pane.id) {
-      const lead = livePaneLabel(o.leadPaneId, o.leadPaneTitle, panes, order);
-      label = panes[o.leadPaneId] ? `Worker · lead ${lead}` : 'Worker · lead closed';
+  const role = paneLeadRole(pane);
+  if (role) {
+    label = `Lead · ${role}`;
+  } else if (o?.source === 'agent') {
+    const leadId = nearestLeadId(pane, panes);
+    if (leadId) {
+      const lead = livePaneLabel(leadId, leadId === o.leadPaneId ? o.leadPaneTitle : undefined, panes, order);
+      label = panes[leadId] ? `Worker · lead ${lead}` : 'Worker · lead closed';
     } else {
       label = `Worker · started by ${livePaneLabel(o.byPaneId, o.byPaneTitle, panes, order) || 'an agent'}`;
     }
@@ -55,8 +60,10 @@ export function roleLabel(pane: PaneInfo, panes: Record<string, PaneInfo>, order
   } else if (o?.source === 'api') {
     label = 'Started by a program';
   }
+  // Being a lead is a role, not having workers: the user's own pane with
+  // workers just counts them.
   const n = workersOf(pane.id, panes).length;
-  if (n > 0) label = label ? `${label} · ${plural(n, 'worker')}` : `Lead · ${plural(n, 'worker')}`;
+  if (n > 0) label = label ? `${label} · ${plural(n, 'worker')}` : plural(n, 'worker');
   return label;
 }
 
@@ -64,8 +71,8 @@ export function roleLabel(pane: PaneInfo, panes: Record<string, PaneInfo>, order
 export function roleShortLabel(pane: PaneInfo, panes: Record<string, PaneInfo>): string {
   const o = pane.origin;
   const n = workersOf(pane.id, panes).length;
-  const base = o?.source === 'agent' ? 'Worker' : o?.source === 'schedule' ? 'Schedule' : o?.source === 'api' ? 'Program' : '';
-  if (n > 0) return base ? `${base} · ${n}` : `Lead · ${n}`;
+  const base = paneLeadRole(pane) ? 'Lead' : o?.source === 'agent' ? 'Worker' : o?.source === 'schedule' ? 'Schedule' : o?.source === 'api' ? 'Program' : '';
+  if (n > 0) return base ? `${base} · ${n}` : plural(n, 'worker');
   return base;
 }
 
@@ -101,13 +108,17 @@ export function PaneOriginButton({ pane }: { pane: PaneInfo }) {
   const label = roleLabel(pane, panes, order);
   if (!label) return null;
   const workers = workersOf(pane.id, panes);
-  const started = !!o && o.source !== 'user';
+  const started = !!o?.source && o.source !== 'user';
+  const role = paneLeadRole(pane);
   const starter = started ? livePaneLabel(o.byPaneId, o.byPaneTitle, panes, order) : undefined;
-  const leadLabel = started ? livePaneLabel(o.leadPaneId, o.leadPaneTitle, panes, order) : undefined;
-  const summary = started ? originSummary(o, starter) : `Leads ${plural(workers.length, 'worker')} its agent started`;
+  const leadId = started ? nearestLeadId(pane, panes) : undefined;
+  const leadLabel = leadId ? livePaneLabel(leadId, leadId === o?.leadPaneId ? o?.leadPaneTitle : undefined, panes, order) : undefined;
+  const summary = started ? originSummary(o, starter)
+    : role ? `Lead for ${role}${workers.length ? `; ${plural(workers.length, 'worker')} its agent started` : ''}`
+    : `Leads ${plural(workers.length, 'worker')} its agent started`;
   const starterAlive = started && !!o.byPaneId && !!panes[o.byPaneId];
-  const leadDiffers = started && !!o.leadPaneId && o.leadPaneId !== o.byPaneId;
-  const leadAlive = leadDiffers && !!panes[o!.leadPaneId!];
+  const leadDiffers = started && !!leadId && leadId !== o.byPaneId;
+  const leadAlive = leadDiffers && !!panes[leadId!];
   const close = () => {
     setOpen(false);
     buttonRef.current?.focus();
@@ -186,8 +197,8 @@ export function PaneOriginButton({ pane }: { pane: PaneInfo }) {
             {starterAlive && o?.byPaneId && (
               <button type="button" autoFocus onClick={() => go(o.byPaneId!)}>Go to {starter || 'starter'}</button>
             )}
-            {leadAlive && o?.leadPaneId && (
-              <button type="button" onClick={() => go(o.leadPaneId!)}>Go to lead</button>
+            {leadAlive && leadId && (
+              <button type="button" onClick={() => go(leadId)}>Go to lead</button>
             )}
             <button type="button" onClick={close} autoFocus={!starterAlive}>Close</button>
           </div>

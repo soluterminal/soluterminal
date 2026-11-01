@@ -716,7 +716,7 @@ func startSupervisedAgentChild(cmd *exec.Cmd) (<-chan struct{}, error) {
 // Spawn forks a new agent process and attaches to it.
 func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 	var release func()
-	if opts.Origin != nil && opts.Origin.Worker != nil && opts.workerAccount == "" {
+	if opts.Origin != nil && workerHoldsCredentials(opts.Origin.Worker) && opts.workerAccount == "" {
 		prepare := workerCredentialSlot.ensure(&m.ext).prepare
 		if prepare == nil {
 			return nil, &SpawnError{msg: "worker account recovery is not ready; resume after daemon startup"}
@@ -2132,4 +2132,37 @@ func expandHome(p string) string {
 		return home + p[1:]
 	}
 	return p
+}
+
+// starterWorkspace resolves a spawn's attribution before any active-workspace
+// fallback. Live layout membership wins over historical origin. An agent's
+// lead is consulted only when neither identifies a visible workspace. The
+// visited set also bounds malformed or restored lead cycles.
+func (a *apiServer) starterWorkspace(paneID string) string {
+	seen := make(map[string]bool)
+	for paneID = strings.TrimSpace(paneID); paneID != "" && !seen[paneID]; {
+		seen[paneID] = true
+		if name := a.ws.NameForPane(paneID); name != "" {
+			return name
+		}
+		if a.mgr == nil {
+			return ""
+		}
+		p, ok := a.mgr.Get(paneID)
+		if !ok {
+			return ""
+		}
+		origin := p.Snapshot().Origin
+		if origin == nil {
+			return ""
+		}
+		if name, ok := resolveWorkspaceName(a.ws, strings.TrimSpace(origin.Workspace)); ok && name != "_current" {
+			return name
+		}
+		if origin.Source != paneOriginAgent {
+			return ""
+		}
+		paneID = strings.TrimSpace(origin.LeadPaneID)
+	}
+	return ""
 }
