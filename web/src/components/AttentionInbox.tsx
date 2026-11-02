@@ -2,7 +2,8 @@ import { isPromptForUser } from '../lib/paneStatus';
 import { useMemo } from 'react';
 import { useStore, ariaObservationFingerprint, ARIA_DISMISSAL_TTL_MS, type AriaTail } from '../store';
 import { isActionable } from '../lib/actionability';
-import type { PaneInfo } from '../types';
+import type { PaneAsk, PaneInfo } from '../types';
+import { api } from '../api';
 
 // Cross-workspace attention surface — the SINGLE SOURCE OF TRUTH for
 // "which panes need the user's attention right now". The topbar bell and
@@ -18,6 +19,9 @@ import type { PaneInfo } from '../types';
 //   - `ariaDismissedFingerprints` — paneId+fingerprint → dismissal ts;
 //                 pane is hidden until the question changes or TTL
 //                 expires (10 min).
+//
+//   - `panes[].asks` — agents' open asks to the user (daemon asks.go), one
+//                 item each, after the prompts.
 //
 // Output: array of AttentionItem, one per pane in attention state.
 // Includes a `dismissed` flag so consumers can choose to render
@@ -56,8 +60,10 @@ export interface AttentionItem {
   dismissed: boolean;
   workspaceName: string | null;
   /** 'unsent': a message another pane sent is still sitting in this pane's
-   *  input box (Send/Clear on the pane header). */
-  kind: 'choice' | 'awaiting' | 'unsent';
+   *  input box (Send/Clear on the pane header). 'ask': an agent's open ask
+   *  (`ask`); one item per ask, not per pane. */
+  kind: 'choice' | 'awaiting' | 'unsent' | 'ask';
+  ask?: PaneAsk;
   /** Daemon's explanation of WHY the human is needed, when it has one
    *  ("AskUserQuestion needs your answer…", "won't auto-approve —
    *  touches secrets", a cautious-mode decline). Undefined for plain
@@ -70,6 +76,17 @@ export interface AttentionItem {
   risk?: string;
   /** Suggested next step accompanying `summary`. */
   action?: string;
+}
+
+/** The bell row for a pane's unsent message: a put-back one says so, and how
+ *  many held messages wait behind it. */
+export function unsentSummary(p: PaneInfo): string {
+  const msg = p.unsentMessage;
+  if (!msg) return '';
+  const held = p.heldMessages?.length ?? 0;
+  const behind = held > 0 && !msg.notTyped ? ` (${held} more ${held === 1 ? 'message waits' : 'messages wait'} behind it)` : '';
+  if (msg.putBack) return `Message from ${msg.sender} put back in the input box after you stopped it${behind} — Send or Clear it on the pane`;
+  return `Message from ${msg.sender} not sent${behind} — Send or Clear it on the pane`;
 }
 
 // Shared selector. Memoized on the inputs so Bell + Panel + Sidebar
@@ -97,7 +114,7 @@ export function useAttentionItems(opts: { includeDismissed?: boolean } = {}): At
       if (!p.unsentMessage) return;
       items.push({
         pane: p, dismissed: false, workspaceName: ownerByPane.get(p.id) ?? null, kind: 'unsent',
-        summary: `Message from ${p.unsentMessage.sender} not sent — Send or Clear it on the pane`,
+        summary: unsentSummary(p),
       });
     };
     for (const p of Object.values(panes)) {
@@ -139,13 +156,19 @@ export function useAttentionItems(opts: { includeDismissed?: boolean } = {}): At
         action: p.attentionAction,
       });
     }
+    for (const p of Object.values(panes)) {
+      for (const ask of p.asks ?? []) {
+        items.push({ pane: p, dismissed: false, workspaceName: ownerByPane.get(p.id) ?? null, kind: 'ask', ask, summary: ask.text });
+      }
+    }
     // Choice prompts are more urgent than passive awaiting-input; within a
     // kind, graded risk sorts high → low (a prod migration outranks a Read),
     // then newest-activity first.
     const riskWeight = (r?: string) => (r === 'high' ? 3 : r === 'medium' ? 2 : r === 'low' ? 1 : 0);
-    const kindWeight = { choice: 0, awaiting: 1, unsent: 2 } as const;
+    const kindWeight = { choice: 0, awaiting: 1, ask: 2, unsent: 3 } as const;
     items.sort((a, b) => {
       if (a.kind !== b.kind) return kindWeight[a.kind] - kindWeight[b.kind];
+      if (a.ask && b.ask) return b.ask.createdAt - a.ask.createdAt;
       const rw = riskWeight(b.risk) - riskWeight(a.risk);
       if (rw !== 0) return rw;
       return (b.pane.lastActivityMs ?? 0) - (a.pane.lastActivityMs ?? 0);
@@ -194,6 +217,13 @@ export function useAttentionBadge(): { count: number; hasChoice: boolean; firstP
       if (firstPaneId === null) firstPaneId = p.id;
       if (p.state === 'choice-prompt') hasChoice = true;
     }
+    // Asks count one each, like their rows in useAttentionItems.
+    for (const p of Object.values(panes)) {
+      const n = p.asks?.length ?? 0;
+      if (n === 0) continue;
+      count += n;
+      if (firstPaneId === null) firstPaneId = p.id;
+    }
     return { count, hasChoice, firstPaneId };
   }, [panes, tails, dismissed]);
 }
@@ -213,6 +243,7 @@ export function AttentionInbox({
   return (
     <div className="attention-inbox-list">
       {items.map((it) => {
+        if (it.ask) return <AskRow key={it.ask.id} item={it} ask={it.ask} onSelect={onSelect} />;
         const title = it.pane.title || it.pane.cmd.join(' ') || it.pane.id.slice(-6);
         const wsLabel = it.workspaceName ?? 'background';
         const age = shortRelative(it.pane.lastActivityMs ?? 0);
@@ -247,6 +278,44 @@ export function AttentionInbox({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** One agent ask: who is asking (the daemon's label for its pane, never
+ *  agent text), what, and how long ago. Click opens the pane; × dismisses.
+ *  The text is plain text: never markdown or links. */
+function AskRow({ item, ask, onSelect }: { item: AttentionItem; ask: PaneAsk; onSelect?: (paneId: string) => void }) {
+  const revealPane = useStore((s) => s.revealPane);
+  const wsLabel = item.workspaceName ?? 'background';
+  const age = shortRelative(ask.createdAt);
+  const dismiss = (e: { stopPropagation: () => void }) => {
+    e.stopPropagation();
+    api.dismissAsk(ask.id)
+      .then(() => useStore.getState().refreshPanes())
+      .catch((err) => useStore.getState().toast(`Could not dismiss: ${String(err)}`, { kind: 'warn' }));
+  };
+  return (
+    <div
+      className="attention-row attention-ask"
+      title={`${ask.source} · ${wsLabel} · ${ask.text} · ${age}`}
+      onClick={() => {
+        void revealPane(item.pane.id);
+        onSelect?.(item.pane.id);
+      }}
+    >
+      <span className="ws-badge ws-badge-ask" aria-hidden />
+      <span className="attention-main">
+        <span className="attention-title-line">
+          <span className="attention-title">{ask.source}</span>
+          <span className="attention-ws">{wsLabel}</span>
+          <span className="attention-age">{age}</span>
+        </span>
+        <span className="attention-summary-line">
+          <span className="attention-summary">{ask.text}</span>
+        </span>
+      </span>
+      <button type="button" className="attention-ask-dismiss" title="Dismiss this ask" aria-label={`Dismiss ask from ${ask.source}`} onClick={dismiss}>×</button>
     </div>
   );
 }

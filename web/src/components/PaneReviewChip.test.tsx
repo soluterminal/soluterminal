@@ -44,6 +44,14 @@ describe('PaneReviewChip', () => {
     expect(reviewSummary({ ...changes, verdict: 'approve', author: undefined })).toBe('Codex reviewed: approved');
   });
 
+  it('shows the reviewed branch and commit without treating local approval as current PR approval', () => {
+    render(<PaneReviewChip pane={pane({ ...changes, verdict: 'approve', branch: 'fix/average', head: '1234567890abcdef1234567890abcdef12345678' })} />);
+    fireEvent.click(screen.getByText('✓ Reviewed'));
+    expect(screen.getByText('fix/average')).toBeTruthy();
+    expect(screen.getByText('1234567890ab')).toBeTruthy();
+    expect(screen.getByText(/pull request's current commit and required reviews/)).toBeTruthy();
+  });
+
   it('reads "Fixed after review" once the author recorded the fix, and shows the note', () => {
     const fixed = { ...changes, round: 2, followup: { note: 'Setting saves before it takes effect', at: Date.now() } };
     expect(reviewChip(fixed)).toEqual({ label: 'Fixed after review', tone: 'muted' });

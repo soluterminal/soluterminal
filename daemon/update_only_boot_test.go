@@ -24,7 +24,7 @@ import (
 
 // updateOnlyBootCalls is every function update_only_boot.go may call. The
 // update-only boot must never reach the normal boot sequence or any engine
-// (scheduler, release train, warden, panes, agent cleanup, registrations,
+// (scheduler, release train, panes, agent cleanup, registrations,
 // relay, pairing, check-in, update poll, memory guard), so a new call here is
 // a deliberate, reviewed change: add it to this list with care.
 var updateOnlyBootCalls = map[string]bool{
@@ -158,7 +158,7 @@ var updateOnlyForbiddenEngines = []string{
 	"(*ScheduleStore)", "startActivityWatcher", "(*relaySupervisor).run", "StartBackgroundPoll",
 	"ensureClaudeMcpRegistration", "ensureCodexMcpRegistration", "ensureClaudeHooksRegistered",
 	"(*PortRegistry)", "(*teamEntitlements).run", "startInstallCheckin", "(*pairingManager)",
-	"warden", "releaseTrain", "memguard", "(*Manager).", "reapOrphanAgents",
+	"releaseTrain", "memguard", "(*Manager).", "reapOrphanAgents",
 }
 
 // An update-only daemon, booted for real under a scratch HOME with saved

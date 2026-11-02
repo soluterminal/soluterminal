@@ -80,19 +80,11 @@ func startupHandoffListener(network, addr string) (net.Listener, error) {
 }
 
 func startupHandoffListenerWithDeps(network, addr string, deps startupHandoffDeps) (net.Listener, error) {
-	ln, err := deps.preflight(network, addr)
+	listeners, err := startupHandoffListenersWithDeps(network, []string{addr}, deps)
 	if err != nil {
 		return nil, err
 	}
-	deps.writeMarker()
-	deps.clearPending()
-	if ln == nil {
-		ln, err = deps.acquire(network, addr)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return ln, nil
+	return listeners[0], nil
 }
 
 func jevBridgeEndpointForListener(addr net.Addr) (string, error) {
@@ -285,6 +277,7 @@ func main() {
 	watchdogEvidence := captureWatchdogRespawnEvidence()
 
 	addr := flag.String("addr", "127.0.0.1:8787", "bind address")
+	wslAddr := flag.String("wsl-addr", "", "additional WSL IPv4 address on the loopback --addr port (requires --backend-id wsl)")
 	dataDir := flag.String("data", defaultDataDir(), "data directory for workspace persistence")
 	devWeb := flag.String("dev-web", "", "if set, serve static files from this path instead of embedded assets (for dev)")
 	relayURL := flag.String("relay", "", "if set, also dial out to this cloud relay URL (e.g. wss://soluterminal.app/relay)")
@@ -314,6 +307,10 @@ func main() {
 	shellPlatform := flag.String("shell-platform", "", "manifest platform key for the Tauri shell (e.g. windows-amd64). Empty = fall back to daemon's runtime platform.")
 	doClaim := flag.Bool("claim", false, "pair this machine with the cloud: prints a 6-char code, waits for you to accept it in the web UI, then writes ~/.solu/claim.json and exits")
 	flag.Parse()
+	listenerAddresses, err := wslListenerAddresses(*addr, *wslAddr, *backendID)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
 	// flag.Parse stops at the first non-flag word and the daemon used to
 	// ignore it, so a mistyped or newer subcommand (e.g. `solud support-bundle`
 	// on an old binary) silently started a full foreground daemon. Refuse a
@@ -993,12 +990,10 @@ func main() {
 	boot.restartAdmission = restartAdmission
 	runBootSteps(bootEarly, boot)
 
-	// Warden settings (opt-in fleet caretaker — DEFAULT OFF). A load failure
-	// is non-fatal: fall back to defaults (disabled) rather than refuse boot.
-	wardenStore, err := newWardenSettingsStore(*dataDir)
-	if err != nil {
-		log.Printf("warden: settings load failed (%v) — starting disabled", err)
-		wardenStore = &wardenSettingsStore{path: filepath.Join(*dataDir, "warden_settings.json"), s: wardenSettings{}}
+	// The retired caretaker never starts; a failed settings cleanup is retried
+	// on next boot and cannot enable it. Preserve unknown/corrupt files.
+	if err := retireWardenSettings(*dataDir); err != nil {
+		log.Printf("retired Warden settings cleanup: %v", err)
 	}
 
 	metrics := NewMetrics()
@@ -1062,7 +1057,6 @@ func main() {
 		updateSettings:     updateSettings,
 		rollback:           rollbackStore,
 		mcpScopes:          newMcpScopeStore(),
-		wardenSettings:     wardenStore,
 		startT:             time.Now(),
 		ver:                version,
 		addr:               *addr,
@@ -1245,6 +1239,12 @@ func main() {
 	// when that pane or the asking agent's pane closes (pane_confirm.go,
 	// mcp_collab_ask.go).
 	mgr.SetOnPaneRemoved(api.paneRemoved)
+	// The user's "Waiting on you" list (asks.go). Panes are restored by now,
+	// so an ask whose pane closed while the daemon was down closes too.
+	api.asks = newAskStore(*dataDir, api.publishAsksChanged)
+	api.asks.onCreated = api.queueAskPush
+	api.asks.closeMissing(func(id string) bool { _, ok := mgr.Get(id); return ok })
+	mgr.SetOnHumanSubmit(api.asks.personReplied)
 	api.trustedDevices = newTrustedDevices(*dataDir)
 	// Reminder names already mirrored to the cloud are replaced as soon as
 	// approved-only is turned on (schedules_reminders.go reminderPayload).
@@ -1697,7 +1697,12 @@ func main() {
 
 	// Commit the successor handoff only after listener preflight, then acquire
 	// exclusive ownership before the potentially slow workflow rehydration.
-	ln, err := startupHandoffListener(daemonListenerNetwork(*addr, isInsideWSL()), *addr)
+	listeners, err := startupHandoffListenersWithDeps(daemonListenerNetwork(*addr, isInsideWSL()), listenerAddresses, startupHandoffDeps{
+		preflight:    preflightUpdateSuccessorListener,
+		writeMarker:  writeSuccessorBootMarker,
+		clearPending: clearUpdatePendingMarker,
+		acquire:      listenWithUpdateRetry,
+	})
 	if err != nil {
 		// A bind failure means another process holds the port. Make the log
 		// line actionable (identify the squatter via /api/health) instead of
@@ -1706,7 +1711,11 @@ func main() {
 		os.Exit(1)
 	}
 	claimDataDirAfterHandoff(*dataDir, dataDirOwner)
+	ln := listeners[0]
 	log.Printf("soluterminal daemon %s listening on http://%s (data=%s)", version, *addr, *dataDir)
+	for _, extra := range listeners[1:] {
+		log.Printf("WSL daemon also listening on http://%s", extra.Addr())
+	}
 	if endpoint, endpointErr := jevBridgeEndpointForListener(ln.Addr()); endpointErr != nil {
 		log.Printf("jev bridge: listener address unavailable — optional bridge disabled")
 	} else {
@@ -1766,15 +1775,6 @@ func main() {
 	// park/resolve and eval declines refresh eagerly via hooks, so their
 	// latency doesn't ride this 2s cadence.
 	go attention.Start(ctx)
-
-	// Warden summoner: the opt-in fleet caretaker. Always ticks (cheap) but
-	// spawns nothing until warden_settings.enabled is set, so this is inert
-	// for every install that hasn't opted in. Uses the same scoped-token
-	// store the /mcp handler enforces against.
-	warden := NewWarden(wardenStore, mgr, api.mcpScopes, bus, *dataDir, *addr)
-	warden.panes = api.panes
-	api.warden = warden
-	go warden.Start(ctx)
 
 	// Long-running-command watcher: emits a single cmd.long_running
 	// uiBus event when a pane stays busy >30s without ever reaching
@@ -1879,17 +1879,19 @@ func main() {
 		}
 	}
 
-	go func() {
-		log.Printf("auth: local (loopback) use needs no token")
-		// Logs end up in problem reports, so they name where the token is
-		// kept rather than carrying it.
-		for _, url := range remoteLoginURLs(*addr) {
-			log.Printf("auth: remote login → %s?token=<%s>", url, filepath.Join(*dataDir, "token"))
-		}
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("serve: %v", err)
-		}
-	}()
+	for _, listener := range listeners {
+		go func(ln net.Listener) {
+			log.Printf("auth: local (loopback) use needs no token")
+			// Logs end up in problem reports, so they name where the token is
+			// kept rather than carrying it.
+			for _, url := range remoteLoginURLs(*addr) {
+				log.Printf("auth: remote login → %s?token=<%s>", url, filepath.Join(*dataDir, "token"))
+			}
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("serve: %v", err)
+			}
+		}(listener)
+	}
 
 	// Start the relay supervisor (the SOLE owner of the relay tunnel). It
 	// re-reads claim.json on a poll, dials whenever a valid token appears or

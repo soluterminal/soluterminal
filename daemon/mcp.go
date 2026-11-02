@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +30,7 @@ const mcpServerInstructions = mcpDirectServerInstructions
 // The engine-free brief is also used by the generated global Codex policy.
 // Keep schedules and pane coordination available without
 // advertising task lifecycle or repair capabilities that cannot run.
-const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. The workflow task engine is unavailable. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards, and close it with kill_pane once you have its result unless the user wants it kept. Pick each worker's agent for its task (cmd claude or codex, optionally with model and effort): work that writes code goes to a visible worker pane, and in-session subagents are for read-only research.Keep your own pane's working_on line current with set_pane_info as your work moves on. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Preserve user authorization and required approval gates."
+const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. The workflow task engine is unavailable. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards. Workers close and archive automatically once finished, their result is read, and their work is committed and pushed. Never close a lead. Close plain finished panes you started with kill_pane unless the user wants them kept. Message agents with ask_pane, never send_input. Pick each worker's agent for its task (cmd claude or codex, optionally with model and effort): work that writes code goes to a visible worker pane, and in-session subagents are for read-only research. Keep your own pane's working_on line current with set_pane_info as your work moves on. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Preserve user authorization and required approval gates. Use list_workspaces to discover names; move_pane_to_workspace targets existing layouts only. Moving someone else's pane and all rename_workspace/delete_workspace operations require user_requested and the person's Allow in the app, regardless of Agent permissions; deletion is empty-only. Never use _current for these tools. If your pane identity is unverified, name the target explicitly; pane changes need the user's request and Allow in the app, even for your own workers. Message labels mark such claims as unverified. Unverified callers have no automatic self-pane default or list_panes you marker. New panes have no starter or inherited worker/lead relationship and do not auto-archive; cmd auto and caller-owned queue cancellation are unavailable. Use explicit commands and workspace names; otherwise spawn placement falls back to the most recently active visible workspace. Do not update working_on without the user's request and Allow when unverified. Use MCP tools for pane and workspace changes; the matching REST mutation routes are for the human UI and do not accept agent callers."
 
 // SOLU_MCP_MUTATION_POLICY controls MCP tools that directly mutate local
 // state without the ARIA confirmation channel. Default "allow" preserves
@@ -127,7 +128,18 @@ func (a *apiServer) mcp(w http.ResponseWriter, r *http.Request) {
 	// only shapes what is advertised (tools/call checks the surface again).
 	callerPane := mcpCallerPane(r)
 	if req.Method == "tools/call" {
-		callerPane = a.mcpTracedCallerPane(r)
+		id := a.identifyCaller(r)
+		callerPane = a.mcpCallerForIdentity(mcpCallerPane(r), id)
+		// Asks speak to the person in the caller pane's name, so they
+		// need a pane traced from the connection's process.
+		if mcpAskToolCall(req.Params) && !askCallerTraced(id) {
+			callerPane = ""
+		}
+		var call toolCallParams
+		if json.Unmarshal(req.Params, &call) == nil && call.Name == "create_workspace" && !id.tracedPane() {
+			// A header-only or detached claim cannot select a creation budget.
+			callerPane = mcpClaimedCallerPrefix + id.PaneID
+		}
 	}
 
 	writeJSON(w, 200, a.mcpDispatchTransport(req, scope, callerPane))
@@ -142,13 +154,15 @@ func (a *apiServer) mcp(w http.ResponseWriter, r *http.Request) {
 // /mcp on loopback and name another pane. So the connection is traced to its
 // process first (caller_authority.go). A process inside a pane is that pane,
 // whatever the header says. A process the daemon started, or any other traced
-// program, is no pane and owns none. The header counts only when the
-// connection cannot be traced (a Windows process reaching a WSL daemon, WSL's
-// relayed loopback): the limit SECURITY.md documents. A process placed only
-// by SOLU_PANE_ID in its environment is no pane either (see below).
+// program, is no pane and owns none. When the connection cannot be traced,
+// the header is only a claim, with no pane ownership. A process placed only
+// by SOLU_PANE_ID in its environment has the same status (see below).
 func (a *apiServer) mcpTracedCallerPane(r *http.Request) string {
-	header := mcpCallerPane(r)
-	id := a.identifyCaller(r)
+	return a.mcpCallerForIdentity(mcpCallerPane(r), a.identifyCaller(r))
+}
+
+// mcpCallerForIdentity is mcpTracedCallerPane for an already traced connection.
+func (a *apiServer) mcpCallerForIdentity(header string, id callerIdentity) string {
 	switch {
 	case id.Kind == callerPane && id.PaneID != "" && id.FromEnv:
 		// No pane above the process (setsid, a detached tmux or screen
@@ -168,7 +182,10 @@ func (a *apiServer) mcpTracedCallerPane(r *http.Request) string {
 		// terminal, a script): it owns no panes, whatever it claims.
 		return ""
 	}
-	return header
+	if header != "" {
+		return mcpClaimedCallerPrefix + header
+	}
+	return ""
 }
 
 // mcpClaimedCallerPrefix marks a caller pane that could not be verified
@@ -230,7 +247,7 @@ func (a *apiServer) mcpDispatchTransport(req rpcReq, scope *mcpScope, callerPane
 	// Public installs (not operator) get the terminal tools only: no
 	// workflow, task-owner or managed-agent tools, and short neutral
 	// instructions instead of the delegation brief. Scoped callers (managed
-	// agents, the Warden) only exist on operator installs. The personal view
+	// agents) only exist on operator installs. The personal view
 	// gives panes started while it is on the same public surface.
 	public := scope == nil && (!a.operatorFeaturesOn() || a.personalViewForPane(splitMCPCaller(callerPane).ID))
 	if public && req.Method == "tools/call" {
@@ -335,10 +352,16 @@ func mcpCoreTools() []mcpTool {
 			Name: "list_panes",
 			Description: "List every open soluterminal pane with its id, its #number and workspace " +
 				"as the user sees them in the app, a label like \"#2 Codex\", the live state " +
-				"(busy, idle, awaiting-input, choice-prompt, exited), agent identity (claude | " +
-				"codex | muse, empty for a plain shell), title, cwd and flagged state. `you: true` " +
+				"(busy, recent, idle, awaiting-input, choice-prompt, exited), agent identity (claude | " +
+				"codex | muse, empty for a plain shell), title, cwd and flagged state. Optional JSON fields: " +
+				"teamKind (lead or worker), leadRole (a lead’s role), handle (stable @name), " +
+				"workingOn (current one-line status), startedBy (who opened it and why; absent for user-opened panes). " +
+				"Also includes worker requests without a pane yet: status queued, running (starting), or closed " +
+				"(cancelled/failed), with worker, queuePosition and optional workerError; use cancel_queued_worker " +
+				"with the request id to cancel a queued request. Archived workers have status archived and worker.state archived; " +
+				"these request/archive entries have no live state or #number. read_pane_tail can read an archived result. `you: true` " +
 				"marks your own pane. When the user says \"pane 2\" they mean number 2 in their " +
-				"workspace. The ids (or #numbers) are the inputs to ask_pane, wait_for_pane, " +
+				"workspace. Open pane ids, #numbers or @handles are the inputs to ask_pane, wait_for_pane, " +
 				"read_pane_tail, get_pane_state, send_input and kill_pane.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
@@ -401,7 +424,10 @@ func mcpCoreTools() []mcpTool {
 				"read_pane_tail. status is replied, needs_approval (the other agent is waiting on a " +
 				"permission menu: answer_prompt it or tell the user, then wait_for_pane), " +
 				"still_working (timed out: call wait_for_pane) or exited. Refused if the pane is " +
-				"busy or on a menu, or is your own pane.",
+				"busy or on a menu, or is your own pane. While the person is typing in that pane, " +
+				"nothing is typed: the message waits on the pane (delivery \"held\") and goes in " +
+				"once their input box is empty and they stop typing; keep waiting, do not resend. " +
+				"Sender labels say unverified when the caller cannot be traced to a pane. All unverified senders share five held messages per target; the total queue limit is twenty.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -448,11 +474,18 @@ func mcpCoreTools() []mcpTool {
 			Name: "send_input",
 			Description: "Write keystrokes to a pane's terminal (stdin). This is a mutating tool — " +
 				"it types directly into a live session. Include a trailing newline in `text` " +
-				"to submit a line (e.g. \"ls\\n\" to run a command). To answer an approval/choice " +
+				"to submit a line (e.g. \"ls\\n\" to run a command). A message for a Claude or " +
+				"Codex pane must end with a newline; one without it is refused unsent, so it " +
+				"never sits in that agent's input box. To answer an approval/choice " +
 				"menu use answer_prompt. While a pane shows such a menu, only a one- or " +
 				"two-key answer is accepted here; longer text is refused unsent (the menu " +
-				"would read it as keystrokes) — retry after the prompt resolves. Refused if " +
-				"the pane has already exited. The pane_id must come from list_panes.",
+				"would read it as keystrokes) — retry after the prompt resolves. A message " +
+				"for a Claude or Codex pane the person is typing in is refused untyped and " +
+				"held on that pane until they stop (do not resend; ask_pane waits for it). " +
+				"Invisible format characters (Unicode tag characters, bidi controls, " +
+				"zero-width spaces) are removed before anything is typed. " +
+				"Refused if the pane has already exited. The pane_id must come from list_panes. " +
+				"Sender labels say unverified when the caller cannot be traced to a pane. All unverified senders share five held messages per target; the total queue limit is twenty.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -556,7 +589,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"lead": {
 						"type": "string",
-						"description": "Start a LEAD: a long-lived role pane that owns an area, named by its role (e.g. \"security\", \"social\"). It nests under you as a sub-lead and is never closed automatically. Without lead, the pane is a WORKER: a task for you, closed and archived automatically once it has finished, you have read its result, and its work is committed and pushed."
+						"description": "Start a LEAD: a long-lived role pane that owns an area, named by its role (e.g. \"security\", \"social\"). It appears in the sidebar as a peer lead (not nested under you), marked as started by you, and is never closed automatically. Without lead, the pane is a WORKER: a task for you, closed and archived automatically once it has finished, you have read its result, and its work is committed and pushed."
 					},
 					"prompt": {
 						"type": "string",
@@ -581,12 +614,15 @@ func mcpCoreTools() []mcpTool {
 		},
 		{
 			Name: "kill_pane",
-			Description: "Terminate a pane and the agent process running inside it. Close the panes you " +
-				"started once you have collected their result, unless the user asked to keep them. " +
+			Description: "Terminate a pane and the agent process running inside it. Workers close and archive " +
+				"automatically once finished, their result is read, and their work is committed and pushed. " +
+				"Never close a lead. Close plain finished panes you started once you have collected their result, " +
+				"unless the user asked to keep them. " +
 				"Any other pane is the user's: closing it is refused, unless the user explicitly asked " +
 				"for it in this conversation and you pass user_requested: true; the user is then asked " +
 				"to allow it in the SoluTerminal app, and the pane closes only if they do. Closing " +
-				"never deletes files. The pane_id must come from list_panes.",
+				"never deletes files. The pane_id must come from list_panes. " +
+				paneClaimedCallerHelp,
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -596,7 +632,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"user_requested": {
 						"type": "boolean",
-						"description": "Set true only when the user explicitly asked you to close this pane. It does not close the pane by itself: the user is asked to allow it in the app. Not needed for panes you started."
+						"description": "Set true only when the user explicitly asked you to close this pane. It does not close the pane by itself: the user is asked to allow it in the app. Not needed for panes you started when your caller identity is verified."
 					}
 				},
 				"required": ["pane_id"],
@@ -604,11 +640,26 @@ func mcpCoreTools() []mcpTool {
 			}`),
 		},
 		{
+			Name:        "move_pane_to_workspace",
+			Description: "Move a running pane to an EXISTING named workspace (case-insensitive). Never creates a workspace. Keeps the process running, removes its source tile and appends it in the target layout; clients update live without switching workspace. Your own pane and panes you started or lead move directly. Any other pane requires user_requested:true and the person's Allow in the app, even with standing Agent permissions. Use list_panes/list_workspaces first. _current and managed owner panes cannot be moved.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"pane_id":{"type":"string","description":"Pane id, #number or @handle from list_panes."},"workspace":{"type":"string","description":"Existing visible destination; never created implicitly."},"user_requested":{"type":"boolean","description":"True only if the person explicitly asked; their Allow is still required for another person's pane."}},"required":["pane_id","workspace"],"additionalProperties":false}`),
+		},
+		{
+			Name:        "rename_workspace",
+			Description: "Rename an existing named workspace, matched case-insensitively. Always requires user_requested:true AND the person's Allow in the app; standing Agent permissions cannot bypass this. Refuses case-insensitive name collisions and the hidden _current autosave. Open clients update live.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"workspace":{"type":"string"},"new_name":{"type":"string","description":"New visible name; must not collide with another workspace, ignoring case."},"user_requested":{"type":"boolean","description":"Must be true only when the person explicitly asked. Waits for their Allow in the app."}},"required":["workspace","new_name","user_requested"],"additionalProperties":false}`),
+		},
+		{
+			Name:        "delete_workspace",
+			Description: "Delete ONLY an empty named workspace (zero panes). Move or close its panes first. Always requires user_requested:true AND the person's Allow in the app; standing Agent permissions cannot bypass this. Refuses protected workspaces and hidden _current. Removes its saved layout, browser/file tiles and context-pack default; does not delete files. Open clients update live.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"workspace":{"type":"string"},"user_requested":{"type":"boolean","description":"Must be true only when the person explicitly asked. Waits for their Allow in the app."}},"required":["workspace","user_requested"],"additionalProperties":false}`),
+		},
+		{
 			Name: "list_workspaces",
 			Description: "List every named soluterminal workspace with its pane count and " +
 				"last-active timestamp. A workspace is a saved layout of panes the user can " +
 				"switch between. Use this to discover what workspaces exist before calling " +
-				"switch_workspace or before spawning a pane into a specific one. The internal " +
+				"switch_workspace, move_pane_to_workspace, rename_workspace or delete_workspace, or before spawning a pane into a specific one. The internal " +
 				"'_current' autosave scratchpad is hidden.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
@@ -633,6 +684,11 @@ func mcpCoreTools() []mcpTool {
 				"required": ["workspace"],
 				"additionalProperties": false
 			}`),
+		},
+		{
+			Name:        "create_workspace",
+			Description: "Create one empty named workspace without switching views or overwriting an existing workspace. No Allow is needed. Requires a verified connection from a running pane. Limited to 5 new workspaces per pane and 20 across all panes per rolling hour; unverified and detached callers are refused. Use spawn_pane afterwards to add panes; use the app to save layouts. The internal _current scratchpad is reserved.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"New visible workspace name, at most 120 runes and no control/bidi characters; must not already exist, ignoring case.","minLength":1,"maxLength":120}},"required":["name"],"additionalProperties":false}`),
 		},
 		{
 			Name: "list_ports",
@@ -797,7 +853,8 @@ func mcpCoreTools() []mcpTool {
 				"process running inside it. You can rename your own pane and the panes you " +
 				"started; any other pane is the user's: renaming it is refused, unless the user " +
 				"asked for it and you pass user_requested: true; the user is then asked to allow " +
-				"it in the SoluTerminal app. The pane_id must come from list_panes.",
+				"it in the SoluTerminal app. The pane_id must come from list_panes. " +
+				paneClaimedCallerHelp,
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -827,7 +884,8 @@ func mcpCoreTools() []mcpTool {
 				"current as your work moves on. Defaults to your own pane. Another pane needs to be one " +
 				"you started; for anyone else's, pass user_requested: true only when the user asked, " +
 				"and they are asked to allow it in the SoluTerminal app. An empty string clears a field. " +
-				"kind makes a pane a lead or a worker (see kind).",
+				"kind makes a pane a lead or a worker (see kind). " +
+				paneClaimedCallerHelp,
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -846,7 +904,7 @@ func mcpCoreTools() []mcpTool {
 					"kind": {
 						"type": "string",
 						"enum": ["lead", "worker"],
-						"description": "Make a pane you started a LEAD (a long-lived role pane, never closed automatically; needs lead_role) or a WORKER (a task for its lead, archived automatically once finished, read and pushed). Set it in its own call, without handle or working_on. Your own pane, or one you did not start, needs user_requested; a pane the user opened can only be changed by the user."
+						"description": "Make a pane you started a LEAD (a long-lived role pane, never closed automatically; needs lead_role) or a WORKER (a task for its lead, archived automatically once finished, read and pushed). Set it in its own call, without handle or working_on. Your own pane, or one you did not start, needs user_requested. For a pane the user opened, only kind: \"lead\" with a valid lead_role and user_requested: true is allowed, and always waits for the person's approval in the app, even with standing agent authority. You cannot make a user-opened pane a worker or clear its kind."
 					},
 					"lead_role": {
 						"type": "string",
@@ -862,12 +920,11 @@ func mcpCoreTools() []mcpTool {
 		},
 		{
 			Name: "set_pane_flag",
-			Description: "Flag (or unflag) a pane as \"come back to this\" — sets the sidebar " +
-				"badge the user scans to find pending threads later, with an optional short " +
-				"memo of why. Use when the user says \"flag this pane\", \"mark T2 so I don't " +
-				"lose it\", or \"clear the flag on T2\". Set flagged=false to remove the flag " +
-				"(this also clears any memo). The flag persists across daemon restarts. The " +
-				"pane_id must come from list_panes.",
+			Description: "Flag (or unflag) your pane or one you started or lead, with an optional short memo. " +
+				"User bookmarks (including historical flags without an owner) cannot be changed or cleared by any agent; " +
+				"the person changes those in the app. Agents may update or clear only their own flags. " +
+				"The verified caller pane is recorded in the owner. Set flagged=false to clear your flag and memo. " +
+				"Flags persist across daemon restarts. pane_id must come from list_panes.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -1051,7 +1108,7 @@ func mcpCoreTools() []mcpTool {
 				"additionalProperties": false
 			}`),
 		},
-	}, removedTodoMCPTools()...)
+	}, append(askMCPTools(), removedTodoMCPTools()...)...)
 }
 
 type toolCallParams struct {
@@ -1068,7 +1125,7 @@ func (a *apiServer) mcpCallTool(params json.RawMessage, scope *mcpScope, callerP
 
 func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope, callerPane string) any {
 	// An unverified caller acts as no pane; only the pane tools that ask the
-	// person keep its claim, to say so in the prompt.
+	// person or label a message keep its claim, marked unverified.
 	caller := splitMCPCaller(callerPane)
 	callerPane = caller.ID
 	var p toolCallParams
@@ -1138,9 +1195,9 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 	case "read_pane_tail":
 		return a.noteCrossPaneTool(crossPane, a.mcpToolReadPaneTail(p.Arguments, callerPane))
 	case "ask_pane":
-		return a.noteCrossPaneTool(crossPane, a.mcpToolAskPane(p.Arguments, callerPane))
+		return a.noteCrossPaneTool(crossPane, a.mcpToolAskPaneAs(p.Arguments, caller))
 	case "wait_for_pane":
-		return a.noteCrossPaneTool(crossPane, a.mcpToolWaitForPane(p.Arguments, callerPane))
+		return a.noteCrossPaneTool(crossPane, a.mcpToolWaitForPaneAs(p.Arguments, caller))
 	case "get_pane_state":
 		return a.mcpToolGetPaneState(p.Arguments)
 	case "send_input":
@@ -1151,7 +1208,8 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 				return toolErr("pane " + target.ID + " is showing a permission prompt. Agents can't answer it on their own; the person can answer it in the SoluTerminal app, or turn on Settings → Privacy & security → Agent permissions.")
 			}
 		}
-		return a.noteCrossPaneTool(crossPane, a.mcpToolSendInput(p.Arguments, callerPane))
+		res, _ := a.mcpToolSendInputOutcomeAs(p.Arguments, deliveryNoSteer, caller)
+		return a.noteCrossPaneTool(crossPane, res)
 	case "answer_prompt":
 		// Answering a prompt is acting for the person. Unscoped callers are
 		// interactive agents and need the person's agent-permissions grant; a
@@ -1169,10 +1227,16 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 		return a.cancelQueuedWorker(p.Arguments, callerPane)
 	case "kill_pane":
 		return a.mcpToolKillPaneAs(p.Arguments, caller)
+	case "move_pane_to_workspace":
+		return a.mcpToolMovePaneToWorkspace(p.Arguments, caller)
+	case "rename_workspace", "delete_workspace":
+		return a.mcpToolChangeWorkspace(p.Name, p.Arguments, caller)
 	case "list_workspaces":
 		return a.mcpToolListWorkspaces(p.Arguments)
 	case "switch_workspace":
 		return a.mcpToolSwitchWorkspace(p.Arguments)
+	case "create_workspace":
+		return a.mcpToolCreateWorkspace(p.Arguments, caller)
 	case "list_ports":
 		return a.mcpToolListPorts(p.Arguments)
 	case "open_browser":
@@ -1194,7 +1258,11 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 	case "set_pane_info":
 		return a.mcpToolSetPaneInfoAs(p.Arguments, caller)
 	case "set_pane_flag":
-		return a.mcpToolSetPaneFlag(p.Arguments, callerIdent, scope)
+		return a.mcpToolSetPaneFlag(p.Arguments, callerIdent, scope, callerPane)
+	case "post_user_ask":
+		return a.mcpToolPostUserAsk(p.Arguments, caller, scope)
+	case "resolve_user_ask":
+		return a.mcpToolResolveUserAsk(p.Arguments, caller, scope)
 	case "list_schedules":
 		return a.mcpToolListSchedules(p.Arguments)
 
@@ -1234,12 +1302,13 @@ func mcpToolRequiresMutationPolicy(tool string) bool {
 	switch tool {
 
 	case "send_input", "ask_pane", "spawn_pane", "create_schedule", "set_schedule_enabled", "cancel_schedule", "write_file_line", "open_browser", "close_browser",
-		// Every remaining mutator joined the gate in the Warden hardening
+		// Every mutator joins the mutation-policy gate; the hardening
 		// pass — before it, `deny` still left kill_pane (!) and the
 		// flag/workspace/preview mutators callable, which made the policy a
 		// false promise of read-only-ness. The removed todo tools left the set:
 		// their stubs change nothing.
-		"kill_pane", "cancel_queued_worker", "rename_pane", "set_pane_info", "set_pane_flag", "switch_workspace", "preview_file", "answer_prompt":
+		"kill_pane", "cancel_queued_worker", "rename_pane", "set_pane_info", "set_pane_flag", "switch_workspace", "create_workspace", "move_pane_to_workspace", "rename_workspace", "delete_workspace", "preview_file", "answer_prompt",
+		"post_user_ask", "resolve_user_ask":
 		return true
 	default:
 		return false
@@ -1304,8 +1373,13 @@ func redactToolHint(tool string, args map[string]any) string {
 			}
 			hint += d
 		}
-	case "switch_workspace":
+	case "switch_workspace", "rename_workspace", "delete_workspace", "move_pane_to_workspace":
 		hint = pick("workspace")
+	case "post_user_ask", "resolve_user_ask":
+		// The key only: ask text is shown in the asks list, not the feed.
+		hint = pick("key")
+	case "create_workspace":
+		hint = pick("name")
 	default:
 		// For any future tool with a common "path" arg, surface just
 		// the basename. Anything else → empty.
@@ -1371,6 +1445,8 @@ type mcpPaneSummary struct {
 	Flagged   bool   `json:"flagged,omitempty"`
 	FlagMemo  string `json:"flagMemo,omitempty"`
 	FlagOwner string `json:"flagOwner,omitempty"`
+	// OpenAsks is how many of the pane's asks wait on the user (asks.go).
+	OpenAsks int `json:"open_asks,omitempty"`
 	// Number is the #n the UI shows on the pane in Workspace; Label is
 	// "#n Name" for repeating back to the user. State is the live runtime
 	// state (busy, idle, awaiting-input, choice-prompt, …). You marks the
@@ -1441,6 +1517,10 @@ func paneSummaryAgent(p *Pane, snap PaneSnapshot) string {
 func (a *apiServer) mcpToolListPanes(_ map[string]any, callerPane string) any {
 	panes := a.mgr.List()
 	slots := paneSlotsByID(a.ws)
+	var asks map[string]int
+	if a.asks != nil {
+		asks = a.asks.openCounts()
+	}
 	out := make([]mcpPaneSummary, 0, len(panes))
 	for _, p := range panes {
 		snap := p.Snapshot()
@@ -1462,6 +1542,7 @@ func (a *apiServer) mcpToolListPanes(_ map[string]any, callerPane string) any {
 			Flagged:        snap.Flagged,
 			FlagMemo:       snap.FlagMemo,
 			FlagOwner:      snap.FlagOwner,
+			OpenAsks:       asks[snap.ID],
 			Number:         slot.Number,
 			Workspace:      slot.Workspace,
 			Label:          paneLabel(slot, snap.Title, agent),
@@ -1572,6 +1653,14 @@ func (a *apiServer) mcpToolSendInput(args map[string]any, callers ...string) any
 // mcpToolSendInputOutcome is send_input that also returns the verified
 // delivery outcome ("" when the text did not go through agent delivery).
 func (a *apiServer) mcpToolSendInputOutcome(args map[string]any, mode deliveryMode, callers ...string) (any, deliveryOutcome) {
+	var c paneCaller
+	if len(callers) > 0 {
+		c = splitMCPCaller(callers[0])
+	}
+	return a.mcpToolSendInputOutcomeAs(args, mode, c)
+}
+
+func (a *apiServer) mcpToolSendInputOutcomeAs(args map[string]any, mode deliveryMode, c paneCaller) (any, deliveryOutcome) {
 	paneID, _ := args["pane_id"].(string)
 	text, _ := args["text"].(string)
 	if paneID == "" {
@@ -1592,25 +1681,44 @@ func (a *apiServer) mcpToolSendInputOutcome(args map[string]any, mode deliveryMo
 	// Normalize literal escape sequences (the model often emits "\\n"
 	// instead of a real newline) the same way the ARIA path does.
 	text = unescapeAriaInput(text)
+	// A Claude or Codex agent gets no invisible format characters (Unicode
+	// tag characters, bidi controls, zero-width spaces), whatever the text
+	// turns out to be: a message, or a one- or two-key answer. They are never
+	// keys, so real keys are kept. Other panes keep their stricter rule: a
+	// busy pane's not-typed receipt refuses such text outright.
+	agent, claude := paneAgentProvider(p)
+	if stripped := withoutInvisibleFormat(text); agent && stripped != text {
+		if strings.Trim(stripped, "\r\n") == "" {
+			return toolErr("text is empty once invisible format characters are removed, so nothing was sent"), ""
+		}
+		text = stripped
+	}
 	if reason := sendInputMenuCollision(p, text); reason != "" {
+		return toolErr(reason), ""
+	}
+	if reason := sendInputUnsubmittedMessage(p, text); reason != "" {
 		return toolErr(reason), ""
 	}
 	// A message to a Claude or Codex pane (text ending in Enter, multi-line
 	// included) goes through the verified delivery: paste, wait until the
 	// input box shows it, Enter, confirm it left the box (pane_delivery.go).
 	if body, ok := agentMessageBody(text); ok {
-		if agent, claude := paneAgentProvider(p); agent {
-			sender := ""
-			if len(callers) > 0 {
-				body = a.labelPaneMessage(body, callers[0], paneID)
-				sender = a.paneMessageSender(callers[0], paneID)
+		if agent {
+			body = a.labelPaneMessageAs(body, c, paneID)
+			sender := a.paneMessageSenderAs(c, paneID)
+			delivered := func(o deliveryOutcome) { p.recordAgentMessage(c.ID, sender, o, time.Now()) }
+			wrote, outcome, err := deliverOrHoldAgentMessage(p, body, claude, mode, delivered, sender, c.messageKey())
+			if errors.Is(err, errHeldQueueFull) || errors.Is(err, errHeldPaneFull) {
+				return toolErr(fmt.Sprintf("pane %s: %v.", paneID, err)), ""
 			}
-			wrote, outcome, err := deliverAgentMessage(p, body, claude, mode, sender)
 			if err != nil {
 				return toolErr(fmt.Sprintf("wrote %d bytes to pane %s but %v", wrote, paneID, err)), ""
 			}
-			if len(callers) > 0 {
-				p.recordAgentMessage(callers[0], sender, outcome, time.Now())
+			if outcome == deliveryHeld {
+				return toolErr(heldNotice(paneID, p.heldDeliveryReason())), outcome
+			}
+			if delivered != nil {
+				delivered(outcome)
 			}
 			if outcome == deliveryLeftInComposer {
 				return toolErr(fmt.Sprintf("Sent %d bytes to pane %s: %s.", wrote, paneID, deliveryNotice(outcome))), outcome
@@ -1623,15 +1731,23 @@ func (a *apiServer) mcpToolSendInputOutcome(args map[string]any, mode deliveryMo
 	// land in the running program or mix with its output. Keys without a
 	// line (Ctrl+C, Esc, a one-letter reply) still go through.
 	if line, ok := agentMessageBody(text); ok && mode == deliveryNoSteer && p.Snapshot().Kind != "native" && sendInputPaneBusy(p) {
-		return a.refuseBusyPane(p, line, callers...), ""
+		return a.refuseBusyPaneAs(p, line, c), ""
 	}
 	// Split body + trailing-Enter so a submitted line is written as a
 	// separate CR frame after the standard gap — see pty_submit.go.
 	body, submit := splitTrailingEnter(text)
 	policy := p.autoModePolicy()
-	recordPrompt := !(p.computeStateCached() == StateChoicePrompt || isObviousMenuReply(body) || (submit && body == ""))
+	menuLive := p.computeStateCached() == StateChoicePrompt
+	recordPrompt := !(menuLive || isObviousMenuReply(body) || (submit && body == ""))
+	// An agent's keys never act on a put-back message in the box (Enter
+	// would send it, Ctrl+A Ctrl+K clear it): only the person does. Keys
+	// answering a live menu go to the menu. Checked under the writer lock.
+	var putBack func() error
+	if agent && mode == deliveryNoSteer {
+		putBack = p.putBackKeysCheck(!claude)
+	}
 	write := func(b []byte) (int, error) {
-		return p.writeWithAutoModePolicy(b, recordPrompt, policy, time.Now().Add(ariaJevTimeout))
+		return p.writeWithFleetAdmissionPolicy(b, recordPrompt, false, &policy, time.Now().Add(ariaJevTimeout), putBack)
 	}
 	hasClaude := p.HasClaudeDescendant()
 	wrote := 0
@@ -1663,13 +1779,18 @@ func (a *apiServer) mcpToolSendInputOutcome(args map[string]any, mode deliveryMo
 // pane's not-typed receipt when it can be. A pane locked against automatic
 // answers refuses an agent's input as any write would, and keeps nothing.
 func (a *apiServer) refuseBusyPane(p *Pane, line string, callers ...string) any {
+	var c paneCaller
+	if len(callers) > 0 {
+		c = splitMCPCaller(callers[0])
+	}
+	return a.refuseBusyPaneAs(p, line, c)
+}
+
+func (a *apiServer) refuseBusyPaneAs(p *Pane, line string, c paneCaller) any {
 	if p.Snapshot().NeverAutoAnswer {
 		return toolErr(fmt.Sprintf("write to pane %s failed: %v", p.ID, fmt.Errorf("%w: pane is locked against automatic answers", errAutoModePolicyChanged)))
 	}
-	sender := ""
-	if len(callers) > 0 && callers[0] != "" {
-		sender = a.paneMessageSender(callers[0], p.ID)
-	}
+	sender := a.paneMessageSenderAs(c, p.ID)
 	if sender == "" {
 		sender = "SoluTerminal"
 	}
@@ -1806,6 +1927,16 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 	// A lead when the spawn names a role, else a worker for its starter.
 	if err := applySpawnTeam(paneOrigin, leadRole, agentFromCmd(cmd)); err != nil {
 		return toolErr("spawn failed: " + err.Error())
+	}
+	// Match Manager.spawnPreparedPane's cwd normalization before the baseline.
+	cwd = expandHome(cwd)
+	if cwd == "" {
+		cwd, _ = os.UserHomeDir()
+	}
+	if paneTeamKind(paneOrigin) == paneTeamWorker {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		paneOrigin.WorkerGit = captureWorkerGitStart(ctx, cwd)
+		cancel()
 	}
 	spawnTitle := spawnPaneTitle(titleArg, agentFromCmd(cmd), paneOrigin)
 	prepared.Cwd, prepared.Cmd, prepared.Agent, prepared.Role, prepared.AutomationOrigin, prepared.Origin, prepared.Title, prepared.Identity = cwd, append(cmd, prepared.Cmd...), agent, role, origin, paneOrigin, spawnTitle, identity
@@ -1982,6 +2113,7 @@ func (a *apiServer) killPaneNow(paneID, callerPane, note string) map[string]any 
 		closer = "agent"
 	}
 	recordPaneClose(paneID, origin, closer, paneStartedByCaller(origin, callerPane))
+	a.asksPaneClosed(paneID)
 	if a.panes != nil {
 		_ = a.panes.Remove(paneID)
 	}
@@ -2343,7 +2475,7 @@ func (a *apiServer) renamePaneNow(p *Pane, title string) map[string]any {
 	return toolOK("Renamed pane " + p.ID + " from '" + oldTitle + "' to '" + title + "'.")
 }
 
-func (a *apiServer) mcpToolSetPaneFlag(args map[string]any, ident string, scope *mcpScope) any {
+func (a *apiServer) mcpToolSetPaneFlag(args map[string]any, ident string, scope *mcpScope, callerPane string) any {
 	paneID, _ := args["pane_id"].(string)
 	if strings.TrimSpace(paneID) == "" {
 		return toolErr("pane_id is required")
@@ -2357,36 +2489,22 @@ func (a *apiServer) mcpToolSetPaneFlag(args map[string]any, ident string, scope 
 	if !found {
 		return toolErr("no pane with id " + paneID + " (call list_panes for ids)")
 	}
-	episode := ""
-	if scope != nil && scope.Identity == wardenScopeIdentity {
-		// Read the current option at call time: a token minted before opt-out
-		// cannot keep creating flags. Only a live triage episode can write.
-		if !flagged || a.wardenSettings == nil || !a.wardenSettings.Snapshot().AutoFlags {
-			return toolErr("Warden automatic flags are disabled")
-		}
-		if scope.WardenPaneID != paneID || scope.WardenEpisode == "" {
-			return toolErr("Warden flag capability is not for this pane and episode")
-		}
-		episode = scope.WardenEpisode
+	if scope == nil && callerPane != "" {
+		ident = "agent:" + callerPane
 	}
 	err := a.mgr.changeCurrentFlag(p, a.panes, func(prev PaneSnapshot) error {
-		if scope != nil && prev.Flagged && prev.FlagOwner != "" && prev.FlagOwner != ident {
-			return fmt.Errorf("pane %s is already flagged by '%s' — a scoped caller may not override it", paneID, prev.FlagOwner)
+		if prev.Flagged && (prev.FlagOwner == "user" || prev.FlagOwner == "") {
+			return fmt.Errorf("pane %s is already flagged by 'user'; only the person can change or clear this bookmark in the app", paneID)
 		}
-		if episode != "" {
-			if a.wardenSettings == nil || !a.wardenSettings.Snapshot().AutoFlags {
-				return fmt.Errorf("Warden automatic flags are disabled")
-			}
-			state, _, current := p.attentionEpisodeNow()
-			if state != AttentionNeedsUser || current != episode {
-				return fmt.Errorf("Warden triage episode is no longer active")
-			}
-			if prev.Flagged {
-				return fmt.Errorf("pane %s already has a flag", paneID)
-			}
+		if scope == nil && (callerPane == "" || (callerPane != paneID && !paneStartedByCaller(prev.Origin, callerPane))) {
+			return fmt.Errorf("you may flag only your own pane or panes you started or lead")
+		}
+		legacyOwn := scope == nil && prev.FlagOwner == "agent"
+		if prev.Flagged && prev.FlagOwner != ident && !legacyOwn {
+			return fmt.Errorf("pane %s is already flagged by '%s'; agents may change or clear only their own flags", paneID, prev.FlagOwner)
 		}
 		return nil
-	}, flagged, memo, ident, episode)
+	}, flagged, memo, ident)
 	if err != nil {
 		return toolErr(err.Error())
 	}

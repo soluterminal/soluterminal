@@ -11,8 +11,9 @@ import (
 // pane_team.go owns explicit leads and workers.
 //
 // A LEAD is a role pane (security, CMO, social…): long-lived, owns an area,
-// has a stable role name, and is never archived automatically. A lead can sit
-// under another pane for organisation (a sub-lead) and is still a lead.
+// has a stable role name, and is never archived automatically. A lead another
+// pane started (a sub-lead) keeps that starter in its origin and is still a
+// lead; the sidebar shows every lead as a peer, with who started it.
 // A WORKER has no role of its own: it is a task for the pane that started it,
 // and once finished, read by its lead and pushed it is archived
 // (worker_archives.go). A pane with no team kind is the user's own.
@@ -333,11 +334,18 @@ func (a *apiServer) setPaneTeamHTTP(w http.ResponseWriter, r *http.Request) {
 
 // paneTeamAgentAuthority decides an agent's set_pane_info kind change. The
 // pane's starter or lead may change it; anyone else, the pane itself
-// included, needs the person's OK. A pane the user opened is the user's to
-// promote: agents may never change it.
-func (a *apiServer) paneTeamAgentAuthority(target *PaneOrigin, paneID, callerPane string, userRequested bool) (paneAgentDecision, string) {
+// included, needs the person's OK. A pane the user opened may only be
+// promoted to a lead, at the user's request and with their OK in the app.
+func (a *apiServer) paneTeamAgentAuthority(target *PaneOrigin, paneID, callerPane, kind string, userRequested bool) (paneAgentDecision, string) {
 	if target == nil || target.Source != paneOriginAgent {
-		return paneAgentRefused, "it is not an agent's pane, so only the user can make it a lead, from its pane menu in SoluTerminal"
+		if kind != paneTeamLead {
+			return paneAgentRefused, "it is a user-opened pane; agents can only ask to make it a lead, never make it a worker or clear its kind"
+		}
+		if !userRequested {
+			return paneAgentRefused, "it is a user-opened pane. If the user asked to make it a lead, call set_pane_info again with kind: \"lead\", a valid lead_role and user_requested: true; they will be asked to allow it in the SoluTerminal app"
+		}
+		// Standing agent authority never covers this promotion either.
+		return paneAgentNeedsOK, ""
 	}
 	caller := strings.TrimSpace(callerPane)
 	if caller != "" && caller != paneID && paneStartedByCaller(target, caller) {
@@ -396,7 +404,7 @@ func (a *apiServer) mcpSetPaneTeam(args map[string]any, c paneCaller, p *Pane) a
 	}
 	name := a.paneConfirmTarget(p)
 	asked, _ := args["user_requested"].(bool)
-	decision, why := a.paneTeamAgentAuthority(p.Snapshot().Origin, p.ID, c.ID, asked)
+	decision, why := a.paneTeamAgentAuthority(p.Snapshot().Origin, p.ID, c.ID, kind, asked)
 	apply := func(target *Pane) map[string]any {
 		if _, err := a.setPaneTeam(target, kind, role, time.Now()); err != nil {
 			return toolErr("couldn't change " + name + ": " + err.Error())

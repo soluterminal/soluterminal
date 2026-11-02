@@ -98,7 +98,8 @@ type paneConfirmView struct {
 type paneConfirmRequest struct {
 	view paneConfirmView
 	key  string
-	// bucket is the asking caller for the per-caller limit (paneCaller.bucket).
+	// bucket is the quota group: the verified caller, or empty for every
+	// unverified caller. The request key still distinguishes individual claims.
 	bucket string
 	// run carries the action out once the person allows it; it returns the
 	// tool result the agent sees.
@@ -122,10 +123,12 @@ func newPaneConfirmID() string {
 	return hex.EncodeToString(b[:])
 }
 
+const paneClaimedCallerHelp = "An unverified caller must name pane_id explicitly and needs the user's request (user_requested: true) and Allow in the app, even for its own pane or workers. Unverified callers share three open Allow requests."
+
 // paneCaller is the agent making a pane tool call. ID is the pane it traces
 // to: the one whose ownership it has ("" for none). Claimed is a pane it only
-// says it is (SOLU_PANE_ID in the environment of a process with no pane above
-// it, mcpTracedCallerPane): never used for ownership, only to word the prompt.
+// says it is (an untraced header or SOLU_PANE_ID alone, mcpTracedCallerPane):
+// never used for ownership, only for unverified labels and caller buckets.
 type paneCaller struct {
 	ID      string
 	Claimed string
@@ -138,7 +141,10 @@ func (a *apiServer) paneConfirmCaller(c paneCaller) string {
 		return a.paneCallerLabel(p)
 	}
 	if p, ok := a.mgr.Get(strings.TrimSpace(c.Claimed)); ok {
-		return "An agent claiming to be " + a.paneCallerLabel(p) + " (couldn't be verified)"
+		return "An agent claiming to be " + a.paneCallerLabel(p) + " (unverified)"
+	}
+	if c.Claimed != "" {
+		return "An unverified agent"
 	}
 	return "An agent outside your panes"
 }
@@ -150,7 +156,8 @@ func (a *apiServer) paneCallerLabel(p *Pane) string {
 	return a.paneLabelFor(p)
 }
 
-// paneConfirmBucket groups a caller's open requests for the per-caller limit.
+// bucket identifies a caller for request deduplication and queued asks.
+// Confirmation quotas group unverified callers independently of this key.
 func (c paneCaller) bucket() string {
 	if id := strings.TrimSpace(c.ID); id != "" {
 		return id
@@ -181,6 +188,12 @@ func (a *apiServer) requestPaneConfirm(key string, view paneConfirmView, run fun
 }
 
 func (a *apiServer) requestPaneConfirmFor(key, bucket string, view paneConfirmView, run func() map[string]any) (*paneConfirmRequest, error) {
+	// Only a verified pane earns its own allowance. Keep the per-claim key
+	// for deduplication, but share the quota across claims and anonymous
+	// callers so changing the claimed name cannot stack more Allow prompts.
+	if strings.TrimSpace(view.CallerPaneID) == "" {
+		bucket = ""
+	}
 	s := &a.paneConfirms
 	s.mu.Lock()
 	if s.byID == nil {
@@ -339,9 +352,10 @@ func (a *apiServer) handleAnswerPaneConfirm(w http.ResponseWriter, r *http.Reque
 		http.Error(w, `body must set "allow" to true or false`, http.StatusBadRequest)
 		return
 	}
-	if !a.requireHuman(w, r, "answer an agent's request to close or change a pane") {
+	if !a.requireHuman(w, r, "answer an agent's request to change a pane or workspace") {
 		return
 	}
+
 	result, ok := a.decidePaneConfirm(r.PathValue("id"), *body.Allow)
 	if !ok {
 		http.Error(w, "this request was already answered or has expired", http.StatusNotFound)
@@ -366,4 +380,13 @@ func paneConfirmResultText(res map[string]any) (string, bool) {
 		}
 	}
 	return strings.Join(parts, "\n"), failed
+}
+
+// messageKey preserves a claim's identity for deduplication without granting
+// ownership. Its existing marker also groups all unverified sender quotas.
+func (c paneCaller) messageKey() string {
+	if c.ID != "" {
+		return c.ID
+	}
+	return mcpClaimedCallerPrefix + c.Claimed
 }

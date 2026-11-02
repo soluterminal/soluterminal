@@ -1,12 +1,12 @@
-import { useEffect, useId, useState } from 'react';
-import { api, DEVICE_APPROVAL_EVENT, takePendingDeviceApproval } from '../api';
+import { useEffect, useId, useRef, useState } from 'react';
+import { api, ApiError, DEVICE_APPROVAL_EVENT, takePendingDeviceApproval } from '../api';
 import {
-  deviceCodeFor,
   deviceIdentity,
   markDeviceEnrolled,
   pinComputerIdentity,
   pinnedComputerIdentity,
 } from '../lib/deviceIdentity';
+import { beginDeviceEnrolmentV3 } from '../lib/deviceEnrolment';
 
 // Shown on a remote browser when the machine it is using only accepts devices
 // a person approved on that computer (daemon trusted_devices.go). It asks the
@@ -54,6 +54,9 @@ export function DeviceApprovalPrompt() {
   const titleId = useId();
   const [target, setTarget] = useState<string | null>(null);
   const [code, setCode] = useState('');
+  const [codeVersion, setCodeVersion] = useState<2 | 3>(2);
+  const [enrolmentId, setEnrolmentId] = useState<string | undefined>();
+  const generation = useRef(0);
   const [deviceId, setDeviceId] = useState<string | null>(null);
   // The computer key the code on screen covers.
   const [shownIdentity, setShownIdentity] = useState<string | null>(null);
@@ -63,6 +66,8 @@ export function DeviceApprovalPrompt() {
   const [approvedIdentity, setApprovedIdentity] = useState<string | null | undefined>(undefined);
   const [phase, setPhase] = useState<Phase>('ask');
   const [error, setError] = useState('');
+
+  useEffect(() => () => { generation.current++; }, []);
 
   useEffect(() => {
     const onNeeded = (e: Event) => {
@@ -83,15 +88,27 @@ export function DeviceApprovalPrompt() {
     let stopped = false;
     const timer = window.setInterval(() => {
       void api.remoteDeviceStatus(target, deviceId).then((d) => {
-        if (stopped || d.status !== 'approved') return;
+        if (stopped) return;
+        if (codeVersion === 3 && (d.id !== deviceId || d.codeVersion !== 3 || d.enrolmentId !== enrolmentId
+          || d.daemonIdentity !== shownIdentity)) {
+          setPhase('codes-differ');
+          return;
+        }
+        if (d.status !== 'approved') return;
         setApprovedIdentity(d.daemonIdentity ?? null);
-      }).catch(() => {});
+      }).catch((e) => {
+        if (!stopped && codeVersion === 3 && e instanceof ApiError && e.status === 404) {
+          setCode('');
+          setError('This comparison expired. Ask for approval again.');
+          setPhase('error');
+        }
+      });
     }, POLL_MS);
     return () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [phase, deviceId, target, approvedIdentity]);
+  }, [phase, deviceId, target, approvedIdentity, codeVersion, enrolmentId, shownIdentity]);
 
   // Both the person's confirmation and the computer's approval: done.
   useEffect(() => {
@@ -109,7 +126,10 @@ export function DeviceApprovalPrompt() {
   if (!target) return null;
 
   const close = () => {
+    generation.current++;
     setTarget(null);
+    setCode('');
+    setDeviceId(null);
     setPhase('ask');
     setConfirmed(false);
     setApprovedIdentity(undefined);
@@ -119,12 +139,26 @@ export function DeviceApprovalPrompt() {
   // the new key is confirmed and approved, so a relay that only claims the
   // identity changed gains nothing: requests stay refused meanwhile.
   const request = async (replacing = false) => {
+    const current = ++generation.current;
+    setCode('');
     setError('');
     setConfirmed(false);
     setApprovedIdentity(undefined);
     try {
       const me = await deviceIdentity();
-      const d = await api.enrollRemoteDevice(target, browserName(), me.spki);
+      const comparison = await beginDeviceEnrolmentV3(me,
+        async (commit) => {
+          if (current !== generation.current) throw new Error('Comparison closed');
+          const reply = await api.enrollRemoteDevice(target, browserName(), me.spki, commit);
+          if (current !== generation.current) throw new Error('Comparison closed');
+          return reply;
+        },
+        async (id, enrolment, nonce) => {
+          if (current !== generation.current) throw new Error('Comparison closed');
+          return api.revealRemoteDevice(target, id, enrolment, nonce);
+        });
+      if (current !== generation.current) return;
+      const d = comparison.device;
       // A computer key already pinned for this target must match; a new key is
       // pinned only after the person confirms the code below.
       const pinned = pinnedComputerIdentity(target);
@@ -138,7 +172,9 @@ export function DeviceApprovalPrompt() {
       }
       // The code covers this browser's key and the computer key the response
       // carried; the computer computes its own from the keys it actually holds.
-      setCode(await deviceCodeFor(me.spki, d.daemonIdentity));
+      setCode(comparison.code);
+      setCodeVersion(comparison.codeVersion);
+      setEnrolmentId(d.enrolmentId);
       setShownIdentity(d.daemonIdentity ?? null);
       setDeviceId(d.id);
       if (d.status === 'approved') {
@@ -150,6 +186,7 @@ export function DeviceApprovalPrompt() {
       }
       setPhase('waiting');
     } catch (e) {
+      if (current !== generation.current) return;
       setPhase('error');
       setError(String(e));
     }
@@ -180,6 +217,7 @@ export function DeviceApprovalPrompt() {
         </div>
         <div style={{ marginTop: 12, fontFamily: 'var(--font-mono, monospace)', fontSize: 18, letterSpacing: 1 }}>
           {code || (phase === 'ask' ? 'Shown after you ask' : '…')}
+          {code && <span style={{ marginLeft: 8, fontSize: 12 }}>V{codeVersion}</span>}
         </div>
         {waiting && (
           <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>

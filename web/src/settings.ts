@@ -40,7 +40,7 @@ const FALLBACK_TABS: Record<SettingsCategory, SettingsTab> = {
   workspace: 'panes',
   sessions: 'claude',
   workflows: 'tasks',
-  agents: 'warden',
+  agents: 'agent',
   credentials: 'credentials',
   team: 'team',
   devices: 'devices',
@@ -51,6 +51,12 @@ const FALLBACK_TABS: Record<SettingsCategory, SettingsTab> = {
 // Terminal & panes and Sidebar), its section.
 function readInitialTarget(): SettingsTarget {
   try {
+    // Drop the removed caretaker's saved destination without affecting other tabs.
+    if (localStorage.getItem('solu.settings.lastSection') === 'agents.warden') {
+      localStorage.removeItem('solu.settings.lastSection');
+      localStorage.removeItem('solu.settings.lastCategory');
+      return { category: 'appearance' };
+    }
     const saved = localStorage.getItem('solu.settings.lastCategory');
     const match = settingsCategories().find((category) => category.id === saved)
       ?? (saved && Object.prototype.hasOwnProperty.call(FALLBACK_TABS, saved) ? { id: saved as SettingsCategory } : undefined);

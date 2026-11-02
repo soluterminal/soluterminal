@@ -8,6 +8,7 @@ import { useIsMobileView } from './useIsMobileView';
 import { PaneHeaderOverflow, PaneDetail, usePaneDetailVisible, DETAIL_PRIORITY } from './PaneHeaderOverflow';
 import { PaneHeaderBadges } from './PaneHeaderBadges';
 import { UnsentMessageChip } from './UnsentMessageChip';
+import { PaneAsksChip } from './PaneAsksChip';
 import { PaneOriginButton } from './PaneOriginButton';
 import { messageSharesOrigin } from '../lib/paneHeaderDetails';
 import { PaneIdentityChip } from './PaneIdentityChip';
@@ -248,6 +249,7 @@ export function PaneHeader({
       )}
       <PaneTurnChip pane={pane} unseen={unreadKind === 'turn'} />
       <UnsentMessageChip pane={pane} actionGuard={actionGuard} />
+      <PaneAsksChip pane={pane} />
       </HeaderAttention>
       <div className="pane-actions">
         <PaneDetail priority={DETAIL_PRIORITY.mode}><PaneModeControl pane={pane} onSwitchMode={onSwitchMode} /></PaneDetail>

@@ -94,7 +94,7 @@ func (a *apiServer) orchestratorHostAvailability(agent string) orchestratorHostA
 			if a != nil && a.addr != "" {
 				addr = a.addr
 			}
-			mcpURL := wardenMCPURL(addr)
+			mcpURL := loopbackMCPURL(addr)
 			host := strings.TrimSuffix(strings.TrimPrefix(mcpURL, "http://"), "/mcp")
 			base.Reason = "soluterminal is not registered as a Codex MCP server — restart the daemon on " + host + " or run: codex mcp add soluterminal --url " + mcpURL
 		} else {

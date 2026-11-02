@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -120,6 +123,113 @@ func shinoqueSoludListening(port string) bool {
 		}
 	}
 	return false
+}
+
+// Check both tables on every relay request. Only a missing tcp6 table (IPv6
+// disabled at boot) is optional; other missing or malformed proc data refuses.
+func shinoqueLocalListenerAllowed(port string) bool {
+	reason := shinoqueLocalListenerRejection(port, os.Getuid(), os.ReadFile)
+	if reason != "" {
+		log.Printf("shinoque relay: listener check refused port=%q: %s", port, reason)
+	}
+	return reason == ""
+}
+
+func shinoqueLocalListenerOwned(port string, uid int, readFile func(string) ([]byte, error)) bool {
+	return shinoqueLocalListenerRejection(port, uid, readFile) == ""
+}
+
+func shinoqueLocalListenerRejection(port string, uid int, readFile func(string) ([]byte, error)) string {
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return "invalid listener port"
+	}
+	ours := false
+	for _, table := range []struct {
+		path      string
+		addrWidth int
+	}{{"/proc/net/tcp", 8}, {"/proc/net/tcp6", 32}} {
+		content, err := readFile(table.path)
+		if err != nil {
+			if table.path == "/proc/net/tcp6" && errors.Is(err, syscall.ENOENT) {
+				continue
+			}
+			return fmt.Sprintf("cannot read %s: %v", table.path, err)
+		}
+		line := 1
+		reject := func(reason string) string {
+			return fmt.Sprintf("%s line %d: %s", table.path, line, reason)
+		}
+		sc := bufio.NewScanner(bytes.NewReader(content))
+		if !sc.Scan() {
+			return reject("missing or unreadable header")
+		}
+		// The IPv4 header calls the remote column rem_address; IPv6 spells
+		// it remote_address. Queue and timer labels span two header fields.
+		header := strings.ReplaceAll(strings.Join(strings.Fields(sc.Text()), " "), "rem_address", "remote_address")
+		if header != "sl local_address remote_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode" {
+			return reject("invalid header")
+		}
+		for sc.Scan() {
+			line++
+			fields := strings.Fields(sc.Text())
+			if len(fields) < 10 {
+				return reject("incomplete socket row")
+			}
+			if !strings.HasSuffix(fields[0], ":") {
+				return reject("invalid socket slot")
+			}
+			if _, err := strconv.ParseUint(strings.TrimSuffix(fields[0], ":"), 10, 64); err != nil {
+				return reject("invalid socket slot")
+			}
+			addr, localPort := parseHexAddr(fields[1])
+			remote, _ := parseHexAddr(fields[2])
+			if len(fields[1]) != table.addrWidth+5 || len(fields[2]) != table.addrWidth+5 || addr == "" || remote == "" {
+				return reject("invalid socket address")
+			}
+			state, stateErr := strconv.ParseUint(fields[3], 16, 8)
+			owner, ownerErr := strconv.ParseUint(fields[7], 10, 32)
+			_, inodeErr := strconv.ParseUint(fields[9], 10, 64)
+			_, timeoutErr := strconv.ParseUint(fields[8], 10, 64)
+			if len(fields[3]) != 2 || stateErr != nil || ownerErr != nil || inodeErr != nil || timeoutErr != nil {
+				return reject("invalid socket state, uid, timeout or inode")
+			}
+			// Validate packed queue/timer fields and the retransmit counter,
+			// including rows unrelated to this port, rather than skipping errors.
+			for i, widths := range [][]int{{8, 8}, {2, 8}, {8}} {
+				parts := strings.Split(fields[4+i], ":")
+				if len(parts) != len(widths) {
+					return reject("invalid queue, timer or retransmit field")
+				}
+				for j, width := range widths {
+					if _, err := strconv.ParseUint(parts[j], 16, 32); err != nil || len(parts[j]) != width {
+						return reject("invalid queue, timer or retransmit field")
+					}
+				}
+			}
+			if state != 0x0a || uint64(localPort) != n {
+				continue
+			}
+			// Any other uid listening on this port makes the destination
+			// ambiguous, even if one of our listeners was already found.
+			if owner != uint64(uid) {
+				return reject(fmt.Sprintf("listener belongs to another uid (%d)", owner))
+			}
+			// Only the IPv4 table proves ownership of the proxy's 127.0.0.1
+			// destination. IPv6 rows still veto other uids above, but cannot
+			// qualify: V6ONLY and WSL forwarding are not visible in proc.
+			if table.path == "/proc/net/tcp" && (addr == "127.0.0.1" || addr == "0.0.0.0") {
+				ours = true
+			}
+		}
+		if sc.Err() != nil {
+			return reject("cannot scan socket table")
+		}
+	}
+	if !ours {
+		return "no owned IPv4 listener on 127.0.0.1 or 0.0.0.0"
+	}
+	return ""
 }
 
 func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, string) {

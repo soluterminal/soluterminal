@@ -117,6 +117,8 @@ export function PaneReviewChip({ pane }: { pane: PaneInfo }) {
           <div id={titleId} className="pane-origin-card-title">{summary}</div>
           <dl className="pane-origin-card-rows">
             {r.title && (<><dt>Change</dt><dd>{r.title}</dd></>)}
+            {r.branch && (<><dt>Branch</dt><dd>{r.branch}</dd></>)}
+            {r.head && (<><dt>Reviewed commit</dt><dd><code>{r.head.slice(0, 12)}</code></dd></>)}
             <dt>Reviewer</dt>
             <dd>
               {agentName(r.reviewer) || 'unknown'}{r.model && r.model !== 'codex default' ? ` (${r.model})` : ''}
@@ -126,6 +128,7 @@ export function PaneReviewChip({ pane }: { pane: PaneInfo }) {
             <dt>Round</dt><dd>{r.round} of 2</dd>
             {r.at > 0 && (<><dt>When</dt><dd>{formatAgo(r.at)}</dd></>)}
           </dl>
+          <p className="pane-review-summary">This is a local review of the recorded change. Before merging, check the pull request's current commit and required reviews.</p>
           {r.summary && <p className="pane-review-summary">{r.summary}</p>}
           {r.error && <p className="pane-review-summary">{r.error}</p>}
           {mustFix.length > 0 && (

@@ -39,7 +39,7 @@
       "id": "settings-category-agents",
       "title": "Agents category renders its complete settings surface",
       "steps": ["1. Open Settings and select Agents."],
-      "expected": ["The Warden section renders with its controls."],
+      "expected": ["The Services section renders with its controls."],
       "risk": "none"
     },
     {

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,10 +154,8 @@ func (p *Pane) setAttentionWithPrompt(a PaneAttention, reason string, key attent
 	next := &paneAttentionRecord{State: a, Reason: reason, Prompt: key}
 	if a == AttentionNeedsUser {
 		if newEpisode {
-			// On restart a marked flag cannot prove that the surviving process
-			// is still on the same prompt: prompt positions are not persisted.
-			// Start fresh and let Warden clear the old episode marker.
-			next.Episode = newFlagRevision()
+			// Prompt positions are not persisted, so restart begins a new episode.
+			next.Episode = newAttentionEpisode()
 		} else {
 			next.Episode = prev.Episode
 		}
@@ -396,6 +396,11 @@ func (e *attentionEngine) Refresh(p *Pane) {
 	if autoCandidate && !f.IsNative && state == StateChoicePrompt {
 		_, f.InputHoldReason = autoFireUserHold(p, now)
 	}
+	if !f.IsNative && state != StateChoicePrompt {
+		// While no menu covers the input box, check the recorder's draft
+		// against it, so a phantom cannot hold the next approval.
+		p.reconcileComposerDraft(now)
+	}
 	f.Dwell = e.dwell(p.ID, pos, state == StateChoicePrompt, autoCandidate, now)
 
 	att, reason := classifyAttention(f)
@@ -480,4 +485,12 @@ func (e *attentionEngine) Start(ctx context.Context) {
 			e.mu.Unlock()
 		}
 	}
+}
+
+func newAttentionEpisode() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		panic("attention episode: " + err.Error())
+	}
+	return hex.EncodeToString(raw[:])
 }

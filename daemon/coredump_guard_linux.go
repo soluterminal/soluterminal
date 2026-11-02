@@ -157,7 +157,6 @@ func coreDumpGuardPolicy(override string, insideWSL func() bool) bool {
 //   - the managed Node harness installer (harness_api.go)
 //   - native muse `muse exec` turns (muse_driver.go)
 //   - scheduled headless task runs (schedules_task.go)
-//   - warden runs (warden.go)
 //   - optional features' headless runs
 //   - workflow/delegated capability probes, npm-global Playwright discovery,
 //     and optional features' Claude MCP registration commands

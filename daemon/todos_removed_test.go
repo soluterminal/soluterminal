@@ -277,16 +277,12 @@ func TestRemovedTodoToolsStayRegisteredWithTinySchemas(t *testing.T) {
 	if len(seen) != len(removedTodoToolNames) {
 		t.Fatalf("registered stubs = %v, want all of %v", seen, removedTodoToolNames)
 	}
-	for _, text := range []string{mcpDirectServerInstructions, mcpPublicServerInstructions, orchestratorBrief, wardenPromptRules, wardenPrompt(wardenEvent{Kind: wardenDebrief}), wardenPrompt(wardenEvent{Kind: wardenTriage})} {
+	for _, text := range []string{mcpDirectServerInstructions, mcpPublicServerInstructions, orchestratorBrief} {
 		if strings.Contains(strings.ToLower(text), "todo") {
 			t.Errorf("agent prompt still mentions todos: %q", text)
 		}
 	}
-	for _, name := range wardenReadAnnotateTools() {
-		if removedTodoToolNames[name] {
-			t.Errorf("scoped tool set still grants %s", name)
-		}
-	}
+
 }
 
 func TestRemovedTodosAPIAnswersGone(t *testing.T) {

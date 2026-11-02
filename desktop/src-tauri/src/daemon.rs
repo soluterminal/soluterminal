@@ -13,8 +13,8 @@
 //   WSL2's built-in localhost forwarding (wslhost/wslrelay) is flaky —
 //   breaks on sleep/hibernate, WSL version bumps, firewall changes.
 //   Instead of relying on it, we:
-//     1. Bind solud inside WSL to 0.0.0.0:8787 (reachable on WSL's eth0).
-//     2. Resolve the WSL2 VM's IP (`wsl hostname -I`).
+//     1. Keep local clients on loopback; add eth0 only in NAT mode.
+//     2. Resolve eth0 for the direct Windows route; also probe loopback.
 //     3. Run our own Rust TCP byte-proxy listening on Windows
 //        127.0.0.1:18787 and forwarding each connection to the first
 //        Windows-reachable WSL daemon address (<wsl_ip>:8787 in NAT
@@ -101,7 +101,7 @@ pub const BACKEND_ID_WIN: &str = "win";
 pub const BACKEND_ID_HOST: &str = "host";
 
 /// Where the Windows-native daemon listens in Dual mode. WSL's localhost
-/// forwarding mirrors the WSL daemon's `0.0.0.0:8787` onto Windows'
+/// forwarding can mirror the WSL daemon's loopback port onto Windows'
 /// `127.0.0.1:8787`, and the WSL daemon deliberately outlives app restarts —
 /// so on every launch after the first it already owned :8787 and the Windows
 /// backend lost the race, leaving "Dual" silently running WSL-only (observed
@@ -2275,7 +2275,7 @@ pub(crate) fn ensure_daemon_running_wsl_with(app: &AppHandle, headless: bool) ->
 
     // Reuse an already-running WSL daemon instead of spawning our own.
     // The spawn path runs a startup script that kills any process whose
-    // command line matches `--addr 0.0.0.0:8787 ... --backend-id wsl
+    // command line matches `--addr <wsl-address>:8787 ... --backend-id wsl
     // ... --shell-platform windows-amd64` — which is exactly the systemd
     // `soluterminal.service` daemon. Spawning therefore starts a
     // kill/restart war with systemd (309784 restarts observed once).
@@ -2310,8 +2310,8 @@ pub(crate) fn ensure_daemon_running_wsl_with(app: &AppHandle, headless: bool) ->
     let (wsl_amd64, wsl_arm64) = wsl_bundles.clone()?;
     launch_log(&format!("wsl bundles: amd64={wsl_amd64} arm64={wsl_arm64}"));
 
-    // Bind to 0.0.0.0 so the daemon is reachable on WSL's eth0 from
-    // Windows (our TCP proxy connects via the VM IP, not localhost).
+    // Keep local clients on loopback. Add the eth0 socket for a confirmed NAT
+    // VM; mirrored and unknown modes need only loopback.
     //
     // We can't chmod the /mnt/c/Program Files copy — that directory is
     // NTFS admin-owned and WSL isn't elevated. Instead, copy the
@@ -2755,7 +2755,11 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "# The one place the listen address is written. launch_daemon and the\n",
             "# stop_port_holder ownership check both read it, so they cannot drift\n",
             "# apart and leave the cleanup looking for a port we never bind.\n",
-            "ADDR=\"0.0.0.0:8787\"\n",
+            "{network_functions}\n",
+            "ADDR=\"127.0.0.1:8787\"\n",
+            "WSL_ADDR=\"$(wsl_daemon_host):8787\"\n",
+            "# Discovery only: retain healthy daemons from an older launcher.\n",
+            "WSL_ETH0_IP=\"$(wsl_eth0_ipv4)\"\n",
             "mkdir -p \"$DAEMON_DIR\"\n",
             "# Retire a conflicting systemd --user unit, if one is installed.\n",
             "#\n",
@@ -2907,16 +2911,29 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "  done\n",
             "  return 0\n",
             "}}\n",
+            "managed_daemon_cmdline() {{\n",
+            "  local cmd listen\n",
+            "  cmd=\"$1\"\n",
+            "  case \"$cmd\" in\n",
+            "    *\" --addr \"*) listen=\"${{cmd#* --addr }}\"; listen=\"${{listen%% *}}\" ;;\n",
+            "    *) return 1 ;;\n",
+            "  esac\n",
+            "  case \"$listen\" in *:8787) ;; *) return 1 ;; esac\n",
+            "  case \"$cmd\" in\n",
+            "    \"$LOCAL \"*) return 0 ;;\n",
+            "  esac\n",
+            "  case \"$cmd\" in *\" --backend-id wsl \"*) ;; *) return 1 ;; esac\n",
+            "  case \"$cmd\" in *\" --shell-platform windows-amd64 \"*) return 0 ;; esac\n",
+            "  return 1\n",
+            "}}\n",
             "cleanup_managed_daemon() {{\n",
             "  pid=\"$(cat \"$PIDFILE\" 2>/dev/null || true)\"\n",
             "  if [ -n \"$pid\" ] && [ -r \"/proc/$pid/cmdline\" ]; then\n",
             "    cmdline=\"$(tr '\\0' ' ' < \"/proc/$pid/cmdline\" 2>/dev/null || true)\"\n",
-            "    case \"$cmdline\" in\n",
-            "      *\"$LOCAL\"*\" --addr 0.0.0.0:8787\"*|*\" --addr 0.0.0.0:8787\"*\" --backend-id wsl\"*\" --shell-platform windows-amd64\"*)\n",
+            "    if managed_daemon_cmdline \"$cmdline\"; then\n",
             "        echo \"cleanup: stopping managed daemon pid=$pid\"\n",
             "        stop_pid \"$pid\"\n",
-            "        ;;\n",
-            "    esac\n",
+            "    fi\n",
             "  fi\n",
             "}}\n",
             "# Print one TOP-LEVEL value of the JSON object on stdin: a string's\n",
@@ -2982,7 +2999,7 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "LIVE_BINARY=\"\"\n",
             "LIVE_UPDATE_ONLY=\"\"\n",
             "probe_live_daemon() {{\n",
-            "  local port resp body tok\n",
+            "  local port resp body tok host seen\n",
             "  LIVE_PID=\"\"\n",
             "  LIVE_BACKEND=\"\"\n",
             "  LIVE_VERSION=\"\"\n",
@@ -2992,15 +3009,21 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "  case \"$port\" in ''|*[!0-9]*) return 1 ;; esac\n",
             "  command -v timeout >/dev/null 2>&1 || return 1\n",
             "  tok=\"$(tr -d '[:space:]' 2>/dev/null < \"$HOME/.solu/token\" || true)\"\n",
-            "  resp=\"$(SOLU_PROBE_TOKEN=\"$tok\" timeout 20 bash -c 'exec 3<>\"/dev/tcp/127.0.0.1/$1\" || exit 1; if [ -n \"$SOLU_PROBE_TOKEN\" ]; then printf \"GET /api/health HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n\" \"$SOLU_PROBE_TOKEN\" >&3; else printf \"GET /api/health HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; fi; cat <&3' probe \"$port\" 2>/dev/null | tr -d '\\r' || true)\"\n",
-            "  case \"$resp\" in \"HTTP/1.\"?\" 200 \"*) ;; *) return 1 ;; esac\n",
-            "  body=\"$(printf '%s\\n' \"$resp\" | sed '1,/^$/d')\"\n",
-            "  LIVE_PID=\"$(printf '%s' \"$body\" | json_top_value pid || true)\"\n",
-            "  LIVE_BACKEND=\"$(printf '%s' \"$body\" | json_top_value backendID || true)\"\n",
-            "  LIVE_VERSION=\"$(printf '%s' \"$body\" | json_top_value version || true)\"\n",
-            "  LIVE_BINARY=\"$(printf '%s' \"$body\" | json_top_value binaryPath || true)\"\n",
-            "  LIVE_UPDATE_ONLY=\"$(printf '%s' \"$body\" | json_top_value updateOnly || true)\"\n",
-            "  [ -n \"$LIVE_BACKEND\" ] || [ -n \"$LIVE_VERSION\" ]\n",
+            "  seen=\" \"\n",
+            "  for host in \"${{ADDR%:*}}\" \"${{WSL_ETH0_IP:-127.0.0.1}}\" 127.0.0.1; do\n",
+            "    case \"$seen\" in *\" $host \"*) continue ;; esac\n",
+            "    seen=\"$seen$host \"\n",
+            "    resp=\"$(SOLU_PROBE_TOKEN=\"$tok\" timeout 20 bash -c 'exec 3<>\"/dev/tcp/$1/$2\" || exit 1; if [ -n \"$SOLU_PROBE_TOKEN\" ]; then printf \"GET /api/health HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\nAuthorization: Bearer %s\\r\\nConnection: close\\r\\n\\r\\n\" \"$SOLU_PROBE_TOKEN\" >&3; else printf \"GET /api/health HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; fi; cat <&3' probe \"$host\" \"$port\" 2>/dev/null | tr -d '\\r' || true)\"\n",
+            "    case \"$resp\" in \"HTTP/1.\"?\" 200 \"*) ;; *) continue ;; esac\n",
+            "    body=\"$(printf '%s\\n' \"$resp\" | sed '1,/^$/d')\"\n",
+            "    LIVE_PID=\"$(printf '%s' \"$body\" | json_top_value pid || true)\"\n",
+            "    LIVE_BACKEND=\"$(printf '%s' \"$body\" | json_top_value backendID || true)\"\n",
+            "    LIVE_VERSION=\"$(printf '%s' \"$body\" | json_top_value version || true)\"\n",
+            "    LIVE_BINARY=\"$(printf '%s' \"$body\" | json_top_value binaryPath || true)\"\n",
+            "    LIVE_UPDATE_ONLY=\"$(printf '%s' \"$body\" | json_top_value updateOnly || true)\"\n",
+            "    if [ -n \"$LIVE_BACKEND\" ] || [ -n \"$LIVE_VERSION\" ]; then return 0; fi\n",
+            "  done\n",
+            "  return 1\n",
             "}}\n",
             "# A daemon the desktop app started only to install this computer's\n",
             "# update (pane restore, relay and self-update off) reports updateOnly. It\n",
@@ -3100,11 +3123,15 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "  write_start_status \"$1\" \"$2\" \"$visible\" \"$cgroup\"\n",
             "}}\n",
             "port_is_open() {{\n",
-            "  local port\n",
+            "  local port host\n",
             "  port=\"${{ADDR##*:}}\"\n",
             "  case \"$port\" in ''|*[!0-9]*) return 1 ;; esac\n",
             "  command -v timeout >/dev/null 2>&1 || return 1\n",
-            "  timeout 5 bash -c 'exec 3<>\"/dev/tcp/127.0.0.1/$1\"' probe \"$port\" 2>/dev/null\n",
+            "  for host in \"${{ADDR%:*}}\" \"${{WSL_ADDR%:*}}\" \"${{WSL_ETH0_IP:-}}\"; do\n",
+            "    [ -n \"$host\" ] || continue\n",
+            "    if timeout 5 bash -c 'exec 3<>\"/dev/tcp/$1/$2\"' probe \"$host\" \"$port\" 2>/dev/null; then return 0; fi\n",
+            "  done\n",
+            "  return 1\n",
             "}}\n",
             "# Wait, outside the restart budget, until the port is released (the user\n",
             "# stopped that daemon), then return so the caller starts ours. Leaves if a\n",
@@ -3253,20 +3280,19 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "# Stop only the WSL daemon this Windows shell manages. Match both the\n",
             "# current staged binary path and the launch flags older installers used\n",
             "# so upgrades can replace stale dev-checkout daemons on the same port.\n",
+            "# Addresses may differ after an upgrade or a WSL mode/IP change.\n",
             "# Runs only when claim_supervision found nothing worth keeping.\n",
             "stop_stale_managed_daemons() {{\n",
             "  if [ -s \"$PIDFILE\" ]; then\n",
             "    oldpid=\"$(cat \"$PIDFILE\" 2>/dev/null || true)\"\n",
             "    if [ -n \"$oldpid\" ] && [ -r \"/proc/$oldpid/cmdline\" ]; then\n",
             "      oldcmd=\"$(tr '\\0' ' ' < \"/proc/$oldpid/cmdline\" 2>/dev/null || true)\"\n",
-            "      case \"$oldcmd\" in\n",
-            "        *\"$LOCAL\"*\" --addr 0.0.0.0:8787\"*|*\" --addr 0.0.0.0:8787\"*\" --backend-id wsl\"*\" --shell-platform windows-amd64\"*)\n",
+            "      if managed_daemon_cmdline \"$oldcmd\"; then\n",
             "          echo \"stopping previous managed daemon pid=$oldpid\"\n",
             "          kill \"$oldpid\" 2>/dev/null || true\n",
             "          sleep 0.5\n",
             "          kill -9 \"$oldpid\" 2>/dev/null || true\n",
-            "          ;;\n",
-            "      esac\n",
+            "      fi\n",
             "    fi\n",
             "  fi\n",
             "  # Older launchers did not always leave a useful PID file, especially\n",
@@ -3279,19 +3305,17 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "  # exit between the -r test and the read, so the read is guarded: under\n",
             "  # set -e an unguarded one would abort the supervisor.\n",
             "  stale=\"\"\n",
-            "  for proc in $(grep -laFs -- \"$ADDR\" /proc/[0-9]*/cmdline 2>/dev/null || true); do\n",
+            "  for proc in $(grep -laFs -- \":8787\" /proc/[0-9]*/cmdline 2>/dev/null || true); do\n",
             "    proc=\"${{proc%/cmdline}}\"\n",
             "    pid=\"${{proc##*/}}\"\n",
             "    [ \"$pid\" = \"$$\" ] && continue\n",
             "    [ -r \"$proc/cmdline\" ] || continue\n",
             "    oldcmd=\"$(tr '\\0' ' ' 2>/dev/null < \"$proc/cmdline\" || true)\"\n",
-            "    case \"$oldcmd\" in\n",
-            "      *\"$LOCAL\"*\" --addr 0.0.0.0:8787\"*|*\" --addr 0.0.0.0:8787\"*\" --backend-id wsl\"*\" --shell-platform windows-amd64\"*)\n",
+            "    if managed_daemon_cmdline \"$oldcmd\"; then\n",
             "        echo \"stopping stale managed daemon pid=$pid\"\n",
             "        kill \"$pid\" 2>/dev/null || true\n",
             "        stale=\"$stale $pid\"\n",
-            "        ;;\n",
-            "    esac\n",
+            "    fi\n",
             "  done\n",
             "  if [ -n \"$stale\" ]; then\n",
             "    sleep 0.5\n",
@@ -3386,7 +3410,7 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "# after its supervisor died and turn away every later supervisor.\n",
             "launch_daemon() {{\n",
             "  LAUNCH_LOG_MARK=\"$(wc -c < \"$DAEMON_DIR/{log}\" 2>/dev/null | tr -dc '0-9' || true)\"\n",
-            "  \"$LOCAL\" --addr \"$ADDR\" {relay}--backend-id {backend} --shell-version {shellver} --shell-platform {shellplat} 9>&- &\n",
+            "  \"$LOCAL\" --addr \"$ADDR\" --wsl-addr \"$WSL_ADDR\" {relay}--backend-id {backend} --shell-version {shellver} --shell-platform {shellplat} 9>&- &\n",
             "  daemon_pid=\"$!\"\n",
             "  daemon_is_child=1\n",
             "  echo \"$daemon_pid\" > \"$PIDFILE\"\n",
@@ -3518,6 +3542,7 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
         pid_listens = PID_LISTENS_ON_PORT_FN,
         // Same cap the host-native supervisor rotates its daemon.log at, so
         // one platform's logs never age out faster than the other's.
+        network_functions = crate::wsl_network::FUNCTIONS,
         logmax = DAEMON_LOG_MAX_BYTES,
         src_amd64 = bundled_amd64_wsl,
         src_arm64 = bundled_arm64_wsl,
@@ -4329,7 +4354,7 @@ fn wsl_probe_failed(st: &mut WslProbeState) {
     st.next_attempt_at = Some(Instant::now() + backoff);
 }
 
-/// Query `wsl.exe -e hostname -I` for the WSL2 VM's IPv4 address —
+/// Query WSL eth0 for the direct proxy upstream (loopback is probed too) —
 /// single-flighted, TTL-cached, and circuit-broken (see WslProbeState).
 #[cfg(windows)]
 fn resolve_wsl_ip() -> Result<String, String> {
@@ -4352,7 +4377,8 @@ fn resolve_wsl_ip() -> Result<String, String> {
     // Holding the lock through the bounded probe IS the single-flight:
     // concurrent callers block briefly, then hit the fresh cache or the
     // just-opened circuit instead of spawning their own wsl.exe.
-    match run_wsl_probe_bounded(&["-e", "bash", "-c", "hostname -I"], Duration::from_secs(5)) {
+    let script = crate::wsl_network::host_probe_script();
+    match run_wsl_probe_bounded(&["-e", "bash", "-c", &script], Duration::from_secs(5)) {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             match pick_wsl_ipv4(&stdout) {
@@ -4365,7 +4391,7 @@ fn resolve_wsl_ip() -> Result<String, String> {
                 }
                 None => {
                     wsl_probe_failed(&mut st);
-                    Err(format!("unexpected hostname output: {stdout:?}"))
+                    Err(format!("unexpected WSL address output: {stdout:?}"))
                 }
             }
         }
@@ -5509,7 +5535,7 @@ mod wsl_start_script_tests {
 
         // ADDR is the single source of truth, and the holder check must read it.
         assert!(
-            b.contains("ADDR=\"0.0.0.0:8787\"\n"),
+            b.contains("ADDR=\"127.0.0.1:8787\"\n") && b.contains("WSL_ADDR=\"$(wsl_daemon_host):8787\"\n"),
             "the listen address must be defined once as ADDR"
         );
         assert!(
@@ -5698,7 +5724,7 @@ mod wsl_start_script_tests {
             Some(url) => assert!(line.contains(&format!(" --relay {url} --backend-id wsl ")), "{line}"),
             None => {
                 assert!(!line.contains("--relay"), "{line}");
-                assert!(line.contains("--addr \"$ADDR\" --backend-id wsl "), "{line}");
+                assert!(line.contains("--addr \"$ADDR\" --wsl-addr \"$WSL_ADDR\" --backend-id wsl "), "{line}");
             }
         }
     }
@@ -5957,15 +5983,40 @@ mod wsl_start_script_tests {
         assert!(launch.contains(" 9>&- &\n"), "daemon launch must close fd 9: {launch}");
     }
 
-    /// The probe asks the daemon on loopback (token-exempt) with a budget that
+    /// The probe asks the daemon on its bind address and legacy routes with a budget that
     /// outlasts a loaded host, and never puts the token on a command line.
     #[test]
-    fn live_probe_is_loopback_patient_and_keeps_the_token_out_of_argv() {
+    fn live_probe_uses_bind_and_legacy_routes_patiently_and_keeps_token_out_of_argv() {
         let probe = extract_fn(&body(), "probe_live_daemon");
-        assert!(probe.contains("/dev/tcp/127.0.0.1/"), "probe must use loopback: {probe}");
+        assert!(probe.contains("/dev/tcp/$1/$2"), "probe must use the selected host: {probe}");
+        assert!(probe.contains("${ADDR%:*}") && probe.contains("${WSL_ETH0_IP:-127.0.0.1}"), "probe must keep legacy routes: {probe}");
         assert!(probe.contains("timeout 20 bash -c"), "probe budget changed: {probe}");
         assert!(probe.contains("SOLU_PROBE_TOKEN=\"$tok\" timeout"), "token must travel in env: {probe}");
-        assert!(probe.contains("' probe \"$port\" 2>/dev/null"), "only the port may be an argument: {probe}");
+        assert!(probe.contains("' probe \"$host\" \"$port\" 2>/dev/null"), "only host and port may be arguments: {probe}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_identity_accepts_old_and_new_addresses_but_only_its_own_addr_flag() {
+        let matcher = extract_fn(&body(), "managed_daemon_cmdline");
+        let script = format!("LOCAL=/stage/solud\n{matcher}\nmanaged_daemon_cmdline \"$1\"\n");
+        for (cmd, expected) in [
+            ("/stage/solud --addr 172.29.132.65:8787 ", true),
+            ("/stage/solud --addr 127.0.0.1:8787 ", true),
+            ("/stage/solud --addr 0.0.0.0:8787 ", true),
+            ("/old/solud --addr 127.0.0.1:8787 --backend-id wsl --shell-platform windows-amd64 ", true),
+            ("/stage/solud --addr 127.0.0.1:9999 --other 172.29.132.65:8787 ", false),
+            ("/stage/solud --addr 127.0.0.1:87870 ", false),
+            ("/stage/solud --other 172.29.132.65:8787 ", false),
+            ("/other/service --addr 127.0.0.1:8787 ", false),
+            ("/old/solud --addr 127.0.0.1:8787 --backend-id wsl-other --shell-platform windows-amd64 ", false),
+        ] {
+            let out = std::process::Command::new("bash")
+                .args(["-c", &script, "test", cmd])
+                .output()
+                .expect("bash");
+            assert_eq!(out.status.success(), expected, "{cmd}");
+        }
     }
 
     /// /api/health repeats "version" and "pid" in every fleet component; only
@@ -7132,8 +7183,13 @@ mod wsl_port_block_tests {
     /// Serve one canned /api/health to every connection until dropped.
     #[cfg(unix)]
     fn serve_health(json: &'static str) -> u16 {
+        serve_health_at("127.0.0.1:0", json)
+    }
+
+    #[cfg(unix)]
+    fn serve_health_at(addr: &str, json: &'static str) -> u16 {
         use std::io::{BufRead, BufReader};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = std::net::TcpListener::bind(addr).unwrap();
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
@@ -7154,6 +7210,41 @@ mod wsl_port_block_tests {
             }
         });
         port
+    }
+
+    /// A listener on one specific interface must be found both at the newly
+    /// selected bind address and at the old eth0 address after a mode change.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn healthy_daemon_on_a_specific_address_is_reused() {
+        let json = r#"{"status":"ok","version":"0.0.1228","pid":4242,"backendID":"wsl"}"#;
+        for selected in ["127.0.0.2", "127.0.0.1"] {
+            let port = serve_health_at("127.0.0.2:0", json);
+            let dir = scratch_dir("wsl-specific-bind").expect("scratch dir");
+            let script = classifier(&dir, port, "0.0.1228", None)
+                .replace("ADDR='0.0.0.0:", &format!("ADDR='{selected}:"));
+            let script = format!(
+                "{script}\nWSL_ETH0_IP=127.0.0.2\n\
+                 probe_live_daemon && live_daemon_is_current && echo REUSE\n"
+            );
+            let out = run_bash(&script).expect("bash");
+            let _ = std::fs::remove_dir_all(dir);
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert!(String::from_utf8_lossy(&out.stdout).contains("REUSE"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn port_wait_checks_the_additional_wsl_address() {
+        let port = serve_health_at("127.0.0.2:0", "{}");
+        let check = extract_fn(&body(), "port_is_open");
+        let script = format!(
+            "set -e\nADDR=127.0.0.1:{port}\nWSL_ADDR=127.0.0.2:{port}\n\
+             {check}\nport_is_open\n"
+        );
+        let out = run_bash(&script).expect("bash");
+        assert!(out.status.success(), "additional WSL socket was treated as free");
     }
 
     /// Probe classification, through the launcher's real probe: an older

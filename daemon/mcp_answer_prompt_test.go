@@ -184,7 +184,7 @@ func TestAnswerPromptScopeGated(t *testing.T) {
 	// answer_prompt must be in a scoped caller's budget to be callable.
 	p := choicePromptPane(t, "pane_ap5")
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus(), agentAuthority: grantedAgentAuthority(t)}
-	readOnly := &mcpScope{Identity: "warden", Tools: map[string]bool{"get_pane_state": true}, Expires: farFuture()}
+	readOnly := &mcpScope{Identity: "reviewer", Tools: map[string]bool{"get_pane_state": true}, Expires: farFuture()}
 
 	text, isErr := mcpResultText(t, scopedCallForTest(t, a, readOnly, "answer_prompt",
 		map[string]any{"pane_id": p.ID, "option": "1"}))

@@ -1120,6 +1120,10 @@ export default function App() {
         st.pushActivity({ ...msg, ts: msg.ts ?? Date.now() });
         if (msg.type === 'aria-switch-workspace' && msg.text) {
           void st.loadWorkspace(msg.text).catch((error) => st.toast(String(error), { kind: 'error' }));
+        } else if (msg.type === 'asks.changed') {
+          // An agent's ask opened, changed or closed (daemon asks.go); the
+          // asks ride on each pane in /api/panes.
+          void st.refreshPanes();
         } else if (msg.type === 'pane-state' && msg.paneId && typeof msg.toState === 'string') {
           // Real-time pane runtime-state from the daemon's 2s detection
           // tick (daemon/activity.go). pushActivity above already fed the
@@ -1172,6 +1176,11 @@ export default function App() {
             });
             void st.refreshPorts();
           }
+        } else if ((msg.type === 'workspace.renamed' || msg.type === 'workspace.deleted') && msg.workspace) {
+          st.applyWorkspaceNameChange(msg.workspace, msg.type === 'workspace.renamed' ? msg.text : undefined);
+          void st.refreshWorkspaces({ full: true });
+        } else if (msg.type === 'workspace.pane-moved' && msg.paneId && msg.workspace && msg.text) {
+          void st.refreshWorkspaces({ full: true, paneMove: { paneId: msg.paneId, source: msg.workspace, destination: msg.text } });
         } else if (msg.type === 'workspace.updated') {
           void st.refreshWorkspaces({ full: true });
         } else if (msg.type === 'pane.spawned' && msg.text && msg.paneId) {

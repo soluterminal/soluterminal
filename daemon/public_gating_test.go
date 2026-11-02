@@ -115,7 +115,7 @@ func TestPublicMCPSurface(t *testing.T) {
 			t.Fatalf("tools/list leaked team tool %s", name)
 		}
 	}
-	for _, want := range []string{"list_panes", "send_input", "preview_file", "create_schedule"} {
+	for _, want := range []string{"list_panes", "send_input", "preview_file", "create_schedule", "move_pane_to_workspace", "rename_workspace", "delete_workspace"} {
 		if !strings.Contains(","+strings.Join(names, ",")+",", ","+want+",") {
 			t.Fatalf("public tool list is missing %s: %v", want, names)
 		}

@@ -176,7 +176,7 @@ export function teamFeaturesAllowed(): boolean {
 
 // The operator's internal tooling: the Tasks console and its chips, task
 // owners, the Orchestrator, Agents, delegation, the release train, Aria,
-// Muse, the Warden, System ops cards and internal credential rows. Never
+// Muse, System ops cards and internal credential rows. Never
 // shown to customers, even on a team plan.
 export function useOperatorFeatures(): boolean {
   return useEntitlements((s) => s.loaded && s.operator);

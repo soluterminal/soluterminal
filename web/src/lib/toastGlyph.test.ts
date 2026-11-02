@@ -6,7 +6,7 @@ describe('splitDaemonToastGlyph', () => {
     ['🤖 Fix agent: apply exit 0 in 2m14s', { message: 'Fix agent: apply exit 0 in 2m14s', icon: '🤖' }],
     ['◇ Docs agent: ok in 40s', { message: 'Docs agent: ok in 40s', icon: '◇' }],
     ['⏰ Morning digest → Build', { message: 'Morning digest → Build', icon: '⏰' }],
-    ['🦉 Warden: commit done', { message: 'Warden: commit done', icon: '🦉' }],
+    ['🦉 Agent: commit done', { message: 'Agent: commit done', icon: '🦉' }],
     ['🧹 Go build cache trimmed — 1.2 GB reclaimed', { message: 'Go build cache trimmed — 1.2 GB reclaimed' }],
   ])('strips and classifies %s', (text, expected) => {
     expect(splitDaemonToastGlyph(text)).toEqual(expected);

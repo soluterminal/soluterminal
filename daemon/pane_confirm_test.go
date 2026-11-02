@@ -429,7 +429,7 @@ func TestMCPCallerHeaderCannotBorrowAnotherPanesOwnership(t *testing.T) {
 func TestMCPTracedCallerPane(t *testing.T) {
 	a := traceTestServer(t)
 	prevRelay := peerIsRelayProxy
-	peerIsRelayProxy = func(pid int) bool { return pid == 1 }
+	peerIsRelayProxy = func(pid int) bool { return pid == 1 || pid == 99 }
 	t.Cleanup(func() { peerIsRelayProxy = prevRelay })
 	for _, tc := range []struct {
 		name   string
@@ -444,8 +444,10 @@ func TestMCPTracedCallerPane(t *testing.T) {
 		{"environment claim ignores the header too", &callerIdentity{Kind: callerPane, PaneID: "lead", PID: 7, FromEnv: true}, "worker", mcpClaimedCallerPrefix + "lead"},
 		{"worker owns no panes", &callerIdentity{Kind: callerWorker, PID: 7}, "lead", ""},
 		{"traced program outside the panes", &callerIdentity{Kind: callerUnverified, PID: 7}, "lead", ""},
-		{"relayed by WSL init: untraceable", &callerIdentity{Kind: callerUnverified, PID: 1}, "lead", "lead"},
-		{"untraceable", nil, "lead", "lead"},
+		{"relayed by WSL init: untraceable", &callerIdentity{Kind: callerUnverified, PID: 1}, "lead", mcpClaimedCallerPrefix + "lead"},
+		{"relayed by the daemon: untraceable", &callerIdentity{Kind: callerUnverified, PID: 99}, "lead", mcpClaimedCallerPrefix + "lead"},
+		{"untraceable", nil, "lead", mcpClaimedCallerPrefix + "lead"},
+		{"untraceable without a header", nil, "", ""},
 	} {
 		prev := identifyCallerHook
 		identifyCallerHook = func(*http.Request) callerIdentity {
@@ -466,9 +468,9 @@ func TestMCPTracedCallerPane(t *testing.T) {
 	if text, failed := mcpAs(t, a, &callerIdentity{Kind: callerWorker, PID: 7}, "lead", "kill_pane", map[string]any{"pane_id": "worker"}); !failed {
 		t.Fatalf("worker closed a pane: %q", text)
 	}
-	// Untraceable: the header still counts (SECURITY.md's documented limit).
-	if text, failed := mcpAs(t, a, nil, "lead", "kill_pane", map[string]any{"pane_id": "worker"}); failed {
-		t.Fatalf("untraceable lead closing its worker: %q", text)
+	// An untraceable header is only a claim and has no ownership.
+	if text, failed := mcpAs(t, a, nil, "lead", "kill_pane", map[string]any{"pane_id": "worker"}); !failed {
+		t.Fatalf("untraced caller closed its claimed worker: %q", text)
 	}
 }
 
@@ -504,7 +506,7 @@ func TestMCPEnvOnlyCallerOwnsNothing(t *testing.T) {
 		t.Fatalf("user_requested = %q", text)
 	}
 	view := onlyPendingConfirm(t, a)
-	if view.CallerPaneID != "" || view.Message != "An agent claiming to be #1 Orchestrator (couldn't be verified) wants to close pane #2 “Worker”. Closing stops what is running in it; files are not deleted." {
+	if view.CallerPaneID != "" || view.Message != "An agent claiming to be #1 Orchestrator (unverified) wants to close pane #2 “Worker”. Closing stops what is running in it; files are not deleted." {
 		t.Fatalf("request = %+v", view)
 	}
 	if _, ok := a.mgr.Get("worker"); !ok {
@@ -540,11 +542,11 @@ func TestRenamePaneAppliesTheTitleThePromptShowed(t *testing.T) {
 func TestPaneConfirmGlobalCapMessage(t *testing.T) {
 	a := confirmTestServer(t)
 	for i := 0; i < paneConfirmMaxOpen; i++ {
-		if _, err := a.requestPaneConfirmFor(string(rune('a'+i)), string(rune('A'+i)), paneConfirmView{}, nil); err != nil {
+		if _, err := a.requestPaneConfirmFor(string(rune('a'+i)), string(rune('A'+i)), paneConfirmView{CallerPaneID: string(rune('A' + i))}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_, err := a.requestPaneConfirmFor("more", "someone-new", paneConfirmView{}, nil)
+	_, err := a.requestPaneConfirmFor("more", "someone-new", paneConfirmView{CallerPaneID: "someone-new"}, nil)
 	if err == nil || err.Error() != "20 requests from agents are already waiting for the person's OK in the app; wait for them to be answered before asking again" {
 		t.Fatalf("global cap = %v", err)
 	}

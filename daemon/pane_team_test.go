@@ -167,20 +167,115 @@ func TestPaneKindAuthority(t *testing.T) {
 		{"self asked", agentPane, "w", "w", true, paneAgentNeedsOK},
 		{"stranger", agentPane, "w", "x", false, paneAgentRefused},
 		{"stranger asked", agentPane, "w", "x", true, paneAgentNeedsOK},
-		{"user pane", &PaneOrigin{Source: paneOriginUser}, "cmo", "x", true, paneAgentRefused},
-		{"user pane self", &PaneOrigin{Source: paneOriginUser}, "cmo", "cmo", true, paneAgentRefused},
-		{"no origin", nil, "old", "x", true, paneAgentRefused},
-		{"schedule", &PaneOrigin{Source: paneOriginSchedule}, "s", "x", true, paneAgentRefused},
+		{"user pane", &PaneOrigin{Source: paneOriginUser}, "cmo", "x", true, paneAgentNeedsOK},
+		{"user pane self", &PaneOrigin{Source: paneOriginUser}, "cmo", "cmo", true, paneAgentNeedsOK},
+		{"no origin", nil, "old", "x", true, paneAgentNeedsOK},
+		{"schedule", &PaneOrigin{Source: paneOriginSchedule}, "s", "x", true, paneAgentNeedsOK},
 	}
 	for _, c := range cases {
-		if got, _ := a.paneTeamAgentAuthority(c.origin, c.pane, c.caller, c.asked); got != c.want {
+		if got, _ := a.paneTeamAgentAuthority(c.origin, c.pane, c.caller, paneTeamLead, c.asked); got != c.want {
 			t.Errorf("%s: %v want %v", c.name, got, c.want)
+		}
+		if c.origin != nil && c.origin.Source == paneOriginAgent {
+			if got, _ := a.paneTeamAgentAuthority(c.origin, c.pane, c.caller, paneTeamWorker, c.asked); got != c.want {
+				t.Errorf("%s worker: %v want %v", c.name, got, c.want)
+			}
 		}
 	}
 	// Standing agent authority does not skip the person's OK for a kind change.
 	a.agentAuthority = grantedAgentAuthority(t)
-	if got, _ := a.paneTeamAgentAuthority(agentPane, "w", "x", true); got != paneAgentNeedsOK {
+	if got, _ := a.paneTeamAgentAuthority(agentPane, "w", "x", paneTeamLead, true); got != paneAgentNeedsOK {
 		t.Fatalf("agent authority bypassed the kind confirmation: %v", got)
+	}
+}
+
+func TestUserPaneKindAuthority(t *testing.T) {
+	a := &apiServer{agentAuthority: grantedAgentAuthority(t)}
+	for _, origin := range []*PaneOrigin{nil, {}, {Source: paneOriginUser}, {Source: paneOriginSchedule}, {Source: paneOriginAPI}} {
+		for _, caller := range []string{"", "self", "other"} {
+			for _, asked := range []bool{false, true} {
+				for _, kind := range []string{paneTeamLead, paneTeamWorker, ""} {
+					want := paneAgentRefused
+					if asked && kind == paneTeamLead {
+						want = paneAgentNeedsOK
+					}
+					got, why := a.paneTeamAgentAuthority(origin, "self", caller, kind, asked)
+					if got != want {
+						t.Errorf("origin=%+v caller=%q asked=%v kind=%q: %v want %v", origin, caller, asked, kind, got, want)
+					}
+					if kind == paneTeamLead && !asked && !strings.Contains(why, "user_requested: true") {
+						t.Errorf("missing promotion hint: %q", why)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestSetPaneInfoUserPaneLeadNeedsApproval(t *testing.T) {
+	shortenPaneConfirmWait(t, time.Millisecond)
+	for _, source := range []string{"legacy", paneOriginUser} {
+		for _, allow := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/allow=%v", source, allow), func(t *testing.T) {
+				a := confirmTestServer(t)
+				a.agentAuthority = grantedAgentAuthority(t)
+				p, _ := a.mgr.Get("social")
+				if source != "legacy" {
+					p.Origin = &PaneOrigin{Source: source}
+				}
+				// Invalid roles and requests outside the narrow promotion path
+				// neither mutate the pane nor raise a confirmation.
+				for _, args := range []map[string]any{
+					{"kind": "lead", "lead_role": "security"},
+					{"kind": "worker", "user_requested": true},
+					{"kind": "", "user_requested": true},
+					{"kind": "lead", "user_requested": true},
+					{"kind": "lead", "lead_role": strings.Repeat("x", 33), "user_requested": true},
+				} {
+					args["pane_id"] = p.ID
+					text, bad := mcpResultText(t, a.mcpToolSetPaneInfo(args, "lead"))
+					if !bad || len(a.pendingPaneConfirms()) != 0 || paneTeamKind(p.Snapshot().Origin) != "" {
+						t.Fatalf("invalid promotion %v: %s", args, text)
+					}
+					if args["lead_role"] == "security" && !strings.Contains(text, "user_requested: true") {
+						t.Fatalf("missing hint: %s", text)
+					}
+				}
+				text, bad := mcpResultText(t, a.mcpToolSetPaneInfo(map[string]any{
+					"pane_id": p.ID, "kind": "lead", "lead_role": " @security ", "user_requested": true,
+				}, "lead"))
+				if bad || !strings.Contains(text, "waiting for your OK") || paneTeamKind(p.Snapshot().Origin) != "" {
+					t.Fatalf("promotion did not wait for approval: %s", text)
+				}
+				view := onlyPendingConfirm(t, a)
+				if view.PaneID != p.ID || view.Title != "Change pane #3 “Social loop”?" || view.Message != "#1 Orchestrator wants to make it a lead (role “security”): pane #3 “Social loop”." {
+					t.Fatalf("approval must identify pane and role: %+v", view)
+				}
+				if rec := answerPaneConfirm(t, a, view.ID, `{"allow":true}`, callerPane); rec.Code != http.StatusForbidden {
+					t.Fatalf("agent approved its own promotion: %d", rec.Code)
+				}
+				if rec := answerPaneConfirm(t, a, view.ID, fmt.Sprintf(`{"allow":%t}`, allow), callerHuman); rec.Code != http.StatusOK {
+					t.Fatalf("person's answer: %d %s", rec.Code, rec.Body.String())
+				}
+				origin := p.Snapshot().Origin
+				if !allow {
+					if paneTeamKind(origin) != "" {
+						t.Fatalf("denied promotion applied: %+v", origin)
+					}
+					return
+				}
+				if origin.TeamKind != paneTeamLead || origin.LeadRole != "security" || origin.Source == paneOriginAgent || origin.Worker != nil {
+					t.Fatalf("approved promotion: %+v", origin)
+				}
+				// Promotion preserves the user's ownership and its restrictions.
+				for _, kind := range []string{paneTeamWorker, ""} {
+					text, bad = mcpResultText(t, a.mcpToolSetPaneInfo(map[string]any{"pane_id": p.ID, "kind": kind, "user_requested": true}, "lead"))
+					if !bad || len(a.pendingPaneConfirms()) != 0 || paneTeamKind(p.Snapshot().Origin) != paneTeamLead {
+						t.Fatalf("user lead changed to %q: %s", kind, text)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -241,9 +336,9 @@ func TestSetPaneInfoKindByStarter(t *testing.T) {
 			t.Errorf("%v accepted: %s", args, text)
 		}
 	}
-	// Nobody's agent may promote the user's own pane.
-	text, bad = mcpResultText(t, a.mcpToolSetPaneInfo(map[string]any{"pane_id": "lead", "kind": "lead", "lead_role": "cmo", "user_requested": true}, child.ID))
-	if !bad || !strings.Contains(text, "only the user") {
+	// Without a user request, an agent may only explain how to ask for promotion.
+	text, bad = mcpResultText(t, a.mcpToolSetPaneInfo(map[string]any{"pane_id": "lead", "kind": "lead", "lead_role": "cmo"}, child.ID))
+	if !bad || !strings.Contains(text, "user_requested: true") {
 		t.Fatal(text)
 	}
 }

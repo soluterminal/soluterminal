@@ -49,8 +49,6 @@ func TestUpdateOnlyEngineConstructorsRefuseToStart(t *testing.T) {
 		{"pairing start", func() { _, _ = (&pairingManager{}).start(ctx) }},
 		{"checkin", func() { newInstallCheckin(data, "dev", nil, nil) }},
 		{"checkin loop", func() { (&installCheckin{}).run(ctx) }},
-		{"warden", func() { NewWarden(nil, nil, nil, nil, data, "") }},
-		{"warden loop", func() { (&Warden{}).Start(ctx) }},
 		{"memory guard", func() { newMemGuard(memGuardConfig{role: "daemon"}) }},
 		{"activity", func() { startActivityWatcher(ctx, nil, nil, nil) }},
 		{"update poll", func() { (&Updater{}).StartBackgroundPoll(ctx) }},

@@ -1,5 +1,5 @@
-// An agent asked to close or change a pane it did not start, saying the
-// person asked for it (kill_pane / set_pane_info with user_requested). The
+// An agent asked to change a pane it did not start, or rename/delete a
+// workspace, saying the person asked for it (user_requested). The
 // daemon holds the action until the person allows it here
 // (daemon/pane_confirm.go).
 //
@@ -63,7 +63,7 @@ export async function reviewPaneConfirm(id: string): Promise<void> {
     message: `${req.message} Only allow it if you asked for it.`,
     confirmLabel: 'Allow',
     cancelLabel: 'Deny',
-    danger: req.action === 'close',
+    danger: req.action === 'close' || req.action === 'delete_workspace',
   });
   let answer: Awaited<ReturnType<typeof api.answerPaneConfirmation>>;
   try {
@@ -81,7 +81,7 @@ export async function reviewPaneConfirm(id: string): Promise<void> {
   } else if (answer.failed) {
     st.toast(answer.result || 'The change could not be made.', { kind: 'error' });
   } else {
-    const done = req.action === 'close' ? 'Closed' : req.action === 'rename' ? 'Renamed' : 'Changed';
+    const done = req.action === 'close' ? 'Closed' : req.action === 'rename' || req.action === 'rename_workspace' ? 'Renamed' : req.action === 'delete_workspace' ? 'Deleted workspace' : req.action === 'move-pane' ? 'Moved' : 'Changed';
     st.toast(`${done} ${req.pane}.`, { kind: 'success' });
   }
 }

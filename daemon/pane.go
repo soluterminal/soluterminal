@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -129,9 +127,24 @@ type Pane struct {
 	quotaWorkerCleanupOwned bool // process-local; restored workers rebind ownership
 	workerArchiving         atomic.Bool
 	// Delivery receipts are ephemeral and immutable after publication under mu.
-	unsentMessage           *unsentPaneMessage
-	deliveryMu              sync.Mutex
-	inputRevision           atomic.Uint64
+	unsentMessage *unsentPaneMessage
+	deliveryMu    sync.Mutex
+	inputRevision atomic.Uint64
+	// Agents' messages held while the person types (pane_draft_guard.go),
+	// oldest first, and the last few that left the queue. Guarded by mu.
+	heldDeliveries   []*heldDelivery
+	heldResolved     []*heldDelivery
+	heldDraining     bool
+	heldSeq          uint64
+	lastHumanInputMs atomic.Int64
+	// agentDeliveryWrite marks the write in progress as an agent's message
+	// delivery; set by its precondition, consumed by
+	// observeSuccessfulInputLocked. Guarded by agentWriteMu.
+	agentDeliveryWrite bool
+	// lastAgentInputMs is LastInputMs as of the last agent delivery write.
+	lastAgentInputMs atomic.Int64
+	// heldReason: why heldDeliveries wait (draftGuardReason). Guarded by mu.
+	heldReason              string
 	Credential              *paneCredentialInfo `json:"credential,omitempty"`
 	credentialSelection     func(provider string) string
 	credentialTeamSelection func(provider string) string
@@ -357,6 +370,9 @@ type Pane struct {
 	// browser reasserts presence while a draft exists; expiry releases a draft
 	// abandoned by a vanished client.
 	composerNonEmptyUntil atomic.Int64
+	// composerReconcileAfterMs throttles reconcileComposerDraft's screen read
+	// while the input box visibly holds text (atomic).
+	composerReconcileAfterMs int64
 
 	// delegationPending is the daemon-computed buffered-update snapshot exposed
 	// to pane DTOs for the compact header chip.
@@ -552,7 +568,7 @@ type Pane struct {
 	attentionObservationSeq atomic.Uint64
 	attentionCommittedSeq   uint64
 	// flagMu serializes flag checks, writes and persistence across manual,
-	// scoped and Warden cleanup paths. p.mu still protects snapshots.
+	// scoped paths. p.mu still protects snapshots.
 	flagMu sync.Mutex
 
 	// attentionSummary is the LLM-written one-liner for the CURRENT
@@ -697,14 +713,10 @@ type Pane struct {
 	FlagMemo string `json:"flagMemo,omitempty"`
 	// FlagOwner records WHO set the current flag: "user" (UI/HTTP paths),
 	// "agent" (a full-access MCP caller, i.e. an interactive pane session),
-	// or a scoped MCP identity like "warden". Lets provenance guards stop a
+	// or a scoped MCP identity. Lets provenance guards stop a
 	// scoped caller from overwriting or clearing someone else's flag.
 	// Cleared together with the flag.
 	FlagOwner string `json:"flagOwner,omitempty"`
-	// FlagEpisode and FlagRevision mark only new episode-bound Warden flags.
-	// Historical flags have neither and are never swept by Warden cleanup.
-	FlagEpisode  string `json:"-"`
-	FlagRevision string `json:"-"`
 
 	// ClaudeSessionID is the Claude Code conversation id observed from
 	// Claude's hook payloads. Persisted so a host reboot can recreate this
@@ -991,6 +1003,17 @@ func (p *Pane) composerPendingLen() int {
 	return pending
 }
 
+// humanComposerPendingSnapshot is composerPendingSnapshot for a draft a
+// person typed; text an agent's delivery left there reads as none.
+func (p *Pane) humanComposerPendingSnapshot() (int, int64) {
+	if p == nil {
+		return 0, 0
+	}
+	p.agentWriteMu.Lock()
+	defer p.agentWriteMu.Unlock()
+	return p.promptRec.humanDraft()
+}
+
 // composerPendingSnapshot returns the recorder's current draft length and the
 // Unix-millisecond time of its most recent recorded input as one locked view.
 func (p *Pane) composerPendingSnapshot() (int, int64) {
@@ -1067,8 +1090,10 @@ func (p *Pane) setAITitleCache(title string) {
 // PaneSnapshot is a lock-free copy of a Pane's serializable fields, safe
 // for concurrent reads (JSON serialization, persistence).
 type PaneSnapshot struct {
-	UnsentMessage *unsentPaneMessage  `json:"unsentMessage,omitempty"`
-	Credential    *paneCredentialInfo `json:"credential,omitempty"`
+	UnsentMessage *unsentPaneMessage `json:"unsentMessage,omitempty"`
+	// HeldMessages are agents' messages waiting while the person types.
+	HeldMessages []heldDelivery      `json:"heldMessages,omitempty"`
+	Credential   *paneCredentialInfo `json:"credential,omitempty"`
 
 	ID              string     `json:"id"`
 	Cwd             string     `json:"cwd"`
@@ -1125,8 +1150,6 @@ type PaneSnapshot struct {
 	Flagged                  bool                 `json:"flagged,omitempty"`
 	FlagMemo                 string               `json:"flagMemo,omitempty"`
 	FlagOwner                string               `json:"flagOwner,omitempty"`
-	FlagEpisode              string               `json:"-"`
-	FlagRevision             string               `json:"-"`
 	ClaudeSessionID          string               `json:"claudeSessionId,omitempty"`
 	ClaudeTranscriptPath     string               `json:"claudeTranscriptPath,omitempty"`
 	TitleOverride            string               `json:"titleOverride,omitempty"`
@@ -1158,6 +1181,7 @@ func (p *Pane) Snapshot() PaneSnapshot {
 	defer p.mu.Unlock()
 	return PaneSnapshot{
 		UnsentMessage:            p.currentUnsentMessageLocked(),
+		HeldMessages:             p.heldDeliveriesLocked(),
 		Credential:               clonePaneCredential(p.Credential),
 		ID:                       p.ID,
 		Cwd:                      p.Cwd,
@@ -1198,8 +1222,6 @@ func (p *Pane) Snapshot() PaneSnapshot {
 		Flagged:                  p.Flagged,
 		FlagMemo:                 p.FlagMemo,
 		FlagOwner:                p.FlagOwner,
-		FlagEpisode:              p.FlagEpisode,
-		FlagRevision:             p.FlagRevision,
 		ClaudeSessionID:          p.ClaudeSessionID,
 		ClaudeTranscriptPath:     p.ClaudeTranscriptPath,
 		TitleOverride:            p.TitleOverride,
@@ -1229,6 +1251,8 @@ type Manager struct {
 	// onPaneRemoved fires after Kill takes a pane out of the manager (set
 	// with SetOnPaneRemoved; main.go drops agents' open requests about it).
 	onPaneRemoved func(id string)
+	// onHumanSubmit fires when the person presses Enter in a pane (ws.go).
+	onHumanSubmit func(id string, at time.Time)
 	// onPromptsCommit is copied onto each pane at spawn/attach; fires
 	// after the pane's LastPrompts history changes. Wired in main.go to
 	// persist the pane and publish a "pane-prompt" UI event.
@@ -2350,6 +2374,8 @@ func (p *Pane) writeWithFleetAdmissionPolicy(b []byte, recordPrompt, nativeTurn 
 		return 0, errors.New("pane not connected")
 	}
 	p.agentWriteMu.Lock()
+	// Only this write's precondition may mark it as an agent's delivery.
+	p.agentDeliveryWrite = false
 	if p.workerArchiving.Load() {
 		p.agentWriteMu.Unlock()
 		return 0, errors.New("worker archived; reopen it before sending input")
@@ -2360,6 +2386,11 @@ func (p *Pane) writeWithFleetAdmissionPolicy(b []byte, recordPrompt, nativeTurn 
 			return 0, err
 		}
 	}
+	// The precondition's mark is taken now and handed back only to this
+	// write's own observe, so an early return below cannot leave it set for
+	// another writer that observes under the lock (conditional submit, Jev).
+	agentDelivery := p.agentDeliveryWrite
+	p.agentDeliveryWrite = false
 	// Keep split terminal-control framing intact: a printable fragment inside
 	// an OSC/CSI is not a menu key even if it happens to be "y" or "1".
 	if menuShortcut && !p.promptRec.inStringControl && !p.promptRec.inCSI && !p.promptRec.escapePending {
@@ -2421,6 +2452,7 @@ func (p *Pane) writeWithFleetAdmissionPolicy(b []byte, recordPrompt, nativeTurn 
 		p.agentWriteMu.Unlock()
 		return 0, err
 	}
+	p.agentDeliveryWrite = agentDelivery
 	commits := p.observeSuccessfulInputLocked(b, recordPrompt, menu)
 	p.agentWriteMu.Unlock()
 	p.finishSuccessfulInput(commits)
@@ -2434,11 +2466,19 @@ func (p *Pane) writeWithFleetAdmissionPolicy(b []byte, recordPrompt, nativeTurn 
 // recorded bytes typed into one go to the recorder's menu segment instead of
 // the composer draft (see menuInputState).
 func (p *Pane) observeSuccessfulInputLocked(b []byte, recordPrompt bool, menu menuInput) []string {
+	agentWrite := p.agentDeliveryWrite
+	p.agentDeliveryWrite = false
 	// Before stamping lastRecordedInputMs: entering a menu saves the draft's
 	// own age, which a menu keystroke must not renew.
 	if recordPrompt {
 		switch {
 		case menu == menuInputLive:
+			p.promptRec.enterMenu()
+		case menu == menuInputAutoAnswered:
+			// Auto-approval's unrecorded Enter answered the menu just now and
+			// its dialog is still drawn: this key is aimed at the dialog. As a
+			// draft it would hold the next approval for ariaAutoDraftStaleAfter
+			// (2026-11-02).
 			p.promptRec.enterMenu()
 		case menu == menuInputDrawn:
 			// Still answering the menu already entered (or composer text that
@@ -2470,6 +2510,9 @@ func (p *Pane) observeSuccessfulInputLocked(b []byte, recordPrompt bool, menu me
 		}
 		atomic.StoreInt64(&p.LastInputStrippedPos, inputPos)
 		atomic.StoreInt64(&p.LastInputMs, inputAtMs)
+		if agentWrite {
+			p.lastAgentInputMs.Store(inputAtMs)
+		}
 		if recordPrompt {
 			p.promptRec.lastRecordedInputMs = inputAtMs
 		}
@@ -2480,7 +2523,25 @@ func (p *Pane) observeSuccessfulInputLocked(b []byte, recordPrompt bool, menu me
 	// bytes kept out of the recorder buffer) for menu-choice replies.
 	var commits []string
 	if recordPrompt {
+		empty := p.promptRec.draftLen() == 0
+		var owned []byte
+		if p.promptRec.agentOwned {
+			owned = append(owned, p.promptRec.buf[:p.promptRec.draftLen()]...)
+		}
 		commits = p.promptRec.observe(b)
+		switch {
+		case p.promptRec.draftLen() == 0:
+			p.promptRec.agentOwned = false
+		case agentWrite:
+			// An agent's text owns the draft only when it went into an empty
+			// box (or one holding only an agent's text).
+			p.promptRec.agentOwned = empty || p.promptRec.agentOwned
+		case p.promptRec.agentOwned && !bytes.Equal(owned, p.promptRec.buf[:p.promptRec.draftLen()]):
+			// A person changed the draft. Keys that leave it as it was (Esc
+			// to stop a turn, arrows, page keys, keys that answered a menu)
+			// leave its owner as it was too.
+			p.promptRec.agentOwned = false
+		}
 	}
 	if p.Kind != "native" && len(commits) > 0 {
 		// Track every terminal submission, not only writes that happen after an
@@ -2559,26 +2620,17 @@ func (p *Pane) SetFlag(flagged bool, memo string) {
 }
 
 // SetFlagAs is SetFlag with explicit provenance ("user", "agent", or a scoped
-// MCP identity like "warden"). Provenance is metadata only at this layer —
+// MCP identity). Provenance is metadata only at this layer —
 // the ownership GUARD lives in the callers that need it (mcpToolSetPaneFlag
-// for scoped callers); the user's own paths stay unrestricted.
+// for all agent callers); the user's own paths stay unrestricted.
 func (p *Pane) SetFlagAs(flagged bool, memo, owner string) {
 	p.flagMu.Lock()
 	defer p.flagMu.Unlock()
-	p.setFlagLocked(flagged, memo, owner, "")
+	p.setFlagLocked(flagged, memo, owner)
 }
 
-func newFlagRevision() string {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		panic("flag revision: " + err.Error())
-	}
-	return hex.EncodeToString(raw[:])
-}
-
-// setFlagLocked requires flagMu. A fresh revision means even a same-owner
-// replacement cannot be mistaken for the flag a cleanup observed earlier.
-func (p *Pane) setFlagLocked(flagged bool, memo, owner, episode string) {
+// setFlagLocked requires flagMu.
+func (p *Pane) setFlagLocked(flagged bool, memo, owner string) {
 	memo = strings.TrimSpace(memo)
 	if r := []rune(memo); len(r) > flagMemoMaxRunes {
 		memo = string(r[:flagMemoMaxRunes])
@@ -2588,16 +2640,9 @@ func (p *Pane) setFlagLocked(flagged bool, memo, owner, episode string) {
 	if flagged {
 		p.FlagMemo = memo
 		p.FlagOwner = owner
-		p.FlagEpisode = episode
-		p.FlagRevision = ""
-		if episode != "" {
-			p.FlagRevision = newFlagRevision()
-		}
 	} else {
 		p.FlagMemo = ""
 		p.FlagOwner = ""
-		p.FlagEpisode = ""
-		p.FlagRevision = ""
 	}
 	p.mu.Unlock()
 }
@@ -2606,7 +2651,7 @@ func (p *Pane) setFlagLocked(flagged bool, memo, owner, episode string) {
 // per-pane transaction. No later manual write can be lost to a failed save.
 // Live callers must enter through Manager.changeCurrentFlag, which also fences
 // same-ID replacement/removal while this object is persisted.
-func (p *Pane) changeFlag(store paneStore, check func(PaneSnapshot) error, flagged bool, memo, owner, episode string) error {
+func (p *Pane) changeFlag(store paneStore, check func(PaneSnapshot) error, flagged bool, memo, owner string) error {
 	p.flagMu.Lock()
 	defer p.flagMu.Unlock()
 	prev := p.Snapshot()
@@ -2615,12 +2660,11 @@ func (p *Pane) changeFlag(store paneStore, check func(PaneSnapshot) error, flagg
 			return err
 		}
 	}
-	p.setFlagLocked(flagged, memo, owner, episode)
+	p.setFlagLocked(flagged, memo, owner)
 	if store != nil {
 		if err := store.Put(p); err != nil {
 			p.mu.Lock()
 			p.Flagged, p.FlagMemo, p.FlagOwner = prev.Flagged, prev.FlagMemo, prev.FlagOwner
-			p.FlagEpisode, p.FlagRevision = prev.FlagEpisode, prev.FlagRevision
 			p.mu.Unlock()
 			return err
 		}
@@ -2632,12 +2676,12 @@ func (p *Pane) changeFlag(store paneStore, check func(PaneSnapshot) error, flagg
 // caller may have captured p before a respawn or deletion; persisting that old
 // object would otherwise overwrite or resurrect the current durable record.
 // Lock order is manager -> flag -> pane/store. Checks must not reenter Manager.
-func (m *Manager) changeCurrentFlag(p *Pane, store paneStore, check func(PaneSnapshot) error, flagged bool, memo, owner, episode string) error {
+func (m *Manager) changeCurrentFlag(p *Pane, store paneStore, check func(PaneSnapshot) error, flagged bool, memo, owner string) error {
 	var err error
 	if !m.withCurrentPane(p, func() {
-		err = p.changeFlag(store, check, flagged, memo, owner, episode)
+		err = p.changeFlag(store, check, flagged, memo, owner)
 	}) {
-		return errWardenFlagChanged
+		return errors.New("pane changed before flag update")
 	}
 	return err
 }
@@ -3038,6 +3082,24 @@ func isManagedDeepseekCmdline(cmd string) bool {
 // this signal.
 func (p *Pane) HasManagedHarnessDescendant() bool {
 	return p.HasDeepseekDescendant() || p.HasPiDescendant()
+}
+
+// SetOnHumanSubmit sets the callback the terminal socket runs when the person
+// (a human-classified connection, never an agent delivery) presses Enter in a
+// pane.
+func (m *Manager) SetOnHumanSubmit(f func(id string, at time.Time)) {
+	m.mu.Lock()
+	m.onHumanSubmit = f
+	m.mu.Unlock()
+}
+
+func (m *Manager) humanSubmitted(id string, at time.Time) {
+	m.mu.RLock()
+	f := m.onHumanSubmit
+	m.mu.RUnlock()
+	if f != nil {
+		f(id, at)
+	}
 }
 
 // SetOnPaneRemoved sets the callback Kill runs once a pane is gone.

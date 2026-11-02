@@ -27,9 +27,7 @@ const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
     'Max agent runs', 'Memory floor', 'Disk floor', 'Host disk floor (WSL)',
     'Host disk floor %', 'Adaptive host disk floor', 'Rotate WSL crash dumps',
   ],
-  agents: [
-    'Enable the Warden', 'Automatic pane flags', 'Model', 'Triage after', 'Max runs / hour', 'Run a fleet brief now',
-  ],
+  agents: [],
   credentials: [
     'Provider accounts', 'Runtime API keys',
     'Hide identities (screen share)',

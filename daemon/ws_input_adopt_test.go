@@ -20,6 +20,7 @@ import (
 
 type adoptTestPane struct {
 	p      *Pane
+	m      *Manager
 	srv    *httptest.Server
 	frames chan []byte // payloads the pane wrote to its agent (the PTY side)
 }
@@ -71,7 +72,7 @@ func newAdoptTestPane(t *testing.T, promptHeld bool) *adoptTestPane {
 		close(p.done)
 		p.shutdownGrid()
 	})
-	return &adoptTestPane{p: p, srv: srv, frames: frames}
+	return &adoptTestPane{p: p, m: m, srv: srv, frames: frames}
 }
 
 type adoptTestConn struct {

@@ -11,6 +11,7 @@ import {
   relayTarget,
   signDeviceRequest,
   withDeviceSignatureQuery,
+  type DeviceEnrolmentReply,
 } from './lib/deviceIdentity';
 import {
   closePrivateRelayChannels,
@@ -2045,7 +2046,6 @@ export interface SystemStatus {
     schedules: { enabled: number; disabled: number; running: number; errors24h: number; nextFireAt: string | null };
     builtins: Array<{ id: string; label: string; on: boolean; detail?: string; present?: boolean; running?: boolean }>;
     autonomy: { globalPaused: boolean; pausedCount: number };
-    warden: { enabled: boolean; lastRunAt: string | null; lastRunStatus: string };
   };
   surface: { addr: string; ports: { total: number; paneOwned: number }; previews: { active: number }; cloud: { configured: boolean; hasCreds: boolean; credsInvalid: boolean; relayState: string } };
   release: { running: string; latest: string; available: boolean; applying: boolean; lastSuccessMs: number; lastError: string; shellCurrent: string; shellLatest: string; shellAvailable: boolean; workflowDeferState?: 'draining' | 'backoff'; workflowNextRetryMs?: number; workflowInflight?: number; workflowDeferAttempts?: number; readiness: { state: string; unreleasedTotal: number; functionalCommitCount: number; oldestFunctionalUnreleasedAt?: string; lastReleaseVersion: string } | null; train?: { enabled: boolean; phase: string } };
@@ -3118,7 +3118,6 @@ export interface AgentsBootstrapApplyInput {
 // Where a row's owner lives. The daemon emits this closed enum and the client
 // maps it to navigation, so a row can never carry a bare URL.
 export type AutonomyDeepLink =
-  | 'settings:warden'
   | 'settings:tasks'
   | 'settings:devices'
   | 'settings:agent'
@@ -3648,11 +3647,8 @@ export interface PrivacySettings {
 
 // Remote devices (daemon/trusted_devices.go): devices approved to use this
 // machine through the cloud relay, and whether only they may.
-export interface RemoteDevice {
-  id: string;
+export interface RemoteDevice extends DeviceEnrolmentReply {
   name: string;
-  status: 'pending' | 'approved';
-  code: string;
   /** The computer's identity key (base64 SPKI), returned at enrolment. */
   daemonIdentity?: string;
   /** The approval code also covered the computer's key (V2). */
@@ -4813,11 +4809,35 @@ const coreApi = {
   },
   // Enrolment and status go to the exact daemon (machine/backend) that asked:
   // each backend keeps its own list of approved devices.
-  enrollRemoteDevice: (target: string, name: string, publicKey: string): Promise<RemoteDevice> =>
+  enrollRemoteDevice: (target: string, name: string, publicKey: string, commit?: string): Promise<RemoteDevice> =>
     rootFetch(`${relayPrefixFor(target)}/api/remote-devices/enroll`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name, publicKey, codeVersion: 2 }),
+      body: JSON.stringify({ name, publicKey, codeVersion: commit ? 3 : 2, ...(commit ? { commit } : {}) }),
+    }).then(j<RemoteDevice>),
+  revealRemoteDevice: (target: string, id: string, enrolmentId: string, nonce: string): Promise<RemoteDevice> =>
+    rootFetch(`${relayPrefixFor(target)}/api/remote-devices/enroll/reveal`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, enrolmentId, nonce }),
+    }).then(j<RemoteDevice>),
+  verifyRemoteDevice: (scope: RoutingScope, id: string, commit: string): Promise<RemoteDevice> => {
+    if (!privateRelayTarget(scope.prefix, scope.backendPrefix)) return Promise.reject(new Error('Enable the private connection to verify this browser'));
+    return apiFetchScoped(scope, `/api/remote-devices/${encodeURIComponent(id)}/verify`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ codeVersion: 3, commit }),
+    }).then(j<RemoteDevice>);
+  },
+  revealDeviceVerification: (scope: RoutingScope, id: string, enrolmentId: string, nonce: string): Promise<RemoteDevice> =>
+    apiFetchScoped(scope, '/api/remote-devices/enroll/reveal', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, enrolmentId, nonce }),
+    }).then(j<RemoteDevice>),
+  confirmDeviceVerification: (id: string, enrolmentId: string): Promise<RemoteDevice> =>
+    apiFetch(`/api/remote-devices/${encodeURIComponent(id)}/verify/confirm`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enrolmentId }),
+    }).then(j<RemoteDevice>),
+  rejectDeviceVerification: (id: string, enrolmentId: string): Promise<RemoteDevice> =>
+    apiFetch(`/api/remote-devices/${encodeURIComponent(id)}/verify/reject`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enrolmentId }),
     }).then(j<RemoteDevice>),
   remoteDeviceStatus: (target: string, id: string): Promise<RemoteDevice> =>
     rootFetch(`${relayPrefixFor(target)}/api/remote-devices/${encodeURIComponent(id)}/status`).then(j<RemoteDevice>),
@@ -4834,8 +4854,11 @@ const coreApi = {
     if (res.status === 404) return null; // already answered or expired
     return j<PaneConfirmAnswer>(res);
   },
-  approveRemoteDevice: (id: string): Promise<RemoteDevice> =>
-    apiFetch(`/api/remote-devices/${encodeURIComponent(id)}/approve`, { method: 'POST' }).then(j<RemoteDevice>),
+  approveRemoteDevice: (id: string, enrolmentId?: string): Promise<RemoteDevice> =>
+    apiFetch(`/api/remote-devices/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      ...(enrolmentId ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enrolmentId }) } : {}),
+    }).then(j<RemoteDevice>),
   removeRemoteDevice: (id: string): Promise<void> =>
     apiFetch(`/api/remote-devices/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) => {
       if (!r.ok) throw new Error(`remove device: ${r.status}`);
@@ -4884,29 +4907,6 @@ const coreApi = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     }).then(j<NativeSettings>),
-  // Warden — opt-in fleet caretaker. Settings + status + run-now + run-log.
-  // The daemon enforces its own tool scope; these are the local control plane.
-  getWardenSettings: (): Promise<import('./types').WardenSettings> =>
-    apiFetch('/api/warden/settings').then(j<import('./types').WardenSettings>),
-  setWardenSettings: (
-    body: Partial<import('./types').WardenSettings>,
-  ): Promise<import('./types').WardenSettings> =>
-    apiFetch('/api/warden/settings', {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    }).then(j<import('./types').WardenSettings>),
-  getWardenStatus: (): Promise<import('./types').WardenStatus> =>
-    apiFetch('/api/warden/status').then(j<import('./types').WardenStatus>),
-  // Fire an on-demand fleet brief. Works even while disabled (a manual tool);
-  // { started:false } when a run is already in flight or the hourly cap is hit.
-  wardenRunNow: (): Promise<{ started: boolean; reason?: string }> =>
-    apiFetch('/api/warden/run-now', { method: 'POST' }).then(
-      j<{ started: boolean; reason?: string }>,
-    ),
-  // Full text of one Warden run (raw markdown, same dialect as task reports).
-  wardenRunLog: (name: string): Promise<string> =>
-    apiFetch(`/api/warden/runs/${encodeURIComponent(name)}`).then((r) => r.text()),
   getUpdateSettings: (): Promise<UpdateSettings> =>
     apiFetch('/api/update/settings').then(j<UpdateSettings>),
   putUpdateSettings: async (body: Partial<UpdateSettings>): Promise<UpdateSettings> => {
@@ -5029,12 +5029,16 @@ const coreApi = {
       body: JSON.stringify({ text }),
     }).then(j<{ bytes: number }>),
 
+  /** The person dismisses an agent's ask (daemon asks_api.go). */
+  dismissAsk: (askId: string) =>
+    apiFetch(`/api/asks/${encodeURIComponent(askId)}/dismiss`, { method: 'POST' }).then(j<{ ok: boolean }>),
+
   actOnUnsentMessage: (id: string, messageId: string, action: 'send' | 'clear') =>
     apiFetch(`/api/panes/${id}/unsent-message`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: messageId, action }),
-    }).then(j<{ outcome: 'submitted' | 'cleared' | 'left_in_composer' | 'sent_unconfirmed' }>),
+    }).then(j<{ outcome: 'submitted' | 'cleared' | 'left_in_composer' | 'sent_unconfirmed' | 'queued' }>),
 
   submitPaneMessage: (id: string, text: string) =>
     apiFetch(`/api/panes/${id}/submit-message`, {
@@ -5264,7 +5268,7 @@ export function mergeFeatureApis<T extends object>(core: T, features: object[]):
 
 export interface PaneConfirmRequest {
   id: string;
-  action: 'close' | 'change' | 'rename';
+  action: 'close' | 'change' | 'rename' | 'move-pane' | 'rename_workspace' | 'delete_workspace';
   callerPaneId?: string;
   caller: string;
   paneId: string;

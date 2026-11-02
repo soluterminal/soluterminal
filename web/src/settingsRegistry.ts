@@ -25,7 +25,6 @@ export type LegacySettingsTab =
   | 'notifications'
   | 'privacy'
   | 'devices'
-  | 'warden'
   | 'tasks'
   | 'agent'
   | 'credentials';
@@ -72,7 +71,7 @@ const SETTINGS_CATEGORIES: SettingsCategoryDef[] = [
   { id: 'workspace', label: 'Panes & sidebar', description: 'Pane layout, mouse behaviour and sidebar sections.' },
   { id: 'sessions', label: 'Claude sessions', description: 'New-session, recovery, prompt and Focus behaviour.' },
   { id: 'workflows', label: 'Services', description: 'Model gateway, release train and resource limits.' },
-  { id: 'agents', label: 'Agents', description: 'Warden controls.' },
+  { id: 'agents', label: 'Agents', description: 'Agent settings.' },
   { id: 'credentials', label: 'Credentials', description: 'Protected provider accounts, runtime keys and repair status.' },
   { id: 'devices', label: 'Devices & updates', description: 'Pairing, desktop behaviour, updates and diagnostics.', mobile: false },
 ];
@@ -107,7 +106,6 @@ const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   defineSection('workflows.modelsFallbacks', 'workflows', 'Model gateway', 'A local OpenAI-compatible endpoint for managed agents.', { domId: 'settings-section-models-fallbacks', aliases: ['model', 'local model', 'base url'] }),
   defineSection('workflows.automation', 'workflows', 'Release train', 'Opt-in automatic publishing on a cadence.', { advanced: true, aliases: ['release', 'publish'] }),
   defineSection('workflows.resources', 'workflows', 'Resource limits', 'Agent run slots and memory and disk floors.', { advanced: true, aliases: ['limit', 'disk', 'memory'] }),
-  defineSection('agents.warden', 'agents', 'Warden', 'Fleet caretaker behaviour and briefs.'),
   defineSection('credentials.accounts', 'credentials', 'Provider accounts', 'Sign in, re-authenticate and review provider accounts.', { aliases: ['sign in', 'login', 'account', 're-auth'] }),
   defineSection('credentials.keys', 'credentials', 'Runtime API keys', 'Local runtime API keys and tokens.', { aliases: ['api key', 'token'] }),
   defineSection('credentials.privacy', 'credentials', 'Screen-share safety', 'Mask identities across operator surfaces.', { aliases: ['screen share', 'privacy', 'mask'] }),
@@ -179,12 +177,6 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['workflows.resources', 'hostDiskPercent', 'Host disk floor %'],
   ['workflows.resources', 'adaptiveHostDisk', 'Adaptive host disk floor'],
   ['workflows.resources', 'rotateCrashDumps', 'Rotate WSL crash dumps'],
-  ['agents.warden', 'enabled', 'Enable the Warden'],
-  ['agents.warden', 'autoFlags', 'Automatic pane flags'],
-  ['agents.warden', 'model', 'Model'],
-  ['agents.warden', 'triageAfter', 'Triage after'],
-  ['agents.warden', 'maxRuns', 'Max runs / hour'],
-  ['agents.warden', 'runBrief', 'Run a fleet brief now'],
   ['credentials.accounts', 'providerAccounts', 'Provider accounts', ['sign in', 'login', 'account', 're-auth']],
   ['credentials.keys', 'runtimeKeys', 'Runtime API keys', ['api key', 'token']],
   ['credentials.privacy', 'hideIdentities', 'Hide identities (screen share)', ['screen share', 'privacy', 'mask']],
@@ -255,7 +247,6 @@ export const LEGACY_TAB_TARGETS: Record<LegacySettingsTab, SettingsTarget> = {
   notifications: { category: 'devices', section: 'devices.notifications' },
   privacy: { category: 'devices', section: 'devices.privacy' },
   devices: { category: 'devices' },
-  warden: { category: 'agents', section: 'agents.warden' },
   tasks: { category: 'workflows' },
   agent: { category: 'agents' },
   credentials: { category: 'credentials' },

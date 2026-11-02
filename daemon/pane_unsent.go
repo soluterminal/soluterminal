@@ -19,7 +19,11 @@ type unsentPaneMessage struct {
 	// with no queue SoluTerminal knows). Send types it; Clear discards it.
 	// Text is the whole message, so the person reads exactly what Send
 	// would type (a typed receipt's text is on screen already).
-	NotTyped   bool   `json:"notTyped,omitempty"`
+	NotTyped bool `json:"notTyped,omitempty"`
+	// PutBack: a queued message the agent put back into its input box,
+	// usually after the person stopped the turn. Only the person sends or
+	// clears it.
+	PutBack    bool   `json:"putBack,omitempty"`
 	Text       string `json:"text,omitempty"`
 	body       string
 	claude     bool
@@ -86,6 +90,8 @@ func composerShowsExactLine(screen string, codex bool, body string) bool {
 
 const untypedSendAction = "send a message a busy pane was not given"
 
+const putBackAction = "send or clear a message put back in a pane's input box"
+
 func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.mgr.Get(r.PathValue("id"))
 	if !ok {
@@ -107,9 +113,21 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "human_required", http.StatusForbidden)
 		return
 	}
+	if held := p.heldDeliveryByID(req.ID); held != nil {
+		// Sending one early overrides the person's typing hold, and
+		// discarding one drops another agent's message: only the person may.
+		if !a.requireHuman(w, r, heldActionName) {
+			return
+		}
+		a.actOnHeldDelivery(w, p, held, req.Action)
+		return
+	}
 	// Sending a message the pane was never given types an agent's text: only
 	// the person, who was shown it, may do that.
 	if msg := p.Snapshot().UnsentMessage; msg != nil && msg.ID == req.ID && msg.NotTyped && req.Action == "send" && !a.requireHuman(w, r, untypedSendAction) {
+		return
+	}
+	if msg := p.Snapshot().UnsentMessage; msg != nil && msg.ID == req.ID && msg.PutBack && !a.requireHuman(w, r, putBackAction) {
 		return
 	}
 	// The provider check can scan the process tree, so it runs before the
@@ -125,6 +143,9 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	// The receipt can change between the check above and the lock: check the
 	// one Send would act on.
 	if msg.NotTyped && req.Action == "send" && !a.requireHuman(w, r, untypedSendAction) {
+		return
+	}
+	if msg.PutBack && !a.requireHuman(w, r, putBackAction) {
 		return
 	}
 	if msg.NotTyped {

@@ -290,8 +290,13 @@ func TestWorkerArchiveGitProof(t *testing.T) {
 		t.Fatal(reason)
 	}
 	archiveGit(t, cwd, "checkout", "--detach")
+	if _, reason := workerGitCleanPushed(ctx, cwd); reason != "" {
+		t.Fatal("published detached worktree refused:", reason)
+	}
+	putCapabilityFile(t, filepath.Join(cwd, "tracked.txt"), "unpublished detached work")
+	archiveGit(t, cwd, "commit", "-am", "unpublished")
 	if _, reason := workerGitCleanPushed(ctx, cwd); reason == "" {
-		t.Fatal("detached worktree treated as pushed")
+		t.Fatal("unpublished detached worktree treated as pushed")
 	}
 }
 
@@ -588,4 +593,135 @@ func TestWorkerArchiveAgentCannotReopenOrUnpin(t *testing.T) {
 	if len(rows) != 1 || !rows[0].Worker.Pinned {
 		t.Fatal("refused mutation changed archive")
 	}
+}
+
+func TestWorkerRetentionFlagsAggregateAndClear(t *testing.T) {
+	a, p, now := archiveFixture(t)
+	lead, _ := a.mgr.Get("lead")
+	a.tryArchiveWorker(p, now)
+	a.flagWorkerLead("lead", "second", "unpushed work")
+	memo := lead.Snapshot().FlagMemo
+	if !strings.Contains(memo, p.ID) || !strings.Contains(memo, "second") {
+		t.Fatalf("lost retention: %s", memo)
+	}
+	a.clearWorkerRetention("second")
+	a.noteWorkerReplyRead("lead", p, a.paneLatestReply(p))
+	a.tryArchiveWorker(p, now)
+	if lead.Snapshot().Flagged {
+		t.Fatalf("archived worker left notice: %s", lead.Snapshot().FlagMemo)
+	}
+}
+
+func TestWorkerRetentionReconcilesClosedResumedAndDisabled(t *testing.T) {
+	for _, kind := range []string{"closed", "resumed", "disabled", "historical"} {
+		t.Run(kind, func(t *testing.T) {
+			a, p, now := archiveFixture(t)
+			lead, _ := a.mgr.Get("lead")
+			a.tryArchiveWorker(p, now)
+			switch kind {
+			case "closed":
+				a.mgr.mu.Lock()
+				delete(a.mgr.panes, p.ID)
+				a.mgr.mu.Unlock()
+			case "resumed":
+				p.mu.Lock()
+				o := p.Origin.clone()
+				o.Worker.State = "running"
+				p.Origin = o
+				p.mu.Unlock()
+			case "historical":
+				a.workerArchives().retained = nil
+				a.workerArchives().noticesLoaded = false
+				a.mgr.mu.Lock()
+				delete(a.mgr.panes, p.ID)
+				a.mgr.mu.Unlock()
+			}
+			a.reconcileWorkerRetentions(kind != "disabled")
+			if lead.Snapshot().Flagged {
+				t.Fatalf("stale notice: %s", lead.Snapshot().FlagMemo)
+			}
+		})
+	}
+}
+
+func TestWorkerRetentionPreservesPersonAndBoundsMemo(t *testing.T) {
+	a, p, now := archiveFixture(t)
+	lead, _ := a.mgr.Get("lead")
+	lead.SetFlag(true, "my bookmark")
+	a.tryArchiveWorker(p, now)
+	a.clearWorkerRetention(p.ID)
+	if lead.Snapshot().FlagMemo != "my bookmark" || lead.Snapshot().FlagOwner != "user" {
+		t.Fatal("user flag changed")
+	}
+	lead.SetFlag(false, "")
+	for i := 0; i < 10; i++ {
+		a.flagWorkerLead("lead", fmt.Sprintf("pane_%016x", i), strings.Repeat("x", 200))
+	}
+	memo := lead.Snapshot().FlagMemo
+	if len([]rune(memo)) > flagMemoMaxRunes || !strings.Contains(memo, "+6 more retained workers") {
+		t.Fatalf("unbounded/lost count: %s", memo)
+	}
+}
+
+func TestWorkerRetentionRestoresNoticeAfterDaemonClear(t *testing.T) {
+	for _, kind := range []string{"disabled", "non-idle", "aborted-archive"} {
+		t.Run(kind, func(t *testing.T) {
+			a, p, now := archiveFixture(t)
+			a.tryArchiveWorker(p, now)
+			lead, _ := a.mgr.Get("lead")
+			if kind == "disabled" {
+				a.reconcileWorkerRetentions(false)
+			} else {
+				a.clearWorkerRetention(p.ID)
+			}
+			if lead.Snapshot().Flagged {
+				t.Fatal("notice not cleared")
+			}
+			a.tryArchiveWorker(p, now)
+			if !lead.Snapshot().Flagged {
+				t.Fatal("daemon-cleared notice stayed suppressed")
+			}
+		})
+	}
+}
+
+func TestWorkerRetentionSurvivesRestartWithOldFinalReply(t *testing.T) {
+	a, p, now := archiveFixture(t)
+	a.tryArchiveWorker(p, now)
+	lead, _ := a.mgr.Get("lead")
+	s := a.workerArchives()
+	s.noticeMu.Lock()
+	s.noticesLoaded = false
+	s.retained = nil
+	s.noticeMu.Unlock()
+	q := a.workers()
+	q.mu.Lock()
+	q.startedAt = now
+	q.mu.Unlock()
+	a.reconcileWorkerRetentions(true)
+	if !lead.Snapshot().Flagged {
+		t.Fatal("restart erased live retention")
+	}
+	a.tryArchiveWorker(p, now)
+	if !lead.Snapshot().Flagged || lead.Snapshot().FlagMemo != "Worker "+p.ID+" retained: final reply unread by lead" {
+		t.Fatal("restored worker lost retention:", lead.Snapshot().FlagMemo)
+	}
+	if _, ok := a.mgr.Get(p.ID); !ok {
+		t.Fatal("old final reply archived after restart")
+	}
+}
+func TestWorkerRetentionRestoresOverflowAfterRestart(t *testing.T) {
+	a, _, _ := archiveFixture(t)
+	for i := 0; i < 6; i++ {
+		a.flagWorkerLead("lead", fmt.Sprintf("worker-%d", i), "reason")
+	}
+	s := a.workerArchives()
+	s.noticeMu.Lock()
+	s.noticesLoaded = false
+	s.retained = nil
+	a.loadWorkerRetentionsLocked(s)
+	if len(s.retained) != 6 {
+		t.Fatalf("overflow metadata lost: %d", len(s.retained))
+	}
+	s.noticeMu.Unlock()
 }

@@ -96,8 +96,6 @@ type PersistedPane struct {
 	Flagged                  bool   `json:"flagged,omitempty"`
 	FlagMemo                 string `json:"flagMemo,omitempty"`
 	FlagOwner                string `json:"flagOwner,omitempty"`
-	FlagEpisode              string `json:"flagEpisode,omitempty"`
-	FlagRevision             string `json:"flagRevision,omitempty"`
 	ClaudeSessionID          string `json:"claudeSessionId,omitempty"`
 	ClaudeTranscriptPath     string `json:"claudeTranscriptPath,omitempty"`
 	// TitleOverride persists the user's per-pane title override so it survives a
@@ -174,6 +172,11 @@ func (s *PaneStore) load() error {
 	changed := false
 	for i := range s.list {
 		entry := &s.list[i]
+		// Retire all Warden bookmarks before any saved pane is reattached.
+		if entry.FlagOwner == "warden" {
+			entry.Flagged, entry.FlagMemo, entry.FlagOwner = false, "", ""
+			changed = true
+		}
 		mode, locked := tightenPaneAnswerSettings(entry.Cwd, entry.AutoMode, entry.NeverAutoAnswer)
 		if mode != entry.AutoMode || locked != entry.NeverAutoAnswer {
 			entry.AutoMode, entry.NeverAutoAnswer = mode, locked
@@ -322,8 +325,6 @@ func persistedFromSnapshot(snap PaneSnapshot) PersistedPane {
 		Flagged:                  snap.Flagged,
 		FlagMemo:                 snap.FlagMemo,
 		FlagOwner:                snap.FlagOwner,
-		FlagEpisode:              snap.FlagEpisode,
-		FlagRevision:             snap.FlagRevision,
 		ClaudeSessionID:          snap.ClaudeSessionID,
 		ClaudeTranscriptPath:     snap.ClaudeTranscriptPath,
 		TitleOverride:            snap.TitleOverride,

@@ -19,7 +19,7 @@ package main
 //     downgrade, hold and flavour checks). Every other request gets the
 //     update-only refusal; there is no catch-all handler.
 //
-// No scheduler, cron, catch-up, release train, warden, pane store or restore,
+// No scheduler, cron, catch-up, release train, pane store or restore,
 // agent cleanup, MCP/CLI/hook registration, relay, pairing, check-in,
 // background update poll, self-update or memory guard: none of their code is
 // reachable from here. updateOnlyBootCalls (update_only_boot_test.go) pins the

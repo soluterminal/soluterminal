@@ -1,3 +1,4 @@
+import { getHostTheme, useEmbedTheme } from '../../lib/useEmbedTheme';
 import { useStore, type AppThemePref } from '../../store';
 import { THEMES } from '../../themes';
 import { SettingsGroup, SettingsRow } from './SettingsRow';
@@ -8,6 +9,7 @@ import { useFocusEnabled } from '../../lib/focusAvailability';
 // users can drag the Settings window aside and watch the effect as they tweak.
 
 export function AppearanceTab() {
+  const hostTheme = useEmbedTheme();
   const appTheme = useStore((s) => s.appTheme);
   const setAppTheme = useStore((s) => s.setAppTheme);
   const terminalThemeName = useStore((s) => s.terminalThemeName);
@@ -31,12 +33,18 @@ export function AppearanceTab() {
       <SettingsGroup title="Appearance">
         <SettingsRow
           label="App theme"
-          hint="Sidebar, top bar and dialogs. System follows your computer's setting. Terminal colours are set below."
+          hint={hostTheme
+            ? 'Follows Shinoque’s theme. Change it in Shinoque Settings → Appearance.'
+            : "Sidebar, top bar and dialogs. System follows your computer's setting. Terminal colours are set below."}
         >
           <select
             className="settings-select"
-            value={appTheme}
-            onChange={(e) => setAppTheme(e.target.value as AppThemePref)}
+            aria-label="App theme"
+            disabled={hostTheme !== null}
+            value={hostTheme ?? appTheme}
+            onChange={(e) => {
+              if (!getHostTheme()) setAppTheme(e.target.value as AppThemePref);
+            }}
           >
             <option value="dark">Dark</option>
             <option value="light">Light</option>

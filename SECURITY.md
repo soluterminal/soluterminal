@@ -44,6 +44,13 @@ still welcome.
   example by hiding its process details, sending the request from a Windows
   program through WSL, or reading your browser's cookies). Run code you don't
   trust under a separate user account, a container or the agent sandbox.
+- **Pane identity.** MCP pane ownership comes from process tracing. A pane ID
+  supplied only by an untraced header or environment is an unverified claim;
+  it grants no ownership. Closing, renaming or changing pane info needs the
+  person's request and Allow, including on macOS and for Windows processes
+  reaching a WSL daemon or local relay/router paths. Messages and prompts
+  mark these callers as unverified. Traced pane callers keep their recorded
+  ownership.
 - **End-to-end encryption covers approved devices.** A browser or phone that
   the computer approved with matching codes, and that pinned the computer's
   key, uses the end-to-end channel by default and never falls back to the

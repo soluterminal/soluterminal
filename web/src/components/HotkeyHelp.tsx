@@ -82,11 +82,20 @@ const GROUPS: ShortcutGroup[] = [
   {
     title: 'Files & shell',
     items: [
-      { actionId: 'palette.actions', label: 'Palette — actions mode. In-palette: "/" files · "@" search pane scrollbacks · ">" actions' },
+      { actionId: 'palette.actions', label: 'Palette — type a handle without @ to jump to another running pane in the current layout. In-palette: "/" files · "@" first searches pane scrollbacks · ">" actions' },
       { actionId: 'palette.files', label: "Find a file or folder (starts in the focused pane's folder)" },
       { actionId: 'palette.findInPane', label: 'Find in focused pane — Enter next, Shift+Enter previous, Esc close' },
       { actionId: 'edit.commandLine', label: 'Edit the current command line in $EDITOR' },
       { keys: ['Tab'], label: 'Complete the highlighted suggestion in the sidebar Files box' },
+    ],
+  },
+  {
+    title: 'Sidebar',
+    items: [
+      { label: 'Expand all / Collapse all — one toggle button in the Workspaces header; it shows Expand all while anything is folded' },
+      { keys: ['*', '/', '-'], label: 'Expand / collapse the focused row and its sibling branches (focus the sidebar tree first)' },
+      { keys: ['Alt', 'click chevron'], label: 'Toggle the whole subtree' },
+      { keys: ['Shift', 'F10', '/', 'Menu'], label: "Open the focused row's menu: the workspace menu on a workspace row, the pane menu on a pane row" },
     ],
   },
   {

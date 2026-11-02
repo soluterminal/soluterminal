@@ -66,3 +66,45 @@ it('offers Send or Discard for a message a busy pane was never given', async () 
   fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
   await waitFor(() => expect(act).toHaveBeenCalledExactlyOnceWith('p2', 'r2', 'clear'));
 });
+
+it('shows a held message with its sender and acts on the oldest one', async () => {
+  const act = vi.spyOn(api, 'actOnUnsentMessage').mockResolvedValue({ outcome: 'cleared' });
+  const refresh = vi.fn().mockResolvedValue(undefined);
+  useStore.setState({ refreshPanes: refresh });
+  const held = [
+    { id: 'h1', sender: '@cmo · #4 Claude', text: 'first', at: 1 },
+    { id: 'h2', sender: '@lead · #1 Claude', text: 'second', at: 2 },
+  ];
+  render(<UnsentMessageChip pane={{ id: 'p5', heldMessages: held } as PaneInfo} />);
+  const chip = screen.getByRole('status');
+  expect(chip.textContent).toContain('Message from @cmo · #4 Claude waits while you type (+1 more)');
+  expect(chip.getAttribute('title')).toBe('first');
+  fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+  await waitFor(() => expect(refresh).toHaveBeenCalled());
+  expect(act).toHaveBeenCalledExactlyOnceWith('p5', 'h1', 'clear');
+});
+
+it('surfaces a refused Send now', async () => {
+  vi.spyOn(api, 'actOnUnsentMessage').mockRejectedValue(new Error('your input box has text: send or clear it first, then send this message'));
+  const toast = vi.fn();
+  useStore.setState({ toast });
+  render(<UnsentMessageChip pane={{ id: 'p6', heldMessages: [{ id: 'h1', sender: '@cmo', text: 'x', at: 1 }] } as PaneInfo} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Send now' }));
+  await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('input box has text'), { kind: 'warn' }));
+});
+
+it('says a put-back message is in the input box, and held messages wait behind it', () => {
+  render(<UnsentMessageChip pane={{
+    id: 'p7',
+    unsentMessage: { id: 'r7', sender: '@flag-guard', putBack: true },
+    heldMessages: [{ id: 'h1', sender: '@release-lead', text: 'next', at: 1 }],
+  } as PaneInfo} />);
+  const [receipt, held] = screen.getAllByRole('status');
+  expect(receipt.textContent).toContain('Unsent message from @flag-guard in the input box (put back after you stopped it)');
+  expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Clear' })).toBeTruthy();
+  expect(held.textContent).toContain('Message from @release-lead waits behind the unsent message');
+  // Send now could only be refused while the box holds that message.
+  expect(screen.queryByRole('button', { name: 'Send now' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Discard' })).toBeTruthy();
+});

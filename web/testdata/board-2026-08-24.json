@@ -60,7 +60,7 @@
       { "id": "codex-headless", "provider": "openai", "status": "billing_error", "cooldownUntilEpoch": 1787556600, "installed": true },
       { "id": "claude-headless", "provider": "anthropic", "status": "healthy", "installed": true }
     ],
-    "automation": { "agents": { "total": 2, "paused": 0, "running": 1, "blocked": 0, "errors24h": 0, "nextRunAt": null }, "schedules": { "enabled": 1, "disabled": 0, "running": 0, "errors24h": 0, "nextFireAt": null }, "builtins": [], "autonomy": { "globalPaused": false, "pausedCount": 0 }, "warden": { "enabled": false, "lastRunAt": null, "lastRunStatus": "" } },
+    "automation": { "agents": { "total": 2, "paused": 0, "running": 1, "blocked": 0, "errors24h": 0, "nextRunAt": null }, "schedules": { "enabled": 1, "disabled": 0, "running": 0, "errors24h": 0, "nextFireAt": null }, "builtins": [], "autonomy": { "globalPaused": false, "pausedCount": 0 } },
     "surface": { "addr": "127.0.0.1:9787", "ports": { "total": 1, "paneOwned": 1 }, "previews": { "active": 0 }, "cloud": { "configured": false, "hasCreds": false, "credsInvalid": false, "relayState": "unconfigured" } },
     "release": { "running": "0.0.999", "latest": "0.1.0", "available": true, "applying": false, "lastSuccessMs": 0, "lastError": "", "shellCurrent": "0.0.999", "shellLatest": "0.1.0", "shellAvailable": true, "readiness": null }
   }

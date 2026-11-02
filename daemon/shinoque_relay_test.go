@@ -84,7 +84,17 @@ func TestShinoqueRelayHeadersAndPrefixes(t *testing.T) {
 	shinoqueTestToken(t, "server-token")
 	seen := make(chan *http.Request, 2)
 	base, tokens, closeServers := shinoqueTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen <- r
+		// Local port discovery can send unrelated HEAD probes to this server.
+		if r.Method != http.MethodPost || r.URL.Path != "/api/write" {
+			http.NotFound(w, r)
+			return
+		}
+		select {
+		case seen <- r:
+		default:
+			http.Error(w, "unexpected extra upstream request", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
 		w.Header().Set("Set-Cookie", "bad=1; Path=/")
 		w.Header().Set("X-Upstream", "yes")
@@ -156,7 +166,16 @@ func TestShinoqueRelayPrivateDeviceHeader(t *testing.T) {
 			home := shinoqueTestToken(t, token)
 			seen := make(chan http.Header, 1)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				seen <- r.Header.Clone()
+				if r.Method != http.MethodPost || r.URL.Path != "/api/files/write" {
+					http.NotFound(w, r)
+					return
+				}
+				select {
+				case seen <- r.Header.Clone():
+				default:
+					http.Error(w, "unexpected extra upstream request", http.StatusInternalServerError)
+					return
+				}
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			defer upstream.Close()
@@ -394,7 +413,14 @@ func TestShinoqueRelayChecksBrowserHeadersBeforeStripping(t *testing.T) {
 func TestShinoqueRelayOnlyAndAvailability(t *testing.T) {
 	home := shinoqueTestToken(t, "")
 	hits := 0
-	base, tokens, closeServers := shinoqueTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { hits++; w.WriteHeader(200) }))
+	base, tokens, closeServers := shinoqueTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
 	defer closeServers()
 	req, _ := http.NewRequest(http.MethodGet, base+"/shinoque/", nil)
 	req.Header.Set("X-Forwarded-Prefix", "/m/m1")
@@ -454,7 +480,11 @@ func TestShinoqueRelayOnlyAndAvailability(t *testing.T) {
 func TestShinoqueRelaySSEFlush(t *testing.T) {
 	shinoqueTestToken(t, "stream-token")
 	release := make(chan struct{})
-	base, _, closeServers := shinoqueTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	base, _, closeServers := shinoqueTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/events" {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(w, "data: first\n\n")
 		w.(http.Flusher).Flush()

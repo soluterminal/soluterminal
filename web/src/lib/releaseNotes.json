@@ -1,4 +1,20 @@
 {
+  "0.0.1235": [
+    "Correction to 0.0.1234: there’s no sidebar search box. To find a pane by its handle, press Ctrl+K and type the handle without the @ (typing @ first searches the text in your panes instead). It finds panes in the workspace you have open.",
+    "The sidebar tree now has one button that collapses or expands it all. Alt+click a chevron to open or close everything below it, or press * or - on a row to open or close it and the rows beside it.",
+    "Right-click a pane or workspace in the sidebar, or press Shift+F10 or the Menu key on its row, to open its menu. A pane’s menu has the same Make lead… and Make worker choices as its title bar. A workspace’s menu has Make leads…, to make several of your panes leads at once, each with its role.",
+    "To delete a workspace, right-click it and choose Delete. Workspace rows no longer show an ×, except on touch screens.",
+    "In the sidebar, every lead now sits at the top level of its workspace, even one another lead started; hover over it to see who. A lead’s workers start folded under it.",
+    "In the sidebar, a ring on a pane’s dot means a pane below it needs you, and a folded row shows how many (for example “2●”). Leads show their role in a small label.",
+    "Sidebar rows now show the pane’s @handle, then what it’s working on: on one line in a wide sidebar, on two in a narrow one.",
+    "An agent can now make a pane you opened a lead, but only when you ask it to. You approve each one in the app, even if “Let agents in panes approve for me” is on in Settings › Agent permissions.",
+    "Agents can now move a pane to another of your workspaces, rename a workspace, or delete an empty one. Moving a pane the agent didn’t start and doesn’t lead, and every rename or delete, needs your Allow in the app, even if “Let agents in panes approve for me” is on. You can also answer from your phone.",
+    "If an agent sends a message to a Claude or Codex pane while you’re typing in it, the message now waits instead of going into your text. The pane shows who it’s from, with Send now and Discard, and it goes in by itself once your input box is empty and you’ve stopped typing.",
+    "Fixed: text in a Claude or Codex pane’s input box that you didn’t type could hold back auto-approve. Agents can also no longer leave half-typed messages in those panes, and their messages no longer carry invisible characters.",
+    "Flags you set with “Flag for attention…” are now yours: agents can no longer change or clear them.",
+    "Agents can now tell you when they’re waiting on you. The ask shows in the bell, on the pane’s title bar and in the sidebar, and your phone gets a notification if you’ve turned on phone notifications. Dismiss it with the × in the bell; it also closes by itself when the agent’s pane closes.",
+    "Fixed: if you stop an agent and a message another pane sent it is put back in its input box, the pane now shows it as an unsent message, with Send and Clear, instead of quietly holding up later messages."
+  ],
   "0.0.1234": [
     "Messages an agent sends to a busy pane no longer get stuck in its text box. In a Claude pane, SoluTerminal tries once more if the message wasn’t taken; if it still isn’t, it waits on the pane as an unsent message you can Send or Clear. A busy shell isn’t typed into, and the agent is told the message wasn’t sent. A question an agent asks a busy pane now waits until that pane is free.",
     "In the sidebar, every pane row now shows an × to close it when you point at it. Typing in a pane no longer makes it show as busy.",

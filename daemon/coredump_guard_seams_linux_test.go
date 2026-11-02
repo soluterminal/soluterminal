@@ -23,7 +23,7 @@ import (
 // The tests in this file exercise the real daemon-owned launch seams that were
 // previously unguarded: the supervised `solud agent` wrapper, the agent's own
 // pipe/PTY child, the managed Node harness installer, a native muse turn, a
-// scheduled headless task run, a warden run and an aria headless run. Each one
+// scheduled headless task run and an aria headless run. Each one
 // must set only the soft RLIMIT_CORE to 1 across the fork/exec window and leave
 // the hard limit untouched. Helpers (coreDumpGuardPreconditions, coreLimitLine,
 // procLimitValue, requireLimitUnchanged, snapshotCrashDir,
@@ -293,35 +293,6 @@ func TestScheduleTaskSpawnSuppressesCoreDumps(t *testing.T) {
 	if soft != "1" || hard != procLimitValue(before.Max) {
 		t.Fatalf("task run limits soft=%q hard=%q, want soft=1 hard=%q", soft, hard, procLimitValue(before.Max))
 	}
-	requireLimitUnchanged(t, before)
-}
-
-// TestWardenRealExecSuppressesCoreDumps proves the built-in warden runner is
-// guarded, including its SIGSEGV failure path.
-func TestWardenRealExecSuppressesCoreDumps(t *testing.T) {
-	before := coreDumpGuardPreconditions(t)
-	crashDir, beforeEntries := snapshotCrashDir(t)
-
-	res := (&Warden{}).realExec(context.Background(), "sh", []string{"-c", coreTreeReportScript}, t.TempDir(), "")
-	if res.err != nil || res.timedOut {
-		t.Fatalf("warden realExec error=%v timedOut=%v output=%q", res.err, res.timedOut, string(res.output))
-	}
-	requireGuardedTree(t, string(res.output), before)
-	soft, hard := coreLimitLine(t, string(res.output))
-	if soft != "1" || hard != procLimitValue(before.Max) {
-		t.Fatalf("warden limits soft=%q hard=%q, want soft=1 hard=%q", soft, hard, procLimitValue(before.Max))
-	}
-
-	crashed := (&Warden{}).realExec(context.Background(), "sh", []string{"-c", "kill -SEGV $$"}, t.TempDir(), "")
-	var exitErr *exec.ExitError
-	if !errors.As(crashed.err, &exitErr) {
-		t.Fatalf("warden crash error=%v, want *exec.ExitError", crashed.err)
-	}
-	status, ok := exitErr.Sys().(syscall.WaitStatus)
-	if !ok || !status.Signaled() || status.Signal() != syscall.SIGSEGV || status.CoreDump() {
-		t.Fatalf("warden crash status=%v, want SIGSEGV without core", status)
-	}
-	requireCrashDirUnchanged(t, crashDir, beforeEntries)
 	requireLimitUnchanged(t, before)
 }
 

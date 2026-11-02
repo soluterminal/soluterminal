@@ -230,6 +230,10 @@ func shinoqueRelayWebOrigin(relayURL string) string {
 // This handler is installed only on the authenticated cloud tunnel. It has no
 // HTML rewriting or CSP mutation: shinoque owns its document sandbox.
 func newShinoqueRelayHandler(next http.Handler, tokens *shinoqueTokenCache, activeRelayURL func() string) http.Handler {
+	return newShinoqueRelayHandlerWithListenerCheck(next, tokens, activeRelayURL, shinoqueLocalListenerAllowed)
+}
+
+func newShinoqueRelayHandlerWithListenerCheck(next http.Handler, tokens *shinoqueTokenCache, activeRelayURL func() string, listenerAllowed func(string) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isShinoquePath(r.URL.Path) {
 			next.ServeHTTP(w, r)
@@ -270,6 +274,12 @@ func newShinoqueRelayHandler(next http.Handler, tokens *shinoqueTokenCache, acti
 		port := config.port
 		if port == "" {
 			http.Error(w, "invalid shinoque relay port", http.StatusServiceUnavailable)
+			return
+		}
+		// Resolve discovery for this request, then check and proxy the same
+		// immutable port. Do not re-resolve the destination after this check.
+		if !listenerAllowed(port) {
+			http.Error(w, shinoqueUnavailable, http.StatusServiceUnavailable)
 			return
 		}
 		target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}

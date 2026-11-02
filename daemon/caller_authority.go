@@ -61,6 +61,15 @@ type callerIdentity struct {
 	// FromEnv: PaneID came from SOLU_PANE_ID in the environment of a process
 	// with no pane above it, not from the pane's own process tree.
 	FromEnv bool
+	// Unproven: classified as the person from browser fetch headers alone,
+	// with no traced browser process behind them.
+	Unproven bool
+}
+
+// tracedPane excludes detached environment/header claims from operations that
+// require a stable per-pane identity, such as workspace creation quotas.
+func (id callerIdentity) tracedPane() bool {
+	return id.Kind == callerPane && id.PaneID != "" && !id.FromEnv
 }
 
 type relayTransportKey struct{}
@@ -133,15 +142,28 @@ func (a *apiServer) identifyCaller(r *http.Request) callerIdentity {
 		// browser's headers: otherwise an agent that detaches from its pane
 		// (`setsid -f env -i curl -H 'Sec-Fetch-Site: same-origin' …`) would
 		// pass as the person.
-		if browserOriginated(r) && (peerIsBrowser(pid) || peerIsRelayProxy(pid)) {
+		if peerIsRelayProxy(pid) {
+			return a.untracedCaller(r, pid)
+		}
+		if browserOriginated(r) && peerIsBrowser(pid) {
 			return callerIdentity{Kind: callerHuman, PID: pid}
 		}
 		return callerIdentity{Kind: callerUnverified, PID: pid}
 	}
-	if browserOriginated(r) {
-		return callerIdentity{Kind: callerHuman}
+	return a.untracedCaller(r, 0)
+}
+
+// untracedCaller classifies a caller whose process can't be found (pid 0),
+// or was found to be a proxy carrying other programs' connections (pid > 0:
+// WSL's init, the desktop app's router). Every untraceable classification goes
+// through here. Only browser fetch headers are left to go on, so each request
+// taken as the person's this way is logged for review.
+func (a *apiServer) untracedCaller(r *http.Request, pid int) callerIdentity {
+	if !browserOriginated(r) {
+		return callerIdentity{Kind: callerUnverified, PID: pid}
 	}
-	return callerIdentity{Kind: callerUnverified}
+	log.Printf("authority: unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+	return callerIdentity{Kind: callerHuman, PID: pid, Unproven: true}
 }
 
 // classifyPeerProcess reports whether pid runs inside a pane or was spawned by
@@ -265,14 +287,16 @@ func browserOriginated(r *http.Request) bool {
 }
 
 // requireHuman refuses r unless a person made it. It guards the acts that
-// widen what agents may do; agent authority never delegates them.
-func (a *apiServer) requireHuman(w http.ResponseWriter, r *http.Request, action string) bool {
+// widen what agents may do; agent authority never delegates them. Optional
+// MCP tool names direct agents to the tool that owns the operation and its
+// ownership/confirmation checks instead of duplicating those rules in REST.
+func (a *apiServer) requireHuman(w http.ResponseWriter, r *http.Request, action string, mcpTools ...string) bool {
 	id := a.identifyCaller(r)
 	if id.Kind == callerHuman {
 		log.Printf("authority: %s by a person (pid %d, relay %t)", action, id.PID, id.Relay)
 		return true
 	}
-	a.refuseCaller(w, id, action, false)
+	a.refuseCaller(w, id, action, false, mcpTools...)
 	return false
 }
 
@@ -295,8 +319,10 @@ func (a *apiServer) requireHumanOrDelegated(w http.ResponseWriter, r *http.Reque
 	return false
 }
 
-func (a *apiServer) refuseCaller(w http.ResponseWriter, id callerIdentity, action string, delegable bool) {
-	log.Printf("authority: refused %s caller=%s pane=%s pid=%d", action, id.Kind, id.PaneID, id.PID)
+func (a *apiServer) refuseCaller(w http.ResponseWriter, id callerIdentity, action string, delegable bool, mcpTools ...string) {
+	if action != "create or save a workspace" || a.workspaceSaveLogs.allow(id, time.Now()) {
+		log.Printf("authority: refused %s caller=%s pane=%s pid=%d", action, id.Kind, id.PaneID, id.PID)
+	}
 	var msg string
 	switch {
 	case id.Kind == callerPane && id.PID > 0 && peerIsBrowser(id.PID):
@@ -312,6 +338,9 @@ func (a *apiServer) refuseCaller(w http.ResponseWriter, id callerIdentity, actio
 		msg = fmt.Sprintf("Only you can %s. Do it in the SoluTerminal app.", action)
 	default:
 		msg = fmt.Sprintf("To %s, use the SoluTerminal app.", action)
+	}
+	if len(mcpTools) > 0 {
+		msg += " Agents must use the MCP tool " + strings.Join(mcpTools, " or ") + ", which applies its ownership and in-app Allow rules."
 	}
 	writeJSON(w, http.StatusForbidden, map[string]any{
 		"error":   "human_required",

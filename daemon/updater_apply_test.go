@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -93,49 +94,78 @@ func TestWriteSuccessorBootMarkerRespectsEnv(t *testing.T) {
 	}
 }
 
+// These are the current loopback launcher, its optional Windows route, and
+// the legacy wildcard launcher. Only their primary address and two identity
+// flags authorize updating the desktop supervisor's pidfile.
+func managedWslArgsCases() []struct {
+	name    string
+	args    []string
+	managed bool
+} {
+	return []struct {
+		name    string
+		args    []string
+		managed bool
+	}{
+		{"current loopback", []string{"--addr", "127.0.0.1:8787", "--backend-id", "wsl", "--shell-platform", "windows-amd64"}, true},
+		{"current NAT launcher", []string{"--addr", "127.0.0.1:8787", "--wsl-addr", "172.29.132.65:8787", "--relay", "wss://example.test/relay", "--backend-id", "wsl", "--shell-version", "0.0.1235", "--shell-platform", "windows-amd64"}, true},
+		{"current loopback-only launcher", []string{"--addr", "127.0.0.1:8787", "--wsl-addr", "127.0.0.1:8787", "--backend-id", "wsl", "--shell-version", "0.0.1235", "--shell-platform", "windows-amd64"}, true},
+		{"current equals flags", []string{"--shell-platform=windows-amd64", "--backend-id=wsl", "--wsl-addr=172.29.132.65:8787", "--addr=127.0.0.1:8787"}, true},
+		{"legacy wildcard", []string{"--addr", "0.0.0.0:8787", "--relay", "wss://example.test/relay", "--backend-id=wsl", "--shell-version", "0.0.501", "--shell-platform", "windows-amd64"}, true},
+		{"legacy equals flags", []string{"--addr=0.0.0.0:8787", "--backend-id=wsl", "--shell-platform=windows-amd64"}, true},
+		{"standalone loopback", []string{"--addr", "127.0.0.1:8787"}, false},
+		{"standalone wildcard", []string{"--addr", "0.0.0.0:8787"}, false},
+		{"host backend", []string{"--addr", "127.0.0.1:8787", "--backend-id", "host", "--shell-platform", "windows-amd64"}, false},
+		{"Windows backend", []string{"--addr", "127.0.0.1:8787", "--backend-id", "win", "--shell-platform", "windows-amd64"}, false},
+		{"Linux shell", []string{"--addr", "127.0.0.1:8787", "--backend-id", "wsl", "--shell-platform", "linux-amd64"}, false},
+		{"missing backend", []string{"--addr", "127.0.0.1:8787", "--shell-platform", "windows-amd64"}, false},
+		{"missing shell platform", []string{"--addr", "127.0.0.1:8787", "--backend-id", "wsl"}, false},
+		{"different port", []string{"--addr", "127.0.0.1:8788", "--backend-id", "wsl", "--shell-platform", "windows-amd64"}, false},
+		{"interface primary", []string{"--addr", "172.29.132.65:8787", "--backend-id", "wsl", "--shell-platform", "windows-amd64"}, false},
+		{"IPv6 primary", []string{"--addr", "[::1]:8787", "--backend-id", "wsl", "--shell-platform", "windows-amd64"}, false},
+		{"secondary alone", []string{"--wsl-addr", "127.0.0.1:8787", "--backend-id", "wsl", "--shell-platform", "windows-amd64"}, false},
+		{"address substring", []string{"--addr=127.0.0.1:8787-extra", "--backend-id", "wsl", "--shell-platform", "windows-amd64"}, false},
+		{"empty address", []string{"--addr=", "--backend-id", "wsl", "--shell-platform", "windows-amd64"}, false},
+	}
+}
+
 func TestIsManagedWslDaemonArgs(t *testing.T) {
-	args := []string{
-		"--addr", "0.0.0.0:8787",
-		"--relay", "wss://example.test/relay",
-		"--backend-id=wsl",
-		"--shell-version", "0.0.501",
-		"--shell-platform", "windows-amd64",
-	}
-
-	if !isManagedWslDaemonArgs(args) {
-		t.Fatal("expected managed WSL daemon args")
-	}
-
-	args[1] = "127.0.0.1:8787"
-	if isManagedWslDaemonArgs(args) {
-		t.Fatal("host-local daemon args should not be treated as managed WSL")
+	for _, tc := range managedWslArgsCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isManagedWslDaemonArgs(tc.args); got != tc.managed {
+				t.Fatalf("managed=%v, want %v for %q", got, tc.managed, tc.args)
+			}
+		})
 	}
 }
 
 func TestUpdateManagedWslPidFile(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "solud")
-	pidFile := filepath.Join(dir, "solud-wsl.pid")
-	if err := os.WriteFile(pidFile, []byte("old\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })
-	os.Args = []string{
-		"solud",
-		"--addr", "0.0.0.0:8787",
-		"--backend-id", "wsl",
-		"--shell-platform", "windows-amd64",
-	}
-
-	updateManagedWslPidFile(bin, 12345)
-
-	got, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "12345\n" {
-		t.Fatalf("pidfile = %q, want 12345\\n", got)
+	for _, tc := range managedWslArgsCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "solud")
+			pidFile := filepath.Join(dir, "solud-wsl.pid")
+			if err := os.WriteFile(pidFile, []byte("old\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			os.Args = append([]string{"solud"}, tc.args...)
+			for _, pid := range []int{12345, 67890} {
+				updateManagedWslPidFile(bin, pid)
+				got, err := os.ReadFile(pidFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "old\n"
+				if tc.managed {
+					want = strconv.Itoa(pid) + "\n"
+				}
+				if string(got) != want {
+					t.Fatalf("pidfile = %q, want %q", got, want)
+				}
+			}
+		})
 	}
 }
 

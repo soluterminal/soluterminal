@@ -20,7 +20,7 @@ function AttentionBellList() {
   const close = () =>
     document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
   if (items.length === 0) {
-    return <div className="notif-center-empty">No panes are waiting on you</div>;
+    return <div className="notif-center-empty">Nothing is waiting on you</div>;
   }
   return <AttentionInbox items={items} onSelect={close} />;
 }
@@ -28,9 +28,9 @@ function AttentionBellList() {
 export function AttentionBell() {
   const { count, hasChoice } = useAttentionBadge();
   const title =
-    count === 0 ? 'No panes are waiting on you'
-    : count === 1 ? '1 pane is waiting on you'
-    : `${count} panes are waiting on you`;
+    count === 0 ? 'Nothing is waiting on you'
+    : count === 1 ? '1 item is waiting on you'
+    : `${count} items are waiting on you`;
   return (
     <TopbarPopover
       minWidth={300}

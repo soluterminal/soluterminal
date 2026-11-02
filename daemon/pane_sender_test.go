@@ -10,12 +10,17 @@ func TestSendInputLabelsOnlyAgentMessagesFromAnotherPane(t *testing.T) {
 	for _, tc := range []struct{ name, caller, text, frame string }{
 		{"message", "sender", "Please review this\n", "\x1b[200~[from #1 Claude] Please review this\x1b[201~"},
 		{"multiline", "sender", "First line\nsecond line\n", "\x1b[200~[from #1 Claude] First line\nsecond line\x1b[201~"},
+		{"claimed sender", mcpClaimedCallerPrefix + "sender", "Please review this\n", "\x1b[200~[from #1 Claude (unverified)] Please review this\x1b[201~"},
+		{"claimed target", mcpClaimedCallerPrefix + "target", "Please review this\n", "\x1b[200~[from #2 Codex (unverified)] Please review this\x1b[201~"},
+		{"unknown claim", mcpClaimedCallerPrefix + "missing", "Please review this\n", "\x1b[200~[from an unverified agent] Please review this\x1b[201~"},
 		{"human", "", "Please review this\n", "\x1b[200~Please review this\x1b[201~"},
 		{"self", "target", "Please review this\n", "\x1b[200~Please review this\x1b[201~"},
 		{"shell sender", "shell", "Please review this\n", "\x1b[200~Please review this\x1b[201~"},
 		{"two keys", "sender", "ok\n", "ok"},
 		{"one key", "sender", "y\n", "y"},
-		{"raw text", "sender", "insert only", "insert only"},
+		// Unterminated text for an agent pane is refused unsent
+		// (TestSendInputRefusesUnsubmittedMessageToAgentPane); keys stay raw.
+		{"two raw keys", "sender", "ab", "ab"},
 		{"arrow", "sender", "\x1b[A", "\x1b[A"},
 		{"compact command", "sender", "/compact\n", "\x1b[200~/compact\x1b[201~"},
 		{"clear command", "sender", "/clear\n", "\x1b[200~/clear\x1b[201~"},

@@ -21,7 +21,7 @@ func TestMcpScopeStoreMintLookupExpiryRevoke(t *testing.T) {
 	t.Parallel()
 	s := newMcpScopeStore()
 
-	tok := s.Mint("warden", []string{"list_panes", "set_pane_flag"}, time.Minute)
+	tok := s.Mint("reviewer", []string{"list_panes", "set_pane_flag"}, time.Minute)
 	if len(tok) != 64 {
 		t.Fatalf("token length = %d, want 64 hex chars", len(tok))
 	}
@@ -29,8 +29,8 @@ func TestMcpScopeStoreMintLookupExpiryRevoke(t *testing.T) {
 	if !ok {
 		t.Fatal("freshly minted token did not resolve")
 	}
-	if sc.Identity != "warden" || !sc.allows("list_panes") || sc.allows("kill_pane") {
-		t.Fatalf("scope = %+v, want warden with exactly the minted tools", sc)
+	if sc.Identity != "reviewer" || !sc.allows("list_panes") || sc.allows("kill_pane") {
+		t.Fatalf("scope = %+v, want reviewer with exactly the minted tools", sc)
 	}
 
 	if _, ok := s.Lookup("not-a-token"); ok {
@@ -40,7 +40,7 @@ func TestMcpScopeStoreMintLookupExpiryRevoke(t *testing.T) {
 		t.Fatal("empty token resolved")
 	}
 
-	expired := s.Mint("warden", []string{"list_panes"}, -time.Second)
+	expired := s.Mint("reviewer", []string{"list_panes"}, -time.Second)
 	if _, ok := s.Lookup(expired); ok {
 		t.Fatal("expired token resolved")
 	}
@@ -62,7 +62,7 @@ func TestMCPScopedCallEnforcesToolBudget(t *testing.T) {
 	t.Parallel()
 	a := &apiServer{mgr: NewManager(""), uiBus: newUIBus()}
 	scope := &mcpScope{
-		Identity: "warden",
+		Identity: "reviewer",
 		Tools:    map[string]bool{"list_panes": true},
 		Expires:  time.Now().Add(time.Minute),
 	}
@@ -84,7 +84,7 @@ func TestMCPScopedCallEnforcesToolBudget(t *testing.T) {
 func TestMCPToolsListFilteredByScope(t *testing.T) {
 	t.Parallel()
 	scope := &mcpScope{
-		Identity: "warden",
+		Identity: "reviewer",
 		Tools:    map[string]bool{"list_panes": true, "read_pane_tail": true},
 		Expires:  time.Now().Add(time.Minute),
 	}
@@ -110,16 +110,16 @@ func TestMCPSetPaneFlagProvenanceGuard(t *testing.T) {
 	t.Parallel()
 	p := testPaneWithTail(t, "pane_flag1", "worker", "$ ")
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus()}
-	warden := &mcpScope{Identity: "reviewer", Tools: map[string]bool{"set_pane_flag": true}, Expires: time.Now().Add(time.Minute)}
+	reviewer := &mcpScope{Identity: "reviewer", Tools: map[string]bool{"set_pane_flag": true}, Expires: time.Now().Add(time.Minute)}
 
 	// User flags the pane; a scoped caller may not overwrite or clear it.
 	p.SetFlag(true, "mine — checking later")
-	text, isErr := mcpResultText(t, scopedCallForTest(t, a, warden, "set_pane_flag",
-		map[string]any{"pane_id": p.ID, "flagged": true, "memo": "warden brief"}))
+	text, isErr := mcpResultText(t, scopedCallForTest(t, a, reviewer, "set_pane_flag",
+		map[string]any{"pane_id": p.ID, "flagged": true, "memo": "reviewer brief"}))
 	if !isErr || !strings.Contains(text, "already flagged by 'user'") {
 		t.Fatalf("scoped overwrite of user flag = (%q, err=%v), want provenance refusal", text, isErr)
 	}
-	text, isErr = mcpResultText(t, scopedCallForTest(t, a, warden, "set_pane_flag",
+	text, isErr = mcpResultText(t, scopedCallForTest(t, a, reviewer, "set_pane_flag",
 		map[string]any{"pane_id": p.ID, "flagged": false}))
 	if !isErr {
 		t.Fatalf("scoped clear of user flag succeeded: %q", text)
@@ -128,29 +128,27 @@ func TestMCPSetPaneFlagProvenanceGuard(t *testing.T) {
 		t.Fatalf("user flag was disturbed: %+v", snap)
 	}
 
-	// Full-access caller (interactive pane, scope nil) keeps today's
-	// unrestricted behavior — and stamps "agent" provenance.
-	text, isErr = mcpResultText(t, scopedCallForTest(t, a, nil, "set_pane_flag",
-		map[string]any{"pane_id": p.ID, "flagged": true, "memo": "agent note"}))
-	if isErr {
-		t.Fatalf("full-access overwrite refused: %q", text)
-	}
-	if snap := p.Snapshot(); snap.FlagOwner != "agent" || snap.FlagMemo != "agent note" {
-		t.Fatalf("full-access set = %+v, want agent-owned note", snap)
+	// Full-access callers must preserve the person's bookmark too.
+	for _, flagged := range []bool{true, false} {
+		text, isErr = mcpResultText(t, scopedCallForTest(t, a, nil, "set_pane_flag",
+			map[string]any{"pane_id": p.ID, "flagged": flagged, "memo": "agent note"}))
+		if !isErr || !strings.Contains(text, "only the person") {
+			t.Fatalf("full-access changed user flag: %q", text)
+		}
 	}
 
-	// The warden may claim an unowned/cleared pane and clear its OWN flag.
+	// The reviewer may claim an unowned/cleared pane and clear its OWN flag.
 	p.SetFlagAs(false, "", "")
-	if text, isErr = mcpResultText(t, scopedCallForTest(t, a, warden, "set_pane_flag",
+	if text, isErr = mcpResultText(t, scopedCallForTest(t, a, reviewer, "set_pane_flag",
 		map[string]any{"pane_id": p.ID, "flagged": true, "memo": "needs a decision: A or B — recommend A"})); isErr {
-		t.Fatalf("warden flag on unflagged pane refused: %q", text)
+		t.Fatalf("reviewer flag on unflagged pane refused: %q", text)
 	}
 	if snap := p.Snapshot(); snap.FlagOwner != "reviewer" {
 		t.Fatalf("owner = %q, want reviewer", snap.FlagOwner)
 	}
-	if text, isErr = mcpResultText(t, scopedCallForTest(t, a, warden, "set_pane_flag",
+	if text, isErr = mcpResultText(t, scopedCallForTest(t, a, reviewer, "set_pane_flag",
 		map[string]any{"pane_id": p.ID, "flagged": false})); isErr {
-		t.Fatalf("warden clearing its own flag refused: %q", text)
+		t.Fatalf("reviewer clearing its own flag refused: %q", text)
 	}
 	if snap := p.Snapshot(); snap.Flagged || snap.FlagOwner != "" {
 		t.Fatalf("clear left residue: %+v", snap)

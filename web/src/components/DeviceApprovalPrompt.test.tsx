@@ -5,7 +5,7 @@ vi.mock('../lib/deviceIdentity', async (orig) => {
   const real = await orig<typeof import('../lib/deviceIdentity')>();
   return {
     ...real,
-    deviceIdentity: vi.fn(async () => ({ id: 'dev_me', spki: 'MEKEY', code: 'V1CODE', key: {} })),
+    deviceIdentity: vi.fn(async () => ({ id: 'dev_0000000000000000000000', spki: 'MEKEY', code: 'V1CODE', key: {} })),
     deviceCodeFor: vi.fn(async (_spki: string, computer?: string) => (computer ? `V2-${computer}` : 'V1CODE')),
     pinComputerIdentity: vi.fn(),
     markDeviceEnrolled: vi.fn(),
@@ -17,9 +17,10 @@ vi.mock('../lib/deviceIdentity', async (orig) => {
 import { api, DEVICE_APPROVAL_EVENT, requestDeviceApproval, type RemoteDevice } from '../api';
 import * as identity from '../lib/deviceIdentity';
 import { CODE_DIFFERS, CODE_MATCHES, DeviceApprovalPrompt, FORGET_AND_COMPARE } from './DeviceApprovalPrompt';
+import v3 from '../lib/testdata/device-code-v3.json';
 
 const device = (status: 'pending' | 'approved', daemonIdentity: string): RemoteDevice =>
-  ({ id: 'dev_me', name: 'b', status, code: 'x', createdAt: '', daemonIdentity }) as RemoteDevice;
+  ({ id: 'dev_0000000000000000000000', name: 'b', status, code: 'x', createdAt: '', daemonIdentity }) as RemoteDevice;
 
 const ask = async () => {
   render(<DeviceApprovalPrompt />);
@@ -47,6 +48,54 @@ describe('DeviceApprovalPrompt', () => {
     vi.mocked(identity.pinnedComputerIdentity).mockReturnValue(null);
   });
 
+  const setupV3 = () => {
+    vi.mocked(identity.deviceIdentity).mockResolvedValueOnce({
+      id: v3.deviceId, spki: v3.deviceSPKI, code: '', key: {} as CryptoKeyPair,
+    });
+    const committed: RemoteDevice = {
+      id: v3.deviceId, name: 'browser', status: 'committed', createdAt: '',
+      daemonIdentity: v3.daemonSPKI, daemonNonce: v3.daemonNonce,
+      enrolmentId: v3.enrolmentId, codeVersion: 3,
+    };
+    const pending: RemoteDevice = { ...committed, status: 'pending', code: 'SERVER-CODE' };
+    const enroll = vi.spyOn(api, 'enrollRemoteDevice').mockResolvedValue(committed);
+    const reveal = vi.spyOn(api, 'revealRemoteDevice').mockResolvedValue(pending);
+    const status = vi.spyOn(api, 'remoteDeviceStatus').mockResolvedValue({ ...pending, status: 'approved' });
+    return { enroll, reveal, status, pending };
+  };
+
+  it('labels a local V3 comparison and pins only the confirmed approved attempt', async () => {
+    const { reveal } = setupV3();
+    await ask();
+    expect(await screen.findByText('V3')).toBeInTheDocument();
+    expect(screen.queryByText('SERVER-CODE')).toBeNull();
+    expect(reveal).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: CODE_MATCHES }));
+    await polls();
+    await waitFor(() => expect(identity.pinComputerIdentity).toHaveBeenCalledWith('mach_x/wsl', v3.daemonSPKI));
+  });
+
+  it('keeps a V3 confirmation bound to the displayed enrolment', async () => {
+    const { status, pending } = setupV3();
+    status.mockResolvedValue({ ...pending, status: 'approved', enrolmentId: 'enr_other' });
+    await ask();
+    fireEvent.click(await screen.findByRole('button', { name: CODE_MATCHES }));
+    await polls();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/nothing was changed/);
+    expect(identity.pinComputerIdentity).not.toHaveBeenCalled();
+    expect(identity.markDeviceEnrolled).not.toHaveBeenCalled();
+  });
+
+  it('reports a reveal refusal without a V2 retry', async () => {
+    const { reveal, enroll } = setupV3();
+    reveal.mockRejectedValue(new Error('409'));
+    await ask();
+    expect(await screen.findByText(/Couldn't ask for approval/)).toHaveTextContent('409');
+    expect(enroll).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('V2')).toBeNull();
+    expect(identity.pinComputerIdentity).not.toHaveBeenCalled();
+  });
+
   // After a reload the first refusal can come before the prompt has mounted.
   it('opens for a refusal that came before it mounted', async () => {
     requestDeviceApproval('mach_x/wsl');
@@ -62,6 +111,7 @@ describe('DeviceApprovalPrompt', () => {
     const status = vi.spyOn(api, 'remoteDeviceStatus').mockResolvedValue(device('approved', 'RELAYKEY'));
     await ask();
     expect(await screen.findByText('V2-RELAYKEY')).toBeInTheDocument();
+    expect(screen.getByText('V2')).toBeInTheDocument();
     await polls(4);
     await waitFor(() => expect(status).toHaveBeenCalled());
     expect(await screen.findByText('Approved on the computer — does it show this exact code?')).toBeInTheDocument();

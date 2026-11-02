@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -547,5 +548,54 @@ func TestIdentifyCallerDetachedEnvClaimIsAnAgentWithoutOwnership(t *testing.T) {
 	}
 	if a.paneAgentAuthority(&PaneOrigin{Source: paneOriginUser}, "p-victim", splitMCPCaller(a.mcpTracedCallerPane(mcpReq)).ID, false) != paneAgentRefused {
 		t.Fatal("a detached env claim may act on the pane it claims")
+	}
+}
+
+// Every request taken as the person's from browser headers alone is logged
+// with its route and peer, so a reviewer can see how often it happens.
+func TestUntracedPersonIsLogged(t *testing.T) {
+	a := authorityTestServer(t)
+	var buf strings.Builder
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	stubPeerPID(t, 0, false)
+	r := httptest.NewRequest("POST", "/api/panes/p1/confirm", nil)
+	r.RemoteAddr = "127.0.0.1:41234"
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	if got := a.identifyCaller(r); got.Kind != callerHuman || !got.Unproven {
+		t.Fatalf("untraced browser request = %+v, want unproven human", got)
+	}
+	if want := "authority: unproven person POST /api/panes/p1/confirm from 127.0.0.1:41234 (proxy pid 0)"; !strings.Contains(buf.String(), want) {
+		t.Fatalf("log = %q, want %q", buf.String(), want)
+	}
+
+	// Through a relay proxy: logged with the proxy's pid.
+	buf.Reset()
+	stubPeerPID(t, 1, true)
+	if got := a.identifyCaller(r); got.Kind != callerHuman || !got.Unproven || got.PID != 1 {
+		t.Fatalf("browser request through a relay proxy = %+v", got)
+	}
+	if !strings.Contains(buf.String(), "(proxy pid 1)") {
+		t.Fatalf("log = %q", buf.String())
+	}
+
+	// Not logged: a request without browser headers, and a traced browser.
+	buf.Reset()
+	stubPeerPID(t, 0, false)
+	if got := a.identifyCaller(httptest.NewRequest("POST", "/", nil)); got.Kind != callerUnverified {
+		t.Fatalf("headerless = %+v", got)
+	}
+	stubPeerPID(t, 1, true)
+	prevBrowser, prevProxy := peerIsBrowser, peerIsRelayProxy
+	t.Cleanup(func() { peerIsBrowser, peerIsRelayProxy = prevBrowser, prevProxy })
+	peerIsBrowser = func(int) bool { return true }
+	peerIsRelayProxy = func(int) bool { return false }
+	if got := a.identifyCaller(r); got.Kind != callerHuman || got.Unproven {
+		t.Fatalf("traced browser = %+v", got)
+	}
+	if strings.Contains(buf.String(), "unproven person") {
+		t.Fatalf("logged a proven caller: %q", buf.String())
 	}
 }

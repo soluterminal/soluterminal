@@ -7,3 +7,6 @@ package main
 func (c *shinoqueDiscoveryCache) discover() (shinoqueRelayConfig, bool, string) {
 	return shinoqueRelayConfig{}, false, ""
 }
+
+// Other platforms lack Linux /proc socket ownership data; retain their behavior.
+func shinoqueLocalListenerAllowed(port string) bool { return true }

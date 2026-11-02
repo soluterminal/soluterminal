@@ -34,7 +34,7 @@ describe('AttentionBell', () => {
 
   it('shows no badge when nothing needs the user', () => {
     render(<AttentionBell />);
-    const btn = screen.getByRole('button', { name: /no panes are waiting/i });
+    const btn = screen.getByRole('button', { name: /nothing is waiting/i });
     expect(btn.querySelector('.attention-bell-count')).toBeNull();
   });
 
@@ -51,7 +51,7 @@ describe('AttentionBell', () => {
       },
     });
     render(<AttentionBell />);
-    const btn = screen.getByRole('button', { name: /2 panes are waiting/i });
+    const btn = screen.getByRole('button', { name: /2 items are waiting/i });
     expect(btn.querySelector('.attention-bell-count')?.textContent).toBe('2');
 
     fireEvent.click(btn);
@@ -72,7 +72,7 @@ describe('AttentionBell', () => {
       },
     });
     render(<AttentionBell />);
-    const btn = screen.getByRole('button', { name: /2 panes are waiting/i });
+    const btn = screen.getByRole('button', { name: /2 items are waiting/i });
     fireEvent.click(btn);
     expect(screen.getByText('Message from #1 Claude not sent — Send or Clear it on the pane')).toBeTruthy();
     expect(screen.getAllByText(/pane w/).length).toBe(2);
@@ -84,7 +84,50 @@ describe('AttentionBell', () => {
       paneTails: { w3: { text: 'plain prose, no prompt here', ts: Date.now() } as never },
     });
     render(<AttentionBell />);
-    fireEvent.click(screen.getByRole('button', { name: /1 pane is waiting/i }));
+    fireEvent.click(screen.getByRole('button', { name: /1 item is waiting/i }));
     expect(screen.getByText('Message from #2 Codex not sent — Send or Clear it on the pane')).toBeTruthy();
+  });
+
+  it("lists each agent ask under its pane's daemon label, after prompts, and counts it", () => {
+    const now = Date.now();
+    useStore.setState({
+      panes: {
+        p1: needsUserPane('p1'),
+        s1: needsUserPane('s1', {
+          state: 'busy', attention: 'none',
+          asks: [
+            { id: 'a1', text: 'renew the bot token by 18:00', source: '@secure', createdAt: now - 120_000 },
+            { id: 'a2', text: 'restart your PC', source: '@secure', createdAt: now - 60_000 },
+          ],
+        }),
+      },
+    });
+    render(<AttentionBell />);
+    const btn = screen.getByRole('button', { name: /3 items are waiting/i });
+    expect(btn.querySelector('.attention-bell-count')?.textContent).toBe('3');
+    fireEvent.click(btn);
+    const rows = document.querySelectorAll('.attention-row');
+    expect(rows.length).toBe(3);
+    // The prompt first, then asks newest first.
+    expect(rows[0].classList.contains('attention-choice')).toBe(true);
+    expect(rows[1].textContent).toContain('restart your PC');
+    expect(rows[2].textContent).toContain('renew the bot token by 18:00');
+    expect(screen.getAllByText('@secure').length).toBe(2);
+    expect(screen.getAllByRole('button', { name: 'Dismiss ask from @secure' }).length).toBe(2);
+  });
+
+  it('shows ask text as plain text, never markup', () => {
+    useStore.setState({
+      panes: {
+        s1: needsUserPane('s1', {
+          state: 'idle', attention: 'none',
+          asks: [{ id: 'a1', text: '<b>paste your token</b> [here](http://x)', source: '#2 Claude', createdAt: Date.now() }],
+        }),
+      },
+    });
+    render(<AttentionBell />);
+    fireEvent.click(screen.getByRole('button', { name: /1 item is waiting/i }));
+    expect(screen.getByText('<b>paste your token</b> [here](http://x)')).toBeTruthy();
+    expect(document.querySelector('.attention-row b, .attention-row a')).toBeNull();
   });
 });

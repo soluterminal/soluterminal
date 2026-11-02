@@ -68,9 +68,9 @@ func TestMCPMutationPolicyDeniesConfiguredMutators(t *testing.T) {
 
 	for _, tool := range []string{
 		"send_input", "spawn_pane", "create_schedule", "cancel_schedule", "write_file_line",
-		// Gated in the Warden hardening pass — before it, `deny` still left
+		// Gated in the MCP hardening pass — before it, `deny` still left
 		// these callable (including kill_pane).
-		"kill_pane", "rename_pane", "set_pane_flag", "switch_workspace", "preview_file", "answer_prompt",
+		"kill_pane", "rename_pane", "set_pane_flag", "create_workspace", "switch_workspace", "preview_file", "answer_prompt",
 	} {
 		text, isErr := mcpResultText(t, mcpCallForTest(t, tool, map[string]any{}))
 		if !isErr {

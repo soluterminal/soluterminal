@@ -58,8 +58,17 @@ func TestShinoqueRelayCapabilities(t *testing.T) {
 			var hits atomic.Int32
 			seen := make(chan http.Header, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api/read" {
+					http.NotFound(w, r)
+					return
+				}
 				hits.Add(1)
-				seen <- r.Header.Clone()
+				select {
+				case seen <- r.Header.Clone():
+				default:
+					http.Error(w, "unexpected extra upstream request", http.StatusInternalServerError)
+					return
+				}
 				_, _ = fmt.Fprint(w, "ok")
 			}))
 			defer server.Close()

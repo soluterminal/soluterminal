@@ -12,6 +12,65 @@ const pendingPhone = {
 };
 
 describe('RemoteDevicesSetting', () => {
+  it('confirms verification separately from approval', async () => {
+    const phone = { ...pendingPhone, status: 'approved' as const, verify: {
+      state: 'revealed' as const, enrolmentId: 'enr_AAECAwQFBgcICQoLDA0ODw', code: 'V3-LOCAL-CODE',
+    } };
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'approved', devices: [phone] });
+    const confirm = vi.spyOn(api, 'confirmDeviceVerification').mockResolvedValue(phone);
+    const approve = vi.spyOn(api, 'approveRemoteDevice');
+    render(<RemoteDevicesSetting />);
+    expect(await screen.findByText('V3-LOCAL-CODE')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Verify codes match' }));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(phone.id, phone.verify.enrolmentId));
+    expect(approve).not.toHaveBeenCalled();
+  });
+
+  it('rejects verification and offers removal without revoking automatically', async () => {
+    const phone = { ...pendingPhone, status: 'approved' as const, verify: {
+      state: 'revealed' as const, enrolmentId: 'enr_AAECAwQFBgcICQoLDA0ODw', code: 'V3-LOCAL-CODE',
+    } };
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'approved', devices: [phone] });
+    const reject = vi.spyOn(api, 'rejectDeviceVerification').mockResolvedValue(phone);
+    const remove = vi.spyOn(api, 'removeRemoteDevice');
+    render(<RemoteDevicesSetting />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Codes differ' }));
+    await waitFor(() => expect(reject).toHaveBeenCalledWith(phone.id, phone.verify.enrolmentId));
+    expect(await screen.findByRole('alert')).toHaveTextContent('You can remove this device');
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('shows V3 next to a revealed code and approves the displayed enrolment', async () => {
+    const phone = { ...pendingPhone, codeVersion: 3, enrolmentId: 'enr_AAECAwQFBgcICQoLDA0ODw' };
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'approved', devices: [phone] });
+    const approve = vi.spyOn(api, 'approveRemoteDevice').mockResolvedValue({ ...phone, status: 'approved' });
+    render(<RemoteDevicesSetting />);
+    expect(await screen.findByText('V3')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(approve).toHaveBeenCalledWith(phone.id, phone.enrolmentId));
+  });
+
+  it('shows no code or approval button before reveal', async () => {
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'approved', devices: [
+      { ...pendingPhone, status: 'committed', codeVersion: 3 },
+    ] });
+    render(<RemoteDevicesSetting />);
+    expect(await screen.findByText('Waiting for the device to confirm its request.')).toBeInTheDocument();
+    expect(screen.queryByText(pendingPhone.code)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+  });
+
+  it('re-reads a comparison when approval reports it changed', async () => {
+    const list = vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'approved', devices: [
+      { ...pendingPhone, codeVersion: 3, enrolmentId: 'enr_AAECAwQFBgcICQoLDA0ODw' },
+    ] });
+    vi.spyOn(api, 'approveRemoteDevice').mockRejectedValue(new Error('409'));
+    render(<RemoteDevicesSetting />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  });
+
   it('stays hidden on a daemon without the endpoint', async () => {
     const list = vi.spyOn(api, 'listRemoteDevices').mockResolvedValue(null);
     render(<RemoteDevicesSetting />);

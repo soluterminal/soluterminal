@@ -3,6 +3,7 @@ import { api, currentRoutingScope } from '../../api';
 import type { RemoteDevicesState } from '../../api';
 import { privateRelayCandidate, privateRelayEnabled, setPrivateRelayEnabled } from '../../lib/privateRelay';
 import { SettingsGroup, SettingsRow } from './SettingsRow';
+import { DeviceVerification } from './DeviceVerification';
 
 export const REMOTE_POLICY_LABEL = 'Who can use this computer remotely';
 export const REMOTE_POLICY_HINT =
@@ -58,7 +59,7 @@ function PrivateRelayRow() {
 // switchable: this is that one row, for the phone Settings.
 export function PhoneEncryptionSetting() {
   if (!privateRelayCandidateInView()) return null;
-  return <SettingsGroup title="Encryption"><PrivateRelayRow /></SettingsGroup>;
+  return <SettingsGroup title="Encryption"><PrivateRelayRow /><DeviceVerification /></SettingsGroup>;
 }
 
 // The daemon keeps the list and checks the signatures (daemon
@@ -68,6 +69,7 @@ export function RemoteDevicesSetting() {
   const [state, setState] = useState<RemoteDevicesState | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rejected, setRejected] = useState<string | null>(null);
 
   const load = useCallback(() => {
     void api.listRemoteDevices().then(setState).catch(() => {
@@ -84,7 +86,7 @@ export function RemoteDevicesSetting() {
   if (!state) {
     // The list can be unavailable (an older daemon); this browser's own
     // setting still applies.
-    return privateRelayCandidateInView() ? <SettingsGroup title="Remote devices"><PrivateRelayRow /></SettingsGroup> : null;
+    return privateRelayCandidateInView() ? <SettingsGroup title="Remote devices"><PrivateRelayRow /><DeviceVerification /></SettingsGroup> : null;
   }
 
   const run = async (what: string, act: () => Promise<unknown>) => {
@@ -96,6 +98,7 @@ export function RemoteDevicesSetting() {
       load();
     } catch (e) {
       setError(`Couldn't ${what}: ${String(e)}`);
+      load();
     } finally {
       setPending(false);
     }
@@ -113,6 +116,7 @@ export function RemoteDevicesSetting() {
   return (
     <SettingsGroup title="Remote devices">
       <PrivateRelayRow />
+      <DeviceVerification />
       <SettingsRow label={REMOTE_POLICY_LABEL} hint={REMOTE_POLICY_HINT}>
         <select
           className="settings-select"
@@ -135,22 +139,43 @@ export function RemoteDevicesSetting() {
             label={d.name}
             hint={
               <>
-                Code <code>{d.code}</code>{' '}
+                {d.verify ? null : d.status === 'failed' ? 'Comparison ended. Ask again from the device.' : d.status === 'committed' ? 'Waiting for the device to confirm its request.' : <>
+                  Code <code>{d.code}</code>{' '}
+                  <span>{d.codeVersion === 3 ? 'V3' : d.codeVersion === 2 || d.verifiesComputer ? 'V2' : 'V1'}</span>{' '}
+                </>}
                 {d.status === 'pending'
                   ? '— waiting for approval. Approve only if the device shows the same code.'
-                  : d.lastSeenAt ? `— approved, last used ${new Date(d.lastSeenAt).toLocaleString()}` : '— approved'}
+                  : d.status === 'approved' ? d.lastSeenAt ? `— approved, last used ${new Date(d.lastSeenAt).toLocaleString()}` : '— approved' : ''}
                 {d.status === 'pending' && !d.verifiesComputer && (
                   <> (this code doesn't verify this computer to the device: expected only from an older app; otherwise someone may be altering the request)</>
                 )}
                 {d.status === 'approved' && !d.verifiesComputer && (
                   <> (older approval: it didn't verify this computer to the device; remove it and approve again from an updated app)</>
                 )}
+                {d.verify?.state === 'committed' && <div>Verify V3 — waiting for the device.</div>}
+                {d.verify?.state === 'revealed' && <div>Verify V3 <code>{d.verify.code}</code> — compare with the device.</div>}
+                {d.verify?.state === 'failed' && <div>Verify V3 ended. Start again from the device.</div>}
+                {rejected === d.id && <div role="alert">The codes differ. Verification was not recorded. You can remove this device.</div>}
               </>
             }
           >
-            {d.status === 'pending' && (
+            {d.status === 'approved' && d.verify?.state === 'revealed' && !!d.verify.enrolmentId && <>
               <button type="button" className="settings-btn primary" disabled={pending}
-                onClick={() => void run('approve the device', () => api.approveRemoteDevice(d.id))}>
+                onClick={() => void run('confirm the comparison', () => api.confirmDeviceVerification(d.id, d.verify!.enrolmentId!))}>
+                Verify codes match
+              </button>
+              <button type="button" className="settings-btn" disabled={pending}
+                onClick={() => void run('reject the comparison', async () => {
+                  await api.rejectDeviceVerification(d.id, d.verify!.enrolmentId!);
+                  setRejected(d.id);
+                })}>
+                Codes differ
+              </button>
+            </>}
+            {d.status === 'pending' && (d.codeVersion !== 3 || !!d.enrolmentId) && (
+              <button type="button" className="settings-btn primary" disabled={pending}
+                onClick={() => void run('approve the device', () => d.codeVersion === 3
+                  ? api.approveRemoteDevice(d.id, d.enrolmentId) : api.approveRemoteDevice(d.id))}>
                 Approve
               </button>
             )}

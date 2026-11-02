@@ -7,7 +7,7 @@ export const AGENT_AUTHORITY_LABEL = 'Let agents in panes approve for me';
 export const AGENT_AUTHORITY_HINT =
   'Off: only you can allow permission prompts and turn on auto-approve. ' +
   'On: agents running in your panes can do these for you. Agents can never turn this on ' +
-  'or widen autopilot and YOLO settings.';
+  'or widen autopilot and YOLO settings. Moving your panes and renaming or deleting workspaces still need your Allow in the app.';
 
 type Choice = 'off' | '1' | '8' | 'always';
 

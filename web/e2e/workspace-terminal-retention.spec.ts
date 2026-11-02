@@ -31,6 +31,8 @@ test('hidden workers keep their terminals in the overview; revealing reuses it',
     const w = window as unknown as TermWindow;
     w.__w1 = [...w.__soluTerms!.entries()].find(([k]) => JSON.parse(k)[1] === 'w1')?.[1];
   });
+  // Workers start folded under their lead in the sidebar; opening it changes no view.
+  await page.getByRole('button', { name: 'Expand lead', exact: true }).click();
   await page.getByRole('treeitem', { name: 'w1', exact: true }).locator(':scope > .workspace-pane-row').click();
   await expect(page.locator('[data-pane-id="w1"] .xterm')).toBeVisible();
   expect(await page.evaluate(() => {

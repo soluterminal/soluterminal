@@ -53,6 +53,11 @@ type promptRecorder struct {
 	// draftRecordedMs is lastRecordedInputMs as of entering the menu: the
 	// freshness of the composer draft, which menu keys must not renew.
 	draftRecordedMs int64
+	// agentOwned: everything in the draft was typed by an agent's message
+	// delivery (pane_delivery.go) into an empty box, such as a message Codex
+	// moved to its queue on Tab. A person's recorded input clears it.
+	// Auto-approval holds only for a person's draft (humanDraft).
+	agentOwned bool
 }
 
 // enterMenu starts a menu segment; a no-op while one is open, so a menu that
@@ -78,6 +83,16 @@ func (r *promptRecorder) leaveMenu() {
 	r.draftRecordedMs = 0
 }
 
+// discardDraft forgets the composer draft and any menu segment. Byte framing
+// (a split escape sequence) is kept: it belongs to the stream, not the draft.
+func (r *promptRecorder) discardDraft() {
+	r.buf = r.buf[:0]
+	r.agentOwned = false
+	r.inMenu = false
+	r.menuStart = 0
+	r.draftRecordedMs = 0
+}
+
 func (r *promptRecorder) draftLen() int {
 	if r.inMenu && r.menuStart < len(r.buf) {
 		return r.menuStart
@@ -93,6 +108,15 @@ func (r *promptRecorder) draft() (int, int64) {
 		return r.draftLen(), r.draftRecordedMs
 	}
 	return len(r.buf), r.lastRecordedInputMs
+}
+
+// humanDraft is draft for a draft a person typed: an agent-owned draft
+// reads as none. Caller holds Pane.agentWriteMu.
+func (r *promptRecorder) humanDraft() (int, int64) {
+	if r.agentOwned {
+		return 0, 0
+	}
+	return r.draft()
 }
 
 const (

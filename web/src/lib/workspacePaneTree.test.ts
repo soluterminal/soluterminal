@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Layout, PaneInfo, Workspace } from '../types';
 import { buildWorkspacePaneTrees, createWorkspacePaneTreeSelector, flattenPaneTree, withoutRemovedWorkspacePanes } from './workspacePaneTree';
+import { paneTeamKind as paneTeamKindOf } from './paneTeam';
 
 const pane = (id: string, by?: string, lead?: string): PaneInfo => ({
   id, title: id, cwd: '/project', cmd: ['sh'], status: 'running', state: 'idle',
@@ -11,17 +12,17 @@ const workspace = (name = 'Project', paneIds = ['lead']): Workspace => ({ name, 
 const build = (panes: PaneInfo[], workspaces = [workspace()]) => buildWorkspacePaneTrees(workspaces, Object.fromEntries(panes.map(p => [p.id, p])), 'Project', layout);
 
 describe('workspace pane hierarchy', () => {
-  it('nests sub-leads under a lead or your own pane, workers under their lead, and keeps leads top level otherwise', () => {
+  it('keeps every lead top level as a peer, with who started it, and nests workers under their starter', () => {
     const lead = (id: string, by?: string, leadId?: string): PaneInfo => ({ ...pane(id, by, leadId), origin: { source: by ? 'agent' : 'user', ...(by ? { byPaneId: by, leadPaneId: leadId ?? by } : {}), at: 1, teamKind: 'lead', leadRole: id } } as PaneInfo);
     const worker = (id: string, by: string, leadId?: string): PaneInfo => ({ ...pane(id, by, leadId), origin: { ...pane(id, by, leadId).origin!, teamKind: 'worker' } } as PaneInfo);
     const leaf = (paneId: string): Layout => ({ type: 'pane', paneId });
     const row = (ids: string[]): Layout => ids.length === 1 ? leaf(ids[0]) : { type: 'split', direction: 'horizontal', ratio: 0.5, a: leaf(ids[0]), b: row(ids.slice(1)) };
     const [tree] = buildWorkspacePaneTrees([workspace()], Object.fromEntries([
       pane('lead'), // your own pane, no kind: @cmo
-      lead('social', 'lead'), // a sub-lead under your pane
+      lead('social', 'lead'), // a sub-lead your pane started: a peer
       // leadPaneId is the top of the spawn chain (the daemon's cap and authority key).
-      worker('post', 'social', 'lead'), // a sub-lead's worker
-      lead('video', 'post', 'lead'), // a lead started by a worker nests under that worker's lead
+      worker('post', 'social', 'lead'), // a sub-lead's worker nests under it
+      lead('video', 'post', 'lead'), // a lead a worker started: a peer too
       lead('qa', 'gone'), // its starter closed: top level
       lead('secure'), // a user pane made a lead: top level
       worker('task', 'lead'),
@@ -29,11 +30,16 @@ describe('workspace pane hierarchy', () => {
     ].map(p => [p.id, p])), 'Project', row(['lead', 'lost', 'qa', 'secure']));
     const shape = (n: { pane: PaneInfo; children: unknown[] }): unknown => [n.pane.id, (n.children as typeof tree.roots).map(shape)];
     expect(tree.roots.map(shape)).toEqual([
-      ['lead', [['social', [['post', []], ['video', []]]], ['task', []]]],
+      ['lead', [['task', []]]],
       ['lost', []], ['qa', []], ['secure', []],
+      ['social', [['post', []]]], ['video', []],
     ]);
-    expect(tree.nodes.filter(n => n.isTopLevel).map(n => n.pane.id)).toEqual(['lead', 'qa', 'secure']);
+    expect(tree.nodes.filter(n => n.isTopLevel).map(n => n.pane.id)).toEqual(['lead', 'qa', 'secure', 'social', 'video']);
     expect(tree.unattached.map(n => n.pane.id)).toEqual(['lost']);
+    // Provenance stays: who started each lead, as it reads now. A lead whose
+    // starter closed, or one you made yourself, has none.
+    const startedBy = Object.fromEntries(tree.nodes.filter(n => paneTeamKindOf(n.pane) === 'lead').map(n => [n.pane.id, n.startedBy]));
+    expect(startedBy).toEqual({ social: 'lead', video: 'post', qa: undefined, secure: undefined });
   });
   it('keeps a sub-lead top level in a workspace other than its parent', () => {
     const social = { ...pane('social', 'lead'), origin: { source: 'agent', byPaneId: 'lead', leadPaneId: 'lead', at: 1, teamKind: 'lead', leadRole: 'social' } } as PaneInfo;
@@ -48,6 +54,17 @@ describe('workspace pane hierarchy', () => {
     expect(tree.roots[0].children[0].children[0].pane.id).toBe('sub');
     expect(flattenPaneTree(tree.roots).filter(n => n.isTopLevel).map(n => n.pane.id)).toEqual(['lead']);
   });
+  it('counts the panes below each node that need the person, apart from the node itself', () => {
+    const asking = (p: PaneInfo): PaneInfo => ({ ...p, state: 'choice-prompt', attention: 'needs-user' } as PaneInfo);
+    const [tree] = build([pane('lead'), asking(pane('worker', 'lead')), asking(pane('sub', 'worker', 'lead')), pane('quiet', 'lead')]);
+    const [lead] = tree.roots;
+    const child = (id: string) => lead.children.find(n => n.pane.id === id)!;
+    const worker = child('worker'), quiet = child('quiet');
+    expect([lead.needsYouBelow, lead.needsYou, lead.status]).toEqual([2, true, 'idle']);
+    expect([worker.needsYouBelow, worker.needsYou, worker.status]).toEqual([1, true, 'needs-you']);
+    expect([quiet.needsYouBelow, quiet.needsYou]).toEqual([0, false]);
+  });
+
   it('keeps roots and every generation stable when input keys and activity change', () => {
     const dated = (id: string, at: number, by?: string) => ({ ...pane(id, by), createdAt: new Date(at).toISOString() });
     const panes = [dated('lead', 90), dated('other', 10), dated('late', 30, 'lead'),

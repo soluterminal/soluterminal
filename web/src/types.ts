@@ -35,38 +35,6 @@ export interface NativeSettings {
   defaultClaudeMode?: '' | 'native';
 }
 
-// The Warden — an opt-in, event-driven fleet caretaker (GET/PUT
-// /api/warden/settings). Default OFF: nothing spawns until `enabled`. See
-// daemon/warden_settings.go. model '' = the account default; triageAfterMin
-// and maxRunsPerHour are clamped daemon-side (2–120, 1–30).
-
-export interface WardenSettings {
-  enabled: boolean;
-  autoFlags?: boolean;
-  model?: string;
-  triageAfterMin?: number;
-  maxRunsPerHour?: number;
-}
-
-// One finished Warden run, from GET /api/warden/status. Isolated from the
-// schedules/reports rail on purpose (see PLAN-warden). status: ok|timeout|error.
-export interface WardenRun {
-  kind: 'brief' | 'debrief' | 'triage';
-  paneId?: string;
-  paneTitle?: string;
-  at: string;
-  status: string;
-  detail?: string;
-  summary?: string;
-  logFile?: string;
-}
-
-export interface WardenStatus {
-  enabled: boolean;
-  runs: WardenRun[];
-}
-
-
 export type PaneRuntimeState =
   | 'busy'
   | 'awaiting-input'
@@ -170,11 +138,23 @@ export interface PaneReview {
   followup?: { note: string; head?: string; at: number };
 }
 
+/** An agent's open ask to the user (daemon asks.go): one line of plain
+ *  text, and source, the daemon's label for the posting pane. */
+export interface PaneAsk { id: string; text: string; source: string; createdAt: number }
+
 export interface PaneInfo {
   neverAutoAnswer?: boolean;
+  /** Open asks this pane's agent posted for the user, oldest first. */
+  asks?: PaneAsk[];
   /** text: the whole message a busy pane was not given (notTyped), shown
    *  before Send types it. */
-  unsentMessage?: { id: string; sender: string; notTyped?: boolean; text?: string };
+  /** putBack: a queued agent message the agent put back into its input box
+   *  (usually after the person stopped the turn); only the person acts on it. */
+  unsentMessage?: { id: string; sender: string; notTyped?: boolean; text?: string; putBack?: boolean };
+  /** Agents' messages held, untyped, while the person types in the pane;
+   *  oldest first. The daemon types each once the input box is empty and the
+   *  person has stopped typing. text is the message without its sender label. */
+  heldMessages?: { id: string; sender: string; text: string; at: number }[];
 	// Current live-auth evidence, distinct from selection captured at launch.
 	codexAuth?: {
 		state: string; account?: string; canReconnect?: boolean; recovery?: string; retryAt?: number;
@@ -1261,7 +1241,7 @@ export interface Entitlements {
   tier?: EntitlementsTier;
   team: boolean;
   // The operator's internal tooling (workflow engine, task owners, release
-  // train, agents, Aria, Warden and credential administration). Older daemons
+  // train, agents, Aria and credential administration). Older daemons
   // omit it; it then follows team.
   operator?: boolean;
   // The personal view is on: the daemon still reports the real verdict and

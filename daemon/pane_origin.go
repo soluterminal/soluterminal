@@ -19,8 +19,9 @@ type PaneOrigin struct {
 	// Source is "user" (opened from the app), "agent" (spawn_pane from
 	// another pane), "schedule", or "api" (any other caller). A pane without
 	// an origin predates this record: show nothing rather than guess.
-	Source string      `json:"source"`
-	Worker *workerInfo `json:"worker,omitempty"`
+	Source    string          `json:"source"`
+	Worker    *workerInfo     `json:"worker,omitempty"`
+	WorkerGit *workerGitStart `json:"workerGit,omitempty"`
 	// TeamKind is "lead", "worker" or "" (the user's own pane), and LeadRole
 	// a lead's role name ("security"). Daemon-owned like Worker: never taken
 	// from a client on restore (pane_team.go).
@@ -165,13 +166,20 @@ func paneStartedByCaller(o *PaneOrigin, caller string) bool {
 // remapOrigin rewrites the starter and lead ids after a workspace restore,
 // which brings panes back under new ids. Reports whether anything changed.
 func (p *Pane) remapOrigin(newIDs map[string]string) bool {
+	p.flagMu.Lock()
+	defer p.flagMu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	changed := false
+	if owner, agent := strings.CutPrefix(p.FlagOwner, "agent:"); agent {
+		if id := newIDs[owner]; id != "" && id != owner {
+			p.FlagOwner, changed = "agent:"+id, true
+		}
+	}
 	if p.Origin == nil {
-		return false
+		return changed
 	}
 	o := p.Origin.clone()
-	changed := false
 	if id, ok := newIDs[o.ByPaneID]; ok && id != "" && o.ByPaneID != "" {
 		o.ByPaneID, changed = id, true
 	}

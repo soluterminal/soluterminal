@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -164,7 +165,27 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 		}
 		writeInput := p.Write
 		if !inPolicy.human {
-			writeInput = p.writeProgrammaticInput
+			// Nor may an agent's socket, once it owns the pane, send or clear
+			// a put-back message in the input box (Enter, Ctrl+A Ctrl+K),
+			// except with keys that answer a live menu: as /inject.
+			var lastPutBackLog time.Time
+			writeInput = func(b []byte) (int, error) {
+				var check func() error
+				if !isTerminalReplyOnly(b) {
+					_, claude := paneAgentProvider(p)
+					check = p.putBackKeysCheck(!claude)
+				}
+				policy := p.autoModePolicy()
+				n, err := p.writeWithFleetAdmissionPolicy(b, true, false, &policy, time.Now().Add(ariaJevTimeout), check)
+				if errors.Is(err, errPutBackInBox) {
+					if now := time.Now(); now.Sub(lastPutBackLog) >= wsDropLogInterval {
+						lastPutBackLog = now
+						log.Printf("input: dropped keystrokes on pane %s from %s socket: %v", p.ID, inPolicy.kind, err)
+					}
+					return 0, nil
+				}
+				return n, err
+			}
 		}
 		heldInput := false
 		holdInput := func() bool {
@@ -439,6 +460,10 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 				if isUserKeypress(data) {
 					markInput()
 				}
+				if inPolicy.human && !isTerminalReplyOnly(data) {
+					p.noteHumanInput(time.Now())
+					noteHumanSubmit(m, p, data)
+				}
 				if _, werr := writeInput(data); werr != nil {
 					goto cleanup
 				}
@@ -461,6 +486,10 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 					}
 					if isUserKeypress([]byte(msg.Data)) {
 						markInput()
+					}
+					if inPolicy.human && !isTerminalReplyOnly([]byte(msg.Data)) {
+						p.noteHumanInput(time.Now())
+						noteHumanSubmit(m, p, []byte(msg.Data))
 					}
 					if _, werr := writeInput([]byte(msg.Data)); werr != nil {
 						goto cleanup

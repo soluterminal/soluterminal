@@ -97,6 +97,12 @@
       "approvedBy": "Benjamin",
       "date": "2026-11-02",
       "note": "Benjamin in @release-lead's pane: \"yes, 1234 notes\" for CMO's six lines (soluterminal-1234-notes.md, launch 29872b1); line 3 reworded to the code facts before approval."
+    },
+    "0.0.1235": {
+      "sha256": "c1b7ea529cf6121d84c8f5d3d5a15865f8a3b0e7fc8a204849ddd39cfbe4f657",
+      "approvedBy": "Benjamin",
+      "date": "2026-11-02",
+      "note": "Benjamin approved the 14-line set in the CMO pane (\"yes, 1235 notes\"); all separable lines merged (#902, #910, #917)."
     }
   }
 }

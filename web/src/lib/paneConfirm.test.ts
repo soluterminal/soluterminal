@@ -107,3 +107,17 @@ describe('pane confirmations', () => {
     expect(usePaneConfirms.getState().pending).toEqual([]);
   });
 });
+
+
+it('requires Review then Allow for deleting an empty workspace', async () => {
+  const workspaceRequest: PaneConfirmRequest = { ...request, action: 'delete_workspace', paneId: '', pane: 'Scratch', title: 'Delete workspace "Scratch"?', message: '@lead wants to delete empty workspace "Scratch".' };
+  apiMock.paneConfirmations.mockResolvedValue({ pending: [workspaceRequest] });
+  apiMock.answerPaneConfirmation.mockResolvedValue({ allowed: true, failed: false, result: 'Deleted empty workspace "Scratch".' });
+  const review = reviewPaneConfirm(request.id);
+  await flush();
+  expect(useStore.getState().dialog).toMatchObject({ title: workspaceRequest.title, danger: true, confirmLabel: 'Allow' });
+  useStore.getState().closeDialog(true);
+  await review;
+  expect(apiMock.answerPaneConfirmation).toHaveBeenCalledWith('req-1', true);
+  expect(useStore.getState().toasts.at(-1)?.message).toBe('Deleted workspace Scratch.');
+});

@@ -1,8 +1,9 @@
 import { workspaceViewLayout } from '../lib/workspaceView';
 import { paneRowLabel } from '../lib/paneRowLabel';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEnabled } from '../lib/focusAvailability';
+import { getHostTheme, useEmbedTheme } from '../lib/useEmbedTheme';
 import { closedPaneHint, closedPaneLabel } from '../lib/closedPanes';
 import { paneUnread } from '../lib/turnChip';
 import { api } from '../api';
@@ -135,6 +136,7 @@ export function CommandPalette({
   // (lastActivityMs); binding maps here would rebuild the action list
   // mid-typing and reset selection.
   const focusedPaneId = useStore((s) => s.focusedPaneId);
+  const hostTheme = useEmbedTheme();
   const workspaces = useStore((s) => s.workspaces);
   const wsOrder = useStore((s) => s.wsOrder);
   const activeWorkspace = useStore((s) => s.activeWorkspace);
@@ -200,6 +202,9 @@ export function CommandPalette({
   const [mode, setMode] = useState<Mode>(initialMode);
   const [query, setQuery] = useState('');
   const [selIdx, setSelIdx] = useState(0);
+  // undefined picks the best match after opening/typing; null is deliberately
+  // unselected after a live action disappears. Other actions follow their id.
+  const [selectedActionId, setSelectedActionId] = useState<string | null | undefined>(undefined);
   // Hover selects a row only on real pointer movement, so rows filtering
   // under a resting mouse can't steal Enter from the best match.
   const pointer = usePointerMoved();
@@ -236,6 +241,7 @@ export function CommandPalette({
     setMode(initialMode);
     setQuery(initialQuery);
     setSelIdx(0);
+    setSelectedActionId(undefined);
     pointer.reset();
     setFileHits([]);
     setCapped(false);
@@ -339,7 +345,13 @@ export function CommandPalette({
         hint: 'Toggle the app theme',
         category: 'View',
         keywords: 'toggle theme dark light mode appearance colour color',
-        run: () => { onClose(); useStore.getState().setAppTheme(useStore.getState().appThemeLight ? 'dark' : 'light'); },
+        run: () => {
+          // Recheck at execution too: palette actions run on the next frame,
+          // so host initialization can arrive after the command was chosen.
+          if (getHostTheme()) return;
+          onClose();
+          useStore.getState().setAppTheme(useStore.getState().appThemeLight ? 'dark' : 'light');
+        },
       },
       ...(canSignIn ? [{
         id: 'account.signIn',
@@ -866,10 +878,11 @@ export function CommandPalette({
         },
       });
     }
-    return list.filter((a) => team || !TEAM_ONLY_ACTIONS.has(a.id));
+    return list.filter((a) => (team || !TEAM_ONLY_ACTIONS.has(a.id)) &&
+      !(a.id === 'view.theme' && hostTheme));
     // `open` in the deps re-snapshots panes each time the palette opens
     // — see the unread-surface block above for why we don't subscribe.
-  }, [open, recentlyClosedPanes, focusedPaneId, focusedPaneCwd, focusEnabled, isFocusedNative, isFocusedAgentCapable, focusedAgentLabel, isFocusedAutoApproveCapable, focusedAutoMode, focusedAutoLocked, workspaces, wsOrder, activeWorkspace, onClose, onOpenHelp, onOpenNewPane, onOpenBroadcast, onOpenFeedback]);
+  }, [open, hostTheme, recentlyClosedPanes, focusedPaneId, focusedPaneCwd, focusEnabled, isFocusedNative, isFocusedAgentCapable, focusedAgentLabel, isFocusedAutoApproveCapable, focusedAutoMode, focusedAutoLocked, workspaces, wsOrder, activeWorkspace, onClose, onOpenHelp, onOpenNewPane, onOpenBroadcast, onOpenFeedback]);
 
   const actionHits = useMemo(() => {
     if (mode !== 'actions') return [];
@@ -975,20 +988,35 @@ export function CommandPalette({
       ? fileHits.length
       : searchHits.length;
 
+  const actionSelIdx = selectedActionId === undefined
+    ? (actionHits.length ? 0 : -1)
+    : actionHits.findIndex((a) => a.id === selectedActionId);
+  const highlightedIdx = mode === 'actions' ? actionSelIdx : selIdx;
+
+  // Pin the initial best match before painting, so later live insertions or
+  // removals cannot move selection to another action at the same index.
+  useLayoutEffect(() => {
+    if (mode !== 'actions') return;
+    if (selectedActionId === undefined) setSelectedActionId(actionHits[0]?.id ?? null);
+    else if (selectedActionId !== null && actionSelIdx === -1) setSelectedActionId(null);
+  }, [mode, actionHits, selectedActionId, actionSelIdx]);
+
   useEffect(() => {
+    if (mode === 'actions') return;
     if (selIdx >= hitsLen) setSelIdx(Math.max(0, hitsLen - 1));
-  }, [hitsLen, selIdx]);
+  }, [mode, hitsLen, selIdx]);
 
   useEffect(() => {
     if (!listRef.current) return;
-    const node = listRef.current.querySelector<HTMLElement>(`[data-idx="${selIdx}"]`);
+    const node = listRef.current.querySelector<HTMLElement>(`[data-idx="${highlightedIdx}"]`);
     node?.scrollIntoView({ block: 'nearest' });
-  }, [selIdx]);
+  }, [highlightedIdx]);
 
   function switchMode(next: Mode) {
     setMode(next);
     setQuery('');
     setSelIdx(0);
+    setSelectedActionId(undefined);
     if (next === 'files') {
       setRoot(focusedPaneCwd);
       setKind('files');
@@ -1022,6 +1050,7 @@ export function CommandPalette({
     setQuery(v);
     // Typing re-ranks the list, so Enter should run the new best match.
     setSelIdx(0);
+    setSelectedActionId(undefined);
   }
 
   function runAction(a: Action) {
@@ -1087,18 +1116,23 @@ export function CommandPalette({
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setSelIdx((i) => (hitsLen ? (i + 1) % hitsLen : 0));
+      if (mode === 'actions') {
+        setSelectedActionId(actionHits[(actionSelIdx + 1) % hitsLen]?.id ?? null);
+      } else setSelIdx((i) => (hitsLen ? (i + 1) % hitsLen : 0));
       return;
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setSelIdx((i) => (hitsLen ? (i - 1 + hitsLen) % hitsLen : 0));
+      if (mode === 'actions') {
+        const next = actionSelIdx < 0 ? hitsLen - 1 : (actionSelIdx - 1 + hitsLen) % hitsLen;
+        setSelectedActionId(actionHits[next]?.id ?? null);
+      } else setSelIdx((i) => (hitsLen ? (i - 1 + hitsLen) % hitsLen : 0));
       return;
     }
     if (e.key === 'Enter') {
       e.preventDefault();
       if (mode === 'actions') {
-        if (actionHits[selIdx]) runAction(actionHits[selIdx]);
+        if (actionHits[actionSelIdx]) runAction(actionHits[actionSelIdx]);
       } else if (mode === 'files') {
         if (fileHits[selIdx]) openFileHit(fileHits[selIdx]);
       } else {
@@ -1317,9 +1351,9 @@ export function CommandPalette({
                   key={a.id}
                   data-idx={i}
                   role="option"
-                  aria-selected={i === selIdx}
-                  className={`quickopen-row ${i === selIdx ? 'sel' : ''}`}
-                  onMouseMove={(e) => { if (pointer.moved(e)) setSelIdx(i); }}
+                  aria-selected={i === actionSelIdx}
+                  className={`quickopen-row ${i === actionSelIdx ? 'sel' : ''}`}
+                  onMouseMove={(e) => { if (pointer.moved(e)) setSelectedActionId(a.id); }}
                   onMouseDown={(e) => { e.preventDefault(); runAction(a); }}
                   title={a.hint || a.label}
                 >

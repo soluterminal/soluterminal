@@ -61,7 +61,9 @@ const (
 	deviceQuerySig            = "solu_dev_sig"
 	deviceQueryTarget         = "solu_dev_to"
 	deviceStatusPending       = "pending"
+	deviceStatusCommitted     = "committed"
 	deviceStatusApproved      = "approved"
+	deviceStatusFailed        = "failed"
 	remoteDevicesPathPrefix   = "/api/remote-devices"
 	remoteDevicesEnrollPath   = "/api/remote-devices/enroll"
 	remoteDevicesStatusSuffix = "/status"
@@ -76,10 +78,18 @@ type trustedDevice struct {
 	// CodeVersion 2: the code covers this computer's identity key too, so an
 	// approval also verified the computer to the device. 1 (or 0, older
 	// records): device key only.
-	CodeVersion int        `json:"codeVersion,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	ApprovedAt  *time.Time `json:"approvedAt,omitempty"`
-	LastSeenAt  *time.Time `json:"lastSeenAt,omitempty"`
+	CodeVersion  int               `json:"codeVersion,omitempty"`
+	CreatedAt    time.Time         `json:"createdAt"`
+	ApprovedAt   *time.Time        `json:"approvedAt,omitempty"`
+	LastSeenAt   *time.Time        `json:"lastSeenAt,omitempty"`
+	EnrolmentID  string            `json:"enrolmentId,omitempty"`
+	Commit       string            `json:"commit,omitempty"`
+	DaemonNonce  string            `json:"daemonNonce,omitempty"`
+	DeviceNonce  string            `json:"deviceNonce,omitempty"`
+	CodeIdentity string            `json:"codeIdentity,omitempty"`
+	RevealedAt   *time.Time        `json:"revealedAt,omitempty"`
+	Verify       *deviceV3Attempt  `json:"verify,omitempty"`
+	V3Verified   *deviceV3Verified `json:"v3Verified,omitempty"`
 
 	key *ecdsa.PublicKey
 }
@@ -288,13 +298,7 @@ func deviceID(spkiB64 string) string {
 	return "dev_" + base64.RawURLEncoding.EncodeToString(sum[:])[:22]
 }
 
-// deviceCode is the fingerprint a person compares on the device and on this
-// computer before approving: 80 bits of a hash over both public keys — the
-// device's and this computer's identity (daemon_identity.go) — as four groups
-// of four characters. A relay that swaps either key during enrolment makes the
-// two sides show different codes, and 80 bits is far beyond what a relay could
-// grind for a match. daemonSPKI is empty only when the identity is
-// unavailable; the code then covers the device key alone (V1).
+// deviceCode retains the V1/V2 comparison format for existing clients.
 func deviceCode(spkiB64, daemonSPKI string) string {
 	input := "SOLU-DEVICE-CODE-V1\n" + strings.TrimSpace(spkiB64)
 	if daemonSPKI != "" {
@@ -354,6 +358,9 @@ func (s *trustedDevices) enrollReport(name, spkiB64 string, codeVersion ...int) 
 	id := deviceID(spkiB64)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.pruneCommittedV3Locked(); err != nil {
+		return nil, false, err
+	}
 	for _, d := range s.record.Devices {
 		if d.ID == id {
 			// A request still waiting under an older (V1) code moves to the
@@ -371,7 +378,7 @@ func (s *trustedDevices) enrollReport(name, spkiB64 string, codeVersion ...int) 
 	// Keep the pending queue short so an unauthenticated caller cannot fill it.
 	var pending []int
 	for i, d := range s.record.Devices {
-		if d.Status == deviceStatusPending {
+		if d.Status != deviceStatusApproved {
 			pending = append(pending, i)
 		}
 	}
@@ -414,12 +421,44 @@ func (s *trustedDevices) find(id string) *trustedDevice {
 	return nil
 }
 
-func (s *trustedDevices) approve(id string) (*trustedDevice, error) {
+func (s *trustedDevices) approve(id string, enrolmentIDs ...string) (*trustedDevice, error) {
+	computer := s.daemonSPKI()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.pruneCommittedV3Locked(); err != nil {
+		return nil, err
+	}
+	enrolmentID := ""
+	if len(enrolmentIDs) > 0 {
+		enrolmentID = enrolmentIDs[0]
+	}
 	d := s.find(id)
 	if d == nil {
+		if enrolmentID != "" {
+			return nil, errDeviceEnrolment
+		}
 		return nil, os.ErrNotExist
+	}
+	if d.CodeVersion == 3 {
+		if d.Status != deviceStatusPending || d.EnrolmentID != enrolmentID || enrolmentID == "" || d.CodeIdentity != computer {
+			return nil, errDeviceEnrolment
+		}
+		next := *d
+		now := s.now().UTC()
+		proof, err := newDeviceV3Verified(d.PublicKey, computer, now)
+		if err != nil {
+			return nil, err
+		}
+		next.Status, next.ApprovedAt = deviceStatusApproved, &now
+		next.V3Verified = proof
+		next.Commit, next.DaemonNonce, next.DeviceNonce = "", "", ""
+		if err := s.replaceDeviceV3Locked(&next); err != nil {
+			return nil, err
+		}
+		return &next, nil
+	}
+	if enrolmentID != "" {
+		return nil, errDeviceEnrolment
 	}
 	now := s.now().UTC()
 	d.Status, d.ApprovedAt = deviceStatusApproved, &now
@@ -652,6 +691,8 @@ func relayDeviceExempt(r *http.Request) bool {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == remoteDevicesEnrollPath:
 		return true
+	case r.Method == http.MethodPost && r.URL.Path == remoteDevicesEnrollPath+"/reveal":
+		return true
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, remoteDevicesPathPrefix+"/") && strings.HasSuffix(r.URL.Path, remoteDevicesStatusSuffix):
 		return true
 	case r.Method == http.MethodGet && r.URL.Path == "/api/health":
@@ -856,29 +897,51 @@ func (c *revocableConn) Close() error {
 // ---- HTTP ------------------------------------------------------------------
 
 type trustedDeviceView struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Status     string     `json:"status"`
-	Code       string     `json:"code"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	ApprovedAt *time.Time `json:"approvedAt,omitempty"`
-	LastSeenAt *time.Time `json:"lastSeenAt,omitempty"`
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Status      string     `json:"status"`
+	Code        string     `json:"code,omitempty"`
+	CodeVersion int        `json:"codeVersion"`
+	EnrolmentID string     `json:"enrolmentId,omitempty"`
+	DaemonNonce string     `json:"daemonNonce,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	ApprovedAt  *time.Time `json:"approvedAt,omitempty"`
+	LastSeenAt  *time.Time `json:"lastSeenAt,omitempty"`
 	// VerifiesComputer: the code was V2, so approving it also proved this
 	// computer's identity to the device (private relay channel).
 	VerifiesComputer bool `json:"verifiesComputer"`
 	// DaemonIdentity is this computer's identity key (base64 SPKI), returned
 	// to the enrolling device: it computes the approval code over both keys
 	// and pins this one for the private relay channel.
-	DaemonIdentity string `json:"daemonIdentity,omitempty"`
+	DaemonIdentity string               `json:"daemonIdentity,omitempty"`
+	Verify         *deviceV3AttemptView `json:"verify,omitempty"`
+	V3Verified     *deviceV3Verified    `json:"v3Verified,omitempty"`
 }
 
 func viewOfDevice(d *trustedDevice) trustedDeviceView {
-	return trustedDeviceView{ID: d.ID, Name: d.Name, Status: d.Status, Code: d.Code, CreatedAt: d.CreatedAt, ApprovedAt: d.ApprovedAt, LastSeenAt: d.LastSeenAt, VerifiesComputer: d.CodeVersion >= 2}
+	v := trustedDeviceView{ID: d.ID, Name: d.Name, Status: d.Status, Code: d.Code, CreatedAt: d.CreatedAt, ApprovedAt: d.ApprovedAt, LastSeenAt: d.LastSeenAt, VerifiesComputer: d.CodeVersion >= 2, CodeVersion: max(1, d.CodeVersion), EnrolmentID: d.EnrolmentID}
+	if d.Status == deviceStatusCommitted {
+		v.Code = ""
+	}
+	if d.Verify != nil {
+		v.Code = ""
+		v.Verify = &deviceV3AttemptView{State: d.Verify.State, EnrolmentID: d.Verify.EnrolmentID}
+		if d.Verify.State == "revealed" {
+			v.Verify.Code = d.Verify.Code
+		}
+	}
+	v.V3Verified = d.V3Verified
+	return v
 }
 
 func (a *apiServer) handleListRemoteDevices(w http.ResponseWriter, _ *http.Request) {
 	s := a.trustedDevices
 	s.mu.Lock()
+	if err := s.pruneCommittedV3Locked(); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "could not save", http.StatusInternalServerError)
+		return
+	}
 	out := struct {
 		Policy  string              `json:"policy"`
 		Devices []trustedDeviceView `json:"devices"`
@@ -897,14 +960,37 @@ func (a *apiServer) handleEnrollRemoteDevice(w http.ResponseWriter, r *http.Requ
 		PublicKey string `json:"publicKey"`
 		// CodeVersion 2: the client computes the approval code over both
 		// keys and pins daemonIdentity (private relay channel).
-		CodeVersion int `json:"codeVersion"`
+		CodeVersion int    `json:"codeVersion"`
+		Commit      string `json:"commit"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, deviceEnrollMaxBody)).Decode(&body); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, deviceEnrollMaxBody))
+	if err := dec.Decode(&body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	d, created, err := a.trustedDevices.enrollReport(body.Name, body.PublicKey, body.CodeVersion)
+	if body.CodeVersion < 0 || body.CodeVersion > 3 {
+		http.Error(w, "unsupported code version", http.StatusBadRequest)
+		return
+	}
+	if body.CodeVersion == 3 {
+		if err := dec.Decode(new(any)); err != io.EOF {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+	}
+	var d *trustedDevice
+	var created bool
+	var err error
+	if body.CodeVersion == 3 {
+		d, created, err = a.trustedDevices.commitDeviceV3(body.Name, body.PublicKey, body.Commit)
+	} else {
+		d, created, err = a.trustedDevices.enrollReport(body.Name, body.PublicKey, body.CodeVersion)
+	}
 	if err != nil {
+		if body.CodeVersion == 3 {
+			writeDeviceV3Error(w, err)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -916,6 +1002,9 @@ func (a *apiServer) handleEnrollRemoteDevice(w http.ResponseWriter, r *http.Requ
 	}
 	a.trustedDevices.mu.Lock()
 	v := viewOfDevice(d)
+	if body.CodeVersion == 3 && d.Status == deviceStatusCommitted {
+		v.DaemonNonce = d.DaemonNonce
+	}
 	a.trustedDevices.mu.Unlock()
 	v.DaemonIdentity = a.trustedDevices.daemonSPKI()
 	writeJSON(w, http.StatusOK, v)
@@ -924,6 +1013,11 @@ func (a *apiServer) handleEnrollRemoteDevice(w http.ResponseWriter, r *http.Requ
 func (a *apiServer) handleRemoteDeviceStatus(w http.ResponseWriter, r *http.Request) {
 	s := a.trustedDevices
 	s.mu.Lock()
+	if err := s.pruneCommittedV3Locked(); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "could not save", http.StatusInternalServerError)
+		return
+	}
 	d := s.find(r.PathValue("id"))
 	var v trustedDeviceView
 	if d != nil {
@@ -947,7 +1041,19 @@ func (a *apiServer) handleApproveRemoteDevice(w http.ResponseWriter, r *http.Req
 	if !a.requireHuman(w, r, "approve a remote device") {
 		return
 	}
-	d, err := a.trustedDevices.approve(r.PathValue("id"))
+	var body struct {
+		EnrolmentID string `json:"enrolmentId"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if !readDeviceV3JSON(w, r, &body) {
+			return
+		}
+	}
+	d, err := a.trustedDevices.approve(r.PathValue("id"), body.EnrolmentID)
+	if errors.Is(err, errDeviceEnrolment) {
+		writeDeviceV3Error(w, err)
+		return
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		http.Error(w, "unknown device", http.StatusNotFound)
 		return

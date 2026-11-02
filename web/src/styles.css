@@ -2791,6 +2791,10 @@ button.section-header-toggle:hover:not(:disabled) {
   box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
   animation: pulse 2s ease-in-out infinite;
 }
+/* An agent's open ask: the waiting-on-you colour, steady — it waits. */
+.ws-badge-ask {
+  background: var(--accent);
+}
 /* A message stuck in a pane's input box: steady, not pulsing — it waits. */
 .ws-badge-unsent {
   background: var(--fg-dim);
@@ -4418,6 +4422,10 @@ button.cloud-gate-inline-link {
 .pane-unsent-message { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border: 1px solid var(--warn); border-radius: 8px; color: var(--warn); font-size: 11px; white-space: nowrap; }
 .pane-unsent-message-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pane-unsent-message button { flex-shrink: 0; padding: 0 2px; font-size: inherit; color: inherit; }
+/* Asks wait on the person: accent, not the warn colour of a stuck message. */
+.pane-asks-chip { border-color: var(--accent); color: var(--accent); max-width: 40ch; }
+.attention-ask-dismiss { flex-shrink: 0; align-self: center; padding: 0 4px; color: var(--fg-dim); background: none; border: 0; cursor: pointer; font-size: 14px; line-height: 1; }
+.attention-ask-dismiss:hover { color: var(--fg); }
 .pane-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }
 /* Between fold tiers, middle chips yield to the title and fixed actions.
    Signals remain present; long labels clip instead of widening the row. */
@@ -15376,41 +15384,6 @@ textarea.ap-setup-input {
 .feedback-report-ask { display: flex; flex-direction: column; gap: 6px; }
 .feedback-report-ask textarea { width: 100%; resize: vertical; }
 
-/* ── Warden settings tab ─────────────────────────────────────────────── */
-.pane-flag-memo-owner {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .03em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.warden-num { display: inline-flex; align-items: center; gap: 5px; }
-.warden-run-btn { display: inline-flex; align-items: center; gap: 6px; }
-.warden-briefs { display: flex; flex-direction: column; gap: 10px; }
-.warden-briefs-head { display: flex; flex-direction: column; gap: 4px; }
-.warden-empty { font-size: 11px; color: var(--fg-dim); margin: 2px 0; }
-.warden-run-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.warden-run-row {
-  display: flex; align-items: baseline; gap: 8px; width: 100%;
-  padding: 5px 8px; text-align: left; font-size: 11px;
-  background: transparent; border: 1px solid transparent;
-  border-radius: var(--radius-sm); cursor: pointer; color: var(--fg);
-}
-.warden-run-row:hover { background: var(--bg-3); }
-.warden-run-row.active { background: var(--bg-3); border-color: var(--border); }
-.warden-run-row:disabled { cursor: default; opacity: 0.6; }
-.warden-run-kind { text-transform: capitalize; font-weight: 500; white-space: nowrap; }
-.warden-run-pane { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.warden-run-when { margin-left: auto; color: var(--fg-dim); white-space: nowrap; }
-.warden-run-bad { color: var(--danger); white-space: nowrap; }
-.warden-brief-reader {
-  max-height: 340px; overflow-y: auto;
-  margin: 4px 0 0; padding: 12px 14px;
-  background: var(--bg-2); border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  max-width: none;
-}
-
 /* Agent responder settings: live status card + recent-activity list */
 .aria-status {
   display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
@@ -16066,40 +16039,72 @@ button.pane-account-chip.is-warn:hover { border-color: var(--warn); color: var(-
 .service-status-chip.is-muted {opacity:.7}
 
 /* Workspace > starter > worker tree. Depth stays readable in narrow drawers. */
-.workspace-pane-row { display: flex; align-items: center; gap: 6px; min-height: 38px; padding: 4px 8px; cursor: pointer; border-radius: 5px; }
+.workspace-pane-row { position: relative; display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 3px 8px; cursor: pointer; border-radius: 5px; }
 .workspace-pane-row:hover, .workspace-pane-row.is-selected { background: var(--bg-hover); }
 [data-tree-key]:focus { outline: none; }
 [data-tree-key]:focus-visible > .workspace-pane-row, .ws-row[data-tree-key]:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.tree-chevron { flex: 0 0 16px; width: 16px; padding: 0; border: 0; background: transparent; color: var(--fg-dim); cursor: pointer; text-align: center; }
-.pane-tree-dot { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--fg-dim); }
+/* The chevron's hit area is a full-height column, so a near miss toggles the
+   branch instead of opening the pane's view. Leaves keep the column empty. */
+.tree-chevron { flex: 0 0 24px; width: 24px; align-self: stretch; margin-block: -3px; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--fg-dim); cursor: pointer; }
+span.tree-chevron { cursor: inherit; }
+.ws-row .tree-chevron { grid-row: 1 / 3; margin-block: -3px; align-items: flex-start; padding-top: 5px; }
+.pane-tree-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-dim); }
 .pane-tree-dot.is-busy { background: var(--ok); }
 .pane-tree-dot.is-finished { background: var(--accent); }
 .pane-tree-dot.is-needs-you { background: var(--danger, #e5484d); box-shadow: 0 0 0 2px #e5484d22; }
+/* A ring, not a dot: this pane is fine, something below it needs you. */
+.pane-tree-dot.is-needs-you-below { background: transparent; box-shadow: inset 0 0 0 1.5px var(--danger, #e5484d); }
+.pane-tree-attn-count { flex: 0 0 auto; color: var(--danger, #e5484d); font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* Guide line under an open branch, through the middle of its chevron. */
+.pane-tree-children { position: relative; }
+.pane-tree-children::before { content: ''; position: absolute; top: 0; bottom: 6px; left: var(--tree-guide-x); width: 1px; background: color-mix(in srgb, var(--fg-dim) 30%, transparent); pointer-events: none; }
 .pane-tree-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.pane-tree-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.pane-tree-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 16px; }
 .pane-tree-title-line { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.pane-tree-title-line > .pane-tree-title { min-width: 0; }
+.pane-tree-title-line > .pane-tree-title { flex: 0 1 auto; min-width: 0; }
 .pane-tree-handle { color: var(--fg); font-weight: 500; }
-.pane-tree-title-detail { color: var(--fg-dim); }
-.pane-tree-lead-pill { flex: 0 1 auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--accent); border-radius: 999px; color: var(--accent); font-size: 9px; line-height: 13px; padding: 0 5px; }
-.pane-tree-status, .pane-tree-role { color: var(--fg-dim); font-size: 10px; }
-.pane-tree-status.needs-you { color: var(--danger, #e5484d); }
+/* A row is the @handle, then what the pane is doing. In a narrow sidebar the
+   description takes a second line so it gets the full width; from about a
+   340px sidebar it follows the handle on one 26px line. */
+.pane-tree-desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-dim); font-size: 11px; line-height: 14px; }
+@container (min-width: 300px) { /* the tree's content box: about a 340px sidebar */
+  .pane-tree-text { flex-direction: row; align-items: baseline; gap: 6px; }
+  .pane-tree-text > .pane-tree-title-line { flex: 0 1 auto; align-self: center; }
+  .pane-tree-text > .pane-tree-title-line:has(+ .pane-tree-sub > .pane-tree-desc) { max-width: 70%; }
+  .pane-tree-sub { flex: 1 1 0; }
+  .pane-tree-desc { font-size: 12px; line-height: 16px; }
+}
+.pane-tree-sub { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.pane-tree-sub > .pane-tree-desc { flex: 1 1 auto; }
+.pane-tree-meta { flex: 0 0 auto; margin-left: auto; display: flex; align-items: baseline; gap: 6px; font-size: 10.5px; line-height: 14px; color: var(--fg-dim); white-space: nowrap; }
+.pane-tree-needs-you { color: var(--danger, #e5484d); font-weight: 600; }
+.pane-tree-count { font-variant-numeric: tabular-nums; }
+/* A lead shows its role as a filled chip; it gives way before the handle does. */
+.pane-tree-role-chip { flex: 0 3 auto; min-width: 4ch; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 3px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); font-size: 9px; font-weight: 600; letter-spacing: 0.03em; line-height: 14px; padding: 0 4px; text-transform: uppercase; }
+.workspace-pane-row.is-lead .pane-tree-handle { font-weight: 600; }
 .tree-leads-toggle { flex: 0 0 auto; border: 0; border-radius: 4px; background: transparent; color: var(--fg-dim); font-size: 9px; padding: 3px; cursor: pointer; }
 .tree-leads-toggle[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
 .ws-row .ws-text { min-width: 0; }
 .pane-tree-close { flex-shrink: 0; }
 /* Every row can be closed; the × appears on hover or keyboard focus so the
-   tree stays calm. A finished worker keeps it visible as a hint to tidy up. */
+   tree stays calm. It floats over the row's end instead of reserving width,
+   so titles get that space. A finished worker keeps it visible as a hint to
+   tidy up, and that row (and every row on touch) keeps room for it. */
+.workspace-pane-row > .pane-tree-close { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); }
+.workspace-pane-row.has-pinned-close { padding-right: 40px; }
 .workspace-pane-row > .pane-tree-close:not(.is-pinned) { opacity: 0; }
 .workspace-pane-row:hover > .pane-tree-close,
 [data-tree-key]:focus-visible > .workspace-pane-row > .pane-tree-close,
-.workspace-pane-row:focus-within > .pane-tree-close { opacity: 1; }
-@media (hover: none) { .workspace-pane-row > .pane-tree-close:not(.is-pinned) { opacity: 1; } }
+.workspace-pane-row:has(:focus-visible) > .pane-tree-close { opacity: 1; }
+@media (hover: none) { .workspace-pane-row > .pane-tree-close:not(.is-pinned) { opacity: 1; } .workspace-pane-row { padding-right: 40px; } }
 @media (max-width: 800px) { .workspace-pane-row { min-height: 44px; } .tree-chevron { min-height: 28px; } }
 [data-tree-key]:focus-visible > .ws-row { outline: 1px solid var(--accent); outline-offset: -1px; }
-.workspace-tree-row { grid-template-columns: 16px auto minmax(0, 1fr) auto; column-gap: 4px; }
+.workspace-tree-row { grid-template-columns: 24px auto minmax(0, 1fr) auto; column-gap: 4px; }
 .ws-row .tree-leads-toggle { grid-column: 3; justify-self: start; }
 .ws-row .ws-delete { grid-column: 4; grid-row: 1 / 3; }
+/* Deleting a workspace lives in its right-click menu; touch keeps the ×. */
+.workspace-tree-row .ws-delete { display: none; }
+@media (hover: none) { .workspace-tree-row .ws-delete { display: inline-flex; } }
 /* Secondary pane details leave the row one at a time, least important first
    (DETAIL_PRIORITY), so a split never produces letter fragments. Phones and
    the legacy native header retain their existing tiers. */
@@ -16188,3 +16193,11 @@ button.pane-account-chip.is-warn:hover { border-color: var(--warn); color: var(-
 .workspace-tree-row.contains-selection { box-shadow: inset 2px 0 0 var(--fg-dim); }
 .pane-tree-unattached { padding: 6px 12px 2px 20px; color: var(--fg-dim); font-size: 10px; }
 .workspace-pane-row.is-selected { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Make leads… (workspace menu): one row per pane, a tick and its role. */
+.make-leads-dialog { width: min(520px, calc(100vw - 32px)); }
+.make-leads-list { list-style: none; margin: 10px 0; padding: 0; max-height: 50vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.make-leads-list li { display: grid; grid-template-columns: minmax(0, 1fr) 170px; gap: 10px; align-items: center; }
+.make-leads-list .make-leads-pane { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; font-size: 12px; color: var(--fg); cursor: pointer; }
+.make-leads-pane span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.make-leads-role { width: 100%; min-width: 0; }

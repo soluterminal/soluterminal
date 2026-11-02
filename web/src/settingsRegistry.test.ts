@@ -36,9 +36,9 @@ describe('settingsRegistry', () => {
   it('distinguishes canonical ids from compatibility ids', () => {
     expect(Object.keys(LEGACY_TAB_TARGETS)).toEqual([
       'appearance', 'panes', 'claude', 'sidebar', 'team', 'account', 'notifications', 'privacy', 'devices',
-      'warden', 'tasks', 'agent', 'credentials',
+      'tasks', 'agent', 'credentials',
     ]);
-    for (const id of ['panes', 'claude', 'sidebar', 'account', 'notifications', 'privacy', 'warden', 'tasks', 'agent']) {
+    for (const id of ['panes', 'claude', 'sidebar', 'account', 'notifications', 'privacy', 'tasks', 'agent']) {
       expect(resolveSettingsTarget(id).legacy).toBe(true);
     }
     for (const id of ['appearance', 'devices', ...settingsCategories().map(({ id }) => id)]) {

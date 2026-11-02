@@ -8,9 +8,7 @@ import { reportsFeed, type ReportFeedItem } from './reportsFeed';
 // managed-agent decisions. Hard inclusion rule: only things a person is meant
 // to READ — routine agent telemetry stays out, while an agent's explicit
 // Needs-you report is a decision and belongs here; the ◇ Agents cockpit owns
-// health. Warden briefs used to be a source too; they were dropped because
-// nobody opened them and they kept counting while the Warden was off — their
-// history stays in Settings › Warden.
+// health. Retired caretaker briefs are not an inbox source.
 //
 // Each source keeps its OWN read state (schedules: daemon-synced lastReadAt;
 // feedback: cloud-side read_at; agent decisions: daemon acknowledgement) —

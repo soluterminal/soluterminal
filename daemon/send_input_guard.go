@@ -39,3 +39,27 @@ func sendInputMenuCollisionFor(paneID string, state PaneRuntimeState, text strin
 	return "pane " + paneID + " is showing an approval prompt — your text was NOT sent, because the menu would read it as keystrokes (it can select options, including persistent grants). " +
 		"Retry after the prompt resolves, or answer the prompt itself with answer_prompt."
 }
+
+// sendInputUnsubmittedMessage refuses a message for a Claude or Codex pane
+// that does not end in Enter. Only a line ending in Enter goes through verified
+// delivery. Without one, the text is typed raw into the input box and
+// left there: Claude collapses a long one into a "[Pasted text #N]" placeholder
+// that nobody submits, and the prompt recorder counts it as the person's own
+// draft, so the pane's auto-approval holds as "composer has text"
+// (2026-11-02: @qa's review note in @lead's box). Keys keep raw
+// semantics: control sequences and one- or two-key answers are not messages.
+// Nothing is written when it refuses.
+func sendInputUnsubmittedMessage(p *Pane, text string) string {
+	if p == nil || strings.HasSuffix(text, "\n") || strings.HasSuffix(text, "\r") {
+		return ""
+	}
+	if _, message := agentMessageBody(text + "\n"); !message {
+		return ""
+	}
+	if agent, _ := paneAgentProvider(p); !agent {
+		return ""
+	}
+	return "pane " + p.ID + " runs an agent, and your text does not end with a newline, so it was NOT sent: " +
+		"it would sit unsubmitted in that agent's input box and hold its auto-approval. " +
+		"End the text with \"\\n\" to deliver and submit it, or use ask_pane."
+}

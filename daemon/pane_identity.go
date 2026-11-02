@@ -233,6 +233,9 @@ type paneIdentityReq struct {
 
 // setPaneIdentity handles POST /api/panes/{id}/identity from the app.
 func (a *apiServer) setPaneIdentity(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "change a pane handle or working-on line", "set_pane_info") {
+		return
+	}
 	p, ok := a.mgr.Get(r.PathValue("id"))
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)

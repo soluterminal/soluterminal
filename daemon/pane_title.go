@@ -33,6 +33,9 @@ type setTitleReq struct {
 // to the trimmed title (an empty/whitespace title CLEARS it, falling back to
 // ai-title) and persists. Modeled on renamePane's decode + persist-with-revert.
 func (a *apiServer) setPaneTitle(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "change a pane title", "rename_pane") {
+		return
+	}
 	id := r.PathValue("id")
 	p, ok := a.mgr.Get(id)
 	if !ok {
@@ -67,6 +70,9 @@ func (a *apiServer) setPaneTitle(w http.ResponseWriter, r *http.Request) {
 //   - no resolvable transcript / empty conversation → 422
 //   - Claude Code missing / the run failed            → 502
 func (a *apiServer) generatePaneTitle(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "generate a pane title", "rename_pane") {
+		return
+	}
 	id := r.PathValue("id")
 	pane, ok := a.mgr.Get(id)
 	if !ok {

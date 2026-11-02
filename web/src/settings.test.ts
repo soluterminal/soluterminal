@@ -50,8 +50,6 @@ describe('settings store compatibility adapter', () => {
 
     useSettings.getState().openSettings('agent');
     expect(useSettings.getState()).toMatchObject({ tab: 'agent', category: 'agents' });
-    useSettings.getState().openSettings('warden');
-    expect(useSettings.getState()).toMatchObject({ tab: 'warden', category: 'agents' });
     useSettings.getState().openSettings('sidebar');
     expect(useSettings.getState()).toMatchObject({ tab: 'sidebar', category: 'workspace' });
 

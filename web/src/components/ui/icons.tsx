@@ -84,6 +84,26 @@ export function IconChevronDown(p: IconProps): React.ReactElement {
   );
 }
 
+/** Chevrons pointing in — collapse every branch of a tree. */
+export function IconCollapseAll(p: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(p)}>
+      <path d="m7 20 5-5 5 5" />
+      <path d="m7 4 5 5 5-5" />
+    </svg>
+  );
+}
+
+/** Chevrons pointing out — expand every branch of a tree. */
+export function IconExpandAll(p: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(p)}>
+      <path d="m7 15 5 5 5-5" />
+      <path d="m7 9 5-5 5 5" />
+    </svg>
+  );
+}
+
 /** Bell — alerts / notification center (was 🔔). */
 export function IconBell(p: IconProps): React.ReactElement {
   return (
@@ -573,7 +593,7 @@ export function IconPause(p: IconProps): React.ReactElement {
   );
 }
 
-/** Shield — the Warden (opt-in fleet caretaker). */
+/** Shield — security and policy controls. */
 export function IconShield(p: IconProps): React.ReactElement {
   return (
     <svg {...svgProps(p)}>

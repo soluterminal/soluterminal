@@ -374,6 +374,10 @@ func TestShinoqueDiscoveryRelayPortMove(t *testing.T) {
 	handler := newShinoqueRelayHandler(http.NotFoundHandler(), tokens, nil)
 	for _, response := range []string{"first", "second"} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
 			if !strings.HasPrefix(r.Host, "127.0.0.1:") || r.Header.Get("X-Shinoque-Relay") != "installed-secret" {
 				t.Errorf("incorrect relay request")
 			}
@@ -474,6 +478,10 @@ func TestShinoqueDiscoveryDeletedFileFallsBack(t *testing.T) {
 	path, home := shinoqueDiscoveryFixture(t)
 	hits := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		hits++
 		if r.Header.Get("X-Shinoque-Relay") != "installed-secret" {
 			t.Error("incorrect installed token")

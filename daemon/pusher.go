@@ -466,6 +466,30 @@ func (p *Pusher) fire(pane *Pane, kind string) {
 	p.deliver(body, snap.ID, kind)
 }
 
+// FireAsks pushes new asks to the user ("user-ask"): title names who is
+// waiting, summary is the ask (or how many). paneId is the newest ask's pane,
+// so a tap opens it. The caller coalesces and spaces these (asks_push.go).
+func (p *Pusher) FireAsks(paneID, title, summary string) bool {
+	if p == nil {
+		return false
+	}
+	if p.metrics != nil {
+		p.metrics.PushFireTotal.Add(1)
+	}
+	workspaceName := ""
+	if p.ws != nil {
+		workspaceName = p.ws.NameForPane(paneID)
+	}
+	body, _ := json.Marshal(map[string]string{
+		"paneId":        paneID,
+		"state":         "user-ask",
+		"title":         title,
+		"summary":       summary,
+		"workspaceName": workspaceName,
+	})
+	return p.deliver(body, paneID, "user-ask")
+}
+
 // FireSchedule pushes a schedule lifecycle notification. kind is
 // "schedule-error" (always sent — a job failing while nobody watches is
 // exactly what push exists for) or "schedule-fired" (per-schedule opt-in,

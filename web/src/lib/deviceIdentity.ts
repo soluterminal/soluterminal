@@ -71,6 +71,10 @@ export async function deviceCodeFor(spki: string, computerSpki?: string): Promis
   const sum = await sha256(computerSpki
     ? CODE_VERSION_2 + spki.trim() + '\n' + computerSpki.trim()
     : CODE_VERSION + spki.trim());
+  return crockford80(sum);
+}
+
+function crockford80(sum: Uint8Array): string {
   let n = 0n;
   for (const b of sum.slice(0, 10)) n = (n << 8n) | BigInt(b);
   let out = '';
@@ -79,6 +83,62 @@ export async function deviceCodeFor(spki: string, computerSpki?: string): Promis
     out += CROCKFORD[Number((n >> BigInt(75 - 5 * i)) & 31n)];
   }
   return out;
+}
+
+export function newDeviceNonceV3(): string {
+  return hex(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+export function validDeviceNonceV3(nonce: string): boolean {
+  return /^[0-9a-f]{64}$/.test(nonce);
+}
+
+export function validEnrolmentIdV3(id: string): boolean {
+  return /^enr_[A-Za-z0-9_-]{21}[AQgw]$/.test(id);
+}
+
+export async function deviceCommitV3For(id: string, nonce: string): Promise<string> {
+  if (!/^dev_[A-Za-z0-9_-]{22}$/.test(id) || !validDeviceNonceV3(nonce)) throw new Error('Invalid V3 commitment fields');
+  return hex(await sha256(['SOLU-DEVICE-COMMIT-V3', id, nonce].join('\n')));
+}
+
+function canonicalSPKIBytes(spki: string): Uint8Array {
+  try {
+    const decoded = atob(spki);
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(spki) || btoa(decoded) !== spki) throw new Error();
+    return Uint8Array.from(decoded, (c) => c.charCodeAt(0));
+  } catch {
+    throw new Error('Invalid canonical SPKI');
+  }
+}
+
+export async function deviceSPKIHashFor(spki: string): Promise<string> {
+  const der = canonicalSPKIBytes(spki);
+  await crypto.subtle.importKey('spki', der as BufferSource, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+  return hex(await sha256(der));
+}
+
+export async function deviceCodeV3For(
+  spki: string, computerSpki: string, enrolmentId: string, deviceNonce: string, daemonNonce: string,
+): Promise<string> {
+  canonicalSPKIBytes(spki);
+  canonicalSPKIBytes(computerSpki);
+  if (!validEnrolmentIdV3(enrolmentId) || !validDeviceNonceV3(deviceNonce) || !validDeviceNonceV3(daemonNonce)) {
+    throw new Error('Invalid V3 comparison fields');
+  }
+  return crockford80(await sha256(['SOLU-DEVICE-CODE-V3', spki, computerSpki, enrolmentId, deviceNonce, daemonNonce].join('\n')));
+}
+
+export interface DeviceEnrolmentReply {
+  id: string;
+  status: 'committed' | 'pending' | 'approved' | 'failed';
+  code?: string;
+  codeVersion?: number;
+  enrolmentId?: string;
+  daemonIdentity?: string;
+  daemonNonce?: string;
+  verify?: { enrolmentId?: string; state: 'committed' | 'revealed' | 'failed'; code?: string };
+  v3Verified?: { at: string; deviceSPKIHash: string; daemonSPKIHash: string };
 }
 
 function canonicalEscape(s: string): string {

@@ -532,8 +532,6 @@ func restoreResumedState(p *Pane, snap PaneSnapshot) {
 	p.Flagged = snap.Flagged
 	p.FlagMemo = snap.FlagMemo
 	p.FlagOwner = snap.FlagOwner
-	p.FlagEpisode = snap.FlagEpisode
-	p.FlagRevision = snap.FlagRevision
 	p.LastPrompts = cloneStringSlice(snap.LastPrompts)
 	p.mu.Unlock()
 	if p.Snapshot().AutoMode != "" {

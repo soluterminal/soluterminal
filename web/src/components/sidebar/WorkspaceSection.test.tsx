@@ -4,11 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../../store';
 import type { PaneInfo, Workspace } from '../../types';
 import { WorkspaceSection } from './WorkspaceSection';
+import { api } from '../../api';
 
 const dialogMocks = vi.hoisted(() => ({
   confirmDialog: vi.fn<(opts: { message: string; confirmLabel?: string; danger?: boolean }) => Promise<boolean>>(),
+  promptDialog: vi.fn<(opts: { title: string; defaultValue?: string }) => Promise<string | null>>(),
 }));
-vi.mock('../../lib/dialog', () => ({ confirmDialog: dialogMocks.confirmDialog }));
+vi.mock('../../lib/dialog', () => ({ confirmDialog: dialogMocks.confirmDialog, promptDialog: dialogMocks.promptDialog }));
 
 const now = new Date('2026-05-18T00:00:00.000Z');
 
@@ -221,17 +223,27 @@ describe('WorkspaceSection', () => {
     expect(dialogMocks.confirmDialog).toHaveBeenLastCalledWith({ message: `Delete workspace "${name}"?`, confirmLabel: 'Delete', danger: true });
     expect(onDeleteWorkspace).not.toHaveBeenCalled();
   });
-  it('persists collapsed branches, bubbles attention, and navigates visible rows', () => {
+  it('starts workers folded, bubbles attention, remembers the person\'s choice, and navigates visible rows', () => {
     const lead = pane({ id: 'lead', title: 'Lead', state: 'idle' });
     const worker = pane({ id: 'worker', title: 'Worker', state: 'choice-prompt', attention: 'needs-user', origin: { source: 'agent', byPaneId: 'lead', at: 1 } });
     const props = { named: [workspace({ name: 'Project', paneIds: ['lead'] })], panes: { lead, worker }, activeWorkspace: 'Project' };
     const first = renderWorkspaceSection(props);
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse Lead' }));
+    // A top-level pane's workers start folded, with nothing stored yet.
+    expect(screen.getByRole('treeitem', { name: 'Lead' })).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem('solu.sidebarTreeCollapsed.v1')).toBeNull();
     expect(screen.getByRole('treeitem', { name: 'Lead' })).toHaveTextContent('1 worker');
     expect(screen.queryByRole('treeitem', { name: 'Worker' })).not.toBeInTheDocument();
-    expect(first.container.querySelector('.workspace-pane-row .pane-tree-dot')).toHaveClass('is-needs-you');
+    // The lead itself is fine: a ring and a count say something below needs you.
+    expect(first.container.querySelector('.workspace-pane-row .pane-tree-dot')).toHaveClass('is-needs-you-below');
+    expect(screen.getByRole('treeitem', { name: 'Lead' }).querySelector('.pane-tree-attn-count')).toHaveTextContent('1●');
     expect(first.container.querySelector('.ws-row .pane-tree-dot')).toHaveClass('is-needs-you');
+    // Opening it is remembered across a reload; folding it again is too.
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Lead' }));
     first.unmount();
+    const second = renderWorkspaceSection(props);
+    expect(screen.getByRole('treeitem', { name: 'Worker' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Lead' }));
+    second.unmount();
     renderWorkspaceSection(props);
     const row = screen.getByRole('treeitem', { name: 'Lead' });
     expect(row).toHaveAttribute('aria-expanded', 'false');
@@ -241,6 +253,164 @@ describe('WorkspaceSection', () => {
     expect(screen.getByRole('treeitem', { name: 'Worker' })).toHaveFocus();
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' });
     expect(row).toHaveFocus();
+  });
+
+  it('collapses and expands every branch from the header, and Alt+click folds a subtree', () => {
+    const lead = pane({ id: 'lead', title: 'Lead', state: 'idle' });
+    const worker = pane({ id: 'worker', title: 'Worker', state: 'idle', origin: { source: 'agent', byPaneId: 'lead', at: 1 } });
+    const sub = pane({ id: 'sub', title: 'Sub', state: 'idle', origin: { source: 'agent', byPaneId: 'worker', leadPaneId: 'lead', at: 2 } });
+    const other = pane({ id: 'other', title: 'Other shell', state: 'idle' });
+    renderWorkspaceSection({
+      named: [workspace({ name: 'Project', paneIds: ['lead'] }), workspace({ name: 'Second', paneIds: ['other'] }), workspace({ name: 'Empty', paneIds: [] })],
+      panes: { lead, worker, sub, other }, activeWorkspace: 'Project',
+    });
+    // An empty workspace has nothing to open: no chevron button.
+    expect(screen.queryByRole('button', { name: 'Collapse Empty' })).not.toBeInTheDocument();
+    // The lead's workers start folded, so the header first offers Expand all.
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }));
+    expect(screen.getByRole('treeitem', { name: 'Sub' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse all' }));
+    for (const name of ['Project', 'Second']) expect(screen.getByRole('treeitem', { name })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('treeitem', { name: 'Lead' })).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('solu.sidebarTreeCollapsed.v1')!)).toEqual({
+      Project: true, 'Project:pane:lead': true, 'Project:pane:worker': true, Second: true,
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }));
+    expect(screen.getByRole('treeitem', { name: 'Sub' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Collapse all' })).toBeInTheDocument();
+    // Alt+click closes the lead and everything under it; a plain reopen keeps
+    // the inner branch closed, and Alt+click opens the whole subtree again.
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Lead' }), { altKey: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Lead' }));
+    expect(screen.getByRole('treeitem', { name: 'Worker' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('treeitem', { name: 'Sub' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Lead' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Lead' }), { altKey: true });
+    expect(screen.getByRole('treeitem', { name: 'Sub' })).toBeInTheDocument();
+    // Alt+click on a workspace chevron folds it with every lead inside.
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Project' }), { altKey: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Project' }));
+    expect(screen.getByRole('treeitem', { name: 'Lead' })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('opens (*) and closes (-) a row and its siblings from the keyboard', () => {
+    const a = pane({ id: 'a', title: 'Lead A', state: 'idle' });
+    const b = pane({ id: 'b', title: 'Lead B', state: 'idle' });
+    const wa = pane({ id: 'wa', title: 'Worker A', state: 'idle', origin: { source: 'agent', byPaneId: 'a', at: 1 } });
+    const wb = pane({ id: 'wb', title: 'Worker B', state: 'idle', origin: { source: 'agent', byPaneId: 'b', at: 2 } });
+    const other = pane({ id: 'other', title: 'Other shell', state: 'idle' });
+    renderWorkspaceSection({
+      named: [workspace({ name: 'Project', paneIds: ['a', 'b'] }), workspace({ name: 'Second', paneIds: ['other'] })],
+      panes: { a, b, wa, wb, other }, activeWorkspace: 'Project',
+    });
+    const leadA = screen.getByRole('treeitem', { name: 'Lead A' });
+    act(() => leadA.focus());
+    fireEvent.keyDown(leadA, { key: '-' });
+    expect(leadA).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('treeitem', { name: 'Lead B' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('treeitem', { name: 'Project' })).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.keyDown(leadA, { key: '*' });
+    expect(screen.getByRole('treeitem', { name: 'Worker A' })).toBeInTheDocument();
+    expect(screen.getByRole('treeitem', { name: 'Worker B' })).toBeInTheDocument();
+    // On a workspace row the siblings are the other workspaces.
+    const project = screen.getByRole('treeitem', { name: 'Project' });
+    act(() => project.focus());
+    fireEvent.keyDown(project, { key: '-' });
+    expect(screen.getByRole('treeitem', { name: 'Second' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('treeitem', { name: 'Lead A' })).not.toBeInTheDocument();
+  });
+
+  it('opens the workspace menu from the keyboard', () => {
+    const setCtxMenu = vi.fn();
+    renderWorkspaceSection({ setCtxMenu });
+    const row = screen.getByRole('treeitem', { name: 'Launch Ops With A Very Long Workspace Name' });
+    act(() => row.focus());
+    fireEvent.keyDown(row, { key: 'F10', shiftKey: true });
+    expect(setCtxMenu).toHaveBeenLastCalledWith(expect.objectContaining({ wsName: 'Launch Ops With A Very Long Workspace Name' }));
+  });
+
+  it('forgets choices for panes that have closed when it next saves', () => {
+    localStorage.setItem('solu.sidebarTreeCollapsed.v1', JSON.stringify({ 'Project:pane:gone': false, 'Removed workspace': true, Project: 'junk' }));
+    const lead = pane({ id: 'lead', title: 'Lead', state: 'idle' });
+    const worker = pane({ id: 'worker', title: 'Worker', state: 'idle', origin: { source: 'agent', byPaneId: 'lead', at: 1 } });
+    renderWorkspaceSection({ named: [workspace({ name: 'Project', paneIds: ['lead'] })], panes: { lead, worker }, activeWorkspace: 'Project' });
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Lead' }));
+    expect(JSON.parse(localStorage.getItem('solu.sidebarTreeCollapsed.v1')!)).toEqual({ 'Project:pane:lead': false });
+  });
+
+  it('shows a lead role as a chip without repeating it in the title', () => {
+    const lead = pane({ id: 'lead', title: '@cmo · marketing', state: 'idle', identity: { handle: 'cmo' }, origin: { source: 'user', at: 1, teamKind: 'lead', leadRole: 'marketing' } });
+    const { container } = renderWorkspaceSection({ named: [workspace({ name: 'Project', paneIds: ['lead'] })], panes: { lead }, activeWorkspace: 'Project' });
+    const row = container.querySelector('.workspace-pane-row')!;
+    expect(row).toHaveClass('is-lead');
+    expect(row.querySelector('.pane-tree-role-chip')).toHaveTextContent(/^marketing$/);
+    expect(row.querySelector('.pane-tree-title')).toHaveTextContent(/^@cmo$/);
+  });
+
+  it('reads as the handle, then what the pane is doing, with status words for screen readers', () => {
+    const lead = pane({ id: 'lead', title: '@ops · deploys', state: 'idle', identity: { handle: 'ops', workingOn: 'Rolling out 1.2' } });
+    const asking = pane({ id: 'asking', title: '@db migrate', state: 'choice-prompt', attention: 'needs-user', identity: { handle: 'db' }, origin: { source: 'agent', byPaneId: 'lead', at: 1 } });
+    const quiet = pane({ id: 'quiet', title: 'Plain worker', state: 'idle', origin: { source: 'agent', byPaneId: 'lead', at: 2 } });
+    renderWorkspaceSection({ named: [workspace({ name: 'Project', paneIds: ['lead'] })], panes: { lead, asking, quiet }, activeWorkspace: 'Project' });
+    const row = (name: string) => screen.getByRole('treeitem', { name }).querySelector(':scope > .workspace-pane-row')!;
+    // Folded by default, the counts stand in for its rows.
+    expect(row('@ops · deploys').querySelector('.pane-tree-count')).toHaveTextContent(/^2w$/);
+    fireEvent.click(screen.getByRole('button', { name: 'Expand @ops · deploys' }));
+    expect(row('@ops · deploys').querySelector('.pane-tree-desc')).toHaveTextContent(/^Rolling out 1\.2$/);
+    expect(row('@db · migrate').querySelector('.pane-tree-desc')).toHaveTextContent(/^needs you · migrate$/);
+    expect(row('Plain worker').querySelector('.pane-tree-desc')).toBeNull();
+    expect(screen.getByRole('treeitem', { name: '@ops · deploys' })).toHaveAccessibleDescription('idle · 2 workers');
+    expect(screen.getByRole('treeitem', { name: '@db · migrate' })).toHaveAccessibleDescription('needs you');
+    // Counts show only on a folded branch, where its rows are out of sight.
+    // Open, the rows replace the counts; folded again, they come back.
+    expect(row('@ops · deploys').querySelector('.pane-tree-count')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse @ops · deploys' }));
+    const count = row('@ops · deploys').querySelector('.pane-tree-count');
+    expect(count).toHaveTextContent(/^2w$/);
+    expect(count).toHaveAttribute('title', '2 workers');
+    expect(row('@ops · deploys').querySelector('.pane-tree-attn-count')).toHaveTextContent('1●');
+  });
+
+  it('shows a lead another lead started as a peer, with its workers folded under it and its attention on its row', () => {
+    const lead = pane({ id: 'lead', title: '@lead · launch', state: 'idle', identity: { handle: 'lead' }, origin: { source: 'user', at: 1, teamKind: 'lead', leadRole: 'launch' } });
+    const qa = pane({ id: 'qa', title: '@qa · qa', state: 'idle', identity: { handle: 'qa' }, origin: { source: 'agent', byPaneId: 'lead', leadPaneId: 'lead', at: 2, teamKind: 'lead', leadRole: 'qa' } });
+    const check = pane({ id: 'check', title: 'Run checks', state: 'choice-prompt', attention: 'needs-user', origin: { source: 'agent', byPaneId: 'qa', leadPaneId: 'lead', at: 3, teamKind: 'worker' } });
+    renderWorkspaceSection({ named: [workspace({ name: 'Project', paneIds: ['lead'] })], panes: { lead, qa, check }, activeWorkspace: 'Project' });
+    const qaItem = screen.getByRole('treeitem', { name: '@qa · qa' });
+    // A peer of its starter, not nested under it, and not counted as its lead.
+    expect(qaItem).toHaveAttribute('aria-level', '2');
+    expect(screen.getByRole('treeitem', { name: '@lead · launch' })).not.toHaveAttribute('aria-expanded');
+    // Who started it stays as provenance: tooltip and accessible description.
+    expect(qaItem.querySelector(':scope > .workspace-pane-row')).toHaveAttribute('title', '@qa · qa\nStarted by @lead');
+    expect(qaItem).toHaveAccessibleDescription('idle · 1 worker · started by @lead');
+    // Its worker nests under it, folded by default, and still raises the flag.
+    expect(qaItem).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('treeitem', { name: 'Run checks' })).not.toBeInTheDocument();
+    expect(qaItem.querySelector('.pane-tree-dot')).toHaveClass('is-needs-you-below');
+    expect(qaItem.querySelector('.pane-tree-attn-count')).toHaveTextContent('1●');
+    fireEvent.click(screen.getByRole('button', { name: 'Expand @qa · qa' }));
+    expect(screen.getByRole('treeitem', { name: 'Run checks' })).toHaveAttribute('aria-level', '3');
+  });
+
+  it('opens a pane menu on a tree row, from the mouse or the keyboard, that makes it a lead', async () => {
+    const mine = pane({ id: 'mine', title: '@ops', state: 'idle', identity: { handle: 'ops' } });
+    const setPaneTeam = vi.spyOn(api, 'setPaneTeam').mockResolvedValue({ origin: { source: 'user', at: 1, teamKind: 'lead', leadRole: 'ops' } });
+    dialogMocks.promptDialog.mockResolvedValue('ops');
+    const onLoadWorkspace = vi.fn();
+    renderWorkspaceSection({ named: [workspace({ name: 'Project', paneIds: ['mine'] })], panes: { mine }, activeWorkspace: 'Project', onLoadWorkspace });
+    const row = screen.getByRole('treeitem', { name: '@ops' });
+    fireEvent.contextMenu(row.querySelector(':scope > .workspace-pane-row')!);
+    expect(screen.getByRole('menu', { name: '@ops actions' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Make worker' })).not.toBeInTheDocument();
+    expect(onLoadWorkspace).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('menu', { name: '@ops actions' })).not.toBeInTheDocument();
+    act(() => row.focus());
+    fireEvent.keyDown(row, { key: 'F10', shiftKey: true });
+    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Make lead…' })); });
+    expect(dialogMocks.promptDialog).toHaveBeenCalledWith(expect.objectContaining({ title: 'Make lead', defaultValue: 'ops' }));
+    expect(setPaneTeam).toHaveBeenCalledWith('mine', 'lead', 'ops', expect.anything());
+    expect(screen.queryByRole('menu', { name: '@ops actions' })).not.toBeInTheDocument();
   });
 
   it('confirms the finished-worker close and respects cancellation', async () => {

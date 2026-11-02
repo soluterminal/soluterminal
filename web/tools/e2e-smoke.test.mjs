@@ -485,7 +485,6 @@ describe('e2e smoke server fixtures', () => {
       ['/api/recovery/settings', { resumeAfterRestart: 'manual' }],
       ['/api/native/settings', { promptSuggestions: false }],
       ['/api/update/settings', { autoApply: 'off' }],
-      ['/api/warden/settings', { enabled: false }],
       ['/api/aria/status', { paused: false }],
       ['/api/aria/auto-pending', { pending: [] }],
       ['/api/claude/accounts', { accounts: [] }],
@@ -496,7 +495,6 @@ describe('e2e smoke server fixtures', () => {
       ['/api/muse/accounts', { accounts: [], liveAuthPresent: false }],
       ['/api/muse/team', { available: false }],
       ['/api/feedback/inbox', { events: [] }],
-      ['/api/warden/status', { enabled: false, runs: [] }],
       ['/api/agents/status', { fixAgent: null, cloud: null }],
       ['/api/enter-gap', { claudeMs: 400, defaultMs: 100 }],
       ['/api/workflow/runtimes/health', {

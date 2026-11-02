@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 )
@@ -926,15 +927,52 @@ func cloneLayoutNode(node LayoutNode) LayoutNode {
 	return next
 }
 
-func (s *WorkspaceStore) Delete(name string) error {
+func (s *WorkspaceStore) Delete(name string) error { return s.deleteWorkspace(name, false) }
+
+// DeleteEmpty checks membership under the same lock as the durable deletion,
+// including panes added while an agent was waiting for the person's Allow.
+func (s *WorkspaceStore) DeleteEmpty(name string) error { return s.deleteWorkspace(name, true) }
+
+func (s *WorkspaceStore) deleteWorkspace(name string, emptyOnly bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if emptyOnly {
+		if err := s.validateEmptyWorkspaceLocked(name); err != nil {
+			return err
+		}
+	}
 	if w, ok := s.data[name]; ok && w.Protected {
 		return fmt.Errorf("workspace %q is protected and cannot be deleted", name)
 	}
 	next := s.candidate()
 	delete(next, name)
 	return s.commit(next)
+}
+
+// validateEmptyWorkspaceLocked is shared by preflight and commit; callers hold mu.
+func (s *WorkspaceStore) validateEmptyWorkspaceLocked(name string) error {
+	if name == "" || strings.EqualFold(name, "_current") {
+		return fmt.Errorf("choose a visible named workspace; _current is reserved")
+	}
+	w, ok := s.data[name]
+	if !ok {
+		return fmt.Errorf("workspace %q not found", name)
+	}
+	if w.Protected {
+		return fmt.Errorf("workspace %q is protected and cannot be deleted", name)
+	}
+	var layoutPanes []string
+	layoutPaneOrder(w.Layout, &layoutPanes)
+	if len(w.PaneIds) != 0 || len(w.Panes) != 0 || len(layoutPanes) != 0 {
+		return fmt.Errorf("workspace %q is not empty; move or close its panes first", name)
+	}
+	return nil
+}
+
+func (s *WorkspaceStore) CheckDeleteEmpty(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.validateEmptyWorkspaceLocked(name)
 }
 
 // EnsureDefault makes sure there's always at least one named workspace
@@ -979,8 +1017,8 @@ func (s *WorkspaceStore) Rename(oldName, newName string) error {
 	if oldName == "" || newName == "" {
 		return fmt.Errorf("names cannot be empty")
 	}
-	if oldName == newName {
-		return nil
+	if strings.EqualFold(oldName, "_current") || strings.EqualFold(newName, "_current") {
+		return fmt.Errorf("_current is reserved")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -988,8 +1026,13 @@ func (s *WorkspaceStore) Rename(oldName, newName string) error {
 	if !ok {
 		return fmt.Errorf("workspace %q not found", oldName)
 	}
-	if _, exists := s.data[newName]; exists {
-		return fmt.Errorf("workspace %q already exists", newName)
+	for name := range s.data {
+		if name != oldName && strings.EqualFold(name, newName) {
+			return fmt.Errorf("workspace %q already exists", newName)
+		}
+	}
+	if oldName == newName {
+		return nil
 	}
 	next := s.candidate()
 	delete(next, oldName)

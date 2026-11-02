@@ -86,6 +86,10 @@ type paneTurnBaseline struct {
 	// queued requests can run first, so only a turn whose prompt is this
 	// message counts, and none while the agent still lists it as queued.
 	Queued string
+	// HeldID is the held message when the person was typing in the pane
+	// (pane_draft_guard.go): the wait follows that one message, never an
+	// earlier one with the same text.
+	HeldID string
 	// Continued: wait_for_pane picking up a timed-out queued ask_pane; the
 	// work it waited on already started, so a settled screen can end it.
 	Continued bool
@@ -222,6 +226,20 @@ func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time
 			res.Screen = paneScreenText(p)
 			return res
 		}
+		// A message held while the person types has not gone in yet; one
+		// they discarded, or that could not be typed, never will.
+		if base.HeldID != "" {
+			switch status, err := p.heldDeliveryStatus(base.HeldID); status {
+			case string(deliveryHeld):
+				state = StateBusy
+				res.State = string(state)
+			case "discarded", "gone", "expired", "failed":
+				res.Status = "unsent"
+				res.Screen = paneScreenText(p)
+				res.Hint = heldUnsentHint(status, err)
+				return res
+			}
+		}
 		if base.Queued != "" && queuedAskPutBack(p, base.Queued) {
 			res.Status = "unsent"
 			res.Screen = paneScreenText(p)
@@ -292,6 +310,11 @@ func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time
 }
 
 func (a *apiServer) mcpToolAskPane(args map[string]any, callerPane string) any {
+	return a.mcpToolAskPaneAs(args, splitMCPCaller(callerPane))
+}
+
+func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
+	callerPane := c.ID
 	ref, _ := args["pane_id"].(string)
 	text, _ := args["text"].(string)
 	if strings.TrimSpace(text) == "" {
@@ -319,29 +342,42 @@ func (a *apiServer) mcpToolAskPane(args map[string]any, callerPane string) any {
 	// A busy pane with no queue SoluTerminal knows gets nothing typed, however
 	// short the message (send_input's guard skips one- and two-letter keys).
 	if !agent && p.Snapshot().Kind != "native" && sendInputPaneBusy(p) {
-		return a.refuseBusyPane(p, strings.TrimRight(unescapeAriaInput(text), "\r\n"), callerPane)
+		return a.refuseBusyPaneAs(p, strings.TrimRight(unescapeAriaInput(text), "\r\n"), c)
 	}
 	if !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}
 	base := a.paneTurnBaselineFor(p)
 	// Never steer: a working Codex that offers no queue key gets no Enter.
-	sent, outcome := a.mcpToolSendInputOutcome(map[string]any{"pane_id": paneID, "text": text}, deliveryNoSteer, callerPane)
-	if m, ok := sent.(map[string]any); ok && m["isError"] == true {
+	sent, outcome := a.mcpToolSendInputOutcomeAs(map[string]any{"pane_id": paneID, "text": text}, deliveryNoSteer, c)
+	if m, ok := sent.(map[string]any); ok && m["isError"] == true && outcome != deliveryHeld {
 		return sent
 	}
 	// A working Codex or Claude queues the message itself (pane_delivery.go);
 	// other panes refuse a busy pane in send_input. A message to a busy
 	// Claude is matched by its text even when its queue was not seen: Claude
 	// may take it with the running turn's next tool result.
-	if outcome == deliveryQueued || (agent && claude && (state == StateBusy || state == StateRecent)) {
-		// send_input turns a typed "\n" into a line break; match what was sent.
-		base.Queued = strings.TrimRight(unescapeAriaInput(text), "\r\n")
+	if outcome == deliveryQueued || outcome == deliveryHeld || (agent && claude && (state == StateBusy || state == StateRecent)) {
+		// send_input turns a typed "\n" into a line break and drops invisible
+		// format characters; match what was sent.
+		base.Queued = withoutInvisibleFormat(strings.TrimRight(unescapeAriaInput(text), "\r\n"))
+	}
+	if outcome == deliveryHeld {
+		// Found right after the send; empty when it was typed meanwhile, and
+		// then the wait goes by Queued alone.
+		sender := a.paneMessageSenderAs(c, paneID)
+		if sender == "" {
+			sender = "SoluTerminal"
+		}
+		// The pane holds the message without control characters; its turn's
+		// prompt will be that text.
+		base.Queued = heldText(base.Queued)
+		base.HeldID = p.pendingHeldID(sender, base.Queued, c.messageKey())
 	}
 	res := a.waitForPaneTurn(p, base, collabTimeout(args, askPaneDefaultTimeout), callerPane)
-	a.queuedAsks.drop(paneID, callerPane)
+	a.queuedAsks.drop(paneID, c.bucket())
 	if base.Queued != "" && queuedAskOpen(res.Status) {
-		a.queuedAsks.put(paneID, callerPane, base)
+		a.queuedAsks.put(paneID, c.bucket(), base)
 	}
 	if outcome == deliveryQueued {
 		res.Delivery = string(deliveryQueued)
@@ -352,10 +388,46 @@ func (a *apiServer) mcpToolAskPane(args map[string]any, callerPane string) any {
 			res.Hint += " Your message is still in its queue; do not resend."
 		}
 	}
+	noteHeldAsk(p, base.HeldID, &res)
 	return collabJSON(res)
 }
 
+// noteHeldAsk marks a wait result whose message is still held while the
+// person types in that pane.
+func noteHeldAsk(p *Pane, heldID string, res *collabResult) {
+	if heldID == "" || !queuedAskOpen(res.Status) {
+		return
+	}
+	if status, _ := p.heldDeliveryStatus(heldID); status != string(deliveryHeld) {
+		return
+	}
+	res.Delivery = string(deliveryHeld)
+	if reason := p.heldDeliveryReason(); strings.HasPrefix(reason, unsentInBoxPrefix) {
+		res.Hint = "held: " + reason + ", so nothing has been typed yet. Your message waits on the pane, queued behind it, and goes in once the person sends or clears that message. Call wait_for_pane to keep waiting; do not resend."
+		return
+	}
+	res.Hint = "queued: the person is typing in that pane, so nothing has been typed yet. Your message is held on the pane with your name and goes in by itself once their input box is empty and they have stopped typing. Call wait_for_pane to keep waiting; do not resend."
+}
+
+// heldUnsentHint explains a held message that will not be typed.
+func heldUnsentHint(status string, err error) string {
+	switch status {
+	case "discarded":
+		return "The person discarded your message: it was held while they typed in that pane, and nothing was typed. Do not resend it unless they ask."
+	case "expired":
+		return fmt.Sprintf("Your message was held for %s while the person typed in that pane and was dropped, untyped. Tell the user rather than resending.", heldDeliveryLimit)
+	case "failed":
+		return fmt.Sprintf("Your message was held while the person typed in that pane, and typing it afterwards failed: %v. Check the pane with read_pane_tail before resending.", err)
+	}
+	return "Your message was held while the person typed in that pane, and the pane's agent exited or restarted before it was typed. Nothing was typed."
+}
+
 func (a *apiServer) mcpToolWaitForPane(args map[string]any, callerPane string) any {
+	return a.mcpToolWaitForPaneAs(args, splitMCPCaller(callerPane))
+}
+
+func (a *apiServer) mcpToolWaitForPaneAs(args map[string]any, c paneCaller) any {
+	callerPane := c.ID
 	ref, _ := args["pane_id"].(string)
 	paneID := a.resolvePaneRef(ref, callerPane)
 	if paneID == "" {
@@ -370,7 +442,7 @@ func (a *apiServer) mcpToolWaitForPane(args map[string]any, callerPane string) a
 	}
 	// Continue a queued ask_pane that timed out: only its own turn counts,
 	// and the wait ends for good once it is answered, put back, or expired.
-	base, queued := a.queuedAsks.get(paneID, callerPane)
+	base, queued := a.queuedAsks.get(paneID, c.bucket())
 	base.Continued = queued
 	res := a.waitForPaneTurn(p, base, collabTimeout(args, waitPaneDefaultTimeout), callerPane)
 	if queued {
@@ -382,8 +454,9 @@ func (a *apiServer) mcpToolWaitForPane(args map[string]any, callerPane string) a
 			res.Hint += " Your queued message has not been answered yet; do not resend."
 		}
 		if !queuedAskOpen(res.Status) {
-			a.queuedAsks.drop(paneID, callerPane)
+			a.queuedAsks.drop(paneID, c.bucket())
 		}
+		noteHeldAsk(p, base.HeldID, &res)
 	}
 	if res.Status == "replied" {
 		res.Status = "idle"

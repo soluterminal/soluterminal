@@ -703,7 +703,7 @@ describe('refreshPanes tracks delegated pending DTO changes', () => {
   it('invalidates a flag-owner-only change without churning stable owners', async () => {
     const before = {
       id: 'pane_owner', cwd: '/x', cmd: ['claude'], title: 'worker',
-      status: 'running', state: 'idle', flagged: true, flagMemo: 'Review', flagOwner: 'warden',
+      status: 'running', state: 'idle', flagged: true, flagMemo: 'Review', flagOwner: 'agent:previous',
     } as PaneInfo;
     useStore.setState({ panes: { [before.id]: before }, layout: null, parkedPaneIds: [] });
     vi.spyOn(api, 'listPanes').mockResolvedValue([{ ...before, flagOwner: 'user' }]);

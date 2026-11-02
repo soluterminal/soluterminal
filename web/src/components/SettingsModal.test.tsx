@@ -45,7 +45,8 @@ describe('SettingsModal', () => {
       'aria-selected',
       'true',
     );
-    for (const label of ['Appearance', 'Terminal & panes', 'Sidebar', 'Privacy & security', 'Devices & updates', 'Warden', 'Services']) {
+    expect(screen.queryByRole('tab', { name: 'Warden' })).toBeNull();
+    for (const label of ['Appearance', 'Terminal & panes', 'Sidebar', 'Privacy & security', 'Devices & updates', 'Services']) {
       expect(screen.getByRole('tab', { name: label })).toBeInTheDocument();
     }
     expect(screen.getByText('Color theme')).toBeInTheDocument();
@@ -59,11 +60,11 @@ describe('SettingsModal', () => {
     expect(screen.getByText('After a restart')).toBeInTheDocument();
   });
 
-  it('hides the Tasks, Credentials and Warden tabs for a public install', () => {
+  it('hides the Tasks, Credentials tabs for a public install', () => {
     useEntitlements.setState({ loaded: true, team: false, operator: false, teamCredentials: false });
     render(<SettingsModal />);
     act(() => useSettings.getState().openSettings('tasks', 'tasks.modelsFallbacks'));
-    for (const label of ['Services', 'Credentials', 'Team pool', 'Warden']) {
+    for (const label of ['Services', 'Credentials', 'Team pool']) {
       expect(screen.queryByRole('tab', { name: label })).toBeNull();
     }
     // A deep link to a hidden tab lands on the first visible one.

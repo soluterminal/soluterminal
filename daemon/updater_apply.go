@@ -993,8 +993,16 @@ func updateManagedWslPidFile(binPath string, pid int) {
 }
 
 func isManagedWslDaemonArgs(args []string) bool {
-	return argValue(args, "--addr") == "0.0.0.0:8787" &&
-		argValue(args, "--backend-id") == "wsl" &&
+	// Current desktop launchers keep the primary listener on loopback and
+	// may add --wsl-addr for the Windows route. Older launchers used a
+	// wildcard primary listener. The backend and shell identity are required
+	// in both cases; a standalone loopback daemon is not desktop-managed.
+	switch argValue(args, "--addr") {
+	case "127.0.0.1:8787", "0.0.0.0:8787":
+	default:
+		return false
+	}
+	return argValue(args, "--backend-id") == "wsl" &&
 		argValue(args, "--shell-platform") == "windows-amd64"
 }
 

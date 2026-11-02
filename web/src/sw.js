@@ -333,6 +333,11 @@ self.addEventListener('push', (event) => {
   } else if (payload.state === 'schedule-fired') {
     title = `⏰ ${rawTitle || 'Schedule'}`;
     body = (summary || 'ran just now') + machineLine;
+  } else if (payload.state === 'user-ask') {
+    // New asks from agents (daemon asks_push.go): title = who is waiting
+    // (the daemon's pane labels), summary = the ask or "N new asks".
+    title = rawTitle ? `${rawTitle} · waiting on you` : 'Waiting on you';
+    body = (summary || 'An agent is waiting on you') + machineLine;
   } else if (payload.state === 'agent-needs-you') {
     title = `${rawTitle || 'Agent'} needs you`;
     body = (summary || 'Open Tasks to review the decision') + machineLine;
@@ -400,6 +405,7 @@ self.addEventListener('push', (event) => {
       renotify: payload.state === 'choice-prompt' || payload.state === 'reply-complete'
         || payload.state === 'schedule-error' || payload.state === 'schedule-fired'
         || payload.state === 'agent-needs-you' || payload.state === 'agent-error' || payload.state === 'agent-report'
+        || payload.state === 'user-ask'
         || payload.state === 'release-pending' || payload.state === 'workflow-completed'
         || payload.state === 'workflow-approval' || payload.state === 'workflow-failed'
         || payload.state === 'workflow-land-failed'

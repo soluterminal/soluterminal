@@ -17,10 +17,16 @@ type apiServer struct {
 	// queuedAsks keeps a timed-out queued ask_pane's baseline for the
 	// caller's wait_for_pane (mcp_collab_ask.go).
 	queuedAsks queuedAskBaselines
+	// asks is the user's "Waiting on you" list (asks.go); nil in tests that
+	// don't build one.
+	asks    *askStore
+	askPush askPushBatch
 	// ext holds optional features' per-server state (extSlot, extensions.go).
 	ext extState
 	// Agent-requested reveals share a cooldown across workspaces and clients.
-	spawnReveals spawnRevealLimiter
+	spawnReveals      spawnRevealLimiter
+	workspaceCreates  workspaceCreateLimiter
+	workspaceSaveLogs workspaceSaveLogLimiter
 	// The provider logins this daemon reports on: the provider CLI's own
 	// login (provider_login.go), or a credential manager that replaces it.
 	claudeLogin claudeLoginState
@@ -75,16 +81,12 @@ type apiServer struct {
 	aria  *Aria
 	// mcpScopes holds daemon-minted scoped capability tokens for /mcp —
 	// per-run restricted tool budgets for spawned judgment children (the
-	// Warden). Nil-safe (Lookup on nil = not found), so tests and partial
+	// managed agents). Nil-safe (Lookup on nil = not found), so tests and partial
 	// wiring degrade to "no scoped callers" rather than panicking.
 	mcpScopes *mcpScopeStore
 	// pane session. The cache is in-process only and is re-minted after an
 	// Authority-card edit; see orchestratorPaneScope.
 	orchestratorScopesMu sync.Mutex
-	// wardenSettings + warden back the opt-in fleet caretaker (DEFAULT OFF).
-	// Both nil in tests that don't exercise the warden surface.
-	wardenSettings *wardenSettingsStore
-	warden         *Warden
 	// relayPaneDirsForTest is TEST-ONLY (nil in production): extra directories
 	// treated like live pane cwds when building the relay file roots
 	// (files_relay_roots.go), so handler tests need no live Manager.
@@ -479,11 +481,7 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recovery/settings", a.handleRecoverySettings)
 	mux.HandleFunc("/api/native/settings", a.handleNativeSettings)
 	mux.HandleFunc("/api/update/settings", a.handleUpdateSettings)
-	mux.HandleFunc("/api/warden/settings", a.handleWardenSettings)
 
-	mux.HandleFunc("GET /api/warden/status", a.handleWardenStatus)
-	mux.HandleFunc("POST /api/warden/run-now", a.handleWardenRunNow)
-	mux.HandleFunc("GET /api/warden/runs/{name}", a.handleWardenRunLog)
 	mux.HandleFunc("POST /api/panes/{id}/resize", a.resizePane)
 	mux.HandleFunc("POST /api/panes/{id}/redraw", a.redrawPane)
 	mux.HandleFunc("POST /api/panes/{id}/rename", a.renamePane)
@@ -496,6 +494,8 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/panes/{id}/announce-delegation", a.setPaneAnnounceDelegation)
 	mux.HandleFunc("POST /api/panes/{id}/composer-state", a.setPaneComposerState)
 	mux.HandleFunc("POST /api/panes/{id}/flag", a.setPaneFlag)
+	mux.HandleFunc("GET /api/asks", a.listAsks)
+	mux.HandleFunc("POST /api/asks/{id}/dismiss", a.dismissAsk)
 	mux.HandleFunc("POST /api/panes/{id}/migrate-clean", a.migratePaneClean)
 	mux.HandleFunc("POST /api/panes/{id}/ack", a.ackPane)
 	mux.HandleFunc("/api/panes/{id}/io", handleWS(a.mgr, a.paneSocketInputPolicy))
@@ -773,6 +773,10 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/pane-confirmations/{id}", a.handleAnswerPaneConfirm)
 	mux.HandleFunc("GET /api/remote-devices", a.handleListRemoteDevices)
 	mux.HandleFunc("POST /api/remote-devices/enroll", a.handleEnrollRemoteDevice)
+	mux.HandleFunc("POST /api/remote-devices/enroll/reveal", a.handleRevealRemoteDevice)
+	mux.HandleFunc("POST /api/remote-devices/{id}/verify", a.handleVerifyRemoteDevice)
+	mux.HandleFunc("POST /api/remote-devices/{id}/verify/confirm", a.handleConfirmDeviceVerification)
+	mux.HandleFunc("POST /api/remote-devices/{id}/verify/reject", a.handleRejectDeviceVerification)
 	mux.HandleFunc("GET /api/remote-devices/{id}/status", a.handleRemoteDeviceStatus)
 	mux.HandleFunc("POST /api/remote-devices/{id}/approve", a.handleApproveRemoteDevice)
 	mux.HandleFunc("DELETE /api/remote-devices/{id}", a.handleRemoveRemoteDevice)
@@ -1119,6 +1123,8 @@ type paneDTO struct {
 	AttentionSummary string `json:"attentionSummary,omitempty"`
 	AttentionRisk    string `json:"attentionRisk,omitempty"`
 	AttentionAction  string `json:"attentionAction,omitempty"`
+	// Asks are the pane's open asks to the user (asks.go), oldest first.
+	Asks []paneAskDTO `json:"asks,omitempty"`
 	// LiveCwd is the current working directory of the shell process
 	// inside the pane — reflects the user's `cd`s since spawn, unlike
 	// Cwd (spawn-time). Fetched every /api/panes poll via a cheap
@@ -1637,8 +1643,18 @@ func (a *apiServer) listPanes(w http.ResponseWriter, _ *http.Request) {
 			revision, selected = "", ""
 		}
 	}
+	var asks map[string][]Ask
+	if a.asks != nil {
+		asks = a.asks.openByPane()
+	}
 	for i, p := range panes {
 		out[i] = makePaneDTOWithProcessSnapshot(p, a.aria, a.attention, snapshotPaneProcessesFromTree(p, tree))
+		if open := asks[p.ID]; len(open) > 0 {
+			source := a.paneCallerLabel(p)
+			for _, x := range open {
+				out[i].Asks = append(out[i].Asks, paneAskDTO{ID: x.ID, Text: x.Text, Source: source, CreatedAt: x.CreatedAt})
+			}
+		}
 		if a.codexLogin != nil && out[i].Kind == "" && out[i].Status == PaneRunning && (out[i].HasCodex || effectiveAgentKind(out[i].Agent) == agentCodex) {
 			st := readCodexLiveStatus(a.mgr.dataDir, p.ID)
 			owned := false
@@ -1982,6 +1998,9 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) deletePane(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "close a pane", "kill_pane") {
+		return
+	}
 	id := r.PathValue("id")
 	// Snapshot BEFORE the kill so "reopen" has the live identity and cwd.
 	closing, _ := a.mgr.Get(id)
@@ -1999,6 +2018,7 @@ func (a *apiServer) deletePane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recordPaneClose(id, closingOrigin, "app", false)
+	a.asksPaneClosed(id)
 	if a.panes != nil {
 		_ = a.panes.Remove(id)
 	}
@@ -2066,6 +2086,9 @@ type renameReq struct {
 }
 
 func (a *apiServer) renamePane(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "rename a pane", "rename_pane") {
+		return
+	}
 	id := r.PathValue("id")
 	p, ok := a.mgr.Get(id)
 	if !ok {
@@ -2195,6 +2218,9 @@ type flagReq struct {
 // pane metadata so the flag survives daemon restart — the user's whole
 // reason for flagging is to find this thread again later.
 func (a *apiServer) setPaneFlag(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "change a pane flag", "set_pane_flag") {
+		return
+	}
 	id := r.PathValue("id")
 	p, ok := a.mgr.Get(id)
 	if !ok {
@@ -2205,7 +2231,7 @@ func (a *apiServer) setPaneFlag(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req, defaultJSONBodyBytes) {
 		return
 	}
-	if err := a.mgr.changeCurrentFlag(p, a.panes, nil, req.Flagged, req.Memo, "user", ""); err != nil {
+	if err := a.mgr.changeCurrentFlag(p, a.panes, nil, req.Flagged, req.Memo, "user"); err != nil {
 		http.Error(w, "persist pane: "+err.Error(), 500)
 		return
 	}
@@ -2221,7 +2247,7 @@ func (a *apiServer) ackPane(w http.ResponseWriter, r *http.Request) {
 	}
 	// Viewing a pane acknowledges its notification, not its prompt. These
 	// detector-owned positions identify unresolved questions for attention,
-	// auto-decline and Warden; focus must not mint a new prompt or re-arm auto.
+	// auto-decline and attention; focus must not mint a new prompt or re-arm auto.
 	if pusher := a.getPusher(); pusher != nil {
 		pusher.AckPane(id)
 	}
@@ -2269,6 +2295,9 @@ func (a *apiServer) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) putWorkspace(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "create or save a workspace", "create_workspace") {
+		return
+	}
 	var wp Workspace
 	if !decodeJSON(w, r, &wp, defaultJSONBodyBytes) {
 		return
@@ -2292,6 +2321,9 @@ func (a *apiServer) putWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) moveWorkspacePane(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "move a pane between workspaces", "move_pane_to_workspace") {
+		return
+	}
 	source := r.PathValue("name")
 	var req struct {
 		PaneID          string `json:"paneId"`
@@ -2303,19 +2335,12 @@ func (a *apiServer) moveWorkspacePane(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req, defaultJSONBodyBytes) {
 		return
 	}
-	pane, ok := a.mgr.Get(req.PaneID)
-	if !ok {
-		http.Error(w, "pane not found", http.StatusNotFound)
-		return
-	}
-	snap := pane.Snapshot()
-	if snap.Role == paneRoleTaskOwner || snap.Status != PaneRunning {
-		http.Error(w, "only running ordinary panes can be moved", http.StatusBadRequest)
-		return
-	}
-	src, dst, err := a.ws.MovePane(source, req.Destination, req.PaneID, req.Direction, req.TargetPaneID, req.PaneMoveVersion)
+	result, err := a.moveWorkspacePaneNow(source, req.Destination, req.PaneID, req.Direction, req.TargetPaneID, req.PaneMoveVersion)
 	if err != nil {
 		status := http.StatusBadRequest
+		if errors.Is(err, errWorkspacePaneNotFound) {
+			status = http.StatusNotFound
+		}
 		if errors.Is(err, errWorkspacePersistence) {
 			status = http.StatusInternalServerError
 		}
@@ -2325,15 +2350,15 @@ func (a *apiServer) moveWorkspacePane(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
-		Source      *Workspace `json:"source"`
-		Destination *Workspace `json:"destination"`
-	}{Source: src, Destination: dst})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *apiServer) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "delete a workspace", "delete_workspace") {
+		return
+	}
 	name := r.PathValue("name")
-	if err := a.ws.Delete(name); err != nil {
+	if err := a.deleteWorkspaceNow(name, false); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -2341,6 +2366,9 @@ func (a *apiServer) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) renameWorkspace(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "rename a workspace", "rename_workspace") {
+		return
+	}
 	old := r.PathValue("name")
 	var req struct {
 		NewName string `json:"newName"`
@@ -2357,7 +2385,7 @@ func (a *apiServer) renameWorkspace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "that name is reserved", 400)
 		return
 	}
-	if err := a.ws.Rename(old, newName); err != nil {
+	if err := a.renameWorkspaceNow(old, newName); err != nil {
 		if errors.Is(err, errWorkspacePersistence) {
 			http.Error(w, "Workspace could not be saved. Please retry.", http.StatusInternalServerError)
 			return
@@ -2369,6 +2397,9 @@ func (a *apiServer) renameWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) setWorkspaceContextPack(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "change a workspace context pack") {
+		return
+	}
 	name := r.PathValue("name")
 	if _, ok := a.ws.Get(name); !ok {
 		http.Error(w, "workspace not found", http.StatusNotFound)

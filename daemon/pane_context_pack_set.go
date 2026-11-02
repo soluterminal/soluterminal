@@ -28,6 +28,9 @@ type setContextPackReq struct {
 // agent in place. Existing provider conversations are preserved exactly like a
 // role/effort respawn; session-less Claude starts fresh.
 func (a *apiServer) handleSetContextPack(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "change a pane context pack") {
+		return
+	}
 	if !contextPackChangeEnabled() {
 		http.Error(w, "context pack change is disabled via SOLU_PANE_CONTEXT_PACK", http.StatusBadRequest)
 		return

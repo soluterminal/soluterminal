@@ -70,10 +70,10 @@ function MobileAttentionSheet({ count, onClose }: { count: number; onClose: () =
   return createPortal(
     <>
       <div className="mobile-attn-backdrop" onClick={onClose} />
-      <div className="mobile-attn-sheet" role="dialog" aria-label="Panes that need you">
+      <div className="mobile-attn-sheet" role="dialog" aria-label="Waiting on you">
         <div className="mobile-attn-head">
           <span className="mobile-attn-title">
-            {count} pane{count === 1 ? '' : 's'} need{count === 1 ? 's' : ''} you
+            {count} waiting on you
           </span>
           <button type="button" className="mobile-attn-close" onClick={onClose} aria-label="Close">
             ✕
@@ -324,10 +324,10 @@ export function MobileTabBar({
               setAttnOpen(true);
             }
           }}
-          title={`${attnCount} pane${attnCount === 1 ? '' : 's'} need${attnCount === 1 ? 's' : ''} you`}
+          title={`${attnCount} waiting on you`}
           aria-label={attnCount === 1
-            ? '1 pane needs you — go to it'
-            : `${attnCount} panes need you — open the list`}
+            ? '1 waiting on you — go to it'
+            : `${attnCount} waiting on you — open the list`}
         >
           <span className="bottombar-attn-badge" aria-hidden>
             {attnCount}

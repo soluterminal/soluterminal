@@ -30,7 +30,7 @@ export const FEATURE_GATES: readonly FeatureGate[] = [
   { file: 'components/SetupChecklist.tsx', flag: 'operator', surface: 'Muse row' },
   { file: 'components/WelcomeOverlay.tsx', flag: 'operator', surface: 'Orchestrator line on the welcome slides' },
   { file: 'components/Topbar.tsx', flag: 'operator', surface: 'Refresh view button' },
-  { file: 'components/SettingsModal.tsx', flag: 'operator', surface: 'Services and Warden tabs' },
+  { file: 'components/SettingsModal.tsx', flag: 'operator', surface: 'Services tab' },
   { file: 'components/CommandPalette.tsx', flag: 'operator', surface: 'Tasks and Orchestrator palette actions' },
   { file: 'components/Pane.tsx', flag: 'operator', surface: 'Announce delegation, convert to Orchestrator' },
   { file: 'components/NativePane.tsx', flag: 'operator', surface: 'Announce delegation, convert to Orchestrator' },

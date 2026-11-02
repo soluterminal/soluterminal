@@ -234,9 +234,70 @@ func submitAgentMessage(p *Pane, body string, hasClaude bool, senders ...string)
 }
 
 func deliverAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode, senders ...string) (wrote int, outcome deliveryOutcome, err error) {
+	return deliverOrHoldAgentMessage(p, body, hasClaude, mode, nil, senders...)
+}
+
+// deliverOrHoldAgentMessage is deliverAgentMessage that, for an agent's
+// message (deliveryNoSteer), holds it instead while the person is typing in
+// the pane or other messages are held (pane_draft_guard.go). A held message
+// returns deliveryHeld with nothing typed; delivered runs once it is typed.
+// senders carries the display label, then an optional stable caller key.
+func deliverOrHoldAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode, delivered func(deliveryOutcome), senders ...string) (wrote int, outcome deliveryOutcome, err error) {
 	p.deliveryMu.Lock()
 	defer p.deliveryMu.Unlock()
+	body = strings.TrimRight(body, "\r\n")
+	if mode != deliveryNoSteer {
+		return typeAgentMessageLocked(p, body, hasClaude, mode, draftUnchecked, senders...)
+	}
+	sender := "SoluTerminal"
+	if len(senders) > 0 && senders[0] != "" {
+		sender = senders[0]
+	}
+	var senderKeys []string
+	if len(senders) > 1 {
+		senderKeys = senders[1:]
+	}
+	if held, err := p.holdDelivery(body, hasClaude, mode, sender, delivered, senderKeys...); held {
+		if err != nil {
+			return 0, "", err
+		}
+		return 0, deliveryHeld, nil
+	}
+	wrote, outcome, err = typeAgentMessageLocked(p, body, hasClaude, mode, draftBoxAndTyping, senders...)
+	if errors.Is(err, errDraftGuardHeld) {
+		reason := p.draftGuardReason(!hasClaude, true, time.Now(), p.humanComposerPendingSnapshot)
+		if reason == "" {
+			reason = "the person is typing"
+		}
+		p.setHeldReason(reason)
+		if err := p.enqueueHeldDelivery(body, hasClaude, mode, sender, delivered, senderKeys...); err != nil {
+			return 0, "", err
+		}
+		return 0, deliveryHeld, nil
+	}
+	return wrote, outcome, err
+}
+
+// draftCheck is what typeAgentMessageLocked rechecks under the writer lock
+// before the paste: nothing (the person's own message box, schedules), the
+// input box (the person pressed Send now on a held message), or the input
+// box and the person's keystroke recency (an agent's message).
+type draftCheck int
+
+const (
+	draftUnchecked draftCheck = iota
+	draftBoxOnly
+	draftBoxAndTyping
+)
+
+// typeAgentMessageLocked types body and submits it. Caller holds deliveryMu.
+// With a draftCheck it returns errDraftGuardHeld, nothing typed, when the
+// person's draft forbids typing at the instant of the paste.
+func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryMode, check draftCheck, senders ...string) (wrote int, outcome deliveryOutcome, err error) {
 	defer func() {
+		if errors.Is(err, errDraftGuardHeld) {
+			return // recorded as held by the caller
+		}
 		ev := coordinationEvent{Kind: "deliver", Pane: p.ID, Outcome: string(outcome)}
 		if len(senders) > 0 {
 			ev.By = senders[0]
@@ -276,7 +337,43 @@ func deliverAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode
 	if codex {
 		first = []byte("\x1b[200~" + body + "\x1b[201~")
 	}
-	wrote, err = p.Write(first)
+	// With a draft check, the person's draft and keystrokes are read again
+	// under the writer lock, so a keystroke cannot land between the check
+	// and the paste. Each later key requires that no input came in since
+	// ours: a keystroke after the paste would be submitted with the message.
+	var rev uint64
+	keyWrite := p.Write
+	if check != draftUnchecked {
+		wrote, err = p.writeWithPrecondition(first, true, false, func() error {
+			if p.draftGuardReason(codex, check == draftBoxAndTyping, time.Now(), p.promptRec.humanDraft) != "" {
+				return errDraftGuardHeld
+			}
+			rev = p.inputRevision.Load()
+			p.agentDeliveryWrite = true
+			return nil
+		})
+		if errors.Is(err, errDraftGuardHeld) {
+			return 0, "", err
+		}
+		keyWrite = func(key []byte) (int, error) {
+			rev++
+			want := rev
+			return p.writeWithPrecondition(key, true, false, func() error {
+				if p.inputRevision.Load() != want {
+					return errDraftGuardTypedAfterPaste
+				}
+				p.agentDeliveryWrite = true
+				return nil
+			})
+		}
+	} else {
+		// No path types onto a put-back message (the person's message box,
+		// schedules, ARIA mentions): it would be submitted with this one.
+		wrote, err = p.writeWithPrecondition(first, true, false, p.putBackInputCheck)
+		if errors.Is(err, errPutBackInBox) {
+			return 0, "", err
+		}
+	}
 	if err != nil {
 		return wrote, "", errors.New("write failed: " + err.Error())
 	}
@@ -289,8 +386,12 @@ func deliverAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode
 	if stop != nil {
 		return wrote, "", p.stopAfterPaste(stop, seen, sender, body, hasClaude)
 	}
-	n, err := p.Write(key)
+	n, err := keyWrite(key)
 	wrote += n
+	if errors.Is(err, errDraftGuardTypedAfterPaste) {
+		revision = rev
+		return wrote, deliveryLeftInComposer, nil
+	}
 	if err != nil {
 		return wrote, "", errors.New("submit key failed: " + err.Error())
 	}
@@ -319,8 +420,12 @@ func deliverAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode
 	}
 	queue = queue || claudeBusy
 	revision = p.inputRevision.Load() + 1
-	n, err = p.Write(key)
+	n, err = keyWrite(key)
 	wrote += n
+	if errors.Is(err, errDraftGuardTypedAfterPaste) {
+		revision = rev
+		return wrote, deliveryLeftInComposer, nil
+	}
 	if err != nil {
 		return wrote, "", errors.New("second submit key failed: " + err.Error())
 	}
@@ -430,6 +535,15 @@ func (p *Pane) leftComposerOutcome(codex, queue bool, body string, senders ...st
 	return deliverySubmitted
 }
 
+// recordPutBackMessage is recordUnsentMessage for a queued message the agent
+// put back into its input box (an interrupted Codex turn, Up in Claude),
+// usually because the person stopped the turn: Send and Clear are theirs.
+func (p *Pane) recordPutBackMessage(sender, body string, claude bool, revision uint64) {
+	p.mu.Lock()
+	p.unsentMessage = &unsentPaneMessage{ID: fmt.Sprintf("%d", time.Now().UnixNano()), Sender: sender, PutBack: true, body: body, claude: claude, revision: revision, connection: p.agentConn}
+	p.mu.Unlock()
+}
+
 func (p *Pane) recordUnsentMessage(sender, body string, claude bool, revision uint64) {
 	p.mu.Lock()
 	p.unsentMessage = &unsentPaneMessage{ID: fmt.Sprintf("%d", time.Now().UnixNano()), Sender: sender, body: body, claude: claude, revision: revision, connection: p.agentConn}
@@ -484,7 +598,7 @@ func (p *Pane) watchQueuedMessage(body, by string, codex bool) {
 			p.deliveryMu.Unlock()
 			continue
 		case holds:
-			p.recordUnsentMessage(sender, body, !codex, p.inputRevision.Load())
+			p.recordPutBackMessage(sender, body, !codex, p.inputRevision.Load())
 			outcome = string(deliveryLeftInComposer)
 		default:
 			outcome = string(deliverySubmitted)

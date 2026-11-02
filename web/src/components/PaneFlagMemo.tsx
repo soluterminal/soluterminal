@@ -26,7 +26,6 @@ export function PaneFlagMemo({
   return (
     <div className="pane-flag-memo" role="note">
       <span className="pane-flag-memo-icon" aria-hidden><IconFlag size={13} style={{ verticalAlign: '-2px' }} /></span>
-      {pane.flagOwner === 'warden' && <span className="pane-flag-memo-owner">Warden</span>}
       {editing ? (
         <input
           className="pane-flag-memo-input"

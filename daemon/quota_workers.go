@@ -791,6 +791,12 @@ type workerCredentialHooks struct {
 var workerCredentialSlot extSlot[workerCredentialHooks]
 
 func (a *apiServer) validatedWorkerOrigin(origin *PaneOrigin, req createPaneReq) *PaneOrigin {
+	// A client-provided baseline must never exempt dirty work from archiving.
+	// Restores below may recover the immutable daemon-owned record instead.
+	if origin != nil {
+		origin = origin.clone()
+		origin.WorkerGit = nil
+	}
 	if !req.Restore && (origin == nil || (origin.Worker == nil && origin.TeamKind == "" && origin.LeadRole == "")) {
 		return origin
 	}
@@ -843,6 +849,7 @@ func (a *apiServer) validatedWorkerOrigin(origin *PaneOrigin, req createPaneReq)
 			origin.Worker = nil
 		}
 		origin.TeamKind, origin.LeadRole = kindFrom.Origin.TeamKind, kindFrom.Origin.LeadRole
+		origin.WorkerGit = kindFrom.Origin.WorkerGit
 		// Only an agent-started pane can be a worker (nextTeamOrigin).
 		if origin.TeamKind == paneTeamWorker && origin.Source != paneOriginAgent {
 			origin.TeamKind = ""

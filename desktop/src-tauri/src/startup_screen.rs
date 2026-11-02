@@ -63,7 +63,7 @@ fn fallback_detail(err: &str) -> String {
         };
     }
     if err.contains("not reachable within") {
-        return "The WSL background service did not answer in time.".to_string();
+        return "The WSL service did not answer. If mode detection failed, enable localhostForwarding=true under [wsl2] in %USERPROFILE%\\.wslconfig; save your Linux work, quit SoluTerminal, run wsl --shutdown in PowerShell, then reopen the app.".to_string();
     }
     String::new()
 }
@@ -244,7 +244,7 @@ mod tests {
         assert!(detail.contains("wsl -d Ubuntu-24.04 -- kill 600"));
         assert_eq!(
             fallback_detail("WSL daemon was not reachable within 120s via []: x"),
-            "The WSL background service did not answer in time."
+            "The WSL service did not answer. If mode detection failed, enable localhostForwarding=true under [wsl2] in %USERPROFILE%\\.wslconfig; save your Linux work, quit SoluTerminal, run wsl --shutdown in PowerShell, then reopen the app."
         );
         assert_eq!(fallback_detail("spawn wsl.exe: nope"), "");
     }

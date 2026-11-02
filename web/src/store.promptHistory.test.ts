@@ -48,7 +48,7 @@ describe('scoped pane prompt history', () => {
     vi.spyOn(api, 'listWorkspaces').mockResolvedValue([]);
     vi.spyOn(api, 'listPorts').mockResolvedValue([]);
     for (const method of ['refreshUpdateStatus', 'loadRecoverySettings', 'loadNativeSettings',
-      'loadUpdateSettings', 'loadWardenSettings', 'loadOrchestratorHosts', 'refreshSchedules'] as const) {
+      'loadUpdateSettings', 'loadOrchestratorHosts', 'refreshSchedules'] as const) {
       vi.spyOn(useStore.getState(), method).mockResolvedValue(undefined);
     }
     await useStore.getState().bootstrap();

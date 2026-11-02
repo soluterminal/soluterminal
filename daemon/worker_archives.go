@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,18 +36,24 @@ type workerReadReceipt struct {
 	Input uint64
 	At    time.Time
 }
+type workerRetention struct{ Lead, Reason string }
+
 type workerArchiveState struct {
-	mu           sync.Mutex
-	operation    sync.Mutex
-	loaded       bool
-	err          error
-	entries      []workerArchiveEntry
-	reads        map[string]workerReadReceipt
-	checked      map[string]time.Time
-	flagged      map[string]string // pane id → the retention already flagged to its lead
-	beforeCommit func()            // test-only race seam; nil in production
-	teardown     func(*Pane) error // test-only failure seam; nil in production
-	context      context.Context
+	noticeMu         sync.Mutex
+	retained         map[string]workerRetention
+	noticesLoaded    bool
+	mu               sync.Mutex
+	operation        sync.Mutex
+	loaded           bool
+	err              error
+	entries          []workerArchiveEntry
+	reads            map[string]workerReadReceipt
+	checked          map[string]time.Time
+	flagged          map[string]string // pane id → the retention already flagged to its lead
+	beforeCommit     func()            // test-only race seam; nil in production
+	beforeGitRecheck func()            // test-only slow-proof seam; nil in production
+	teardown         func(*Pane) error // test-only failure seam; nil in production
+	context          context.Context
 }
 
 var workerArchiveSlot extSlot[workerArchiveState]
@@ -136,95 +144,183 @@ func (a *apiServer) noteWorkerReplyRead(caller string, p *Pane, reply paneReply)
 	s.reads[p.ID] = workerReadReceipt{Pane: p, Turn: key, Input: p.inputRevision.Load(), At: time.Now()}
 }
 
-type workerGitProof struct{ Head, Upstream string }
-
-func workerGitCleanPushed(ctx context.Context, cwd string) (workerGitProof, string) {
-	// Do not inherit injected git config, alternate indexes or external diff.
-	env := []string{}
-	for _, item := range os.Environ() {
-		if !strings.HasPrefix(item, "GIT_") {
-			env = append(env, item)
-		}
-	}
-	env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
-	options := []string{"--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", "-c", "core.untrackedCache=false"}
-	run := func(args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, "git", append(append([]string{}, options...), args...)...)
-		cmd.Dir, cmd.Env = cwd, env
-		out, err := cmd.Output()
-		return strings.TrimSpace(string(out)), err
-	}
-	heads, err := run("rev-parse", "HEAD", "@{upstream}")
-	parts := strings.Fields(heads)
-	if err != nil || len(parts) != 2 {
-		return workerGitProof{}, "work has no pushed upstream"
-	}
-	paths, err := run("rev-parse", "--path-format=absolute", "--git-path", "objects", "--git-path", "index", "--show-toplevel")
-	locations := strings.Split(paths, "\n")
-	if err != nil || len(locations) != 3 {
-		return workerGitProof{}, "worktree paths cannot be verified"
-	}
-	index, err := run("ls-files", "--stage")
-	if err != nil {
-		return workerGitProof{}, "worktree index cannot be verified"
-	}
-	for _, line := range strings.Split(index, "\n") {
-		if strings.HasPrefix(line, "160000 ") {
-			return workerGitProof{}, "submodule work requires manual review"
-		}
-	}
-	// Status may invoke clean/process filters. Use a private Git directory
-	// with no driver definitions, even if the worker concurrently edits its
-	// config or attributes. Metadata-only commands above/below never run drivers.
-	// Local info/exclude rules are deliberately omitted (conservative retention).
-	view, err := os.MkdirTemp("", "solu-worker-git-*")
-	if err != nil {
-		return workerGitProof{}, "worktree status cannot be verified"
-	}
-	defer os.RemoveAll(view)
-	for _, dir := range []string{"objects", "refs"} {
-		if err := os.Mkdir(filepath.Join(view, dir), 0700); err != nil {
-			return workerGitProof{}, "worktree status cannot be verified"
-		}
-	}
-	if err := os.WriteFile(filepath.Join(view, "HEAD"), []byte(parts[0]+"\n"), 0600); err != nil {
-		return workerGitProof{}, "worktree status cannot be verified"
-	}
-	cmd := exec.CommandContext(ctx, "git", append(options, "--git-dir="+view, "--work-tree="+locations[2], "status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=all")...)
-	cmd.Dir = locations[2]
-	cmd.Env = append(env, "GIT_OBJECT_DIRECTORY="+locations[0], "GIT_INDEX_FILE="+locations[1])
-	out, err := cmd.Output()
-	status := strings.TrimSpace(string(out))
-	if err != nil {
-		return workerGitProof{}, "worktree status cannot be verified"
-	}
-	if status != "" {
-		return workerGitProof{}, "uncommitted work"
-	}
-	ahead, err := run("rev-list", "--count", "@{upstream}..HEAD")
-	if err != nil || ahead != "0" {
-		return workerGitProof{}, "unpushed work"
-	}
-	return workerGitProof{parts[0], parts[1]}, ""
-}
 func workerArchiveAllowed(finished, final, read, noInput, cleanPushed bool) (bool, bool) {
 	if !finished || !final || !noInput {
 		return false, false
 	}
 	return read && cleanPushed, !read || !cleanPushed
 }
+
+// Retentions survive restart, including entries hidden by the bounded memo.
+// Existing single-worker notices seed the metadata on first use.
+func (a *apiServer) loadWorkerRetentionsLocked(s *workerArchiveState) {
+	if s.noticesLoaded {
+		return
+	}
+	s.noticesLoaded = true
+	s.retained = map[string]workerRetention{}
+	if a.dataDir != "" {
+		if raw, err := os.ReadFile(filepath.Join(a.dataDir, "worker-retentions.json")); err == nil {
+			if err := json.Unmarshal(raw, &s.retained); err != nil {
+				log.Printf("worker retention load: %v", err)
+			}
+		}
+	}
+	if s.retained == nil {
+		s.retained = map[string]workerRetention{}
+	}
+	for _, p := range a.mgr.List() {
+		snap := p.Snapshot()
+		if !snap.Flagged || snap.FlagOwner != "worker-manager" {
+			continue
+		}
+		for _, line := range strings.Split(snap.FlagMemo, "\n") {
+			line, ok := strings.CutPrefix(line, "Worker ")
+			if !ok {
+				continue
+			}
+			worker, reason, ok := strings.Cut(line, " retained: ")
+			if ok && worker != "" {
+				if _, exists := s.retained[worker]; !exists {
+					s.retained[worker] = workerRetention{snap.ID, reason}
+				}
+			}
+		}
+	}
+}
+func (a *apiServer) retainedWorker(id string) (workerRetention, bool) {
+	s := a.workerArchives()
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	a.loadWorkerRetentionsLocked(s)
+	note, ok := s.retained[id]
+	return note, ok
+}
+
+func (a *apiServer) saveWorkerRetentionsLocked(s *workerArchiveState) {
+	if a.dataDir == "" {
+		return
+	}
+	raw, err := json.Marshal(s.retained)
+	if err == nil {
+		err = writeFileAtomicSynced(filepath.Join(a.dataDir, "worker-retentions.json"), raw, 0600)
+	}
+	if err != nil {
+		log.Printf("worker retention save: %v", err)
+	}
+}
+
+// noticeMu serializes aggregate memo updates, independently of archive/storage
+// locks. The flag transaction still checks ownership against concurrent UI writes.
 func (a *apiServer) flagWorkerLead(lead, worker, reason string) {
+	s := a.workerArchives()
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	a.loadWorkerRetentionsLocked(s)
+	old := s.retained[worker]
+	s.retained[worker] = workerRetention{lead, reason}
+	a.saveWorkerRetentionsLocked(s)
+	if old.Lead != "" && old.Lead != lead {
+		a.syncWorkerLeadFlagLocked(s, old.Lead, false)
+	}
+	a.syncWorkerLeadFlagLocked(s, lead, true)
+}
+func (a *apiServer) syncWorkerLeadFlagLocked(s *workerArchiveState, lead string, create bool) {
 	p, ok := a.mgr.Get(lead)
 	if !ok {
 		return
 	}
-	memo := clipRunes("Worker "+worker+" retained: "+reason, flagMemoMaxRunes)
+	var ids []string
+	for id, note := range s.retained {
+		if note.Lead == lead {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	var lines []string
+	for i, id := range ids {
+		if i == 4 {
+			lines = append(lines, fmt.Sprintf("+%d more retained workers", len(ids)-i))
+			break
+		}
+		lines = append(lines, "Worker "+id+" retained: "+clipRunes(oneLine(s.retained[id].Reason), 70))
+	}
+	memo := strings.Join(lines, "\n")
 	_ = a.mgr.changeCurrentFlag(p, a.panes, func(prev PaneSnapshot) error {
-		if prev.Flagged && (prev.FlagOwner != "worker-manager" || prev.FlagMemo == memo) {
+		if (prev.Flagged && prev.FlagOwner != "worker-manager") || (!prev.Flagged && !create) || (prev.Flagged && prev.FlagMemo == memo) {
 			return errors.New("preserve existing flag")
 		}
 		return nil
-	}, true, memo, "worker-manager", "")
+	}, len(ids) > 0, memo, "worker-manager")
+}
+func (a *apiServer) clearWorkerRetention(worker string) {
+	s := a.workerArchives()
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	a.loadWorkerRetentionsLocked(s)
+	s.mu.Lock()
+	delete(s.flagged, worker)
+	s.mu.Unlock()
+	if note, ok := s.retained[worker]; ok {
+		delete(s.retained, worker)
+		a.saveWorkerRetentionsLocked(s)
+		a.syncWorkerLeadFlagLocked(s, note.Lead, false)
+	}
+}
+func (a *apiServer) reconcileWorkerRetentions(enabled bool) {
+	s := a.workerArchives()
+	// A detached worker with an unfinished durable archive still has pending
+	// cleanup. expireWorkerArchivesLocked retries that cleanup independently
+	// of auto-archive policy; keep its notice until the retry is persisted.
+	s.mu.Lock()
+	a.loadWorkerArchivesLocked(s)
+	pending := map[string]bool{}
+	for _, entry := range s.entries {
+		if !entry.Ready {
+			pending[entry.Snap.ID] = true
+		}
+	}
+	s.mu.Unlock()
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	a.loadWorkerRetentionsLocked(s)
+	changed := false
+	leads := map[string]bool{}
+	for _, p := range a.mgr.List() {
+		snap := p.Snapshot()
+		if snap.Flagged && snap.FlagOwner == "worker-manager" {
+			leads[p.ID] = true
+		}
+	}
+	for id, note := range s.retained {
+		leads[note.Lead] = true
+		p, ok := a.mgr.Get(id)
+		if !ok {
+			if pending[id] {
+				continue
+			}
+			delete(s.retained, id)
+			changed = true
+			s.mu.Lock()
+			delete(s.flagged, id)
+			s.mu.Unlock()
+			continue
+		}
+		snap := p.Snapshot()
+		if !enabled || paneTeamKind(snap.Origin) != paneTeamWorker || snap.Origin.Worker == nil || snap.Origin.Worker.State != "finished" {
+			delete(s.retained, id)
+			changed = true
+			s.mu.Lock()
+			delete(s.flagged, id)
+			s.mu.Unlock()
+		}
+	}
+	if changed {
+		a.saveWorkerRetentionsLocked(s)
+	}
+	for lead := range leads {
+		a.syncWorkerLeadFlagLocked(s, lead, false)
+	}
 }
 func (a *apiServer) archiveFinishedWorkers(now time.Time) {
 	q := a.workers()
@@ -246,6 +342,7 @@ func (a *apiServer) archiveFinishedWorkers(now time.Time) {
 	go func() {
 		defer s.operation.Unlock()
 		a.expireWorkerArchivesLocked(now)
+		a.reconcileWorkerRetentions(enabled)
 		if !enabled {
 			return
 		}
@@ -275,6 +372,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	snap := p.Snapshot()
 	// Only workers are archived: never a lead or the user's own pane.
 	if a.ws == nil || a.panes == nil || snap.Origin == nil || snap.Origin.Worker == nil || snap.Origin.Worker.State != "finished" || paneTeamKind(snap.Origin) != paneTeamWorker {
+		a.clearWorkerRetention(p.ID)
 		return
 	}
 	reply := a.paneLatestReply(p)
@@ -289,7 +387,12 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	// restart cannot be reconstructed from its ephemeral writer counter.
 	final := key != "" && !reply.CompletedAt.Before(started) && !reply.CompletedAt.After(now)
 	noInput := atomic.LoadInt64(&p.LastInputMs) == 0 || atomic.LoadInt64(&p.LastInputMs) < reply.CompletedAt.UnixMilli()
-	if !enabled || !final || !noInput || p.computeStateCached() != StateIdle {
+	if !enabled || key == "" || !noInput {
+		a.clearWorkerRetention(p.ID)
+		return
+	}
+	// Transient non-idle observations do not mean retained work vanished.
+	if p.computeStateCached() != StateIdle {
 		return
 	}
 	s := a.workerArchives()
@@ -316,11 +419,28 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		return
 	}
 	read := receipt.Pane == p && receipt.Turn == key && receipt.Input == p.inputRevision.Load() && !receipt.At.Before(reply.CompletedAt)
-	cwd := snap.Cwd // pane's assigned worktree, not a task subprocess's temporary cwd
+	live := liveCwdOfPane(p)
 	ctx, cancel := context.WithTimeout(baseContext, 4*time.Second)
-	proof, reason := workerGitCleanPushed(ctx, cwd)
+	proof, reason := workerGitForArchive(ctx, snap, live)
 	cancel()
-	allowed, flag := workerArchiveAllowed(true, final, read, noInput, reason == "")
+	if !final {
+		// Losing ephemeral read receipts at restart is not evidence of a new
+		// unread result. Preserve known notices, but do not re-flag a silent or
+		// dismissed clean worker merely because its old final cannot archive.
+		prior, known := a.retainedWorker(p.ID)
+		if reason == "" {
+			if read || (known && !strings.Contains(prior.Reason, "final reply unread by lead") && !strings.HasPrefix(prior.Reason, "archive ")) {
+				a.clearWorkerRetention(p.ID)
+			}
+			return
+		}
+		if known && prior.Lead == a.workerLeadFor(snap.Origin) && (prior.Reason == reason || (!read && prior.Reason == reason+"; final reply unread by lead")) {
+			return
+		}
+		a.flagWorkerLead(a.workerLeadFor(snap.Origin), p.ID, reason)
+		return
+	}
+	allowed, flag := workerArchiveAllowed(true, key != "", read, noInput, reason == "")
 	if !allowed {
 		if flag {
 			if !read {
@@ -379,13 +499,24 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	if copyErr != nil || syncErr != nil || closeErr != nil || n > 128<<20 || syncDir(dir) != nil {
 		return
 	}
-	// Commit under the same writer lock as terminal/native/conditional input.
-	// Once committed, all input paths refuse the old process; reopening has a new id.
+	// Finish slow Git verification before taking manager/input locks. Input
+	// arriving during the proof changes the revision and rejects commit below.
 	if s.beforeCommit != nil {
 		s.beforeCommit()
 	}
+	if s.beforeGitRecheck != nil {
+		s.beforeGitRecheck()
+	}
+	ctx, cancel = context.WithTimeout(baseContext, 4*time.Second)
+	fresh, why := workerGitForArchive(ctx, p.Snapshot(), liveCwdOfPane(p))
+	cancel()
+	if why != "" || fresh != proof {
+		return
+	}
 	var entry workerArchiveEntry
 	committed := false
+	// Once committed under the writer fence, input refuses the old process;
+	// reopening has a new ID. Recheck identity/input after the slow proof.
 	a.mgr.withCurrentPane(p, func() {
 		p.agentWriteMu.Lock()
 		defer p.agentWriteMu.Unlock()
@@ -397,12 +528,6 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			return
 		}
 		if !q.archiveEnabled.Load() {
-			return
-		}
-		ctx, cancel := context.WithTimeout(baseContext, 4*time.Second)
-		fresh, why := workerGitCleanPushed(ctx, cwd)
-		cancel()
-		if why != "" || fresh != proof {
 			return
 		}
 		current := p.Snapshot()
@@ -467,6 +592,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			return
 		}
 	}
+	a.asksPaneClosed(p.ID)
 	s.mu.Lock()
 	next := append([]workerArchiveEntry(nil), s.entries...)
 	for i := range next {
@@ -494,6 +620,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		release()
 	}
 
+	a.clearWorkerRetention(p.ID)
 	if a.uiBus != nil {
 		a.uiBus.publish(uiEvent{Type: "pane.archived", PaneID: p.ID, Workspace: entry.Workspace, Text: "Worker archived; reopen from its lead"})
 	}

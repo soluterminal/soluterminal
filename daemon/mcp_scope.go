@@ -14,7 +14,7 @@ import (
 // caller (tokenless loopback, or the daemon token). That is right for
 // interactive panes — a human is in the loop and Claude Code's own
 // permission prompts gate each call — and wrong for daemon-spawned
-// judgment runs (the Warden): a headless child's tool budget must be
+// managed-agent runs: a headless child's tool budget must be
 // enforced by the daemon, not by prompt text, or drift and prompt
 // injection walk straight through it.
 //
@@ -26,14 +26,10 @@ import (
 // caller even on loopback — the scope lookup runs before the loopback
 // allowance, which is the whole point: the spawned child is loopback too.
 type mcpScope struct {
-	// Identity names the caller class ("warden") — stamped as provenance
+	// Identity names the scoped caller — stamped as provenance
 	// on artifacts the caller creates (pane-flag owner) so guards like
 	// "only clear your own flags" have something to check.
 	Identity string
-	// A Warden triage capability is bound to exactly one pane and attention
-	// episode. Other Warden runs leave these empty and cannot write flags.
-	WardenPaneID  string
-	WardenEpisode string
 	// Tools is the exact allowed tool-name set. Nothing outside it is
 	// visible (tools/list) or callable (tools/call).
 	Tools map[string]bool
@@ -43,12 +39,10 @@ type mcpScope struct {
 
 	// ---------------------------------------------------------------------
 	// Managed-agent fields (docs/DESIGN-agents-surface.md §3.2). Every one is
-	// ADDITIVE and optional: a scope minted by the Warden leaves them zero,
-	// which is why Class=="" reads as "warden/legacy" everywhere below and the
-	// Warden's behavior is byte-identical to before this slice.
+	// Classless scopes leave managed-agent authority fields zero.
 	// ---------------------------------------------------------------------
 
-	// Class is "" (warden/legacy) or "agent". It is the switch that merges
+	// Class is "" (legacy) or "agent". It is the switch that merges
 	// agentMcpTools() into tools/list and turns on the dispatch hard-deny; no
 	// agent_* tool is ever visible or callable without it.
 	Class string
@@ -318,7 +312,7 @@ func newMcpScopeStore() *mcpScopeStore {
 
 // Mint creates a legacy (Class=="") scope and returns its bearer token. The
 // token is the only handle — treat it like a credential (0600 files, never
-// logged). This is the Warden's path and it stays exactly three fields wide.
+// logged). Classless callers receive only the explicit tool budget.
 func (s *mcpScopeStore) Mint(identity string, tools []string, ttl time.Duration) string {
 	set := make(map[string]bool, len(tools))
 	for _, t := range tools {

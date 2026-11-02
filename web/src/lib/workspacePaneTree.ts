@@ -2,6 +2,7 @@ import type { Layout, PaneInfo, Workspace } from '../types';
 import { paneIdsInOrder } from './layout';
 import { paneRowStatus, type PaneRowStatus } from './paneStatus';
 import { nearestLeadId, paneTeamKind } from './paneTeam';
+import { paneRowLabel } from './paneRowLabel';
 
 // Legacy snapshots may only have origin.at; missing/invalid times sort first.
 function creationTime(pane: PaneInfo): number {
@@ -19,7 +20,11 @@ export interface PaneTreeNode {
   isTopLevel: boolean;
   status: PaneRowStatus;
   needsYou: boolean;
+  /** Panes below this one (not itself) waiting on the person. */
+  needsYouBelow: number;
   descendantCount: number;
+  /** A lead another pane started: who, as it reads now (or its saved name). */
+  startedBy?: string;
 }
 export interface WorkspacePaneTree {
   workspace: Workspace;
@@ -32,10 +37,10 @@ export interface WorkspacePaneTree {
 }
 
 /** A worker nests under its immediate starter, falling back to its lead when
- * the starter has closed. A lead nests under its starter, or else its lead,
- * when that pane is open and not a worker (a sub-lead); with neither it is
- * top level, like the user's own panes. Explicit workspace membership always
- * wins over ancestry, so moving a worker never drags it back to its old
+ * the starter has closed. Every lead is top level, a peer of the others, even
+ * one another lead started (a sub-lead): who started it is kept as startedBy,
+ * and its ancestry still decides its workspace. Explicit workspace membership
+ * always wins over ancestry, so moving a worker never drags it back to its old
  * workspace. */
 export function buildWorkspacePaneTrees(
   workspaces: Workspace[], panes: Record<string, PaneInfo>,
@@ -47,7 +52,8 @@ export function buildWorkspacePaneTrees(
   for (const p of list) {
     const kind = paneTeamKind(p);
     if (!kind || !p.origin) continue;
-    // A lead nests under the lead it works for, past any workers between.
+    // A lead's ancestor is the lead it works for, past any workers between;
+    // it only decides the workspace, since leads are shown top level.
     const candidates = kind === 'worker' ? [p.origin.byPaneId, p.origin.leadPaneId] : [nearestLeadId(p, panes)];
     const id = candidates.find(id => id && id !== p.id && panes[id] && panes[id].role !== 'task_owner'
       && (kind === 'worker' || paneTeamKind(panes[id]) !== 'worker'));
@@ -90,14 +96,21 @@ export function buildWorkspacePaneTrees(
   // An agent pane with no surviving ancestor and no recorded home belongs to
   // no workspace: it stays in Background sessions (its one place), instead of
   // being claimed by whichever workspace sorts first.
-  // Workers are never top level; a lead is unless it nests under another pane.
-  const nodes = new Map(list.map(pane => [pane.id, { pane, children: [], isTopLevel: paneTeamKind(pane) !== 'worker', status: paneRowStatus(pane), needsYou: false, descendantCount: 0, } as PaneTreeNode]));
+  // Workers are never top level; leads always are.
+  const starter = (p: PaneInfo): string | undefined => {
+    const by = p.origin?.source === 'agent' ? p.origin.byPaneId : undefined;
+    if (!by || by === p.id) return undefined;
+    const open = panes[by];
+    return open ? (paneRowLabel(open).handle || open.title || open.cmd.join(' ')) : p.origin?.byPaneTitle || undefined;
+  };
+  const nodes = new Map(list.map(pane => [pane.id, { pane, children: [], isTopLevel: paneTeamKind(pane) !== 'worker', status: paneRowStatus(pane), needsYou: false, needsYouBelow: 0, descendantCount: 0,
+    ...(paneTeamKind(pane) === 'lead' ? { startedBy: starter(pane) } : {}) } as PaneTreeNode]));
   for (const p of list) {
     const i = owner.get(p.id);
     if (i === undefined) continue;
     const node = nodes.get(p.id)!;
     const parentId = parents.get(p.id);
-    const parent = parentId && owner.get(parentId) === i ? nodes.get(parentId) : undefined;
+    const parent = parentId && owner.get(parentId) === i && paneTeamKind(p) !== 'lead' ? nodes.get(parentId) : undefined;
     if (parent) {
       parent.children.push(node);
       node.isTopLevel = false;
@@ -107,7 +120,8 @@ export function buildWorkspacePaneTrees(
   const summarize = (node: PaneTreeNode) => {
     node.children.forEach(summarize);
     node.descendantCount = node.children.reduce((count, child) => count + child.descendantCount + 1, 0);
-    node.needsYou = node.status === 'needs-you' || node.children.some(child => child.needsYou);
+    node.needsYouBelow = node.children.reduce((count, child) => count + child.needsYouBelow + (child.status === 'needs-you' ? 1 : 0), 0);
+    node.needsYou = node.status === 'needs-you' || node.needsYouBelow > 0;
   };
   for (const tree of trees) {
     const w = tree.workspace;

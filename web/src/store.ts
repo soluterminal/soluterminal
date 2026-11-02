@@ -31,7 +31,7 @@ import { applyShellUpdateSilentNative, exitForUpdateNative, getAppProcessId, get
 import { isCloudLaunchMode, isVersionNewer } from './lib/useCloudShellUpdate';
 import { daemonOnThisComputer, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from './lib/shellUpdateRoute';
 import { hasRegisteredUnsentInput } from './lib/unsentInput';
-import type { BrowserInfo, FileTileInfo, Layout, McpServer, NativeSettings, OrchestratorHostInfo, PaneAutoMode, PaneEffort, PaneInfo, PaneRole, Port, RecoveryResumeMode, RecoverySettings, RollbackDecline, Schedule, ScheduleInput, ShellAutoRestart, UpdateAutoApplyMode, UpdateHold, UpdateSettings, UpdateStatus, WardenSettings, Workspace, WorkspaceSummary } from './types';
+import type { BrowserInfo, FileTileInfo, Layout, McpServer, NativeSettings, OrchestratorHostInfo, PaneAutoMode, PaneEffort, PaneInfo, PaneRole, Port, RecoveryResumeMode, RecoverySettings, RollbackDecline, Schedule, ScheduleInput, ShellAutoRestart, UpdateAutoApplyMode, UpdateHold, UpdateSettings, UpdateStatus, Workspace, WorkspaceSummary } from './types';
 import { agentLabel, effectivePaneAgent } from './lib/agentKind';
 import {
   buildNxMFromLeaves,
@@ -830,12 +830,6 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // 'native' Focus). Daemon-stored (native_settings.json) so every device
   // the user opens agrees; the new-session dialog preselects it.
   setNativeDefaultClaudeMode: (mode: '' | 'native') => Promise<void>;
-  // Warden — opt-in fleet caretaker (daemon/warden_settings.go). Default OFF.
-  // saveWardenSettings takes a partial patch (enable, model, delay, cap) and
-  // applies optimistically with rollback, mirroring setUpdateAutoApply.
-  wardenSettings: WardenSettings | null;
-  loadWardenSettings: () => Promise<void>;
-  saveWardenSettings: (patch: Partial<WardenSettings>) => Promise<void>;
 
   mainPresentation: MainPresentation;
   ownerReturnContext: WorkspaceReturnContext | null;
@@ -1258,7 +1252,7 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   switchBackend: (b: 'wsl' | 'win', workspaceName?: string, opts?: {preserveOwnerLink?:boolean}) => Promise<void>;
   refreshPanes: () => Promise<void>;
   refreshPorts: () => Promise<void>;
-  refreshWorkspaces: (opts?: { full?: boolean }) => Promise<void>;
+  refreshWorkspaces: (opts?: { full?: boolean; paneMove?: WorkspacePaneMove }) => Promise<void>;
   // Write-through cache: after persisting a workspace, fold the saved
   // layout/paneIds back into the matching `workspaces` entry so a later
   // loadWorkspace restores what we just wrote — not a stale snapshot.
@@ -1488,6 +1482,7 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   loadWorkspace: (name: string, takeOver?: boolean) => Promise<void>;
   deleteWorkspace: (name: string) => Promise<void>;
   renameWorkspace: (oldName: string, newName: string) => Promise<void>;
+  applyWorkspaceNameChange: (name: string, newName?: string) => void;
   setWorkspaceContextPack: (name: string, contextPack: string) => Promise<void>;
 
   // Clear the current layout without killing any panes. They remain alive
@@ -1725,6 +1720,59 @@ function autosaveSnapshotFromState(s: State): AutosaveSnapshot | undefined {
   };
 }
 
+type WorkspacePaneMove = { paneId: string; source: string; destination: string };
+
+// Rebase membership, never geometry, when a daemon move reaches a loaded view.
+// Cached paneIds are the previously observed server membership; local layout
+// edits (including hidden/adopted tiles) are kept unless this move affects them.
+function reconcileWorkspacePaneMove(s: State, workspaces: Workspace[], move: WorkspacePaneMove): Partial<State> {
+  let active: Partial<State> = {};
+  const next = workspaces.map((w) => {
+    if ((w.name !== move.source && w.name !== move.destination) || (w.backend && w.backend !== s.activeBackend)) return w;
+    const previous = s.workspaces.find(old => workspaceCacheKey(old) === workspaceCacheKey(w));
+    const shown = w.name === s.activeWorkspace && s.mainPresentation.kind === 'workspace' && !workspaceMovedTo(w.name)
+      && (s.layout !== null || (previous?.paneIds.length === 0 && s.activeWorkspaceKnownPaneIds.length === 0));
+    if (!shown && (!previous || previous.summary)) return w; // never loaded: use the saved layout
+    const oldMoveVersion = shown ? s.activeWorkspaceMoveVersion : previous?.paneMoveVersion ?? 0;
+    const oldLayoutVersion = shown ? s.activeWorkspaceLayoutVersion : previous?.layoutVersion ?? 0;
+    if ((w.paneMoveVersion ?? 0) < oldMoveVersion || ((w.paneMoveVersion ?? 0) === oldMoveVersion && (w.layoutVersion ?? 0) < oldLayoutVersion)) return previous ?? w;
+    const mode = shown ? s.paneLayoutMode : previous!.layoutMode ?? 'auto';
+    const columns = shown ? s.layoutColumns : previous!.layoutColumns || DEFAULT_LAYOUT_COLUMNS;
+    const aspect = shown ? s.layoutAspect : previous!.layoutAspect || DEFAULT_LAYOUT_ASPECT;
+    let layout = shown ? s.layout : previous!.layout;
+    const known = new Set(shown ? s.activeWorkspaceKnownPaneIds : previous!.paneIds);
+    const before = new Set(previous?.paneIds ?? [...known]);
+    const after = new Set(w.paneIds);
+    const elsewhere = new Set(workspaces.filter(other => other.name !== w.name && other.name !== CURRENT_WS && (other.backend ?? '') === (w.backend ?? '')).flatMap(other => other.paneIds));
+    const removed = new Set([...(w.removedPaneIds ?? []), ...[...before].filter(id => !after.has(id)), ...collectPaneIds(layout).filter(id => !after.has(id) && elsewhere.has(id))]);
+    const added = new Set([...after].filter(id => !known.has(id)));
+    // A summary poll can already have advanced the cache. The actual event
+    // still names its delta; latest membership makes delayed events idempotent.
+    if (w.name === move.source && !after.has(move.paneId)) removed.add(move.paneId);
+    if (w.name === move.destination && after.has(move.paneId)) added.add(move.paneId);
+    for (const id of removed) { layout = removePane(layout, id, mode, columns, aspect); known.delete(id); }
+    for (const id of added) { layout = insertPaneOrAppend(layout, id, 'horizontal', null, mode, columns, aspect); known.add(id); }
+    for (const id of after) known.add(id);
+    if (shown) {
+      const panes = { ...s.panes };
+      for (const id of w.removedPaneIds ?? []) delete panes[id];
+      for (const def of w.panes ?? []) if (!panes[def.id]) panes[def.id] = optimisticPaneFromDef(def);
+      active = { layout, panes,
+        workspaceLayoutDirty: layout !== null && (s.workspaceLayoutDirty || !sameJsonValue(layout, w.layout) || mode !== (w.layoutMode ?? 'auto') || columns !== (w.layoutColumns || DEFAULT_LAYOUT_COLUMNS) || Math.abs(aspect - (w.layoutAspect || DEFAULT_LAYOUT_ASPECT)) > 1e-8),
+        activeWorkspaceMoveVersion: w.paneMoveVersion ?? 0,
+        activeWorkspaceLayoutVersion: w.layoutVersion ?? 0,
+        activeWorkspaceKnownPaneIds: [...known],
+        focusedPaneId: layoutHasLeaf(layout, s.focusedPaneId) ? s.focusedPaneId : collectPaneIds(layout)[0] ?? null,
+        lastUserFocusId: layoutHasLeaf(layout, s.lastUserFocusId) ? s.lastUserFocusId : null,
+        zoomedPaneId: layoutHasLeaf(layout, s.zoomedPaneId) ? s.zoomedPaneId : null,
+        parkedPaneIds: s.parkedPaneIds.filter(id => !removed.has(id)),
+      };
+    }
+    return { ...w, layout, layoutMode: mode, layoutColumns: columns, layoutAspect: aspect };
+  });
+  return { workspaces: next, ...active };
+}
+
 function reconcileWorkspaceMembership(s: State, workspaces: Workspace[]): Partial<State> {
   if (s.mainPresentation.kind !== 'workspace' || workspaceMovedTo(s.activeWorkspace)) return {};
   const w = workspaces.find((w) => w.name === s.activeWorkspace && (!w.backend || w.backend === s.activeBackend));
@@ -1903,6 +1951,9 @@ function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
     && (a.attentionReason ?? '') === (b.attentionReason ?? '')
     // The unsent-message chip appears and clears with no other pane change.
     && sameJsonValue(a.unsentMessage, b.unsentMessage)
+    && sameJsonValue(a.heldMessages, b.heldMessages)
+    // Asks open and close with no other pane change.
+    && sameJsonValue(a.asks, b.asks)
     // A review result lands with no other pane change.
     && sameJsonValue(a.review, b.review)
     // Restores rewrite a pane's starter/lead links with no other change.
@@ -3032,7 +3083,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
   recoverySettings: null,
   nativeSettings: null,
   updateSettings: null,
-  wardenSettings: null,
   updateStatus: null,
   updateApplyRequestInFlight: false,
   deferredUpdate: null,
@@ -4441,7 +4491,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       void get().loadRecoverySettings();
       void get().loadNativeSettings();
       void get().loadUpdateSettings();
-      void get().loadWardenSettings();
       void get().loadOrchestratorHosts();
       const paneMap: Record<string, PaneInfo> = {};
       for (const p of panes) { if (!p.backend || !get().activeBackend || p.backend === get().activeBackend) paneMap[p.id] = p; }
@@ -4806,10 +4855,18 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     const startedAt = perfNow();
     try {
     if (opts?.full) {
+      const movingHere = opts.paneMove && (get().activeWorkspace === opts.paneMove.source || get().activeWorkspace === opts.paneMove.destination);
+      if (movingHere) cancelAutosave(); // resume below with the new server bases
       const wss = isRouterMode()
         ? await api.listWorkspacesAllBackends()
         : await api.listWorkspaces();
       if(scope.key !== currentRoutingScope().key)return;
+      if (opts.paneMove) {
+        set(state => reconcileWorkspacePaneMove(state, wss, opts.paneMove!));
+        const state = get();
+        if ((state.activeWorkspace === opts.paneMove.source || state.activeWorkspace === opts.paneMove.destination) && state.workspaceLayoutDirty) scheduleAutosave(get);
+        return;
+      }
       set((state) => reconcileWorkspaceMembership(state, wss));
       if (sameJsonValue(get().workspaces, wss)) {
         debugPerf('refreshWorkspaces full unchanged', startedAt, { workspaces: wss.length }, 80);
@@ -5034,30 +5091,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       get().maybeAutoApplyShellUpdate();
     } catch {
       // Older daemons won't expose /api/update/settings; keep Settings usable.
-    }
-  },
-  loadWardenSettings: async () => {
-    try {
-      set({ wardenSettings: await api.getWardenSettings() });
-    } catch {
-      // Older daemons won't expose /api/warden/settings; keep Settings usable.
-    }
-  },
-  saveWardenSettings: async (patch) => {
-    const prev = get().wardenSettings;
-    // Optimistic: merge the patch onto the current view (or a disabled base).
-    const optimistic: WardenSettings = { enabled: false, ...(prev ?? {}), ...patch };
-    set({ wardenSettings: optimistic });
-    try {
-      set({ wardenSettings: await api.setWardenSettings(patch) });
-    } catch (e) {
-      set({ wardenSettings: prev });
-      get().toast(`Couldn't save Warden setting: ${(e as Error).message}`, {
-        kind: 'error',
-        icon: '!',
-        ttlMs: 5000,
-      });
-      throw e;
     }
   },
   setUpdateAutoApply: async (mode) => {
@@ -7474,25 +7507,37 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       );
       return;
     }
-    // Migrate the local persisted state so the new name keeps its order
-    // position and last-viewed timestamp.
-    set((s) => {
-      const newOrder = s.wsOrder.map((n) => (n === oldName ? trimmed : n));
-      try { localStorage.setItem(WS_ORDER_KEY, JSON.stringify(newOrder)); } catch {}
-      const viewedCopy = { ...s.wsLastViewedMs };
-      if (oldName in viewedCopy) {
-        viewedCopy[trimmed] = viewedCopy[oldName];
-        delete viewedCopy[oldName];
-        try { localStorage.setItem(WS_VIEWED_KEY, JSON.stringify(viewedCopy)); } catch {}
-      }
-      return {
-        wsOrder: newOrder,
-        wsLastViewedMs: viewedCopy,
-        activeWorkspace: s.activeWorkspace === oldName ? trimmed : s.activeWorkspace,
-      };
-    });
+    get().applyWorkspaceNameChange(oldName, trimmed);
     await get().refreshWorkspaces({ full: true });
     get().toast(`Renamed to "${trimmed}"`, { kind: 'success', icon: '✓' });
+  },
+
+  // Used by REST callers and daemon events alike; idempotent for the UI's
+  // own rename event. No API call here, so events cannot recursively rename.
+  applyWorkspaceNameChange: (name, newName) => {
+    if (get().activeWorkspace === name) cancelAutosave();
+    set((s) => {
+      const wsOrder = newName ? s.wsOrder.map(n => n === name ? newName : n) : s.wsOrder.filter(n => n !== name);
+      const wsLastViewedMs = { ...s.wsLastViewedMs };
+      if (name in wsLastViewedMs) {
+        if (newName) wsLastViewedMs[newName] = wsLastViewedMs[name];
+        delete wsLastViewedMs[name];
+      }
+      try { localStorage.setItem(WS_ORDER_KEY, JSON.stringify(wsOrder)); localStorage.setItem(WS_VIEWED_KEY, JSON.stringify(wsLastViewedMs)); } catch {}
+      const workspaces = newName ? s.workspaces.map(w => w.name === name && (!w.backend || w.backend === s.activeBackend) ? { ...w, name: newName } : w)
+        : s.workspaces.filter(w => w.name !== name || (!!w.backend && w.backend !== s.activeBackend));
+      return { wsOrder: [...new Set(wsOrder)], wsLastViewedMs, workspaces,
+        ...(s.activeWorkspace === name ? newName ? { activeWorkspace: newName } : {
+          activeWorkspace: CURRENT_WS, activeWorkspaceMoveVersion: 0, activeWorkspaceLayoutVersion: 0,
+          workspaceLayoutDirty: false, activeWorkspaceKnownPaneIds: [],
+        } : {}),
+      };
+    });
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('ws') === name) {
+      if (newName) url.searchParams.set('ws', newName); else url.searchParams.delete('ws');
+      window.history.replaceState(null, '', url.toString());
+    }
   },
 
   setWorkspaceContextPack: async (name, contextPack) => {

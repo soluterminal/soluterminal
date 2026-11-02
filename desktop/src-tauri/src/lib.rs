@@ -7,6 +7,7 @@ mod browser;
 mod browser_pane;
 mod daemon;
 mod daemon_health;
+mod wsl_network;
 #[cfg(any(windows, test))]
 mod wsl_update;
 mod hosted_cloud;
@@ -1239,8 +1240,9 @@ mod autostart_window_tests {
 /// actively wrong for some causes (an incomplete download needs a
 /// re-install, not `wsl --shutdown`; a held port needs the other daemon
 /// quit). Substrings match the error sites in daemon.rs. Windows-only:
-/// the WSL backend (and thus its fallback) only exists there.
-#[cfg(windows)]
+/// the WSL backend (and thus its fallback) only exists there. The copy is also
+/// compiled in tests so recovery instructions are checked on every host.
+#[cfg(any(windows, test))]
 fn classify_wsl_fallback(err: &str) -> (&'static str, String) {
     if err.contains("host disk critically low") {
         return (
@@ -1269,7 +1271,14 @@ fn classify_wsl_fallback(err: &str) -> (&'static str, String) {
                 "soluterminal couldn't reach Windows' Linux (WSL) over the network, \
                  so it's running directly on Windows for now — panes open in \
                  PowerShell and WSL-only features are unavailable.\n\n\
-                 Try `wsl --shutdown` in a terminal then reopen soluterminal, or use \
+                 If networking-mode detection failed, the daemon stays on 127.0.0.1. \
+                 NAT mode then needs WSL localhost forwarding. Open \
+                 %USERPROFILE%\\.wslconfig on Windows and set localhostForwarding=true \
+                 under [wsl2], preserving your other settings. Save your Linux work, \
+                 quit SoluTerminal, run `wsl --shutdown` in PowerShell, then reopen \
+                 SoluTerminal. This restarts all WSL sessions; your saved WSL panes \
+                 have not been deleted.\n\n\
+                 If it still cannot connect, run `wsl --update` or use \
                  \"Repair setup\" in the tray menu.\n\n\
                  Reason: {err}"
             ),
@@ -1313,6 +1322,46 @@ fn classify_wsl_fallback(err: &str) -> (&'static str, String) {
              missing) and relaunch. You can also switch backends from the tray menu."
         ),
     )
+}
+
+#[cfg(test)]
+mod wsl_fallback_message_tests {
+    use super::classify_wsl_fallback;
+
+    #[test]
+    fn unreachable_wsl_explains_how_to_restore_loopback_forwarding() {
+        for reason in [
+            "WSL daemon was not reachable within 120s via []: request failed",
+            "resolve WSL IP: unavailable",
+        ] {
+            let (title, body) = classify_wsl_fallback(reason);
+            assert_eq!(title, "Couldn't reach the Linux (WSL) backend");
+            for action in [
+                "127.0.0.1",
+                "%USERPROFILE%\\.wslconfig",
+                "localhostForwarding=true",
+                "[wsl2]",
+                "Save your Linux work",
+                "wsl --shutdown",
+                "reopen SoluTerminal",
+                "wsl --update",
+                reason,
+            ] {
+                assert!(
+                    body.contains(action),
+                    "missing recovery step {action}: {body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn port_conflict_keeps_its_specific_recovery() {
+        let (title, body) = classify_wsl_fallback("WSL port held: stop the service in Ubuntu");
+        assert_eq!(title, "WSL didn't start: port 8787 is in use");
+        assert!(body.contains("stop the service in Ubuntu"));
+        assert!(!body.contains("localhostForwarding"));
+    }
 }
 
 /// Minimal percent-encoder for values destined for URL query strings.

@@ -1456,8 +1456,6 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 		Flagged:                  info.Flagged,
 		FlagMemo:                 info.FlagMemo,
 		FlagOwner:                info.FlagOwner,
-		FlagEpisode:              info.FlagEpisode,
-		FlagRevision:             info.FlagRevision,
 		ClaudeSessionID:          info.ClaudeSessionID,
 		CodexThreadID:            info.CodexThreadID,
 		MuseSessionID:            info.MuseSessionID,
@@ -1617,8 +1615,6 @@ func (m *Manager) SuspendExisting(info *PersistedPane) *Pane {
 		Flagged:                  info.Flagged,
 		FlagMemo:                 info.FlagMemo,
 		FlagOwner:                info.FlagOwner,
-		FlagEpisode:              info.FlagEpisode,
-		FlagRevision:             info.FlagRevision,
 		ClaudeSessionID:          info.ClaudeSessionID,
 		CodexThreadID:            info.CodexThreadID,
 		MuseSessionID:            info.MuseSessionID,
@@ -1825,8 +1821,6 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 	p.Flagged = info.Flagged
 	p.FlagMemo = info.FlagMemo
 	p.FlagOwner = info.FlagOwner
-	p.FlagEpisode = info.FlagEpisode
-	p.FlagRevision = info.FlagRevision
 	p.LastPrompts = cloneStringSlice(info.LastPrompts)
 	p.mu.Unlock()
 	if p.Snapshot().AutoMode != "" {

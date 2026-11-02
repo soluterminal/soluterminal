@@ -81,7 +81,7 @@ var (
 	// both "new task?" and "/clear" on one line. NBSP-tolerant whitespace
 	// matches the prompt regexes above. In the 2026-08-25 05:09-05:13 incident
 	// this chrome on pane_eab1cef2ed51f934 repeatedly fired direct auto-mode
-	// (warden run ~/.solu/warden-runs/run-1787605917630.log).
+	// (historical caretaker log from that incident).
 	claudeIdleHintRE = regexp.MustCompile(`(?i)new[\s\p{Zs}]*task[\s\p{Zs}]*\?[^\n]{0,160}/clear`)
 	// A real Claude/Codex menu renders at least one sibling numbered option
 	// below its focused row. Accept siblings 2-9 so an ANSI-collapse glitch on

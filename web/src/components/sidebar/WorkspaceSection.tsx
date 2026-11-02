@@ -2,7 +2,7 @@ import { useStore } from '../../store';
 import { createWorkspacePaneTreeSelector, type WorkspacePaneTree } from '../../lib/workspacePaneTree';
 import { workspaceViewKey } from '../../lib/workspaceView';
 import { paneRowStatus } from '../../lib/paneStatus';
-import { WorkspacePaneRows } from './WorkspacePaneRows';
+import { WorkspacePaneRows, branchKeys, foldedByDefault, isFolded, paneTreeKey } from './WorkspacePaneRows';
 import { useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent as ReactDragEvent, type MutableRefObject, type RefObject, type SetStateAction } from 'react';
 import { paneUnread } from '../../lib/turnChip';
 import { isRouterMode } from '../../dualBackend';
@@ -10,13 +10,16 @@ import type { Layout, PaneInfo, Workspace } from '../../types';
 import { useAttentionBadge } from '../AttentionInbox';
 import { useIsMobileView } from '../useIsMobileView';
 import { SectionHeader } from './SectionHeader';
-import { IconLayers, IconPlus, IconX, IconFlag } from '../ui/icons';
+import { IconLayers, IconPlus, IconX, IconFlag, IconCollapseAll, IconExpandAll } from '../ui/icons';
 import { relativeTime } from './time';
 import { confirmDialog } from '../../lib/dialog';
 import { useClampedMenuPosition } from '../useClampedMenuPosition';
 import { ContextPackDialog } from '../ContextPackDialog';
+import { TreePaneMenu } from './TreePaneMenu';
+import { MakeLeadsDialog, leadCandidates } from './MakeLeadsDialog';
 
 const WS_DRAG_MIME = 'application/x-solu-workspace';
+const TREE_COLLAPSED_KEY = 'solu.sidebarTreeCollapsed.v1';
 
 type WorkspaceMenu = { x: number; y: number; wsName: string } | null;
 
@@ -129,13 +132,15 @@ export function WorkspaceSection({
   onReorderWorkspaces,
 }: WorkspaceSectionProps) {
   const [packWorkspaceName, setPackWorkspaceName] = useState<string | null>(null);
+  const [paneMenu, setPaneMenu] = useState<{ paneId: string; x: number; y: number } | null>(null);
+  const [leadsWorkspaceKey, setLeadsWorkspaceKey] = useState<string | null>(null);
   const selectTrees = useMemo(createWorkspacePaneTreeSelector, []);
   const trees = providedTrees ?? selectTrees(named, panes, activeWorkspace, layout, activeBackend);
   const [treeCollapsed, setTreeCollapsed] = useState<Record<string, boolean>>(() => {
     try {
-      const saved: unknown = JSON.parse(localStorage.getItem('solu.sidebarTreeCollapsed.v1') || '{}');
+      const saved: unknown = JSON.parse(localStorage.getItem(TREE_COLLAPSED_KEY) || '{}');
       return saved && typeof saved === 'object' && !Array.isArray(saved)
-        ? Object.fromEntries(Object.entries(saved).filter(([, value]) => value === true)) : {};
+        ? Object.fromEntries(Object.entries(saved).filter(([, value]) => typeof value === 'boolean')) : {};
     } catch { return {}; }
   });
   const [focusedTreeKey, setFocusedTreeKey] = useState(() => named[0] ? workspaceKey(named[0]) : '');
@@ -147,11 +152,39 @@ export function WorkspaceSection({
     const visibleRows = Array.from(treeRef.current?.querySelectorAll<HTMLElement>('[data-tree-key]') ?? []);
     if (!visibleRows.some(row => row.dataset.treeKey === focusedTreeKey)) setFocusedTreeKey(named[0] ? workspaceKey(named[0]) : '');
   }, [trees, treeCollapsed, workspaceView, collapsed, named, focusedTreeKey]);
-  const toggleTree = (key: string) => setTreeCollapsed(previous => {
-    const next = { ...previous, [key]: !previous[key] };
-    try { localStorage.setItem('solu.sidebarTreeCollapsed.v1', JSON.stringify(next)); } catch { /* storage may be unavailable */ }
+  // Every branch that can open or close: workspaces with panes, and panes
+  // with panes below them.
+  const allBranches = useMemo(() => trees.flatMap(tree => {
+    const key = workspaceKey(tree.workspace);
+    return tree.nodes.length > 0 ? [key, ...branchKeys(key, tree.roots)] : [];
+  }), [trees]);
+  // Folded unless the person opened them: a top-level pane's workers.
+  const foldedDefaults = useMemo(() => new Set(trees.flatMap(tree => {
+    const key = workspaceKey(tree.workspace);
+    return tree.nodes.filter(foldedByDefault).map(node => paneTreeKey(key, node.pane.id));
+  })), [trees]);
+  const folded = (map: Record<string, boolean>, key: string) => isFolded(map, key, foldedDefaults.has(key));
+  // Workers start folded, so the header offers Expand all while anything is
+  // folded and Collapse all once everything is open.
+  const allOpen = allBranches.every(key => !folded(treeCollapsed, key));
+  const setBranches = (keys: string[], close: boolean | ((previous: Record<string, boolean>) => boolean)) => setTreeCollapsed(previous => {
+    const closing = typeof close === 'function' ? close(previous) : close;
+    const next: Record<string, boolean> = {};
+    // The person's open/fold choices are stored; drop panes that have closed
+    // and workspaces that no longer exist so the map does not grow forever.
+    // With two backends the other daemon's panes are not loaded, so keep those.
+    const workspaces = new Set(named.map(workspaceKey));
+    const live = Object.keys(panes).length > 0 && !isRouterMode();
+    for (const [key, value] of Object.entries(previous)) {
+      const [ws, paneId] = key.split(':pane:');
+      if (typeof value !== 'boolean' || (named.length > 0 && !workspaces.has(ws)) || (paneId && live && !panes[paneId])) continue;
+      next[key] = value;
+    }
+    for (const key of keys) next[key] = closing;
+    try { localStorage.setItem(TREE_COLLAPSED_KEY, JSON.stringify(next)); } catch { /* storage may be unavailable */ }
     return next;
   });
+  const toggleTree = (key: string) => setBranches([key], previous => !folded(previous, key));
   const isActiveWorkspace = (w: Workspace) => {
     const state = useStore.getState();
     return state.activeWorkspace === w.name && (!w.backend || state.activeBackend === w.backend);
@@ -222,6 +255,11 @@ export function WorkspaceSection({
             flagged = true;
             attentionCount++;
           } else if (p.state === 'awaiting-input' && paneRowStatus(p) === 'needs-you') {
+            if (badgeKind !== 'choice') badgeKind = 'awaiting';
+            flagged = true;
+            attentionCount++;
+          } else if ((p.asks?.length ?? 0) > 0) {
+            // An agent's open ask (daemon asks.go) waits on you like a prompt.
             if (badgeKind !== 'choice') badgeKind = 'awaiting';
             flagged = true;
             attentionCount++;
@@ -306,6 +344,18 @@ export function WorkspaceSection({
           } else if (e.key === 'ArrowLeft') {
             if (row.getAttribute('aria-expanded') === 'true') toggleTree(key);
             else next = rows.find(r => r.dataset.treeKey === row.dataset.treeParent);
+          } else if (e.key === '*' || e.key === '-') {
+            // Open (*) or close (-) this row and its siblings that have branches.
+            const parent = row.dataset.treeParent;
+            setBranches(rows.filter(r => r.dataset.treeParent === parent && r.hasAttribute('aria-expanded')).map(r => r.dataset.treeKey!), e.key === '-');
+          } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+            const box = row.getBoundingClientRect();
+            const at = { x: box.left + 24, y: box.top + Math.min(box.height, 30) };
+            if (row.dataset.treeParent) setPaneMenu({ paneId: key.split(':pane:')[1], ...at });
+            else {
+              const w = named.find(item => workspaceKey(item) === key);
+              if (w) setCtxMenu({ ...at, wsName: w.name });
+            }
           } else if (e.key === 'Enter') row.click();
           else return;
           e.preventDefault();
@@ -327,6 +377,18 @@ export function WorkspaceSection({
           onToggle={onToggle}
           extra={
             <>
+              {!collapsed && allBranches.length > 0 && (
+                <button
+                  type="button"
+                  className="iconbtn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setBranches(allBranches, allOpen);
+                  }}
+                  title={allOpen ? 'Collapse all' : 'Expand all'}
+                  aria-label={allOpen ? 'Collapse all' : 'Expand all'}
+                >{allOpen ? <IconCollapseAll size={14} /> : <IconExpandAll size={14} />}</button>
+              )}
               <button
                 className="iconbtn"
                 onClick={(e) => {
@@ -410,7 +472,7 @@ export function WorkspaceSection({
           const paneSelected = isActive && (workspaceView?.kind === 'team' || workspaceView?.kind === 'single');
           const workspaceSelected = isActive && !paneSelected;
           const allPanes = allPanesPreferences[workspaceViewKey(w.name, w.backend ?? activeBackend)] === true;
-          const treeOpen = !treeCollapsed[wKey];
+          const treeOpen = !folded(treeCollapsed, wKey);
           const dropPos = dropTarget?.key === wKey ? dropTarget.pos : null;
           const metaParts = [
             `${summary.count} pane${summary.count === 1 ? '' : 's'}`,
@@ -464,9 +526,14 @@ export function WorkspaceSection({
                 setCtxMenu({ x: e.clientX, y: e.clientY, wsName: w.name });
               }}
             >
-              <button type="button" className="tree-chevron" tabIndex={-1}
+              {nodes.length > 0 ? <button type="button" className="tree-chevron" tabIndex={-1}
                 aria-label={`${treeOpen ? 'Collapse' : 'Expand'} ${w.name}`}
-                onClick={e => { e.stopPropagation(); toggleTree(wKey); }}>{treeOpen ? '▾' : '▸'}</button>
+                title={`${treeOpen ? 'Collapse' : 'Expand'} (Alt+click: with everything below)`}
+                onClick={e => {
+                  e.stopPropagation();
+                  if (e.altKey) setBranches([wKey, ...branchKeys(wKey, tree?.roots ?? [])], treeOpen);
+                  else toggleTree(wKey);
+                }}>{treeOpen ? '▾' : '▸'}</button> : <span className="tree-chevron" aria-hidden />}
               <span className="ws-status">
                 <span
                   className={`ws-dot ws-dot-${statusKind} pane-tree-dot is-${treeStatus}`}
@@ -576,11 +643,11 @@ export function WorkspaceSection({
               )}
             </div>
             {treeOpen && <div role="group">
-              <WorkspacePaneRows nodes={(tree?.roots ?? []).filter(node => node.isTopLevel)} workspaceKey={wKey} collapsed={treeCollapsed} toggle={toggleTree}
+              <WorkspacePaneRows nodes={(tree?.roots ?? []).filter(node => node.isTopLevel)} workspaceKey={wKey} collapsed={treeCollapsed} toggle={toggleTree} setBranches={setBranches} onMenu={(paneId, x, y) => setPaneMenu({ paneId, x, y })}
                 focusedKey={focusedTreeKey} select={node => { void selectPane(w, node.pane.id, node.children.length > 0 || node.isTopLevel); }} />
               {!!tree?.unattached.length && <div role="group" aria-label="Unattached">
                 <div role="presentation" className="pane-tree-unattached">Unattached</div>
-                <WorkspacePaneRows nodes={tree.unattached} workspaceKey={wKey} collapsed={treeCollapsed} toggle={toggleTree}
+                <WorkspacePaneRows nodes={tree.unattached} workspaceKey={wKey} collapsed={treeCollapsed} toggle={toggleTree} setBranches={setBranches} onMenu={(paneId, x, y) => setPaneMenu({ paneId, x, y })}
                   focusedKey={focusedTreeKey} select={node => { void selectPane(w, node.pane.id, node.children.length > 0); }} />
               </div>}
             </div>}
@@ -615,6 +682,15 @@ export function WorkspaceSection({
                 setPackWorkspaceName(ws.name);
               }}
             >Context pack…</button></>}
+            {(() => {
+              const tree = trees.find(t => workspaceKey(t.workspace) === workspaceKey(ws));
+              // Only this daemon's panes can be changed from here.
+              const local = !isRouterMode() || !ws.backend || ws.backend === activeBackend;
+              return local && tree && leadCandidates(tree.nodes).length > 0 && (
+                <button role="menuitem" title="Make several of your own panes here leads at once, each with its role"
+                  onClick={() => { setCtxMenu(null); setLeadsWorkspaceKey(workspaceKey(ws)); }}>Make leads…</button>
+              );
+            })()}
             {isActive && layout && (
               <button
                 role="menuitem"
@@ -640,6 +716,15 @@ export function WorkspaceSection({
             )}
           </div>
         );
+      })()}
+      {paneMenu && panes[paneMenu.paneId] && (
+        <TreePaneMenu pane={panes[paneMenu.paneId]} x={paneMenu.x} y={paneMenu.y} onClose={() => setPaneMenu(null)} />
+      )}
+      {leadsWorkspaceKey && (() => {
+        const tree = trees.find(t => workspaceKey(t.workspace) === leadsWorkspaceKey);
+        if (!tree) return null;
+        const name = tree.workspace.name === '_current' ? 'Current workspace' : tree.workspace.name;
+        return <MakeLeadsDialog workspace={name} nodes={tree.nodes} onClose={() => setLeadsWorkspaceKey(null)} />;
       })()}
       {packWorkspaceName && (() => {
         const workspace = named.find((item) => item.name === packWorkspaceName);

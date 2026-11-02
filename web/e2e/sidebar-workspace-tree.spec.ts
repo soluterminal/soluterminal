@@ -5,7 +5,16 @@ import { buildNxMFromLeaves, removePane } from '../src/lib/layout';
 
 const ids = ['tree-lead', 'tree-w1', 'tree-w2', 'tree-w3', 'tree-sub', 'tree-human'];
 const labels = ['Release lead', 'Build worker', 'Finished worker', 'Missing layout worker', 'Approval sub-worker', 'My shell'];
-async function setup(page: Page, nativeWorker = false, options: { secondWorkspace?: boolean; agentOnly?: boolean; orphan?: boolean; auto?: boolean } = {}) {
+// Workers start folded under a top-level pane. Most tests here are about views,
+// not folding, so they start with the lead open, as if the person had opened
+// it (only when nothing is stored yet, so reloads keep later choices).
+async function openTree(page: Page, keys: string[]) {
+  await page.addInitScript(keys => {
+    if (localStorage.getItem('solu.sidebarTreeCollapsed.v1') === null) localStorage.setItem('solu.sidebarTreeCollapsed.v1', JSON.stringify(Object.fromEntries(keys.map(key => [key, false]))));
+  }, keys);
+}
+async function setup(page: Page, nativeWorker = false, options: { secondWorkspace?: boolean; agentOnly?: boolean; orphan?: boolean; auto?: boolean; folded?: boolean } = {}) {
+  if (!options.folded) await openTree(page, ['Tree project:pane:tree-lead']);
   const panes = ids.map((id, i) => ({
     id, title: labels[i], cwd: '/project', cmd: ['sh'], status: 'running', state: 'idle', pid: i + 10, cols: 80, rows: 24,
     createdAt: '2026-10-30T00:00:00Z', lastActivityMs: 0,
@@ -116,7 +125,9 @@ test('workspace, lead, nested lead, worker and return preserve the saved layout'
   // through visible rows and expands the same branch.
   await page.getByRole('button', { name: 'Collapse Release lead', exact: true }).click();
   await expect(row(page, 'Release lead')).toContainText('4 workers');
-  await expect(row(page, 'Release lead').locator('.pane-tree-dot')).toHaveClass(/is-needs-you/);
+  // The lead itself is idle: a ring and a count say what below it needs you.
+  await expect(row(page, 'Release lead').locator('.pane-tree-dot')).toHaveClass(/is-needs-you-below/);
+  await expect(row(page, 'Release lead').locator('.pane-tree-attn-count')).toHaveText('1●');
   await expect(page.locator('.ws-row .pane-tree-dot')).toHaveClass(/is-needs-you/);
   await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('collapsed-attention.png') });
   await page.setViewportSize({ width: 1000, height: 800 });
@@ -143,6 +154,84 @@ test('workspace, lead, nested lead, worker and return preserve the saved layout'
   await page.reload();
   await expect(row(page, 'Release lead')).toBeVisible();
   await expect(row(page, 'Finished worker')).toHaveCount(0);
+});
+
+test('chevrons take near misses, × takes no width, and branches open and close together', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await setup(page, false, { secondWorkspace: true });
+  const topLevel = ['tree-lead', 'tree-human'];
+  await visible(page, topLevel);
+  // The chevron is a full-height column: a click 2px above the row's bottom
+  // edge, well outside the glyph, folds the branch and leaves the view alone.
+  const chevron = page.getByRole('button', { name: 'Collapse Release lead', exact: true });
+  const box = (await chevron.boundingBox())!;
+  const rowBox = (await row(page, 'Release lead').locator(':scope > .workspace-pane-row').boundingBox())!;
+  expect(box.width).toBe(24);
+  expect(box.height).toBeGreaterThanOrEqual(rowBox.height - 1);
+  await page.mouse.click(box.x + box.width / 2, rowBox.y + rowBox.height - 2);
+  await expect(row(page, 'Release lead')).toHaveAttribute('aria-expanded', 'false');
+  await visible(page, topLevel);
+  await page.getByRole('button', { name: 'Expand Release lead', exact: true }).click();
+  // The × floats over the row's end on hover instead of taking width.
+  const buildRow = row(page, 'Build worker').locator(':scope > .workspace-pane-row');
+  const text = buildRow.locator(':scope > .pane-tree-text');
+  await page.mouse.move(900, 500);
+  const before = (await text.boundingBox())!.width;
+  await buildRow.hover();
+  await expect(buildRow.locator('.pane-tree-close')).toHaveCSS('opacity', '1');
+  expect((await text.boundingBox())!.width).toBe(before);
+  expect(before).toBeGreaterThan(rowBox.width - 100);
+  // Alt+click folds the lead with everything below it; a plain reopen keeps
+  // the inner branch folded.
+  await page.getByRole('button', { name: 'Collapse Release lead', exact: true }).click({ modifiers: ['Alt'] });
+  await page.getByRole('button', { name: 'Expand Release lead', exact: true }).click();
+  await expect(row(page, 'Build worker')).toHaveAttribute('aria-expanded', 'false');
+  await expect(row(page, 'Approval sub-worker')).toHaveCount(0);
+  await expect(row(page, 'Build worker').locator('.pane-tree-attn-count')).toHaveText('1●');
+  await page.getByRole('button', { name: 'Collapse Release lead', exact: true }).click();
+  await page.getByRole('button', { name: 'Expand Release lead', exact: true }).click({ modifiers: ['Alt'] });
+  await expect(row(page, 'Approval sub-worker')).toBeVisible();
+  // Collapse all / Expand all from the header, remembered across a reload.
+  await page.getByRole('button', { name: 'Collapse all', exact: true }).click();
+  for (const name of ['Tree project', 'Other project']) await expect(row(page, name)).toHaveAttribute('aria-expanded', 'false');
+  await expect(row(page, 'Release lead')).toHaveCount(0);
+  await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('collapse-all.png') });
+  await page.reload();
+  await expect(row(page, 'Tree project')).toHaveAttribute('aria-expanded', 'false');
+  await page.getByRole('button', { name: 'Expand all', exact: true }).click();
+  await expect(row(page, 'Approval sub-worker')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Collapse all', exact: true })).toBeVisible();
+  // * and - open and close a row with its siblings.
+  await row(page, 'Tree project').focus();
+  await page.keyboard.press('-');
+  await expect(row(page, 'Other project')).toHaveAttribute('aria-expanded', 'false');
+  await page.keyboard.press('*');
+  await expect(row(page, 'Other project')).toHaveAttribute('aria-expanded', 'true');
+  await expect(row(page, 'Release lead')).toBeVisible();
+  // A workspace is deleted from its menu, not a × on every row.
+  await expect(page.getByRole('button', { name: 'Delete workspace' }).first()).toBeHidden();
+  await page.locator('.ws-row').first().click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: 'Delete' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('tree-targets.png') });
+});
+
+test('workers start folded under their lead, still raise its flag, and an opened lead stays open', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await setup(page, false, { folded: true });
+  const lead = row(page, 'Release lead');
+  await expect(lead).toHaveAttribute('aria-expanded', 'false');
+  await expect(row(page, 'Build worker')).toHaveCount(0);
+  // The approval two levels down shows on the folded lead: a ring and 1●.
+  await expect(lead.locator(':scope > .workspace-pane-row .pane-tree-dot')).toHaveClass(/is-needs-you-below/);
+  await expect(lead.locator(':scope > .workspace-pane-row .pane-tree-attn-count')).toHaveText('1●');
+  await expect(page.getByRole('button', { name: 'Expand all', exact: true })).toBeVisible();
+  await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('folded-by-default.png') });
+  await lead.getByRole('button', { name: 'Expand Release lead', exact: true }).click();
+  await expect(row(page, 'Approval sub-worker')).toBeVisible();
+  await page.reload();
+  await expect(row(page, 'Release lead')).toHaveAttribute('aria-expanded', 'true');
+  await expect(row(page, 'Approval sub-worker')).toBeVisible();
 });
 
 test('mobile keeps the hierarchy and capped indentation', async ({ page }, testInfo) => {
@@ -350,7 +439,7 @@ test('an attention jump to a hidden worker opens its team and focuses it', async
   await page.setViewportSize({ width: 1440, height: 960 });
   await setup(page);
   await visible(page, ['tree-lead', 'tree-human']);
-  await page.getByRole('button', { name: '1 pane is waiting on you' }).click();
+  await page.getByRole('button', { name: '1 item is waiting on you' }).click();
   await page.locator('.attention-row', { hasText: 'Approval sub-worker' }).click();
   // The worker's top-level ancestor's team: never the lead alone.
   await visible(page, ['tree-lead', 'tree-w1', 'tree-w2', 'tree-w3', 'tree-sub']);
@@ -455,13 +544,13 @@ test('mobile lists only top-level panes and an attention jump shows the worker',
   await expect(options).toHaveText([/Release lead/, /My shell/]);
   await page.locator('.bottombar-picker').click();
   // One waiting pane: the bottom bar goes straight to it.
-  await page.getByRole('button', { name: '1 pane needs you — go to it' }).click();
+  await page.getByRole('button', { name: '1 waiting on you — go to it' }).click();
   await visible(page, ['tree-sub']);
   await page.locator('.bottombar-picker').click();
   await expect(options).toHaveCount(5);
 });
 
-test('leads are roles: sub-leads nest with the lead pill, workers under their lead, Make lead from the pane menu', async ({ page }) => {
+test('leads are peers: a sub-lead is top level with its workers folded under it; Make lead from the pane header, the tree row and in a batch', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 960 });
   const at = (n: number) => ({ at: n, workspace: 'Leads project' });
   const base = { cwd: '/project', cmd: ['sh'], status: 'running', state: 'idle', cols: 80, rows: 24, createdAt: '2026-10-30T00:00:00Z', lastActivityMs: 0 };
@@ -481,8 +570,10 @@ test('leads are roles: sub-leads nest with the lead pill, workers under their le
   await page.route('**/api/panes/*/team', route => {
     const body = route.request().postDataJSON();
     teamCalls.push({ id: new URL(route.request().url()).pathname.split('/').at(-2), ...body });
-    const origin = { source: 'user', ...at(5), teamKind: 'lead', leadRole: body.role };
-    panes[4] = { ...panes[4], origin } as PaneInfo;
+    const id = new URL(route.request().url()).pathname.split('/').at(-2);
+    const index = panes.findIndex(p => p.id === id);
+    const origin = { ...panes[index].origin, teamKind: 'lead', leadRole: body.role };
+    panes[index] = { ...panes[index], origin } as PaneInfo;
     return route.fulfill({ json: { origin } });
   });
   await page.routeWebSocket(/\/api\/panes\/.*\/io/, ws => {
@@ -490,31 +581,35 @@ test('leads are roles: sub-leads nest with the lead pill, workers under their le
     ws.send(Buffer.from('\r\nLeads fixture\r\n'));
   });
   await page.goto('/?ws=Leads%20project');
+  await expect(row(page, 'CMO')).toBeVisible();
   const shown = (expected: string[]) => expect.poll(async () => {
     const out = [];
     for (const id of paneIds) if (await page.locator(`[data-pane-id="${id}"] .xterm`).isVisible()) out.push(id);
     return out;
   }).toEqual(paneIds.filter(id => expected.includes(id)));
-  // Your own panes and a lead whose starter closed are top level; the
-  // sub-lead nests under the pane that started it, its worker under it.
-  await shown(['k-cmo', 'k-qa', 'k-shell']);
-  await expect(row(page, 'CMO')).toHaveAttribute('aria-level', '2');
-  await expect(row(page, 'Social')).toHaveAttribute('aria-level', '3');
-  await expect(row(page, 'Draft post')).toHaveAttribute('aria-level', '4');
-  await expect(row(page, 'QA')).toHaveAttribute('aria-level', '2');
-  await expect(row(page, 'Social').locator(':scope > .workspace-pane-row .pane-tree-lead-pill')).toHaveText('lead · social');
-  await expect(row(page, 'QA').locator(':scope > .workspace-pane-row .pane-tree-lead-pill')).toHaveText('lead · qa');
-  await expect(row(page, 'CMO').locator(':scope > .workspace-pane-row .pane-tree-lead-pill')).toHaveCount(0);
-  await expect(row(page, 'CMO').locator(':scope > .workspace-pane-row .pane-tree-status')).toHaveText('idle · 1 worker · 1 lead');
+  // Every lead is top level, a peer, even one the CMO started (a sub-lead);
+  // who started it stays as provenance. Its worker nests under it, folded.
+  await shown(['k-cmo', 'k-social', 'k-qa', 'k-shell']);
+  for (const name of ['CMO', 'Social', 'QA', 'My shell']) await expect(row(page, name)).toHaveAttribute('aria-level', '2');
+  await expect(row(page, 'Social')).toHaveAttribute('aria-expanded', 'false');
+  await expect(row(page, 'Draft post')).toHaveCount(0);
+  await expect(row(page, 'Social').locator(':scope > .workspace-pane-row')).toHaveAttribute('title', 'Social\nStarted by CMO');
+  await expect(row(page, 'Social')).toHaveAccessibleDescription('idle · 1 worker · started by CMO');
+  await row(page, 'Social').getByRole('button', { name: 'Expand Social', exact: true }).click();
+  await expect(row(page, 'Draft post')).toHaveAttribute('aria-level', '3');
+  await expect(row(page, 'Social').locator(':scope > .workspace-pane-row .pane-tree-role-chip')).toHaveText('social');
+  await expect(row(page, 'QA').locator(':scope > .workspace-pane-row .pane-tree-role-chip')).toHaveText('qa');
+  await expect(row(page, 'CMO').locator(':scope > .workspace-pane-row .pane-tree-role-chip')).toHaveCount(0);
+  await expect(row(page, 'CMO')).not.toHaveAttribute('aria-expanded');
   // A lead with no running workers is still a lead, and its header says so.
   await expect(page.locator('[data-pane-id="k-qa"] .pane-header')).toContainText('Lead · qa');
-  // Clicking a sub-lead shows its own team; its parent shows the whole subtree.
+  // A sub-lead shows its own team; its starter's team no longer includes it.
   await row(page, 'Social').locator(':scope > .workspace-pane-row').click();
   await shown(['k-social', 'k-post']);
   await row(page, 'CMO').locator(':scope > .workspace-pane-row').click();
-  await shown(['k-cmo', 'k-social', 'k-post']);
+  await shown(['k-cmo']);
   await page.locator('.ws-row .ws-name').click();
-  await shown(['k-cmo', 'k-qa', 'k-shell']);
+  await shown(['k-cmo', 'k-social', 'k-qa', 'k-shell']);
   // Make lead on your own pane asks for the role and shows the pill.
   await page.locator('[data-pane-id="k-shell"] .pane-header').click({ button: 'right' });
   await expect(page.getByRole('menuitem', { name: 'Make worker' })).toHaveCount(0);
@@ -522,13 +617,31 @@ test('leads are roles: sub-leads nest with the lead pill, workers under their le
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('textbox').fill('@security');
   await dialog.getByRole('button', { name: 'Make lead' }).click();
-  await expect(row(page, 'My shell').locator(':scope > .workspace-pane-row .pane-tree-lead-pill')).toHaveText('lead · security');
+  await expect(row(page, 'My shell').locator(':scope > .workspace-pane-row .pane-tree-role-chip')).toHaveText('security');
   expect(teamCalls).toEqual([{ id: 'k-shell', kind: 'lead', role: 'security' }]);
   // Still top level, nothing else moved.
-  await shown(['k-cmo', 'k-qa', 'k-shell']);
+  await shown(['k-cmo', 'k-social', 'k-qa', 'k-shell']);
+  // The same from the tree row's own menu, without opening the pane…
+  await row(page, 'My shell').locator(':scope > .workspace-pane-row').click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: 'Rename lead role…' })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Remove lead' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  // …and for several panes at once from the workspace menu.
+  await page.locator('.ws-row').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Make leads…' }).click();
+  const batch = page.getByRole('dialog', { name: 'Make leads in Leads project' });
+  await expect(batch.getByRole('checkbox')).toHaveCount(1);
+  await batch.getByRole('checkbox', { name: 'CMO' }).check();
+  await expect(batch.getByRole('button', { name: 'Make 1 lead' })).toBeDisabled();
+  await batch.getByRole('textbox', { name: 'Role for CMO' }).fill('marketing');
+  await batch.getByRole('button', { name: 'Make 1 lead' }).click();
+  await expect(batch).toHaveCount(0);
+  expect(teamCalls.at(-1)).toEqual({ id: 'k-cmo', kind: 'lead', role: 'marketing' });
+  await expect(row(page, 'CMO').locator(':scope > .workspace-pane-row .pane-tree-role-chip')).toHaveText('marketing');
 });
 
-test('pane rows lead with the @handle, then the title without repeating it', async ({ page }) => {
+test('pane rows lead with the @handle, then what the pane is doing, on two lines or one by width', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 960 });
   const base = { cwd: '/project', cmd: ['sh'], status: 'running', state: 'idle', cols: 80, rows: 24, createdAt: '2026-10-30T00:00:00Z', lastActivityMs: 0 };
   const panes = [
@@ -545,17 +658,37 @@ test('pane rows lead with the @handle, then the title without repeating it', asy
   await page.routeWebSocket(/\/api\/panes\/.*\/io/, ws => { ws.send(JSON.stringify({ type: 'ownership', owned: true, owner: 'you' })); });
   await page.goto('/?ws=Handles');
   const line = (name: string) => row(page, name).locator(':scope > .workspace-pane-row');
+  // The working-on line wins over the rest of the title; both stay in the tooltip.
   await expect(line('@cmo · launch').locator('.pane-tree-handle')).toHaveText('@cmo');
-  await expect(line('@cmo · launch').locator('.pane-tree-title-detail')).toHaveText('launch');
+  await expect(line('@cmo · launch').locator('.pane-tree-desc')).toHaveText('Drafting the launch post');
   await expect(line('@cmo · launch')).toHaveAttribute('title', '@cmo · launch\nDrafting the launch post');
-  await expect(line('@secure · Security review').locator('.pane-tree-title')).toHaveText('@secure Security review');
+  await expect(line('@secure · Security review').locator('.pane-tree-title')).toHaveText('@secure');
+  await expect(line('@secure · Security review').locator('.pane-tree-desc')).toHaveText('Security review');
   await expect(line('@qa').locator('.pane-tree-handle')).toHaveText('@qa');
-  await expect(line('@qa').locator('.pane-tree-title-detail')).toHaveCount(0);
+  await expect(line('@qa').locator('.pane-tree-desc')).toHaveCount(0);
   await expect(line('My shell').locator('.pane-tree-title')).toHaveText('My shell');
   await expect(line('My shell').locator('.pane-tree-handle')).toHaveCount(0);
-  // The handle reads dimmer-free; the title after it is dim.
-  const colors = await line('@cmo · launch').evaluate(el => [el.querySelector('.pane-tree-handle'), el.querySelector('.pane-tree-title-detail')].map(n => getComputedStyle(n!).color));
+  // The handle reads dimmer-free; the description is dim.
+  const colors = await line('@cmo · launch').evaluate(el => [el.querySelector('.pane-tree-handle'), el.querySelector('.pane-tree-desc')].map(n => getComputedStyle(n!).color));
   expect(colors[0]).not.toBe(colors[1]);
+  // The status words are for screen readers; the dot shows the state.
+  await expect(row(page, 'My shell')).toHaveAccessibleDescription('idle');
+  const placement = async () => line('@cmo · launch').evaluate(el => {
+    const handle = el.querySelector('.pane-tree-handle')!.getBoundingClientRect(), desc = el.querySelector('.pane-tree-desc')!.getBoundingClientRect();
+    return { below: desc.top >= handle.bottom - 1, height: Math.round(el.getBoundingClientRect().height) };
+  });
+  // The default 260px sidebar: the description gets its own line.
+  expect(await placement()).toEqual({ below: true, height: 36 });
+  // From about a 340px sidebar it follows the handle on one 26px line.
+  const handleBox = (await page.locator('[data-panel-resize-handle-id]').first().boundingBox())!;
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2 + 120, handleBox.y + 200, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(placement).toEqual({ below: false, height: 26 });
+  await expect(row(page, 'My shell').locator(':scope > .workspace-pane-row')).toHaveCSS('min-height', '26px');
+  // Without a description the title may use the whole line.
+  expect(await line('My shell').locator('.pane-tree-title-line').evaluate(el => el.style.maxWidth || getComputedStyle(el).maxWidth)).toBe('none');
 });
 
 test('every pane row offers × on hover or focus; a finished worker keeps it shown', async ({ page }) => {

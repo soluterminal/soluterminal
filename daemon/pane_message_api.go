@@ -9,6 +9,9 @@ import (
 // Broadcast uses verified agent delivery. Keep /inject raw: voice and ordinary
 // keystrokes rely on its byte-for-byte behavior.
 func (a *apiServer) submitPaneMessage(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "submit a pane message", "ask_pane", "send_input") {
+		return
+	}
 	p, ok := a.mgr.Get(r.PathValue("id"))
 	if !ok {
 		http.Error(w, "pane not found", http.StatusNotFound)
@@ -54,6 +57,15 @@ func (a *apiServer) submitPaneMessage(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, errDeliveryChoicePrompt) {
 			status = http.StatusConflict
+		}
+		if errors.Is(err, errPutBackInBox) {
+			// Said to the person, whose message box this is.
+			sender := "an agent"
+			if msg := p.Snapshot().UnsentMessage; msg != nil {
+				sender = msg.Sender
+			}
+			http.Error(w, "Nothing was sent: your input box holds an unsent message from "+sender+", put back after you stopped the turn. Send or Clear it on the pane first.", http.StatusConflict)
+			return
 		}
 		http.Error(w, err.Error(), status)
 		return

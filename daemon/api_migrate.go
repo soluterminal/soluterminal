@@ -59,6 +59,9 @@ func (a *apiServer) migratePaneClean(w http.ResponseWriter, r *http.Request) {
 			"status": "sibling-created", "method": "sibling", "pane": makePaneDTO(np, a.aria, a.attention),
 		})
 	case "inplace":
+		if !a.requireHuman(w, r, "recover a pane in place") {
+			return
+		}
 		if p.HasClaudeDescendant() && !req.Confirm {
 			writeJSON(w, 409, map[string]any{
 				"needsConfirm": true,
@@ -217,16 +220,18 @@ func (a *apiServer) doMigrateInplace(p *Pane) (*Pane, inplaceResult, error) {
 			}
 		}
 	}
-	// A clean replacement ends the old pane's needs-user episode. Carry
-	// durable manual/historical flags with their owner, but not an automatic
-	// Warden flag bound to the retired pane's episode.
-	if snap.Flagged && !(snap.FlagOwner == wardenScopeIdentity && snap.FlagEpisode != "" && snap.FlagRevision != "") {
+	// Carry the current flag to the replacement pane.
+	if snap.Flagged {
 		np.SetFlagAs(true, snap.FlagMemo, snap.FlagOwner)
 	}
 	if a.panes != nil {
 		_ = a.panes.Put(np)
 	}
 
+	// The agent goes on in the new pane, and so do its asks.
+	if a.asks != nil {
+		a.asks.movePane(p.ID, np.ID, a.paneCallerLabel(np))
+	}
 	// Replacement is live in the layout — retire the old pane.
 	_ = a.mgr.Kill(p.ID)
 	if a.panes != nil {
@@ -299,6 +304,9 @@ type migrateAllReq struct {
 // real run executes in the background, staggered, and the client watches
 // /api/panes (degraded flags clear, clean siblings appear) for progress.
 func (a *apiServer) migrateCleanAll(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "recover all degraded panes") {
+		return
+	}
 	var req migrateAllReq
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)

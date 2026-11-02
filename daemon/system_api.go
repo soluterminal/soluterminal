@@ -322,11 +322,6 @@ type systemAutomationDTO struct {
 		GlobalPaused bool `json:"globalPaused"`
 		PausedCount  int  `json:"pausedCount"`
 	} `json:"autonomy"`
-	Warden struct {
-		Enabled       bool       `json:"enabled"`
-		LastRunAt     *time.Time `json:"lastRunAt"`
-		LastRunStatus string     `json:"lastRunStatus"`
-	} `json:"warden"`
 }
 
 type systemSurfaceDTO struct {
@@ -623,16 +618,7 @@ func (a *apiServer) systemAutomation(now time.Time) systemAutomationDTO {
 			}
 		}
 	}
-	if a.wardenSettings != nil {
-		out.Warden.Enabled = a.wardenSettings.Enabled()
-	}
-	if a.warden != nil {
-		if runs := a.warden.RecentRuns(); len(runs) > 0 {
-			at := runs[0].At
-			out.Warden.LastRunAt = &at
-			out.Warden.LastRunStatus = runs[0].Status
-		}
-	}
+
 	return out
 }
 

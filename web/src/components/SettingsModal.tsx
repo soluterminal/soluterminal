@@ -14,7 +14,6 @@ import { AccountTab, useAccountTabVisible } from './settings/AccountTab';
 import { NotificationsVoiceTab, useNotificationsVoiceVisible } from './settings/NotificationsVoiceTab';
 import { PrivacySecurityTab } from './settings/PrivacySecurityTab';
 import { PhoneEncryptionSetting, privateRelayCandidateInView } from './settings/RemoteDevicesSetting';
-import { WardenTab } from './settings/WardenTab';
 import { ServicesTab } from './settings/ServicesTab';
 import { ErrorBoundary } from './ErrorBoundary';
 
@@ -35,13 +34,12 @@ const TABS: { key: SettingsTab; label: string }[] = [
   { key: 'notifications', label: 'Notifications & voice' },
   { key: 'privacy', label: 'Privacy & security' },
   { key: 'devices', label: 'Devices & updates' },
-  { key: 'warden', label: 'Warden' },
   { key: 'tasks', label: 'Services' },
 ];
 
-// Tabs for team-only surfaces: the Tasks engine and the Warden caretaker.
+// Team-only service settings.
 // Feature modules add their own tabs (extensions.ts).
-const TEAM_ONLY_TABS = new Set<SettingsTab>(['tasks', 'warden']);
+const TEAM_ONLY_TABS = new Set<SettingsTab>(['tasks']);
 
 export function SettingsModal() {
   const open = useSettings((s) => s.open);
@@ -152,7 +150,6 @@ export function SettingsModal() {
               {activeTab === 'privacy' && !isMobile && <PrivacySecurityTab />}
               {activeTab === 'privacy' && isMobile && <PhoneEncryptionSetting />}
               {activeTab === 'devices' && <DevicesTab />}
-              {activeTab === 'warden' && <WardenTab />}
               {activeTab === 'tasks' && <ServicesTab />}
               {featureTabs.map((f, i) => activeTab === f.key && featureVisible[i] && <f.Component key={f.key} />)}
             </ErrorBoundary>

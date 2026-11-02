@@ -17,7 +17,16 @@ func TestShinoquePrivateChannelDesktopProxy(t *testing.T) {
 	home := shinoqueTestToken(t, token)
 	seen := make(chan *http.Request, 1)
 	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen <- r.Clone(r.Context())
+		if r.Method != http.MethodGet || (r.URL.Path != "/home" && r.URL.Path != "/api/files/roots") {
+			http.NotFound(w, r)
+			return
+		}
+		select {
+		case seen <- r.Clone(r.Context()):
+		default:
+			http.Error(w, "unexpected extra upstream request", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html")
 		w.Header().Set("Content-Security-Policy", "sandbox")
 		_, _ = io.WriteString(w, "<html><head></head><body>pane app</body></html>")
@@ -27,8 +36,17 @@ func TestShinoquePrivateChannelDesktopProxy(t *testing.T) {
 	port := strconv.Itoa(int(owned.Port))
 	shinoqueTestDiscovery(t, home, port)
 	unownedHits := make(chan struct{}, 1)
-	unownedService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		unownedHits <- struct{}{}
+	unownedService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/home" {
+			http.NotFound(w, r)
+			return
+		}
+		select {
+		case unownedHits <- struct{}{}:
+		default:
+			http.Error(w, "unexpected extra upstream request", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer unownedService.Close()

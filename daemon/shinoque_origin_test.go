@@ -15,7 +15,16 @@ func TestShinoqueRelayServingCloudOrigins(t *testing.T) {
 	shinoqueTestToken(t, "relay-token")
 	seen := make(chan http.Header, 1)
 	base, tokens, closeServers := shinoqueTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen <- r.Header.Clone()
+		if r.Method != http.MethodPost || r.URL.Path != "/api/files/write" {
+			http.NotFound(w, r)
+			return
+		}
+		select {
+		case seen <- r.Header.Clone():
+		default:
+			http.Error(w, "unexpected extra upstream request", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer closeServers()

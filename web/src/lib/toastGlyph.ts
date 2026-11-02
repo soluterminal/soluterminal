@@ -6,7 +6,7 @@ export interface DaemonToastGlyph {
 
 /**
  * Daemon emit sites in schedules_agent.go, schedules_task.go, agents_run.go,
- * schedules_runner.go, warden.go, workflow_janitor.go and optional features prefix human-readable toast text with glyphs. Resolve
+ * schedules_runner.go, workflow_janitor.go and optional features prefix human-readable toast text with glyphs. Resolve
  * those prefixes at the web boundary: the same daemon strings also feed the
  * Flutter mobile app, so changing their wire text would break that client.
  */

@@ -58,10 +58,20 @@ func autoFireUserHold(p *Pane, now time.Time) (bool, string) {
 	//
 	// Recency only. Draft freshness below comes from recorded input instead of
 	// LastInputMs because auto-approval writes deliberately update LastInputMs.
-	if lastInput > 0 && lastInput > p.Snapshot().AutoModeLastFiredMs && now.Sub(time.UnixMilli(lastInput)) < ariaAutoTypingSettle {
+	//
+	// Only a person's input holds: an agent's message delivery (send_input,
+	// ask_pane) stamps lastAgentInputMs too, and #896's lastHumanInputMs
+	// (person sockets only) catches a person typing just before it.
+	if lastInput > 0 && lastInput > p.Snapshot().AutoModeLastFiredMs && lastInput != p.lastAgentInputMs.Load() && now.Sub(time.UnixMilli(lastInput)) < ariaAutoTypingSettle {
 		return true, "user typing"
 	}
-	pending, lastRecordedInput := p.composerPendingSnapshot()
+	if human := p.lastHumanInputMs.Load(); human > 0 && now.Sub(time.UnixMilli(human)) < ariaAutoTypingSettle {
+		return true, "user typing"
+	}
+	// A draft an agent's delivery left (Codex keeps a queued message's text
+	// in the recorder: Tab is not Enter) is no one's typing (2026-11-02:
+	// @rest-gate's approval waited two minutes on @flag-guard's message).
+	pending, lastRecordedInput := p.humanComposerPendingSnapshot()
 	if pending > 0 && lastRecordedInput > 0 && now.Sub(time.UnixMilli(lastRecordedInput)) < ariaAutoDraftStaleAfter {
 		// Name when the hold lifts. The deadline only moves when new input
 		// renews the draft, so a renewed hold records a new decision line

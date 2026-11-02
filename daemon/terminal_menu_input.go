@@ -3,6 +3,7 @@ package main
 import (
 	"regexp"
 	"strings"
+	"time"
 )
 
 // terminalPermissionShortcut distinguishes a literal menu key from composer
@@ -68,6 +69,12 @@ const (
 	menuInputDrawn
 	// menuInputLive: an unanswered menu is on screen.
 	menuInputLive
+	// menuInputAutoAnswered: drawn, and auto-approval answered a menu on this
+	// pane within ariaAutoTypingSettle. Auto-approval's Enter is unrecorded,
+	// so the recorder never entered that menu; a key reaching the dialog
+	// still drawn (its next "2 of 3" step, or a redraw not yet landed) is
+	// aimed at the dialog, not the composer.
+	menuInputAutoAnswered
 )
 
 // menuDialogFooterRE matches the key-hint footer Claude and Codex draw under
@@ -98,6 +105,16 @@ func (p *Pane) menuInputState() menuInput {
 		text, ok = p.gridVisibleText()
 	}
 	if ok && menuDialogFooterOnScreen(text) {
+		// The footer phrase alone can be assistant output. Only a dialog still
+		// in its own shape (the footer under the focused option, no input box
+		// below it) right after an answer auto-approval sent makes it the
+		// key's target.
+		p.mu.Lock()
+		fired := p.AutoModeLastFiredMs
+		p.mu.Unlock()
+		if fired > 0 && time.Since(time.UnixMilli(fired)) < ariaAutoTypingSettle && menuDialogFooterBelowLastPrompt(text) {
+			return menuInputAutoAnswered
+		}
 		return menuInputDrawn
 	}
 	return menuInputNone
@@ -116,4 +133,24 @@ func menuDialogFooterOnScreen(screen string) bool {
 		tail[i], tail[j] = tail[j], tail[i]
 	}
 	return menuDialogFooterRE.MatchString(strings.Join(strings.Fields(strings.Join(tail, " ")), " "))
+}
+
+// menuDialogFooterBelowLastPrompt reports whether the dialog key-hint footer
+// sits below the screen's last prompt-glyph row. In an open dialog that row is
+// the focused option. When the input box is back, it is the box's own row, and
+// any "Enter to confirm" in output above it is not a dialog.
+func menuDialogFooterBelowLastPrompt(screen string) bool {
+	lines := strings.Split(screen, "\n")
+	last := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "❯") || strings.HasPrefix(trimmed, "›") {
+			last = i
+		}
+	}
+	if last < 0 {
+		return false
+	}
+	below := strings.Join(lines[last+1:], " ")
+	return menuDialogFooterRE.MatchString(strings.Join(strings.Fields(below), " "))
 }

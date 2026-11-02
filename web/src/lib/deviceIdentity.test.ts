@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   canonicalDeviceQuery,
   deviceCodeFor,
+  deviceCodeV3For,
+  deviceCommitV3For,
+  deviceSPKIHashFor,
+  newDeviceNonceV3,
   deviceIdFor,
   deviceEnrolledFor,
   deviceSigMessage,
@@ -11,6 +15,7 @@ import {
   relayTarget,
   withDeviceSignatureQuery,
 } from './deviceIdentity';
+import v3 from './testdata/device-code-v3.json';
 
 // Reference values from the daemon's own deviceID / deviceCode /
 // deviceSigMessage (daemon/trusted_devices.go) for a fixed key.
@@ -18,6 +23,33 @@ const SPKI =
   'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAECqJG/QG2oPDwtUD/pEtTZ7kr1umboQSCs3VBTHognZiHan6FatqeXN1oOr+YXgR089/a3+vdtLMcEdJJHyqdBA==';
 
 describe('deviceIdentity', () => {
+  it('matches the shared DER hash and refuses alternative spellings of the key', async () => {
+    expect(await deviceSPKIHashFor(v3.keyHash.spki)).toBe(v3.keyHash.derSHA256);
+    expect(atob(v3.keyHash.nonCanonicalSPKI)).toBe(atob(v3.keyHash.spki));
+    for (const spki of [v3.keyHash.nonCanonicalSPKI, v3.keyHash.spki.replace(/=+$/, ''), v3.keyHash.spki + '\n', 'AA==']) {
+      await expect(deviceSPKIHashFor(spki)).rejects.toThrow();
+    }
+    await expect(deviceCodeV3For(v3.keyHash.nonCanonicalSPKI, v3.daemonSPKI, v3.enrolmentId, v3.deviceNonce, v3.daemonNonce)).rejects.toThrow();
+  });
+
+  it('matches the shared V3 commit and comparison vectors', async () => {
+    expect(await deviceIdFor(v3.deviceSPKI)).toBe(v3.deviceId);
+    expect(await deviceCommitV3For(v3.deviceId, v3.deviceNonce)).toBe(v3.commit);
+    expect(await deviceCodeV3For(v3.deviceSPKI, v3.daemonSPKI, v3.enrolmentId, v3.deviceNonce, v3.daemonNonce)).toBe(v3.code);
+    expect(newDeviceNonceV3()).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('rejects noncanonical V3 fields', async () => {
+    await expect(deviceCommitV3For(v3.deviceId, v3.deviceNonce.toUpperCase())).rejects.toThrow();
+    for (const [key, value] of [
+      ['deviceSPKI', v3.deviceSPKI + '\n'], ['enrolmentId', 'enr_short'],
+      ['deviceNonce', '00'], ['daemonNonce', v3.daemonNonce.toUpperCase()],
+    ]) {
+      const v = { ...v3, [key]: value };
+      await expect(deviceCodeV3For(v.deviceSPKI, v.daemonSPKI, v.enrolmentId, v.deviceNonce, v.daemonNonce)).rejects.toThrow();
+    }
+  });
+
   it('derives the same id and approval code as the daemon', async () => {
     expect(await deviceIdFor(SPKI)).toBe('dev_b71SY8ikOq3NEn-6MV-j9z');
     expect(await deviceCodeFor(SPKI)).toBe('GJ23-QFPG-G9PE-ASX5');

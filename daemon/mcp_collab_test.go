@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,17 +121,18 @@ func TestAskPaneSendsWaitsAndReturnsOnlyTheReply(t *testing.T) {
 	p := testPaneWithTail(t, "pane_claude", "claude", "❯ \n")
 	p.Cmd = []string{"claude"}
 	p.ClaudeTranscriptPath = transcript
-	drainConn(t, p)
-	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus()}
-
-	go func() {
-		time.Sleep(300 * time.Millisecond)
+	// The fake agent answers the message once it has been submitted, as a
+	// real one does. (It used to answer on a 300 ms timer: under -race and
+	// load, ask_pane could take its before-sending baseline after that
+	// reply was written, and then the reply read as the previous turn's.)
+	replyAfterSubmit(t, p, "review my change", func() {
 		now := time.Now()
 		f, _ := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o600)
 		defer f.Close()
 		fmt.Fprintln(f, claudeLine("user", now, `"promptSource":"typed","message":{"role":"user","content":"review my change"}`))
 		fmt.Fprintln(f, claudeLine("assistant", now, `"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Looks good apart from the loop."}]}`))
-	}()
+	})
+	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus()}
 	text, isErr := mcpResultText(t, a.mcpToolAskPane(map[string]any{"pane_id": "pane_claude", "text": "review my change", "timeout_seconds": 10.0}, "pane_caller"))
 	if isErr {
 		t.Fatal(text)
@@ -142,6 +144,32 @@ func TestAskPaneSendsWaitsAndReturnsOnlyTheReply(t *testing.T) {
 	if res.Status != "replied" || res.Reply != "Looks good apart from the loop." || res.Source != "transcript" {
 		t.Fatalf("result: %+v", res)
 	}
+}
+
+// replyAfterSubmit connects p to a fake agent that reads the pane's input
+// and runs reply once, after the Enter that follows message.
+func replyAfterSubmit(t *testing.T, p *Pane, message string, reply func()) {
+	t.Helper()
+	paneEnd, agentEnd := net.Pipe()
+	t.Cleanup(func() { _ = paneEnd.Close(); _ = agentEnd.Close() })
+	go func() {
+		var typed strings.Builder
+		replied := false
+		for {
+			_, payload, err := ReadFrame(agentEnd)
+			if err != nil {
+				return
+			}
+			typed.Write(payload)
+			if !replied && strings.Contains(typed.String(), message) && strings.HasSuffix(typed.String(), "\r") {
+				replied = true
+				reply()
+			}
+		}
+	}()
+	p.mu.Lock()
+	p.agentConn = paneEnd
+	p.mu.Unlock()
 }
 
 // A new Claude pane in a folder that already holds an older session must not

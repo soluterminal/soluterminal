@@ -107,3 +107,24 @@ func BenchmarkVisibleText(b *testing.B) {
 		}
 	})
 }
+
+func TestVisibleTextFaintBlankedBlanksPlaceholder(t *testing.T) {
+	e := New(40, 3)
+	defer e.Close()
+	// Claude 2.1.310's empty input box: the glyph, then a faint placeholder.
+	e.Feed([]byte("\u276f\u00a0\x1b[2mTry\x1b[0m \x1b[2m\"how do I log an error?\"\x1b[0m\r\n\u276f typed \x1b[1mbold\x1b[0m"))
+	plain, blanked, ok := e.VisibleTextFaintBlanked()
+	if !ok {
+		t.Fatal("not readable")
+	}
+	if want, _ := e.VisibleText(); plain != want {
+		t.Fatalf("plain = %q, want VisibleText %q", plain, want)
+	}
+	lines := strings.Split(blanked, "\n")
+	if lines[0] != "\u276f\u00a0" {
+		t.Fatalf("placeholder row = %q, want the bare glyph", lines[0])
+	}
+	if lines[1] != "\u276f typed bold" {
+		t.Fatalf("typed row = %q", lines[1])
+	}
+}
