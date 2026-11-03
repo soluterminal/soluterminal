@@ -50,7 +50,7 @@ function ReceiptChip({ pane, actionGuard }: { pane: PaneInfo; actionGuard?: () =
   const [pending, setPending] = useState(false);
   const msg = pane.unsentMessage;
   if (!msg) return null;
-  const act = async (action: 'send' | 'clear') => {
+  const act = async (action: 'send' | 'clear' | 'keep') => {
     if (pending || actionGuard?.() === false) return;
     setPending(true);
     try {
@@ -70,15 +70,25 @@ function ReceiptChip({ pane, actionGuard }: { pane: PaneInfo; actionGuard?: () =
       }
       const result = await api.actOnUnsentMessage(pane.id, msg.id, action);
       await useStore.getState().refreshPanes();
-      if (result.outcome !== 'submitted' && result.outcome !== 'cleared') {
+      if (result.outcome !== 'submitted' && result.outcome !== 'cleared' && result.outcome !== 'kept') {
         useStore.getState().toast(result.outcome === 'left_in_composer' ? 'The message is still in the input box.' : 'Could not confirm the input box changed.', { kind: 'warn' });
       }
     } catch (err) {
       useStore.getState().toast(String(err), { kind: 'warn' });
     } finally { setPending(false); }
   };
+  // An agent's message put back in the box blocks agents until it is gone;
+  // once the person edits it, Send would send their edit too, so they Clear
+  // it (a single line) or keep it as their own draft.
+  if (msg.putBack && msg.edited) {
+    return <span className="pane-unsent-message" role="status" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+      <span className="pane-unsent-message-label">{`${msg.sender}'s unsent message is still in the input box after your edit. Agents can't type into this pane until it's gone`} —{' '}</span>
+      <button type="button" disabled={pending} title="Empties the input box, your edit too. Only a single line can be cleared this way; remove a longer one in the pane yourself." onClick={() => void act('clear')}>Clear</button>{' / '}
+      <button type="button" disabled={pending} title="Hide this and use your own message box again. Agents still can't type into this pane until the text is gone." onClick={() => void act('keep')}>Keep as my draft</button>
+    </span>;
+  }
   return <span className="pane-unsent-message" role="status" title={msg.notTyped ? msg.text : undefined} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-    <span className="pane-unsent-message-label">{msg.notTyped ? `Message from ${msg.sender} not sent (the pane was busy)` : msg.putBack ? `Unsent message from ${msg.sender} in the input box (put back after you stopped it)` : `Unsent message from ${msg.sender}`} —{' '}</span>
+    <span className="pane-unsent-message-label">{msg.notTyped ? `Message from ${msg.sender} not sent (the pane was busy)` : msg.putBack ? `Unsent message from ${msg.sender} in the input box (put back after you stopped it). Agents can't type into this pane until it's sent or cleared` : `Unsent message from ${msg.sender}`} —{' '}</span>
     <button type="button" disabled={pending} title={msg.notTyped ? 'Read the message, then type it into the pane and press Enter.' : undefined} onClick={() => void act('send')}>{msg.notTyped ? 'Send…' : 'Send'}</button>{' / '}
     {msg.notTyped
       ? <button type="button" disabled={pending} title="Discard the message; nothing was typed." onClick={() => void act('clear')}>Discard</button>

@@ -121,19 +121,18 @@ func TestWorkerRestartDoesNotInventUnreadNotices(t *testing.T) {
 	for _, kind := range []string{"silent-clean", "read-clean", "dismissed-unread", "retained-dirty", "cleared-git-condition"} {
 		t.Run(kind, func(t *testing.T) {
 			a, p, now := archiveFixture(t)
-			lead, _ := a.mgr.Get("lead")
 			if kind == "retained-dirty" {
 				putCapabilityFile(t, filepath.Join(p.Cwd, "tracked.txt"), "worker dirty\n")
 				a.tryArchiveWorker(p, now)
 			}
 			if kind == "dismissed-unread" {
 				a.tryArchiveWorker(p, now)
-				lead.SetFlag(false, "")
+				dismissLeadNotices(t, a, "lead")
 			}
 			if kind == "cleared-git-condition" {
 				a.flagWorkerLead("lead", p.ID, "uncommitted work")
 			}
-			memo := lead.Snapshot().FlagMemo
+			memo := leadNoticeText(a, "lead")
 			q := a.workers()
 			q.mu.Lock()
 			q.startedAt = now
@@ -148,13 +147,13 @@ func TestWorkerRestartDoesNotInventUnreadNotices(t *testing.T) {
 			}
 			a.reconcileWorkerRetentions(true)
 			a.tryArchiveWorker(p, now)
-			got := lead.Snapshot()
+			got := leadNoticeText(a, "lead")
 			if kind == "retained-dirty" {
-				if !got.Flagged || got.FlagMemo != memo {
-					t.Fatalf("existing retention changed: %+v", got)
+				if got == "" || got != memo {
+					t.Fatalf("existing retention changed: %q, was %q", got, memo)
 				}
-			} else if got.Flagged {
-				t.Fatalf("restart invented a retention: %+v", got)
+			} else if got != "" {
+				t.Fatalf("restart invented a retention: %q", got)
 			}
 			if _, live := a.mgr.Get(p.ID); !live {
 				t.Fatal("old final archived after restart")
@@ -188,7 +187,7 @@ func TestWorkerCleanupFailureNoticeSurvivesUntilRetrySucceeds(t *testing.T) {
 				t.Fatal("fixture did not detach worker")
 			}
 			lead, _ := a.mgr.Get("lead")
-			if !strings.Contains(lead.Snapshot().FlagMemo, "pane-store cleanup failed") {
+			if !strings.Contains(leadNoticeText(a, "lead"), "pane-store cleanup failed") {
 				t.Fatal("cleanup failure did not notify lead")
 			}
 			if owner == "user" {
@@ -196,7 +195,7 @@ func TestWorkerCleanupFailureNoticeSurvivesUntilRetrySucceeds(t *testing.T) {
 			}
 			a.expireWorkerArchivesLocked(now)
 			a.reconcileWorkerRetentions(false)
-			if !lead.Snapshot().Flagged {
+			if !leadNoticed(a, "lead") {
 				t.Fatal("failed retry erased the cleanup notice")
 			}
 			if store.attempts < 2 {
@@ -205,11 +204,10 @@ func TestWorkerCleanupFailureNoticeSurvivesUntilRetrySucceeds(t *testing.T) {
 			store.fail = false
 			a.expireWorkerArchivesLocked(now)
 			a.reconcileWorkerRetentions(false)
-			if owner == "user" {
-				if lead.Snapshot().FlagOwner != "user" || lead.Snapshot().FlagMemo != "my bookmark" {
-					t.Fatal("cleanup changed user bookmark")
-				}
-			} else if lead.Snapshot().Flagged {
+			if owner == "user" && (lead.Snapshot().FlagOwner != "user" || lead.Snapshot().FlagMemo != "my bookmark") {
+				t.Fatal("cleanup changed user bookmark")
+			}
+			if leadNoticed(a, "lead") {
 				t.Fatal("successful cleanup left notice")
 			}
 			s := a.workerArchives()

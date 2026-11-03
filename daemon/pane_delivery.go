@@ -154,9 +154,10 @@ func composerDraft(screen string, codex bool) (string, bool) {
 	if start < 0 {
 		return "", false
 	}
+	footer := codexFooterIndex(lines)
 	var parts []string
 	for i, line := range lines[start:] {
-		if codexFooterLineRE.MatchString(line) {
+		if start+i == footer {
 			break
 		}
 		if i == 0 {
@@ -225,6 +226,29 @@ func waitComposer(p *Pane, codex bool, body string, want bool, timeout time.Dura
 	}
 }
 
+// waitPutBackGone polls until the input box shows no part of a put-back
+// message (putBackShown) or the timeout passes; it returns the last
+// observation, at once when the box cannot be read.
+func waitPutBackGone(p *Pane, msg *unsentPaneMessage, timeout time.Duration) (shown, known bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		shown, known = putBackShown(deliveryScreenText(p), !msg.claude, msg.body)
+		if !known || !shown || !time.Now().Before(deadline) {
+			return shown, known
+		}
+		deliverySleep(deliveryPollInterval)
+	}
+}
+
+// submitPersonMessage is submitAgentMessage for the person's own message
+// box, as the daemon classified the caller: it may type onto a put-back
+// message the person chose to keep as their draft. Nothing else may.
+func submitPersonMessage(p *Pane, body string, hasClaude bool, senders ...string) (wrote int, outcome deliveryOutcome, err error) {
+	p.deliveryMu.Lock()
+	defer p.deliveryMu.Unlock()
+	return typeAgentMessageLocked(p, strings.TrimRight(body, "\r\n"), hasClaude, deliveryPlain, draftPersonBox, senders...)
+}
+
 // submitAgentMessage types body into a Claude or Codex pane and submits it,
 // following the contract at the top of this file. It returns the bytes
 // written and the outcome; an error means a PTY write failed or delivery
@@ -269,8 +293,7 @@ func deliverOrHoldAgentMessage(p *Pane, body string, hasClaude bool, mode delive
 		if reason == "" {
 			reason = "the person is typing"
 		}
-		p.setHeldReason(reason)
-		if err := p.enqueueHeldDelivery(body, hasClaude, mode, sender, delivered, senderKeys...); err != nil {
+		if err := p.enqueueHeldDelivery(body, hasClaude, mode, sender, delivered, reason, senderKeys...); err != nil {
 			return 0, "", err
 		}
 		return 0, deliveryHeld, nil
@@ -288,6 +311,9 @@ const (
 	draftUnchecked draftCheck = iota
 	draftBoxOnly
 	draftBoxAndTyping
+	// draftPersonBox: unchecked, as draftUnchecked, for the person's own
+	// message box only: a put-back message they kept does not refuse it.
+	draftPersonBox
 )
 
 // typeAgentMessageLocked types body and submits it. Caller holds deliveryMu.
@@ -343,7 +369,7 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 	// ours: a keystroke after the paste would be submitted with the message.
 	var rev uint64
 	keyWrite := p.Write
-	if check != draftUnchecked {
+	if check == draftBoxOnly || check == draftBoxAndTyping {
 		wrote, err = p.writeWithPrecondition(first, true, false, func() error {
 			if p.draftGuardReason(codex, check == draftBoxAndTyping, time.Now(), p.promptRec.humanDraft) != "" {
 				return errDraftGuardHeld
@@ -369,7 +395,12 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 	} else {
 		// No path types onto a put-back message (the person's message box,
 		// schedules, ARIA mentions): it would be submitted with this one.
-		wrote, err = p.writeWithPrecondition(first, true, false, p.putBackInputCheck)
+		// Only the person's own box may, once they kept it as their draft.
+		putBack := p.putBackInputCheck
+		if check == draftPersonBox {
+			putBack = p.putBackPersonCheck
+		}
+		wrote, err = p.writeWithPrecondition(first, true, false, putBack)
 		if errors.Is(err, errPutBackInBox) {
 			return 0, "", err
 		}
@@ -541,11 +572,23 @@ func (p *Pane) leftComposerOutcome(codex, queue bool, body string, senders ...st
 func (p *Pane) recordPutBackMessage(sender, body string, claude bool, revision uint64) {
 	p.mu.Lock()
 	p.unsentMessage = &unsentPaneMessage{ID: fmt.Sprintf("%d", time.Now().UnixNano()), Sender: sender, PutBack: true, body: body, claude: claude, revision: revision, connection: p.agentConn}
+	start := !p.putBackWatching
+	p.putBackWatching = true
 	p.mu.Unlock()
+	if start {
+		go p.watchPutBack()
+	}
 }
 
 func (p *Pane) recordUnsentMessage(sender, body string, claude bool, revision uint64) {
+	keep := p.keptPutBack()
 	p.mu.Lock()
+	if keep != nil && p.unsentMessage != nil && p.unsentMessage.ID == keep.ID {
+		// The agent's put-back text is still in the box: its receipt, and
+		// the guard on agents' keys, stay. This message is in the box with it.
+		p.mu.Unlock()
+		return
+	}
 	p.unsentMessage = &unsentPaneMessage{ID: fmt.Sprintf("%d", time.Now().UnixNano()), Sender: sender, body: body, claude: claude, revision: revision, connection: p.agentConn}
 	p.mu.Unlock()
 }

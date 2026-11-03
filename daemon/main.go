@@ -381,6 +381,10 @@ func main() {
 	// respawns panes. A second daemon on the same data directory exits here.
 	dataDirOwner := dataDirLockHolder{Addr: *addr, Backend: *backendID, Version: version}
 	dataDirLockHeld = claimDataDirForBoot(*dataDir, dataDirOwner)
+	// Bound now, while no other goroutine runs, because its mode comes from
+	// the umask at bind time; published once this process owns the data
+	// directory (below). Nothing registers it yet.
+	mcpSocket := prepareMCPSocket(*dataDir)
 
 	// Non-claim path: if --relay is set and --relay-token isn't, fall back
 	// to the token stored by a previous --claim run.
@@ -1245,7 +1249,11 @@ func main() {
 	api.asks.onCreated = api.queueAskPush
 	api.asks.closeMissing(func(id string) bool { _, ok := mgr.Get(id); return ok })
 	mgr.SetOnHumanSubmit(api.asks.personReplied)
+	// Flags are the person's bookmarks now: earlier agents' and the worker
+	// manager's flags move onto the asks list (asks_migrate.go).
+	api.migrateFlagsToAsks()
 	api.trustedDevices = newTrustedDevices(*dataDir)
+	api.humanProof = newHumanProof(*dataDir)
 	// Reminder names already mirrored to the cloud are replaced as soon as
 	// approved-only is turned on (schedules_reminders.go reminderPayload).
 	api.trustedDevices.onPolicyChange = scheds.scheduleReminderSync
@@ -1278,8 +1286,10 @@ func main() {
 	api.shinoqueTokens = shinoqueTokens
 
 	srv := &http.Server{
+		// Caller lookups are remembered per connection (caller_authority.go).
+		ConnContext:       withConnPeerMemo,
 		Addr:              *addr,
-		Handler:           denyLocalShinoque(gate.middleware(maxRequestBodyMiddleware(defaultJSONBodyBytes, logMiddleware(workflowHandler)))),
+		Handler:           denyLocalShinoque(gate.middleware(maxRequestBodyMiddleware(defaultJSONBodyBytes, api.localDeviceProof(logMiddleware(workflowHandler))))),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -1711,6 +1721,15 @@ func main() {
 		os.Exit(1)
 	}
 	claimDataDirAfterHandoff(*dataDir, dataDirOwner)
+	if mcpSocket != nil {
+		if err := mcpSocket.activate(); err != nil {
+			log.Printf("mcp socket: endpoint disabled: %v", err)
+			mcpSocket.close()
+		} else {
+			log.Printf("mcp socket: listening on %s (not registered with agents)", mcpSocket.path)
+			go mcpSocket.serve(ctx, api)
+		}
+	}
 	ln := listeners[0]
 	log.Printf("soluterminal daemon %s listening on http://%s (data=%s)", version, *addr, *dataDir)
 	for _, extra := range listeners[1:] {

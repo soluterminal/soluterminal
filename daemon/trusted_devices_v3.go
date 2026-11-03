@@ -120,7 +120,8 @@ func newDeviceV3Verified(deviceSPKI, computerSPKI string, now time.Time) (*devic
 
 // saveDevicesV3Locked publishes a new snapshot only after its durable write.
 func (s *trustedDevices) saveDevicesV3Locked(devices []*trustedDevice) error {
-	rec := trustedDevicesRecord{Policy: s.record.Policy, Devices: devices}
+	rec := s.record
+	rec.Devices = devices
 	b, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return err

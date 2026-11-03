@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -253,6 +254,14 @@ func (s *ScheduleStore) fire(id string) {
 	body := strings.TrimRight(prompt, "\r\n")
 	hasClaude := snap.Kind != "native" && pane.HasClaudeDescendant()
 	wrote, err := submitLineToPane(pane, body, hasClaude)
+	if errors.Is(err, errPutBackInBox) {
+		// Not ready, like a busy pane: the person sends or clears the
+		// message in its input box first (its chip shows it).
+		run.Status = "skipped"
+		run.Detail = fmt.Sprintf("pane not ready (%v)", err)
+		s.recordRun(id, run)
+		return
+	}
 	if err != nil {
 		detail := err.Error()
 		if snap.Kind == "native" {

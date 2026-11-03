@@ -264,6 +264,8 @@ func (a *apiServer) handleSwitchMode(w http.ResponseWriter, r *http.Request) {
 // inference.
 func (a *apiServer) performSwitchMode(p *Pane, target string, deferred bool, liveCols, liveRows uint16) (*Pane, error) {
 	id := p.ID
+	finishPresence := a.trackPaneRespawn(id)
+	defer finishPresence()
 	if target == "native" && p.Snapshot().Kind != "native" {
 		// A terminal muse pane has no session-identity discovery yet — a
 		// Focus flip would mint a FRESH session and silently drop the

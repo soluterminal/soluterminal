@@ -230,7 +230,7 @@ func (a *apiServer) doMigrateInplace(p *Pane) (*Pane, inplaceResult, error) {
 
 	// The agent goes on in the new pane, and so do its asks.
 	if a.asks != nil {
-		a.asks.movePane(p.ID, np.ID, a.paneCallerLabel(np))
+		a.movePaneAsks(p.ID, np.ID, a.paneCallerLabel(np))
 	}
 	// Replacement is live in the layout — retire the old pane.
 	_ = a.mgr.Kill(p.ID)

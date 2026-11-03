@@ -100,11 +100,36 @@ it('says a put-back message is in the input box, and held messages wait behind i
     heldMessages: [{ id: 'h1', sender: '@release-lead', text: 'next', at: 1 }],
   } as PaneInfo} />);
   const [receipt, held] = screen.getAllByRole('status');
-  expect(receipt.textContent).toContain('Unsent message from @flag-guard in the input box (put back after you stopped it)');
+  expect(receipt.textContent).toContain('Unsent message from @flag-guard in the input box (put back after you stopped it). Agents can\'t type into this pane until it\'s sent or cleared');
   expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Clear' })).toBeTruthy();
   expect(held.textContent).toContain('Message from @release-lead waits behind the unsent message');
   // Send now could only be refused while the box holds that message.
   expect(screen.queryByRole('button', { name: 'Send now' })).toBeNull();
   expect(screen.getByRole('button', { name: 'Discard' })).toBeTruthy();
+});
+
+it('offers Clear or Keep as my draft, never Send, on a put-back message the person edited', async () => {
+  const act = vi.spyOn(api, 'actOnUnsentMessage').mockResolvedValue({ outcome: 'kept' });
+  const refresh = vi.fn().mockResolvedValue(undefined);
+  const toast = vi.fn();
+  useStore.setState({ refreshPanes: refresh, toast });
+  render(<UnsentMessageChip pane={{ id: 'p8', unsentMessage: { id: 'r8', sender: '@flag-guard', putBack: true, edited: true } } as PaneInfo} />);
+  const chip = screen.getByRole('status');
+  expect(chip.textContent).toContain("@flag-guard's unsent message is still in the input box after your edit. Agents can't type into this pane until it's gone");
+  expect(screen.queryByRole('button', { name: 'Send' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Clear' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Keep as my draft' }));
+  await waitFor(() => expect(refresh).toHaveBeenCalled());
+  expect(act).toHaveBeenCalledExactlyOnceWith('p8', 'r8', 'keep');
+  expect(toast).not.toHaveBeenCalled();
+});
+
+it('surfaces a refused Clear on a multi-line edited message', async () => {
+  vi.spyOn(api, 'actOnUnsentMessage').mockRejectedValue(new Error('Nothing was cleared: the input box has more than one line'));
+  const toast = vi.fn();
+  useStore.setState({ toast });
+  render(<UnsentMessageChip pane={{ id: 'p9', unsentMessage: { id: 'r9', sender: '@flag-guard', putBack: true, edited: true } } as PaneInfo} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('more than one line'), { kind: 'warn' }));
 });

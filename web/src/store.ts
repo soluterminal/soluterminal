@@ -1954,6 +1954,7 @@ function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
     && sameJsonValue(a.heldMessages, b.heldMessages)
     // Asks open and close with no other pane change.
     && sameJsonValue(a.asks, b.asks)
+    && sameJsonValue(a.workerNotices, b.workerNotices)
     // A review result lands with no other pane change.
     && sameJsonValue(a.review, b.review)
     // Restores rewrite a pane's starter/lead links with no other change.

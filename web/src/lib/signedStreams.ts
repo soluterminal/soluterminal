@@ -87,6 +87,6 @@ export function openWebSocket(url: string, protocols?: string | string[], scope?
     const s = scope ?? currentRoutingScope();
     return openPrivateRelayWebSocket(url, protocols, s);
   }
-  if (!streamSigningNeeded(scope)) return new WebSocket(url, protocols);
+  if (!streamSigningNeeded(scope, url)) return new WebSocket(url, protocols);
   return new DeferredWebSocket(url, protocols, scope) as unknown as WebSocket;
 }

@@ -189,8 +189,15 @@ func workerGitCleanPushed(ctx context.Context, cwd string) (workerGitProof, stri
 		head, headErr := run("rev-parse", "--verify", "HEAD")
 		refs, refErr := run("for-each-ref", "--contains="+head, "--format=%(objectname)", "refs/remotes/")
 		remoteHeads := strings.Fields(refs)
-		if headErr != nil || refErr != nil || len(remoteHeads) == 0 {
+		if headErr != nil || refErr != nil {
 			return workerGitProof{}, "work has no pushed upstream"
+		}
+		if len(remoteHeads) == 0 {
+			// A valid local HEAD with no containing remote ref is known
+			// unpublished work, unlike a failed repository/ref inspection.
+			// Keep the qualified reason distinct from baseline-capable proofs:
+			// this early return has not inspected the checkout's dirty bytes.
+			return workerGitProof{}, "unpushed work (no pushed upstream)"
 		}
 		parts = []string{head, remoteHeads[0]}
 		remoteContained = true

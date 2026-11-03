@@ -117,7 +117,7 @@ func askAge(ms int64, now time.Time) string {
 func (a *apiServer) askOpenSummary(pane string) []askToolOpen {
 	now := time.Now()
 	out := []askToolOpen{}
-	for _, x := range a.asks.openFor(pane) {
+	for _, x := range a.asks.openAgentAsks(pane) {
 		out = append(out, askToolOpen{Key: x.Key, Text: x.Text, Age: askAge(x.CreatedAt, now)})
 	}
 	return out
@@ -165,7 +165,7 @@ func (a *apiServer) mcpToolResolveUserAsk(args map[string]any, caller paneCaller
 	if err := a.asks.resolve(pane, mcpArgString(args, "key")); err != nil {
 		if errors.Is(err, errAskNotFound) {
 			keys := []string{}
-			for _, x := range a.asks.openFor(pane) {
+			for _, x := range a.asks.openAgentAsks(pane) {
 				keys = append(keys, x.Key)
 			}
 			if len(keys) == 0 {
@@ -191,6 +191,9 @@ func (a *apiServer) listAsks(w http.ResponseWriter, r *http.Request) {
 	out := []askView{}
 	if a.asks != nil {
 		for _, x := range a.asks.list() {
+			if !askNeedsUser(x) {
+				continue
+			}
 			v := askView{Ask: x, Source: x.Source}
 			if p, ok := a.mgr.Get(x.SourcePane); ok {
 				v.Source, v.Open = a.paneCallerLabel(p), true
@@ -245,8 +248,10 @@ func (a *apiServer) publishAsksChanged() {
 // paneAskDTO is an open ask as /api/panes carries it on its pane. Source is
 // the daemon's label for the pane, shown beside the text.
 type paneAskDTO struct {
-	ID        string `json:"id"`
-	Text      string `json:"text"`
-	Source    string `json:"source"`
-	CreatedAt int64  `json:"createdAt"`
+	ID         string `json:"id"`
+	Text       string `json:"text"`
+	Source     string `json:"source"`
+	CreatedAt  int64  `json:"createdAt"`
+	WorkerPane string `json:"workerPane,omitempty"`
+	NeedsUser  bool   `json:"needsUser,omitempty"`
 }

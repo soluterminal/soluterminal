@@ -79,7 +79,13 @@ func (a *apiServer) finishDeviceVerification(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "device comparisons can only be confirmed at the computer itself", http.StatusForbidden)
 		return
 	}
+	caller := a.identifyCaller(r)
 	if !a.requireHuman(w, r, "confirm a device comparison") {
+		return
+	}
+	// A recorded comparison outlives a later switch to approved devices only,
+	// so it takes the same proof as managing devices.
+	if ok, _ := a.requireDeviceManagementProof(w, r, caller, "confirm a device comparison"); !ok {
 		return
 	}
 	var body struct{ EnrolmentID string }

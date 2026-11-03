@@ -1,0 +1,34 @@
+{
+ "cols": 100,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "list_idle",
+   "bytes": 9349
+  },
+  {
+   "name": "echo_idle",
+   "bytes": 14696
+  },
+  {
+   "name": "permission",
+   "bytes": 20951
+  },
+  {
+   "name": "permission_cancelled",
+   "bytes": 24513
+  },
+  {
+   "name": "ask_step1",
+   "bytes": 30120
+  },
+  {
+   "name": "ask_step2",
+   "bytes": 30397
+  },
+  {
+   "name": "ask_cancelled",
+   "bytes": 31830
+  }
+ ]
+}

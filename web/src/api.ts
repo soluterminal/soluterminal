@@ -13,6 +13,7 @@ import {
   withDeviceSignatureQuery,
   type DeviceEnrolmentReply,
 } from './lib/deviceIdentity';
+import { ensureLocalClock, isPaneSocketUrl, localClockOffset, localProofTarget, refreshLocalProof, type LocalProofMode, type LocalProofStatus } from './lib/localProof';
 import {
   closePrivateRelayChannels,
   configurePrivateRelay,
@@ -2240,9 +2241,44 @@ function cloudForwardedQuery(daemonPath: string, rawQuery: string): string {
 }
 
 function relaySigningTarget(scopePrefix: string, scopeBackendPrefix: string): string | null {
+  if (scopePrefix === '') return null;
   const target = relayTarget(scopePrefix, scopeBackendPrefix);
   if (!target || !deviceEnrolledFor(target) || typeof crypto === 'undefined' || !crypto.subtle) return null;
   return target;
+}
+
+// Approved devices at this computer (lib/localProof.ts): a request to a local
+// daemon that approved this browser is signed when it can carry authority,
+// that is anything but GET/HEAD, with a JSON (string) body or none. Uploads
+// stay unsigned: no route that needs the person takes one.
+function localSigningTarget(scopePrefix: string, scopeBackendPrefix: string, init?: RequestInit): string | null {
+  if (scopePrefix !== '') return null;
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD') return null;
+  if (init?.body != null && typeof init.body !== 'string') return null;
+  return localProofTarget(scopeBackendPrefix);
+}
+
+function requestSigningTarget(scopePrefix: string, scopeBackendPrefix: string, init?: RequestInit): string | null {
+  return localSigningTarget(scopePrefix, scopeBackendPrefix, init) ?? relaySigningTarget(scopePrefix, scopeBackendPrefix);
+}
+
+const isLocalTarget = (target: string) => target.startsWith('local/');
+
+// A local daemon answers an unproven signed request with why
+// (X-Solu-Human-Proof): a stale clock is re-measured and the request, if it
+// was refused for want of the person, sent once more; any other reason
+// refreshes this browser's standing (it may have been removed).
+async function withLocalProofRetry(
+  scopeBackendPrefix: string,
+  send: () => Promise<Response>,
+): Promise<Response> {
+  const res = await send();
+  const reason = res.headers.get('x-solu-human-proof');
+  if (!reason) return res;
+  await refreshLocalProof(scopeBackendPrefix).catch(() => null);
+  if (reason === 'stale' && res.status === 403) return send();
+  return res;
 }
 
 async function signRelayRequest(
@@ -2250,10 +2286,14 @@ async function signRelayRequest(
   path: string,
   init: RequestInit,
   headers: Headers,
+  proofBackendPrefix = backendPrefix,
 ): Promise<RequestInit> {
   const q = path.indexOf('?');
   const daemonPath = q >= 0 ? path.slice(0, q) : path;
-  const rawQuery = cloudForwardedQuery(daemonPath, q >= 0 ? path.slice(q + 1) : '');
+  const local = isLocalTarget(target);
+  // The cloud drops some parameters before forwarding; a local daemon sees
+  // the query as sent.
+  const rawQuery = local ? (q >= 0 ? path.slice(q + 1) : '') : cloudForwardedQuery(daemonPath, q >= 0 ? path.slice(q + 1) : '');
   let body = new Uint8Array();
   let signedInit = init;
   if (init.body != null) {
@@ -2270,7 +2310,8 @@ async function signRelayRequest(
     }
   }
   try {
-    const sig = await signDeviceRequest(target, init.method ?? 'GET', decodedPath(daemonPath), rawQuery, body);
+    if (local) await ensureLocalClock(proofBackendPrefix, target);
+    const sig = await signDeviceRequest(target, init.method ?? 'GET', decodedPath(daemonPath), rawQuery, body, ...(local ? [localClockOffset(target)] : []));
     for (const [k, v] of Object.entries(deviceSignatureHeaders(sig))) headers.set(k, v);
   } catch {
     // Unsigned: an "any devices" daemon accepts it; an "approved" one asks.
@@ -2285,22 +2326,34 @@ async function signRelayRequest(
 export async function signStreamUrl(url: string, scope?: RoutingScope): Promise<string> {
   const scopePrefix = scope?.prefix ?? prefix;
   const scopeBackendPrefix = scope?.backendPrefix ?? backendPrefix;
-  const target = relaySigningTarget(scopePrefix, scopeBackendPrefix);
+  const target = streamSigningTarget(scopePrefix, scopeBackendPrefix, url);
   if (!target) return url;
   try {
     const u = new URL(url, location.href);
     const routed = scopePrefix + scopeBackendPrefix;
     const daemonPath = u.pathname.startsWith(routed) ? u.pathname.slice(routed.length) : u.pathname;
-    const sig = await signDeviceRequest(target, 'GET', decodedPath(daemonPath), cloudForwardedQuery(daemonPath, u.search.replace(/^\?/, '')), new Uint8Array());
+    const rawQuery = u.search.replace(/^\?/, '');
+    const local = isLocalTarget(target);
+    if (local) await ensureLocalClock(scopeBackendPrefix, target);
+    const sig = await signDeviceRequest(target, 'GET', decodedPath(daemonPath), local ? rawQuery : cloudForwardedQuery(daemonPath, rawQuery),
+      new Uint8Array(), ...(local ? [localClockOffset(target)] : []));
     return withDeviceSignatureQuery(url, sig);
   } catch {
     return url;
   }
 }
 
-/** Whether streams for scope need signing (an enrolled relayed machine). */
-export function streamSigningNeeded(scope?: RoutingScope): boolean {
-  return relaySigningTarget(scope?.prefix ?? prefix, scope?.backendPrefix ?? backendPrefix) !== null;
+// Streams to an enrolled relayed machine are all signed. At this computer
+// only a pane terminal socket is: typing into a pane's permission prompt is
+// the one thing a stream does that needs the person.
+function streamSigningTarget(scopePrefix: string, scopeBackendPrefix: string, url?: string): string | null {
+  if (scopePrefix === '') return url && isPaneSocketUrl(url) ? localProofTarget(scopeBackendPrefix) : null;
+  return relaySigningTarget(scopePrefix, scopeBackendPrefix);
+}
+
+/** Whether a stream (url, when known) for scope needs signing. */
+export function streamSigningNeeded(scope?: RoutingScope, url?: string): boolean {
+  return streamSigningTarget(scope?.prefix ?? prefix, scope?.backendPrefix ?? backendPrefix, url) !== null;
 }
 
 export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
@@ -2308,11 +2361,12 @@ export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const requestPrefix = prefix;
   const requestBackendPrefix = backendPrefix;
-  const target = relaySigningTarget(requestPrefix, requestBackendPrefix);
-  // Unenrolled and local requests take the same synchronous path as always.
+  const target = requestSigningTarget(requestPrefix, requestBackendPrefix, init);
+  // Unsigned requests take the same synchronous path as always.
   if (!target) return fetchBounded(requestPrefix + requestBackendPrefix + path, init ?? {}, headers);
-  return signRelayRequest(target, path, init ?? {}, headers)
+  const send = () => signRelayRequest(target, path, init ?? {}, headers, requestBackendPrefix)
     .then((signedInit) => fetchBounded(requestPrefix + requestBackendPrefix + path, signedInit, headers));
+  return isLocalTarget(target) ? withLocalProofRetry(requestBackendPrefix, send) : send();
 }
 
 export function retryMachineAccess(): Promise<Response> {
@@ -2350,10 +2404,11 @@ function apiFetchScoped(scope: RoutingScope, path: string, init?: RequestInit): 
   }
   const headers = new Headers(init?.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const target = relaySigningTarget(scope.prefix, scope.backendPrefix);
+  const target = requestSigningTarget(scope.prefix, scope.backendPrefix, init);
   if (!target) return fetchBounded(scope.prefix + scope.backendPrefix + path, init ?? {}, headers);
-  return signRelayRequest(target, path, init ?? {}, headers)
+  const send = () => signRelayRequest(target, path, init ?? {}, headers, scope.backendPrefix)
     .then((signedInit) => fetchBounded(scope.prefix + scope.backendPrefix + path, signedInit, headers));
+  return isLocalTarget(target) ? withLocalProofRetry(scope.backendPrefix, send) : send();
 }
 
 // Workflow task mutations take an optional captured scope (the Tasks UI pins
@@ -2684,10 +2739,11 @@ function ccUsagePrefetch<T extends CCUsagePayload>(path: string): void {
 function apiFetchBackend(backend: BackendId, path: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const target = relaySigningTarget(prefix, `/b/${backend}`);
+  const target = requestSigningTarget(prefix, `/b/${backend}`, init);
   if (!target) return fetchBounded(`${prefix}/b/${backend}${path}`, init ?? {}, headers);
-  return signRelayRequest(target, path, init ?? {}, headers)
+  const send = () => signRelayRequest(target, path, init ?? {}, headers, `/b/${backend}`)
     .then((signedInit) => fetchBounded(`${prefix}/b/${backend}${path}`, signedInit, headers));
+  return isLocalTarget(target) ? withLocalProofRetry(`/b/${backend}`, send) : send();
 }
 
 async function health(): Promise<Health> {
@@ -3656,6 +3712,13 @@ export interface RemoteDevice extends DeviceEnrolmentReply {
   createdAt: string;
   approvedAt?: string;
   lastSeenAt?: string;
+  /** Where it enrolled: over the relay, or at this computer. */
+  surface?: 'relay' | 'local';
+  /**
+   * How it was approved: first-device, device:<id>, relay-device:<id>,
+   * traced (a browser at this computer) or headers.
+   */
+  approvedVia?: string;
 }
 
 export interface RemoteDevicesState {
@@ -4860,9 +4923,22 @@ const coreApi = {
       ...(enrolmentId ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enrolmentId }) } : {}),
     }).then(j<RemoteDevice>),
   removeRemoteDevice: (id: string): Promise<void> =>
-    apiFetch(`/api/remote-devices/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) => {
-      if (!r.ok) throw new Error(`remove device: ${r.status}`);
+    apiFetch(`/api/remote-devices/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(async (r) => {
+      // The daemon's reason (e.g. the last device while approved devices are
+      // required) is worth showing.
+      if (!r.ok) await j<unknown>(r);
     }),
+  // Approved devices at this computer (daemon human_proof.go). Both are
+  // signed by this browser when it is approved (lib/localProof.ts).
+  setHumanProofMode: (mode: LocalProofMode): Promise<LocalProofStatus> =>
+    apiFetch('/api/human-proof', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    }).then(j<LocalProofStatus>),
+  acknowledgeFirstDevice: (): Promise<LocalProofStatus> =>
+    apiFetch('/api/human-proof/acknowledge', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      .then(j<LocalProofStatus>),
   setRemoteAccessPolicy: (policy: 'any' | 'approved'): Promise<RemoteDevicesState> =>
     apiFetch('/api/remote-devices/policy', {
       method: 'PUT',
@@ -5033,12 +5109,12 @@ const coreApi = {
   dismissAsk: (askId: string) =>
     apiFetch(`/api/asks/${encodeURIComponent(askId)}/dismiss`, { method: 'POST' }).then(j<{ ok: boolean }>),
 
-  actOnUnsentMessage: (id: string, messageId: string, action: 'send' | 'clear') =>
+  actOnUnsentMessage: (id: string, messageId: string, action: 'send' | 'clear' | 'keep') =>
     apiFetch(`/api/panes/${id}/unsent-message`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: messageId, action }),
-    }).then(j<{ outcome: 'submitted' | 'cleared' | 'left_in_composer' | 'sent_unconfirmed' | 'queued' }>),
+    }).then(j<{ outcome: 'submitted' | 'cleared' | 'kept' | 'left_in_composer' | 'sent_unconfirmed' | 'queued' }>),
 
   submitPaneMessage: (id: string, text: string) =>
     apiFetch(`/api/panes/${id}/submit-message`, {

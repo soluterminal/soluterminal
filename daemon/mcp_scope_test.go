@@ -132,7 +132,7 @@ func TestMCPSetPaneFlagProvenanceGuard(t *testing.T) {
 	for _, flagged := range []bool{true, false} {
 		text, isErr = mcpResultText(t, scopedCallForTest(t, a, nil, "set_pane_flag",
 			map[string]any{"pane_id": p.ID, "flagged": flagged, "memo": "agent note"}))
-		if !isErr || !strings.Contains(text, "only the person") {
+		if !isErr || !strings.Contains(text, "agents no longer set or clear them") {
 			t.Fatalf("full-access changed user flag: %q", text)
 		}
 	}

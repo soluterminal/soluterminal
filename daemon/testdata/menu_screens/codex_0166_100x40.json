@@ -1,0 +1,26 @@
+{
+ "cols": 100,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "boot",
+   "bytes": 2185
+  },
+  {
+   "name": "list_idle",
+   "bytes": 18938
+  },
+  {
+   "name": "echo_idle",
+   "bytes": 36209
+  },
+  {
+   "name": "approval",
+   "bytes": 66542
+  },
+  {
+   "name": "approval_cancelled",
+   "bytes": 69289
+  }
+ ]
+}

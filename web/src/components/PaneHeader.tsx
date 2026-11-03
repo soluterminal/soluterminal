@@ -9,6 +9,7 @@ import { PaneHeaderOverflow, PaneDetail, usePaneDetailVisible, DETAIL_PRIORITY }
 import { PaneHeaderBadges } from './PaneHeaderBadges';
 import { UnsentMessageChip } from './UnsentMessageChip';
 import { PaneAsksChip } from './PaneAsksChip';
+import { WorkerNoticesChip } from './WorkerNoticesChip';
 import { PaneOriginButton } from './PaneOriginButton';
 import { messageSharesOrigin } from '../lib/paneHeaderDetails';
 import { PaneIdentityChip } from './PaneIdentityChip';
@@ -235,6 +236,7 @@ export function PaneHeader({
       <PaneDetail priority={combineMessage ? DETAIL_PRIORITY.message : DETAIL_PRIORITY.origin}>{combineMessage ? <span className="pane-origin-message"><PaneOriginButton pane={pane} /><PaneMessageChip pane={pane} /></span> : <PaneOriginButton pane={pane} />}</PaneDetail>
       {!warningReview && <PaneDetail priority={DETAIL_PRIORITY.review}><PaneReviewChip pane={pane} /></PaneDetail>}
       {!combineMessage && <PaneDetail priority={DETAIL_PRIORITY.message}><PaneMessageChip pane={pane} /></PaneDetail>}
+      <PaneDetail priority={DETAIL_PRIORITY.workerNotice}><WorkerNoticesChip pane={pane} /></PaneDetail>
       <HeaderAttention enabled={!isMobileView}>
       {warningReview && <PaneReviewChip pane={pane} />}
       {!isMobileView && <PaneHeaderBadges pane={pane} paneIndex={paneIndex} section="attention" showAutoMode={isAutoApproveCapable(pane)} />}

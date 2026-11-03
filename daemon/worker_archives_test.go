@@ -151,10 +151,9 @@ func TestWorkerArchiveKeepsBlockedWorkAndFlagsLead(t *testing.T) {
 			if len(a.archivedWorkerSummaries()) != 0 {
 				t.Fatal("blocked worker was archived")
 			}
-			lead, _ := a.mgr.Get("lead")
 			wantFlag := kind != "input-after-final" && kind != "disabled"
-			if lead.Snapshot().Flagged != wantFlag {
-				t.Fatalf("lead flag=%v want %v", lead.Snapshot().Flagged, wantFlag)
+			if leadNoticed(a, "lead") != wantFlag {
+				t.Fatalf("lead notice=%v want %v", leadNoticed(a, "lead"), wantFlag)
 			}
 		})
 	}
@@ -597,18 +596,19 @@ func TestWorkerArchiveAgentCannotReopenOrUnpin(t *testing.T) {
 
 func TestWorkerRetentionFlagsAggregateAndClear(t *testing.T) {
 	a, p, now := archiveFixture(t)
-	lead, _ := a.mgr.Get("lead")
 	a.tryArchiveWorker(p, now)
 	a.flagWorkerLead("lead", "second", "unpushed work")
-	memo := lead.Snapshot().FlagMemo
-	if !strings.Contains(memo, p.ID) || !strings.Contains(memo, "second") {
-		t.Fatalf("lost retention: %s", memo)
+	if asks := a.asks.workerAsks("lead"); len(asks) != 2 {
+		t.Fatalf("lost retention: %+v", asks)
+	}
+	if !strings.Contains(leadNoticeText(a, "lead"), "Worker second kept open: unpushed work") {
+		t.Fatalf("notice text: %s", leadNoticeText(a, "lead"))
 	}
 	a.clearWorkerRetention("second")
 	a.noteWorkerReplyRead("lead", p, a.paneLatestReply(p))
 	a.tryArchiveWorker(p, now)
-	if lead.Snapshot().Flagged {
-		t.Fatalf("archived worker left notice: %s", lead.Snapshot().FlagMemo)
+	if leadNoticed(a, "lead") {
+		t.Fatalf("archived worker left notice: %s", leadNoticeText(a, "lead"))
 	}
 }
 
@@ -616,7 +616,6 @@ func TestWorkerRetentionReconcilesClosedResumedAndDisabled(t *testing.T) {
 	for _, kind := range []string{"closed", "resumed", "disabled", "historical"} {
 		t.Run(kind, func(t *testing.T) {
 			a, p, now := archiveFixture(t)
-			lead, _ := a.mgr.Get("lead")
 			a.tryArchiveWorker(p, now)
 			switch kind {
 			case "closed":
@@ -637,29 +636,35 @@ func TestWorkerRetentionReconcilesClosedResumedAndDisabled(t *testing.T) {
 				a.mgr.mu.Unlock()
 			}
 			a.reconcileWorkerRetentions(kind != "disabled")
-			if lead.Snapshot().Flagged {
-				t.Fatalf("stale notice: %s", lead.Snapshot().FlagMemo)
+			if leadNoticed(a, "lead") {
+				t.Fatalf("stale notice: %s", leadNoticeText(a, "lead"))
 			}
 		})
 	}
 }
 
-func TestWorkerRetentionPreservesPersonAndBoundsMemo(t *testing.T) {
+// The person's bookmark is never touched, and every retained worker gets its
+// own notice (asks are not bounded like the old one-memo flag).
+func TestWorkerRetentionPreservesPersonAndListsEveryWorker(t *testing.T) {
 	a, p, now := archiveFixture(t)
 	lead, _ := a.mgr.Get("lead")
 	lead.SetFlag(true, "my bookmark")
 	a.tryArchiveWorker(p, now)
+	if !leadNoticed(a, "lead") {
+		t.Fatal("no notice beside the person's bookmark")
+	}
 	a.clearWorkerRetention(p.ID)
 	if lead.Snapshot().FlagMemo != "my bookmark" || lead.Snapshot().FlagOwner != "user" {
 		t.Fatal("user flag changed")
 	}
-	lead.SetFlag(false, "")
 	for i := 0; i < 10; i++ {
 		a.flagWorkerLead("lead", fmt.Sprintf("pane_%016x", i), strings.Repeat("x", 200))
 	}
-	memo := lead.Snapshot().FlagMemo
-	if len([]rune(memo)) > flagMemoMaxRunes || !strings.Contains(memo, "+6 more retained workers") {
-		t.Fatalf("unbounded/lost count: %s", memo)
+	if n := len(a.asks.workerAsks("lead")); n != 10 {
+		t.Fatalf("notices = %d, want 10", n)
+	}
+	if lead.Snapshot().FlagMemo != "my bookmark" {
+		t.Fatal("user flag changed")
 	}
 }
 
@@ -668,17 +673,16 @@ func TestWorkerRetentionRestoresNoticeAfterDaemonClear(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			a, p, now := archiveFixture(t)
 			a.tryArchiveWorker(p, now)
-			lead, _ := a.mgr.Get("lead")
 			if kind == "disabled" {
 				a.reconcileWorkerRetentions(false)
 			} else {
 				a.clearWorkerRetention(p.ID)
 			}
-			if lead.Snapshot().Flagged {
+			if leadNoticed(a, "lead") {
 				t.Fatal("notice not cleared")
 			}
 			a.tryArchiveWorker(p, now)
-			if !lead.Snapshot().Flagged {
+			if !leadNoticed(a, "lead") {
 				t.Fatal("daemon-cleared notice stayed suppressed")
 			}
 		})
@@ -688,7 +692,6 @@ func TestWorkerRetentionRestoresNoticeAfterDaemonClear(t *testing.T) {
 func TestWorkerRetentionSurvivesRestartWithOldFinalReply(t *testing.T) {
 	a, p, now := archiveFixture(t)
 	a.tryArchiveWorker(p, now)
-	lead, _ := a.mgr.Get("lead")
 	s := a.workerArchives()
 	s.noticeMu.Lock()
 	s.noticesLoaded = false
@@ -699,12 +702,12 @@ func TestWorkerRetentionSurvivesRestartWithOldFinalReply(t *testing.T) {
 	q.startedAt = now
 	q.mu.Unlock()
 	a.reconcileWorkerRetentions(true)
-	if !lead.Snapshot().Flagged {
+	if !leadNoticed(a, "lead") {
 		t.Fatal("restart erased live retention")
 	}
 	a.tryArchiveWorker(p, now)
-	if !lead.Snapshot().Flagged || lead.Snapshot().FlagMemo != "Worker "+p.ID+" retained: final reply unread by lead" {
-		t.Fatal("restored worker lost retention:", lead.Snapshot().FlagMemo)
+	if !strings.HasSuffix(leadNoticeText(a, "lead"), " kept open: final reply unread by lead") {
+		t.Fatal("restored worker lost retention:", leadNoticeText(a, "lead"))
 	}
 	if _, ok := a.mgr.Get(p.ID); !ok {
 		t.Fatal("old final reply archived after restart")

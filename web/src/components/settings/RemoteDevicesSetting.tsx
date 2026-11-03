@@ -4,6 +4,7 @@ import type { RemoteDevicesState } from '../../api';
 import { privateRelayCandidate, privateRelayEnabled, setPrivateRelayEnabled } from '../../lib/privateRelay';
 import { SettingsGroup, SettingsRow } from './SettingsRow';
 import { DeviceVerification } from './DeviceVerification';
+import { approvalProvenance } from './HumanProofSetting';
 
 export const REMOTE_POLICY_LABEL = 'Who can use this computer remotely';
 export const REMOTE_POLICY_HINT =
@@ -105,6 +106,7 @@ export function RemoteDevicesSetting() {
   };
 
   const approved = state.devices.filter((d) => d.status === 'approved').length;
+  const names = Object.fromEntries(state.devices.map((d) => [d.id, d.name]));
   const changePolicy = (policy: 'any' | 'approved') => {
     if (policy === 'approved' && approved === 0 &&
       !window.confirm('No device is approved yet, so your phone and other browsers will lose access until you approve them here. Continue?')) {
@@ -152,6 +154,7 @@ export function RemoteDevicesSetting() {
                 {d.status === 'approved' && !d.verifiesComputer && (
                   <> (older approval: it didn't verify this computer to the device; remove it and approve again from an updated app)</>
                 )}
+                {(d.surface || d.approvedVia) && <div>{approvalProvenance(d, names)}</div>}
                 {d.verify?.state === 'committed' && <div>Verify V3 — waiting for the device.</div>}
                 {d.verify?.state === 'revealed' && <div>Verify V3 <code>{d.verify.code}</code> — compare with the device.</div>}
                 {d.verify?.state === 'failed' && <div>Verify V3 ended. Start again from the device.</div>}

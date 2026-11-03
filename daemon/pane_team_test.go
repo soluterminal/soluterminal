@@ -474,7 +474,7 @@ func TestOnlyWorkersAreArchived(t *testing.T) {
 			if live == wantArchived {
 				t.Fatalf("live=%v, want archived=%v", live, wantArchived)
 			}
-			if lead, _ := a.mgr.Get("lead"); !wantArchived && lead.Snapshot().Flagged {
+			if !wantArchived && leadNoticed(a, "lead") {
 				t.Fatal("a pane that is never archived flagged its lead")
 			}
 		})
@@ -566,27 +566,24 @@ func TestRestoredPlainWorkerNeverSharesItsRecord(t *testing.T) {
 func TestKeptWorkerFlagsItsLeadOncePerReason(t *testing.T) {
 	a, p, now := archiveFixture(t)
 	a.tryArchiveWorker(p, now) // unread
-	lead, _ := a.mgr.Get("lead")
-	if !lead.Snapshot().Flagged {
-		t.Fatal("unread result did not flag the lead")
+	if !leadNoticed(a, "lead") {
+		t.Fatal("unread result did not notify the lead")
 	}
-	// The person clears the flag; nothing about the worker changed.
-	lead.mu.Lock()
-	lead.Flagged, lead.FlagMemo, lead.FlagOwner = false, "", ""
-	lead.mu.Unlock()
+	// The person dismisses the notice; nothing about the worker changed.
+	dismissLeadNotices(t, a, "lead")
 	s := a.workerArchives()
 	s.mu.Lock()
 	s.checked = map[string]time.Time{}
 	s.mu.Unlock()
 	a.tryArchiveWorker(p, now)
-	if lead.Snapshot().Flagged {
-		t.Fatal("the lead was flagged again for the same unread result")
+	if leadNoticed(a, "lead") {
+		t.Fatal("the lead was notified again for the same unread result")
 	}
 	// A new reason flags again.
 	putCapabilityFile(t, filepath.Join(p.Cwd, "tracked.txt"), "changed")
 	a.tryArchiveWorker(p, now)
-	if !lead.Snapshot().Flagged || !strings.Contains(lead.Snapshot().FlagMemo, "uncommitted") {
-		t.Fatalf("a new reason did not flag the lead: %+v", lead.Snapshot().FlagMemo)
+	if !leadNoticed(a, "lead") || !strings.Contains(leadNoticeText(a, "lead"), "uncommitted") {
+		t.Fatalf("a new reason did not notify the lead: %+v", leadNoticeText(a, "lead"))
 	}
 }
 

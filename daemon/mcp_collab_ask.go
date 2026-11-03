@@ -402,8 +402,17 @@ func noteHeldAsk(p *Pane, heldID string, res *collabResult) {
 		return
 	}
 	res.Delivery = string(deliveryHeld)
-	if reason := p.heldDeliveryReason(); strings.HasPrefix(reason, unsentInBoxPrefix) {
+	reason := p.heldDeliveryReason()
+	if strings.HasPrefix(reason, unsentInBoxPrefix) {
 		res.Hint = "held: " + reason + ", so nothing has been typed yet. Your message waits on the pane, queued behind it, and goes in once the person sends or clears that message. Call wait_for_pane to keep waiting; do not resend."
+		return
+	}
+	if reason == heldMenuReason {
+		res.Hint = "queued: a menu is open in that pane, so nothing has been typed yet. Your message is held on the pane with your name and goes in by itself once the menu is answered. Call wait_for_pane to keep waiting; do not resend."
+		return
+	}
+	if reason == "" {
+		res.Hint = "queued: other held messages go into that pane first, so nothing has been typed yet. Your message is held on the pane with your name and goes in by itself after them. Call wait_for_pane to keep waiting; do not resend."
 		return
 	}
 	res.Hint = "queued: the person is typing in that pane, so nothing has been typed yet. Your message is held on the pane with your name and goes in by itself once their input box is empty and they have stopped typing. Call wait_for_pane to keep waiting; do not resend."

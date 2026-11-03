@@ -150,6 +150,7 @@ import { useAgentIntegrationPrompt } from './agentIntegration';
 import { startAgent } from './agentStart';
 import { AgentInstallPrompt } from './components/AgentInstallPrompt';
 import { DeviceApprovalPrompt } from './components/DeviceApprovalPrompt';
+import { HumanProofBanner } from './components/HumanProofBanner';
 import { remoteDevicePendingText } from './components/settings/RemoteDevicesSetting';
 import { forgetPaneConfirm, notePaneConfirm, resyncPaneConfirms } from './lib/paneConfirm';
 import { PaneConfirmHost } from './components/PaneConfirmHost';
@@ -2154,6 +2155,7 @@ export default function App() {
       <div className="app-banner-row">
         <DaemonHealthBanner />
         <DegradedBanner />
+        <HumanProofBanner />
         <ClaudeInstallBanner hidden={firstRunReady && (welcomeOpen || checklistOpen)} />
         {teamFeatures && <MuseInstallBanner />}
         {showEmbedChrome('phonePairing') && <PhoneAccessBanner />}

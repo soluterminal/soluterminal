@@ -21,6 +21,11 @@ type apiServer struct {
 	// don't build one.
 	asks    *askStore
 	askPush askPushBatch
+	// Presence during in-place replacement is independent of mgr.panes: the
+	// old pane is removed before its replacement is published. Notification
+	// readers use this state only; it grants no caller authority.
+	respawnPresenceMu sync.Mutex
+	respawnPresence   map[string]int
 	// ext holds optional features' per-server state (extSlot, extensions.go).
 	ext extState
 	// Agent-requested reveals share a cooldown across workspaces and clients.
@@ -186,6 +191,12 @@ type apiServer struct {
 	// trustedDevices decides which remote devices may use the relay
 	// (trusted_devices.go).
 	trustedDevices *trustedDevices
+	// humanProof: device proof for untraceable callers (human_proof.go).
+	humanProof *humanProof
+	// noticeMu serialises approving and removing devices with acknowledging
+	// approval notices, so an acknowledgement never sees a notice whose
+	// approval is still under way (human_proof.go acknowledgeNoticesAs).
+	noticeMu sync.Mutex
 	// privateRelayInner serves requests that arrive inside an approved
 	// device's private relay channel (private_relay.go).
 	privateRelayInner http.Handler
@@ -781,6 +792,10 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/remote-devices/{id}/approve", a.handleApproveRemoteDevice)
 	mux.HandleFunc("DELETE /api/remote-devices/{id}", a.handleRemoveRemoteDevice)
 	mux.HandleFunc("PUT /api/remote-devices/policy", a.handlePutRemoteAccessPolicy)
+	mux.HandleFunc("GET /api/human-proof", a.handleGetHumanProof)
+	mux.HandleFunc("PUT /api/human-proof", a.handlePutHumanProof)
+	mux.HandleFunc("POST /api/human-proof/bootstrap", a.handleBootstrapHumanProof)
+	mux.HandleFunc("POST /api/human-proof/acknowledge", a.handleAcknowledgeHumanProof)
 	mux.HandleFunc("GET "+privateRelayPath, a.handlePrivateRelay)
 	// Opt-in for the machine-wide Claude Code / Codex registration
 	// (agent_integration_api.go). Changes are local-only.
@@ -1125,6 +1140,8 @@ type paneDTO struct {
 	AttentionAction  string `json:"attentionAction,omitempty"`
 	// Asks are the pane's open asks to the user (asks.go), oldest first.
 	Asks []paneAskDTO `json:"asks,omitempty"`
+	// WorkerNotices are quiet notes to the lead, outside person attention.
+	WorkerNotices []paneAskDTO `json:"workerNotices,omitempty"`
 	// LiveCwd is the current working directory of the shell process
 	// inside the pane — reflects the user's `cd`s since spawn, unlike
 	// Cwd (spawn-time). Fetched every /api/panes poll via a cheap
@@ -1652,7 +1669,12 @@ func (a *apiServer) listPanes(w http.ResponseWriter, _ *http.Request) {
 		if open := asks[p.ID]; len(open) > 0 {
 			source := a.paneCallerLabel(p)
 			for _, x := range open {
-				out[i].Asks = append(out[i].Asks, paneAskDTO{ID: x.ID, Text: x.Text, Source: source, CreatedAt: x.CreatedAt})
+				note := paneAskDTO{ID: x.ID, Text: x.Text, Source: source, CreatedAt: x.CreatedAt, WorkerPane: x.WorkerPane, NeedsUser: askNeedsUser(x)}
+				if askNeedsUser(x) {
+					out[i].Asks = append(out[i].Asks, note)
+				} else {
+					out[i].WorkerNotices = append(out[i].WorkerNotices, note)
+				}
 			}
 		}
 		if a.codexLogin != nil && out[i].Kind == "" && out[i].Status == PaneRunning && (out[i].HasCodex || effectiveAgentKind(out[i].Agent) == agentCodex) {

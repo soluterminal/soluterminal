@@ -145,6 +145,8 @@ type Pane struct {
 	lastAgentInputMs atomic.Int64
 	// heldReason: why heldDeliveries wait (draftGuardReason). Guarded by mu.
 	heldReason              string
+	// putBackWatching: watchPutBack runs (one per pane). Guarded by mu.
+	putBackWatching bool
 	Credential              *paneCredentialInfo `json:"credential,omitempty"`
 	credentialSelection     func(provider string) string
 	credentialTeamSelection func(provider string) string
@@ -2367,6 +2369,13 @@ func (p *Pane) writeWithFleetAdmissionPolicy(b []byte, recordPrompt, nativeTurn 
 	if recordPrompt && p.Kind != "native" && !isTerminalReplyOnly(b) {
 		menu = p.menuInputState()
 	}
+	// A key answering a menu leaves a put-back message in the input box as
+	// it was (carryPutBackPastMenuKey). Unrecorded keys (an agent's menu
+	// answer) are classified too, only while there is one.
+	putBackMenuKey := menu != menuInputNone
+	if !recordPrompt && p.Kind != "native" && !isTerminalReplyOnly(b) && p.putBackReceipt() != nil {
+		putBackMenuKey = p.menuInputState() != menuInputNone
+	}
 	p.mu.Lock()
 	conn := p.agentConn
 	p.mu.Unlock()
@@ -2454,6 +2463,11 @@ func (p *Pane) writeWithFleetAdmissionPolicy(b []byte, recordPrompt, nativeTurn 
 	}
 	p.agentDeliveryWrite = agentDelivery
 	commits := p.observeSuccessfulInputLocked(b, recordPrompt, menu)
+	if putBackMenuKey && !isTerminalReplyOnly(b) {
+		p.mu.Lock()
+		p.carryPutBackPastMenuKeyLocked(p.inputRevision.Load())
+		p.mu.Unlock()
+	}
 	p.agentWriteMu.Unlock()
 	p.finishSuccessfulInput(commits)
 	return len(b), nil

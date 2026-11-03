@@ -90,13 +90,45 @@ type trustedDevice struct {
 	RevealedAt   *time.Time        `json:"revealedAt,omitempty"`
 	Verify       *deviceV3Attempt  `json:"verify,omitempty"`
 	V3Verified   *deviceV3Verified `json:"v3Verified,omitempty"`
+	// Surface is where the device enrolled from: "relay" or "local" (this
+	// computer). Empty on older records.
+	Surface string `json:"surface,omitempty"`
+	// ApprovedVia says how it was approved: "first-device", "device:<id>"
+	// (signed by an approved device), "relay-device:<id>" (an approved
+	// device over the relay), "traced" (a browser traced at this computer)
+	// or "headers" (browser headers alone, before approved devices were
+	// required). Empty on older records.
+	ApprovedVia string `json:"approvedVia,omitempty"`
+	// ApprovedBy is the approved device that approved this one, and Lineage
+	// every device above it in that chain, oldest first. Lineage is copied
+	// at approval, so it outlives the devices it names. Empty when a person
+	// at the computer, the first-device step or env recovery approved it,
+	// and on older records, which are taken as untainted.
+	ApprovedBy string   `json:"approvedBy,omitempty"`
+	Lineage    []string `json:"lineage,omitempty"`
 
 	key *ecdsa.PublicKey
 }
 
+const (
+	deviceSurfaceRelay = "relay"
+	deviceSurfaceLocal = "local"
+)
+
+var errDeviceAlreadyBootstrapped = errors.New("a device is already approved")
+
+// errApproverGone: the device approving another was removed (or is no
+// longer approved) before the approval was made.
+var errApproverGone = errors.New("the approving device is no longer approved")
+
 type trustedDevicesRecord struct {
 	Policy  string           `json:"policy"`
 	Devices []*trustedDevice `json:"devices"`
+	// ApprovedEver counts the devices ever approved here; older records
+	// lack it, and then the devices approved now are the count.
+	ApprovedEver int `json:"approvedEver,omitempty"`
+	// LastApprovedRemoval is when an approved device was last removed.
+	LastApprovedRemoval *time.Time `json:"lastApprovedRemoval,omitempty"`
 }
 
 type trustedDevices struct {
@@ -422,15 +454,37 @@ func (s *trustedDevices) find(id string) *trustedDevice {
 }
 
 func (s *trustedDevices) approve(id string, enrolmentIDs ...string) (*trustedDevice, error) {
+	enrolmentID := ""
+	if len(enrolmentIDs) > 0 {
+		enrolmentID = enrolmentIDs[0]
+	}
+	return s.approveWith(id, enrolmentID, false, "")
+}
+
+// approveWith approves id. With onlyFirst it succeeds only while no device
+// is approved, decided under the same lock, so of two racing first
+// approvals one gets errDeviceAlreadyBootstrapped.
+func (s *trustedDevices) approveWith(id, enrolmentID string, onlyFirst bool, via string) (*trustedDevice, error) {
 	computer := s.daemonSPKI()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.pruneCommittedV3Locked(); err != nil {
 		return nil, err
 	}
-	enrolmentID := ""
-	if len(enrolmentIDs) > 0 {
-		enrolmentID = enrolmentIDs[0]
+	if onlyFirst {
+		for _, d := range s.record.Devices {
+			if d.Status == deviceStatusApproved {
+				return nil, errDeviceAlreadyBootstrapped
+			}
+		}
+	}
+	// The approver is checked again here, under the lock its removal takes:
+	// a device removed since it signed can't approve, nor pass on a chain
+	// that no longer names its own approvers.
+	if by := approverIn(via); by != "" {
+		if p := s.find(by); p == nil || p.Status != deviceStatusApproved {
+			return nil, errApproverGone
+		}
 	}
 	d := s.find(id)
 	if d == nil {
@@ -452,6 +506,7 @@ func (s *trustedDevices) approve(id string, enrolmentIDs ...string) (*trustedDev
 		next.Status, next.ApprovedAt = deviceStatusApproved, &now
 		next.V3Verified = proof
 		next.Commit, next.DaemonNonce, next.DeviceNonce = "", "", ""
+		s.recordApprovalLocked(&next, via)
 		if err := s.replaceDeviceV3Locked(&next); err != nil {
 			return nil, err
 		}
@@ -462,20 +517,144 @@ func (s *trustedDevices) approve(id string, enrolmentIDs ...string) (*trustedDev
 	}
 	now := s.now().UTC()
 	d.Status, d.ApprovedAt = deviceStatusApproved, &now
+	s.recordApprovalLocked(d, via)
 	return d, s.saveLocked()
 }
 
-func (s *trustedDevices) remove(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, d := range s.record.Devices {
-		if d.ID == id {
-			s.record.Devices = append(s.record.Devices[:i], s.record.Devices[i+1:]...)
-			s.notifyLocked()
-			return s.saveLocked()
+// recordApprovalLocked notes how d was approved, in the same save as the
+// approval itself: a device approved by another inherits its approver's
+// chain at once, so it can never act as untainted in between.
+func (s *trustedDevices) recordApprovalLocked(d *trustedDevice, via string) {
+	s.record.ApprovedEver = s.approvedEverLocked(d.ID) + 1
+	if via == "" {
+		return
+	}
+	d.ApprovedVia = via
+	by := approverIn(via)
+	if by == "" {
+		return
+	}
+	d.ApprovedBy = by
+	d.Lineage = []string{by}
+	if p := s.find(by); p != nil {
+		d.Lineage = append(append([]string(nil), p.Lineage...), by)
+	}
+}
+
+// approverIn is the approving device an approvedVia names, or "".
+func approverIn(via string) string {
+	if rest, ok := strings.CutPrefix(via, "relay-device:"); ok {
+		return rest
+	}
+	if rest, ok := strings.CutPrefix(via, "device:"); ok {
+		return rest
+	}
+	return ""
+}
+
+// approvedEverLocked is how many devices were ever approved here, not
+// counting except (one being approved now).
+func (s *trustedDevices) approvedEverLocked(except string) int {
+	n := 0
+	for _, d := range s.record.Devices {
+		if d.Status == deviceStatusApproved && d.ID != except {
+			n++
 		}
 	}
-	return os.ErrNotExist
+	return max(n, s.record.ApprovedEver)
+}
+
+// deviceDisplayName is the name a device is stored under.
+func deviceDisplayName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "Unnamed device"
+	}
+	if len([]rune(name)) > 64 {
+		name = string([]rune(name)[:64])
+	}
+	return name
+}
+
+// bootstrapLocal records the first device as approved, in one step, while no
+// device is approved. The check and the write are under one lock, so two
+// racing first devices can't both get in.
+func (s *trustedDevices) bootstrapLocal(name, spkiB64, surface string) (*trustedDevice, error) {
+	key, err := parseDevicePublicKey(spkiB64)
+	if err != nil {
+		return nil, err
+	}
+	computer := s.daemonSPKI()
+	name = deviceDisplayName(name)
+	id := deviceID(spkiB64)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, d := range s.record.Devices {
+		if d.Status == deviceStatusApproved {
+			return nil, errDeviceAlreadyBootstrapped
+		}
+	}
+	kept := s.record.Devices[:0]
+	for _, d := range s.record.Devices {
+		if d.ID != id {
+			kept = append(kept, d)
+		}
+	}
+	s.record.Devices = kept
+	now := s.now().UTC()
+	d := &trustedDevice{
+		ID: id, Name: name, PublicKey: strings.TrimSpace(spkiB64), Status: deviceStatusApproved,
+		Code: deviceCode(spkiB64, computer), CodeVersion: codeVersionOf(computer), CreatedAt: now, ApprovedAt: &now,
+		Surface: surface, ApprovedVia: "first-device", key: key,
+	}
+	s.record.ApprovedEver = s.approvedEverLocked("") + 1
+	s.record.Devices = append(s.record.Devices, d)
+	if err := s.saveLocked(); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// noteApproval records how a device was approved.
+func (s *trustedDevices) remove(id string) error {
+	_, err := s.removeDevice(id, false)
+	return err
+}
+
+var errLastApprovedDevice = errors.New("the last approved device")
+
+// removeDevice removes id and returns what it removed. With keepOne it
+// refuses to remove the last approved device, deciding under the same lock
+// as the removal so two concurrent removals can't both pass.
+func (s *trustedDevices) removeDevice(id string, keepOne bool) (*trustedDevice, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if keepOne {
+		if d := s.find(id); d != nil && d.Status == deviceStatusApproved {
+			approved := 0
+			for _, other := range s.record.Devices {
+				if other.Status == deviceStatusApproved {
+					approved++
+				}
+			}
+			if approved <= 1 {
+				return nil, errLastApprovedDevice
+			}
+		}
+	}
+	for i, d := range s.record.Devices {
+		if d.ID == id {
+			if d.Status == deviceStatusApproved {
+				s.record.ApprovedEver = s.approvedEverLocked("")
+				now := s.now().UTC()
+				s.record.LastApprovedRemoval = &now
+			}
+			s.record.Devices = append(s.record.Devices[:i], s.record.Devices[i+1:]...)
+			s.notifyLocked()
+			return d, s.saveLocked()
+		}
+	}
+	return nil, os.ErrNotExist
 }
 
 func (s *trustedDevices) setPolicy(policy string) error {
@@ -625,15 +804,34 @@ var (
 // device and restores the body for the handler. The signature fields are
 // removed from the query so handlers see the request the device made.
 func (s *trustedDevices) verifyRequest(r *http.Request) (*trustedDevice, error) {
-	f := deviceSigFieldsFrom(r)
-	if f.id == "" || f.sig == "" || f.nonce == "" || f.time == "" || f.target == "" {
-		return nil, errDeviceUnsigned
-	}
 	machineID, backendID := "", ""
 	if s.identity != nil {
 		machineID, backendID = s.identity()
 	}
-	if !deviceTargetMatches(f.target, machineID, backendID) {
+	return s.verifySigned(r, deviceSigCheck{
+		targetOK: func(t string) bool { return deviceTargetMatches(t, machineID, backendID) },
+		maxBody:  deviceSigMaxBody,
+	})
+}
+
+// deviceSigCheck is what one signature check accepts.
+type deviceSigCheck struct {
+	targetOK func(string) bool
+	maxBody  int64
+	// keepOversize leaves a body over maxBody intact for the handler (the
+	// request then counts as unsigned) instead of failing the request.
+	keepOversize bool
+	// possession verifies against this key instead of an approved device's:
+	// a device proving it holds the key it is enrolling.
+	possession *ecdsa.PublicKey
+}
+
+func (s *trustedDevices) verifySigned(r *http.Request, c deviceSigCheck) (*trustedDevice, error) {
+	f := deviceSigFieldsFrom(r)
+	if f.id == "" || f.sig == "" || f.nonce == "" || f.time == "" || f.target == "" {
+		return nil, errDeviceUnsigned
+	}
+	if !c.targetOK(f.target) {
 		return nil, errDeviceWrongTarget
 	}
 	unix, err := strconv.ParseInt(f.time, 10, 64)
@@ -646,12 +844,26 @@ func (s *trustedDevices) verifyRequest(r *http.Request) (*trustedDevice, error) 
 	}
 	var body []byte
 	if r.Body != nil {
-		body, err = io.ReadAll(io.LimitReader(r.Body, deviceSigMaxBody+1))
-		_ = r.Body.Close()
+		if c.keepOversize && r.ContentLength > c.maxBody {
+			return nil, errDeviceBodyTooLong
+		}
+		orig := r.Body
+		body, err = io.ReadAll(io.LimitReader(orig, c.maxBody+1))
+		if c.keepOversize && (err != nil || int64(len(body)) > c.maxBody) {
+			r.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.MultiReader(bytes.NewReader(body), orig), orig}
+			if err != nil {
+				return nil, errDeviceBadSig
+			}
+			return nil, errDeviceBodyTooLong
+		}
+		_ = orig.Close()
 		if err != nil {
 			return nil, errDeviceBadSig
 		}
-		if len(body) > deviceSigMaxBody {
+		if int64(len(body)) > c.maxBody {
 			return nil, errDeviceBodyTooLong
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -661,21 +873,30 @@ func (s *trustedDevices) verifyRequest(r *http.Request) (*trustedDevice, error) 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	d := s.find(f.id)
-	if d == nil || d.Status != deviceStatusApproved || d.key == nil {
-		return nil, errDeviceUnknown
+	var d *trustedDevice
+	key := c.possession
+	if key == nil {
+		d = s.find(f.id)
+		if d == nil || d.Status != deviceStatusApproved || d.key == nil {
+			return nil, errDeviceUnknown
+		}
+		key = d.key
 	}
-	if !verifyDeviceSignature(d.key, msg, f.sig) {
+	if !verifyDeviceSignature(key, msg, f.sig) {
 		return nil, errDeviceBadSig
 	}
-	nonceKey := d.ID + "/" + f.nonce
+	nonceKey := f.id + "/" + f.nonce
 	s.pruneNoncesLocked(now)
 	if _, seen := s.nonces[nonceKey]; seen {
 		return nil, errDeviceReplay
 	}
 	s.nonces[nonceKey] = now.Add(2 * deviceSigMaxSkew)
-	seen := now.UTC()
-	d.LastSeenAt = &seen
+	if d != nil {
+		seen := now.UTC()
+		d.LastSeenAt = &seen
+	} else {
+		d = &trustedDevice{ID: f.id}
+	}
 	if f.fromQuery {
 		r.URL.RawQuery = rawQuery
 	}
@@ -916,6 +1137,8 @@ type trustedDeviceView struct {
 	DaemonIdentity string               `json:"daemonIdentity,omitempty"`
 	Verify         *deviceV3AttemptView `json:"verify,omitempty"`
 	V3Verified     *deviceV3Verified    `json:"v3Verified,omitempty"`
+	Surface        string               `json:"surface,omitempty"`
+	ApprovedVia    string               `json:"approvedVia,omitempty"`
 }
 
 func viewOfDevice(d *trustedDevice) trustedDeviceView {
@@ -931,6 +1154,7 @@ func viewOfDevice(d *trustedDevice) trustedDeviceView {
 		}
 	}
 	v.V3Verified = d.V3Verified
+	v.Surface, v.ApprovedVia = d.Surface, d.ApprovedVia
 	return v
 }
 
@@ -955,6 +1179,15 @@ func (a *apiServer) handleListRemoteDevices(w http.ResponseWriter, _ *http.Reque
 }
 
 func (a *apiServer) handleEnrollRemoteDevice(w http.ResponseWriter, r *http.Request) {
+	if !requestViaRelay(r) {
+		if pid, ok := lookupPeerPID(r); ok && pid > 0 && peerIsAutomationBrowser(pid) {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error":   "automation_browser",
+				"message": "A browser run by automation can't be enrolled as your device.",
+			})
+			return
+		}
+	}
 	var body struct {
 		Name      string `json:"name"`
 		PublicKey string `json:"publicKey"`
@@ -994,6 +1227,12 @@ func (a *apiServer) handleEnrollRemoteDevice(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if created {
+		a.trustedDevices.mu.Lock()
+		d.Surface = deviceSurface(r)
+		_ = a.trustedDevices.saveLocked()
+		a.trustedDevices.mu.Unlock()
+	}
 	log.Printf("remote-devices: enrolment %s (%s) is %s", d.ID, d.Name, d.Status)
 	// A new request is announced on this computer, where it is approved; a
 	// device asking again while it waits is not.
@@ -1032,14 +1271,94 @@ func (a *apiServer) handleRemoteDeviceStatus(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, v)
 }
 
-// handleApproveRemoteDevice is a person's act at the computer itself.
+// remoteVerifiedDevice is the approved device a request from the relay
+// proved itself to be: by its signature (relayDeviceGate) or by the
+// handshake of the private channel it arrived on. "" otherwise.
+func remoteVerifiedDevice(r *http.Request) string {
+	if d := relayVerifiedDevice(r); d != "" {
+		return d
+	}
+	if relayTransport(r) {
+		return privateRelayDevice(r)
+	}
+	return ""
+}
+
+// deviceManagementProven reports a caller that may manage devices once one
+// is approved: an approved device (signed locally, signed over the relay, or
+// on its private channel) or, outside require, a browser traced at this
+// computer that isn't run by automation. Under require a browser known only
+// by its executable's name doesn't count.
+func deviceManagementProven(r *http.Request, caller callerIdentity, require bool) bool {
+	return caller.Device != "" || remoteVerifiedDevice(r) != "" ||
+		(!require && caller.Kind == callerHuman && caller.PID > 0 && !caller.Unproven)
+}
+
+// requireDeviceManagementProof refuses r unless no device is approved yet or
+// the caller proved more than browser headers (deviceManagementProven).
+// SOLU_HUMAN_PROOF=off, the recovery the person sets at the computer, also
+// lets browser headers through (envRecovery), so losing every approved
+// browser can't lock them out of approving a new one; that is logged, and
+// an approval made that way is announced until acknowledged.
+func (a *apiServer) requireDeviceManagementProof(w http.ResponseWriter, r *http.Request, caller callerIdentity, action string) (ok, envRecovery bool) {
+	if a.approvedDeviceCount() == 0 || deviceManagementProven(r, caller, a.humanProofMode() == humanProofRequire) {
+		return true, false
+	}
+	if a.humanProof != nil && a.humanProof.envOff && caller.Kind == callerHuman {
+		log.Printf("remote-devices: %s on browser headers under %s=off (env-recovery, pid %d)", action, humanProofEnv, caller.PID)
+		return true, true
+	}
+	log.Printf("remote-devices: refused %s without device proof (pid %d)", action, caller.PID)
+	writeDeviceProofRequired(w, action)
+	return false, false
+}
+
+func writeDeviceProofRequired(w http.ResponseWriter, action string) {
+	writeJSON(w, http.StatusForbidden, map[string]any{
+		"error":   "device_required",
+		"message": "This screen isn't an approved device yet, so it can't " + action + ". Open Settings → Privacy & security → Ask to approve this browser, then approve it from a browser or app you've already approved. If that button isn't shown here, use an already-approved device instead. If you're locked out, recovery steps are in Settings → Privacy & security on the computer.",
+	})
+}
+
+// handleApproveRemoteDevice is a person's act at the computer itself, or
+// from a browser or app the person already approved.
 func (a *apiServer) handleApproveRemoteDevice(w http.ResponseWriter, r *http.Request) {
-	if requestViaRelay(r) {
-		http.Error(w, "devices can only be approved at the computer itself", http.StatusForbidden)
+	relayDevice := remoteVerifiedDevice(r)
+	if requestViaRelay(r) && relayDevice == "" {
+		http.Error(w, "devices can only be approved at the computer itself or from an approved device", http.StatusForbidden)
 		return
 	}
+	caller := a.identifyCaller(r)
 	if !a.requireHuman(w, r, "approve a remote device") {
 		return
+	}
+	via := "headers"
+	switch {
+	case relayDevice != "":
+		via = "relay-device:" + relayDevice
+	case caller.Device != "":
+		via = "device:" + caller.Device
+	case caller.PID > 0 && !caller.Unproven && a.humanProofMode() != humanProofRequire:
+		via = "traced"
+	}
+	// Once any device is approved, in every mode, a new one is approved
+	// from an approved device or, outside require, a browser traced at this
+	// computer (under require a browser known only by its name doesn't count):
+	// otherwise a program could approve its own key and keep it. Browser
+	// headers alone approve only the first device (decided
+	// atomically by approveWith) or, under the env recovery, any device;
+	// both are announced until an approved device acknowledges them.
+	onlyFirst := false
+	if via == "headers" {
+		ok, envRecovery := a.requireDeviceManagementProof(w, r, caller, "approve a device")
+		if !ok {
+			return
+		}
+		if envRecovery {
+			via = "env-recovery"
+		} else {
+			via, onlyFirst = "first-device", true
+		}
 	}
 	var body struct {
 		EnrolmentID string `json:"enrolmentId"`
@@ -1049,7 +1368,39 @@ func (a *apiServer) handleApproveRemoteDevice(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	d, err := a.trustedDevices.approve(r.PathValue("id"), body.EnrolmentID)
+	// A notice goes in before the approval it announces, so the device is
+	// never approved without it, not even between the two saves; noticeMu
+	// keeps an acknowledgement from landing in between.
+	a.noticeMu.Lock()
+	defer a.noticeMu.Unlock()
+	noticed := via == "first-device" || via == "env-recovery"
+	noticeAt := time.Now().UTC()
+	if noticed {
+		pending, ok := a.trustedDevices.deviceName(r.PathValue("id"))
+		if !ok {
+			http.Error(w, "unknown device", http.StatusNotFound)
+			return
+		}
+		if err := a.humanProof.noteApprovalNotice(&trustedDevice{ID: r.PathValue("id"), Name: pending}, via, noticeAt); err != nil {
+			log.Printf("human-proof: record %s approval: %v", via, err)
+			http.Error(w, "could not save", http.StatusInternalServerError)
+			return
+		}
+	}
+	d, err := a.trustedDevices.approveWith(r.PathValue("id"), body.EnrolmentID, onlyFirst, via)
+	// Withdrawn only if the device didn't become approved: a failed save
+	// can leave it approved in memory, and then the notice stays.
+	if noticed && (approvalNotMade(err) || (err != nil && !a.trustedDevices.isApproved(r.PathValue("id")))) {
+		a.humanProof.dropNotice(r.PathValue("id"), noticeAt)
+	}
+	if errors.Is(err, errDeviceAlreadyBootstrapped) {
+		writeDeviceProofRequired(w, "approve a device")
+		return
+	}
+	if errors.Is(err, errApproverGone) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "device_required", "message": "The device approving this one is no longer approved."})
+		return
+	}
 	if errors.Is(err, errDeviceEnrolment) {
 		writeDeviceV3Error(w, err)
 		return
@@ -1062,27 +1413,90 @@ func (a *apiServer) handleApproveRemoteDevice(w http.ResponseWriter, r *http.Req
 		http.Error(w, "could not save", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("remote-devices: approved %s (%s)", d.ID, d.Name)
+	log.Printf("remote-devices: approved %s (%s) via %s", d.ID, d.Name, via)
+	if a.uiBus != nil {
+		a.uiBus.publish(uiEvent{Type: "remote-device.approved", Text: d.Name})
+	}
 	a.trustedDevices.mu.Lock()
 	v := viewOfDevice(d)
 	a.trustedDevices.mu.Unlock()
 	writeJSON(w, http.StatusOK, v)
 }
 
-// handleRemoveRemoteDevice revokes a device. Removing access is open to a
-// person anywhere, including from another approved device.
+// handleRemoveRemoteDevice revokes a device: from an approved device (here
+// or remote) or a browser traced at this computer once any is approved.
 func (a *apiServer) handleRemoveRemoteDevice(w http.ResponseWriter, r *http.Request) {
+	caller := a.identifyCaller(r)
 	if !a.requireHuman(w, r, "remove a remote device") {
 		return
 	}
-	if err := a.trustedDevices.remove(r.PathValue("id")); errors.Is(err, os.ErrNotExist) {
+	// Removing the person's devices on browser headers alone would let any
+	// program lock them out; once a device is approved it takes the same
+	// proof as approving one.
+	if ok, _ := a.requireDeviceManagementProof(w, r, caller, "remove a device"); !ok {
+		return
+	}
+	a.noticeMu.Lock()
+	defer a.noticeMu.Unlock()
+	id := r.PathValue("id")
+	remover := caller.Device
+	if remover == "" {
+		remover = remoteVerifiedDevice(r)
+	}
+	// Checked again under noticeMu: a device removed since it signed can't
+	// remove others.
+	if remover != "" && !a.trustedDevices.isApproved(remover) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "device_required", "message": "This browser or app is no longer approved."})
+		return
+	}
+	// A device that is flagged, or was approved by one that is, leaves a
+	// notice when it removes another approved device, so removing the
+	// others can't hide where it came from. The notice is saved first and
+	// withdrawn if the removal doesn't happen.
+	var noticeAt time.Time
+	if remover != "" && remover != id && a.trustedDevices.isApproved(id) && a.deviceFlagged(remover) {
+		removerName, _ := a.trustedDevices.deviceName(remover)
+		targetName, _ := a.trustedDevices.deviceName(id)
+		noticeAt = time.Now().UTC()
+		if err := a.humanProof.addNotice(humanProofNotice{ID: remover, Name: removerName, At: noticeAt, Via: "removed", Removed: targetName}); err != nil {
+			log.Printf("human-proof: record removal by %s: %v", remover, err)
+			http.Error(w, "could not save", http.StatusInternalServerError)
+			return
+		}
+	}
+	removed, err := a.trustedDevices.removeDevice(id, a.humanProofMode() == humanProofRequire)
+	if err != nil && !noticeAt.IsZero() {
+		if _, still := a.trustedDevices.deviceName(id); still {
+			a.humanProof.dropNotice(remover, noticeAt)
+		}
+	}
+	if errors.Is(err, errLastApprovedDevice) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":   "last_device",
+			"message": "This is the last approved device. Stop requiring approved devices first, or approve another one.",
+		})
+		return
+	}
+	if errors.Is(err, os.ErrNotExist) {
 		http.Error(w, "unknown device", http.StatusNotFound)
 		return
 	} else if err != nil {
 		http.Error(w, "could not save", http.StatusInternalServerError)
 		return
 	}
+	log.Printf("remote-devices: removed %s (%s) by device %q, pid %d", removed.ID, removed.Name, remover, caller.PID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deviceName is the stored name of device id, approved or not.
+func (s *trustedDevices) deviceName(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.find(id)
+	if d == nil {
+		return "", false
+	}
+	return d.Name, true
 }
 
 // handlePutRemoteAccessPolicy switches between "any" and "approved". Both
@@ -1093,7 +1507,13 @@ func (a *apiServer) handlePutRemoteAccessPolicy(w http.ResponseWriter, r *http.R
 		http.Error(w, "remote access can only be changed at the computer itself", http.StatusForbidden)
 		return
 	}
+	caller := a.identifyCaller(r)
 	if !a.requireHuman(w, r, "change remote access") {
+		return
+	}
+	// The policy outlives a later switch to approved devices only, so once a
+	// device is approved it takes the same proof as managing devices.
+	if ok, _ := a.requireDeviceManagementProof(w, r, caller, "change remote access"); !ok {
 		return
 	}
 	var body struct {

@@ -174,10 +174,15 @@ func TestDeviceCodeV3VerificationGates(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, handler := range []http.HandlerFunc{a.handleConfirmDeviceVerification, a.handleRejectDeviceVerification} {
-		for _, caller := range []string{"relay", "agent", "stale"} {
+		for _, caller := range []string{"relay", "agent", "headers", "stale"} {
 			identifyCallerHook = nil
 			if caller == "agent" {
 				identifyCallerHook = func(*http.Request) callerIdentity { return callerIdentity{Kind: callerPane, PaneID: "p-v3-agent"} }
+			}
+			if caller == "stale" {
+				// A browser traced at this computer: past the device-proof
+				// gate, so the stale enrolment itself is what is refused.
+				identifyCallerHook = func(*http.Request) callerIdentity { return callerIdentity{Kind: callerHuman, PID: 4242} }
 			}
 			rawID := attempt
 			if caller == "stale" {

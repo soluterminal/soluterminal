@@ -6,13 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,7 +34,50 @@ type workerReadReceipt struct {
 	Input uint64
 	At    time.Time
 }
-type workerRetention struct{ Lead, Reason string }
+
+// workerRetention is a retained worker's notice record. Pending: its ask is
+// not saved yet (a full or unwritable asks store); reconcile retries it.
+type workerRetention struct {
+	Lead, Reason    string
+	Pending         bool   `json:",omitempty"`
+	Since           int64  `json:",omitempty"` // first observed unpublished work; zero when not observed
+	Escalated       bool   `json:",omitempty"` // set only after a fresh publication check
+	MovedFrom       string `json:",omitempty"` // human-authorized notification-recipient migration
+	LeadAbsentSince int64  `json:",omitempty"` // first observed absence; reset when present
+}
+
+// Routine retention is the lead's work. Only prolonged, known unpublished
+// work asks the person to decide how to preserve/recover it. Generic Git or
+// cleanup errors do not prove that only the person can help.
+const workerUnpublishedEscalation = 72 * time.Hour
+const workerLeadAbsenceGrace = 5 * time.Second
+
+func workerRetentionNeedsUser(note workerRetention, now time.Time) bool {
+	if note.Since <= 0 || now.Sub(time.UnixMilli(note.Since)) < workerUnpublishedEscalation {
+		return false
+	}
+	return workerUnpublishedReason(note.Reason)
+}
+
+func workerUnpublishedReason(text string) bool {
+	for _, reason := range []string{"uncommitted work", "unpushed work"} {
+		if text == reason || strings.HasPrefix(text, reason+" (") || strings.HasPrefix(text, reason+";") {
+			return true
+		}
+	}
+	return false
+}
+
+// Failure to inspect work cannot retract earlier publication evidence. It
+// cannot start or promote an escalation either; that still needs fresh proof.
+func workerPublicationUncertain(text string) bool {
+	for _, reason := range []string{"work has no pushed upstream", "worktree list cannot be verified", "worktree paths cannot be verified", "worktree index cannot be verified", "worktree status cannot be verified", "submodule work requires manual review"} {
+		if text == reason || strings.HasPrefix(text, reason+" (") || strings.HasPrefix(text, reason+";") {
+			return true
+		}
+	}
+	return false
+}
 
 type workerArchiveState struct {
 	noticeMu         sync.Mutex
@@ -130,7 +171,7 @@ func (a *apiServer) noteWorkerReplyRead(caller string, p *Pane, reply paneReply)
 	snap := p.Snapshot()
 	// The lead reading the result: the worker's starter when that pane leads
 	// workers, or the lead recorded at spawn (pane_team.go workerLeadFor).
-	if snap.Origin == nil || snap.Origin.Worker == nil || caller == "" || (caller != snap.Origin.LeadPaneID && caller != a.workerLeadFor(snap.Origin)) {
+	if snap.Origin == nil || snap.Origin.Worker == nil || caller == "" || (caller != snap.Origin.LeadPaneID && caller != a.workerNoticeLead(snap.ID, snap.Origin)) {
 		return
 	}
 	key := workerReplyKey(reply)
@@ -182,7 +223,7 @@ func (a *apiServer) loadWorkerRetentionsLocked(s *workerArchiveState) {
 			worker, reason, ok := strings.Cut(line, " retained: ")
 			if ok && worker != "" {
 				if _, exists := s.retained[worker]; !exists {
-					s.retained[worker] = workerRetention{snap.ID, reason}
+					s.retained[worker] = workerRetention{Lead: snap.ID, Reason: reason}
 				}
 			}
 		}
@@ -210,48 +251,279 @@ func (a *apiServer) saveWorkerRetentionsLocked(s *workerArchiveState) {
 	}
 }
 
-// noticeMu serializes aggregate memo updates, independently of archive/storage
-// locks. The flag transaction still checks ownership against concurrent UI writes.
+// noticeMu serializes notice updates, independently of archive/storage locks.
 func (a *apiServer) flagWorkerLead(lead, worker, reason string) {
 	s := a.workerArchives()
 	s.noticeMu.Lock()
 	defer s.noticeMu.Unlock()
 	a.loadWorkerRetentionsLocked(s)
 	old := s.retained[worker]
-	s.retained[worker] = workerRetention{lead, reason}
+	if (lead == old.MovedFrom || !a.workerLeadPresent(lead)) && a.workerLeadPresent(old.Lead) {
+		lead = old.Lead
+	}
+	since := old.Since
+	if !workerUnpublishedReason(reason) && !workerPublicationUncertain(reason) {
+		since = 0
+	} else if workerUnpublishedReason(reason) && since == 0 {
+		since = a.asksNow().UnixMilli()
+	}
+	note := workerRetention{Lead: lead, Reason: reason, Pending: true, Since: since, MovedFrom: old.MovedFrom, LeadAbsentSince: old.LeadAbsentSince}
+	if lead != old.Lead {
+		note.LeadAbsentSince = 0
+	}
+	leadGone := a.observeWorkerLeadAbsence(&note, a.asksNow())
+	note.Escalated = workerRetentionNeedsUser(note, a.asksNow()) || (workerUnpublishedReason(reason) && leadGone)
+	if workerPublicationUncertain(reason) {
+		note.Escalated = old.Escalated
+	}
+	s.retained[worker] = note
 	a.saveWorkerRetentionsLocked(s)
 	if old.Lead != "" && old.Lead != lead {
-		a.syncWorkerLeadFlagLocked(s, old.Lead, false)
+		a.syncWorkerLeadAsksLocked(s, old.Lead, "")
 	}
-	a.syncWorkerLeadFlagLocked(s, lead, true)
+	a.syncWorkerLeadAsksLocked(s, lead, worker)
 }
-func (a *apiServer) syncWorkerLeadFlagLocked(s *workerArchiveState, lead string, create bool) {
+
+// Worker notices are asks on the lead (asks.go, kind worker), one per
+// retained worker and keyed by its pane id. The retention record above stays
+// the lifecycle's source of truth: it keeps the exact reason and remembers
+// notices the person dismissed.
+func workerAskKey(worker string) string { return "worker-" + strings.ToLower(worker) }
+
+func (a *apiServer) workerAskText(worker, reason string) string {
+	label := worker
+	if p, ok := a.mgr.Get(worker); ok {
+		label = a.paneCallerLabel(p)
+	}
+	return "Worker " + label + " kept open: " + oneLine(reason)
+}
+
+func (a *apiServer) asksNow() time.Time {
+	if a.asks != nil {
+		return a.asks.now()
+	}
+	return time.Now()
+}
+
+// A suspended lead still owns its workers across shutdown/reboot. Only a
+// missing lead or a non-resumable exit starts the absence grace window.
+func (a *apiServer) workerLeadPresent(lead string) bool {
+	if a.paneRespawnInProgress(lead) {
+		return true
+	}
 	p, ok := a.mgr.Get(lead)
+	if !ok {
+		// The replacement can begin after our first presence check.
+		return a.paneRespawnInProgress(lead)
+	}
+	snap := p.Snapshot()
+	return p.respawning.Load() || snap.Status == PaneRunning || (snap.Status == PaneExited && snap.Resumable)
+}
+
+// Called only with a fresh worker observation. Reconciliation alone cannot
+// promote a saved Git reason merely because an absence timer aged.
+func (a *apiServer) observeWorkerLeadAbsence(note *workerRetention, now time.Time) bool {
+	if a.workerLeadPresent(note.Lead) {
+		note.LeadAbsentSince = 0
+		return false
+	}
+	if note.LeadAbsentSince == 0 {
+		note.LeadAbsentSince = now.UnixMilli()
+		return false
+	}
+	return now.Sub(time.UnixMilli(note.LeadAbsentSince)) >= workerLeadAbsenceGrace
+}
+
+// A human-authorized lead migration updates the notification recipient. Do
+// not mistake its old spawn-time pane id for an abandoned lead. This changes
+// only who is notified/records a read, not spending or pane-close authority.
+func (a *apiServer) workerNoticeLead(worker string, origin *PaneOrigin) string {
+	lead := a.workerLeadFor(origin)
+	if note, ok := a.retainedWorker(worker); ok && (lead == note.MovedFrom || !a.workerLeadPresent(lead)) && a.workerLeadPresent(note.Lead) {
+		return note.Lead
+	}
+	return lead
+}
+
+func (a *apiServer) movePaneAsks(from, to, label string) {
+	s := a.workerArchives()
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	a.loadWorkerRetentionsLocked(s)
+	a.asks.movePane(from, to, label)
+	changed := false
+	for worker, note := range s.retained {
+		if note.Lead == from {
+			if note.MovedFrom == "" {
+				note.MovedFrom = from
+			}
+			note.Lead = to
+			note.LeadAbsentSince = 0
+			s.retained[worker] = note
+			changed = true
+		}
+	}
+	if changed {
+		a.saveWorkerRetentionsLocked(s)
+		a.syncWorkerLeadAsksLocked(s, to, "")
+	}
+}
+
+// observeWorkerPublication runs after Git inspection, outside the pane and
+// archive locks. Merely aging a saved reason is not fresh evidence of risk.
+func (a *apiServer) observeWorkerPublication(worker, reason string, now time.Time) {
+	s := a.workerArchives()
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	a.loadWorkerRetentionsLocked(s)
+	note, ok := s.retained[worker]
 	if !ok {
 		return
 	}
-	var ids []string
-	for id, note := range s.retained {
-		if note.Lead == lead {
-			ids = append(ids, id)
+	before := note
+	if workerUnpublishedReason(reason) {
+		if note.Since == 0 {
+			note.Since = now.UnixMilli()
+		}
+	} else if !workerPublicationUncertain(reason) {
+		note.Since = 0
+		if reason == "" && workerUnpublishedReason(note.Reason) && strings.Contains(note.Reason, "final reply unread by lead") {
+			note.Reason = "final reply unread by lead"
 		}
 	}
-	sort.Strings(ids)
-	var lines []string
-	for i, id := range ids {
-		if i == 4 {
-			lines = append(lines, fmt.Sprintf("+%d more retained workers", len(ids)-i))
-			break
-		}
-		lines = append(lines, "Worker "+id+" retained: "+clipRunes(oneLine(s.retained[id].Reason), 70))
+	verified := note
+	verified.Reason = reason
+	leadGone := a.observeWorkerLeadAbsence(&note, now)
+	if !workerPublicationUncertain(reason) {
+		note.Escalated = workerRetentionNeedsUser(verified, now) || (workerUnpublishedReason(reason) && leadGone)
 	}
-	memo := strings.Join(lines, "\n")
-	_ = a.mgr.changeCurrentFlag(p, a.panes, func(prev PaneSnapshot) error {
-		if (prev.Flagged && prev.FlagOwner != "worker-manager") || (!prev.Flagged && !create) || (prev.Flagged && prev.FlagMemo == memo) {
-			return errors.New("preserve existing flag")
-		}
+	if note != before {
+		s.retained[worker] = note
+		a.saveWorkerRetentionsLocked(s)
+		a.syncWorkerLeadAsksLocked(s, note.Lead, "")
+	}
+}
+
+// workerAsksAll, as syncWorkerLeadAsksLocked's create, opens an ask for every
+// retained worker of the lead (the flag migration).
+const workerAsksAll = "*"
+
+// syncWorkerLeadAsksLocked makes the lead's worker asks match its retained
+// workers: it updates their text and closes those no longer retained. It
+// opens an ask only for create, the worker just retained, so a notice the
+// person dismissed stays dismissed until the worker is retained again.
+// It clears Pending for each saved notice independently, and reports the
+// first ask it could not save. A failure for another worker must not leave a
+// saved notice pending: retrying it could undo the person’s dismissal.
+func (a *apiServer) syncWorkerLeadAsksLocked(s *workerArchiveState, lead, create string) error {
+	if a.asks == nil {
 		return nil
-	}, len(ids) > 0, memo, "worker-manager")
+	}
+	var failed error
+	retentionsChanged := false
+	leadPresent := a.workerLeadPresent(lead)
+	open := map[string]Ask{}
+	for _, x := range a.asks.list() {
+		if x.Kind != askKindWorker || x.State != askOpen {
+			continue
+		}
+		owner, retained := s.retained[x.WorkerPane]
+		if (retained && owner.Lead == lead) || (!retained && x.SourcePane == lead) {
+			open[x.WorkerPane] = x
+		}
+	}
+	for worker, note := range s.retained {
+		if note.Lead != lead {
+			continue
+		}
+		if leadPresent && note.LeadAbsentSince != 0 {
+			note.LeadAbsentSince = 0
+			s.retained[worker] = note
+			retentionsChanged = true
+		}
+		previous, has := open[worker]
+		delete(open, worker)
+		if !has && create != worker && create != workerAsksAll {
+			continue
+		}
+		target := lead
+		leadGone := !leadPresent && note.LeadAbsentSince > 0 && a.asksNow().Sub(time.UnixMilli(note.LeadAbsentSince)) >= workerLeadAbsenceGrace
+		if leadGone {
+			// Keep the work actionable when its lead is gone without Resume.
+			target = worker
+		}
+		p, live := a.mgr.Get(target)
+		if !live {
+			continue
+		}
+		// Refresh the exact ask we saw, without recreating it if the person
+		// dismissed it after workerAsks returned (or a new ask replaced it).
+		needsUser := note.Escalated && (leadGone || (note.Since > 0 && a.asksNow().Sub(time.UnixMilli(note.Since)) >= workerUnpublishedEscalation))
+		text := a.workerAskText(worker, note.Reason)
+		if needsUser {
+			if leadGone {
+				text = "The lead is no longer running. Decide how to preserve unpublished work. " + text
+			} else {
+				text = "Decide how to preserve unpublished work kept for at least 72 hours. " + text
+			}
+		}
+		_, _, err := a.asks.post(askPost{Pane: target, Source: a.paneCallerLabel(p), Kind: askKindWorker, Key: workerAskKey(worker), Text: text, WorkerPane: worker, NeedsUser: needsUser, UpdateID: previous.ID})
+		if err != nil && !errors.Is(err, errAskNotFound) {
+			log.Printf("worker notice for %s on %s: %v", worker, lead, err)
+			if failed == nil {
+				failed = err
+			}
+			continue
+		}
+		if note.Pending {
+			note.Pending = false
+			s.retained[worker] = note
+			retentionsChanged = true
+		}
+	}
+	if retentionsChanged {
+		a.saveWorkerRetentionsLocked(s)
+	}
+	for _, x := range open {
+		if err := a.asks.closeWorkerKey(x.SourcePane, x.Key, "worker_cleared"); err != nil {
+			log.Printf("worker notice %s on %s: %v", x.Key, lead, err)
+		}
+	}
+	return failed
+}
+
+// migrateWorkerManagerFlags turns the worker manager's old flags into asks:
+// their memos seed the retention record (loadWorkerRetentionsLocked), each
+// retained worker gets an ask on its lead, and the flag is cleared. Run at
+// boot; once no worker-manager flag is left it does nothing.
+func (a *apiServer) migrateWorkerManagerFlags() {
+	s := a.workerArchives()
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	a.loadWorkerRetentionsLocked(s)
+	var leads []*Pane
+	for _, p := range a.mgr.List() {
+		if snap := p.Snapshot(); snap.Flagged && snap.FlagOwner == "worker-manager" {
+			leads = append(leads, p)
+		}
+	}
+	if len(leads) == 0 {
+		return
+	}
+	a.saveWorkerRetentionsLocked(s)
+	for _, p := range leads {
+		// The flag stays until every notice it carried is saved as an ask, so
+		// a failed save is retried at the next start.
+		if err := a.syncWorkerLeadAsksLocked(s, p.ID, workerAsksAll); err != nil {
+			continue
+		}
+		_ = a.mgr.changeCurrentFlag(p, a.panes, func(prev PaneSnapshot) error {
+			if !prev.Flagged || prev.FlagOwner != "worker-manager" {
+				return errors.New("not the worker manager's flag")
+			}
+			return nil
+		}, false, "", "")
+	}
 }
 func (a *apiServer) clearWorkerRetention(worker string) {
 	s := a.workerArchives()
@@ -264,7 +536,10 @@ func (a *apiServer) clearWorkerRetention(worker string) {
 	if note, ok := s.retained[worker]; ok {
 		delete(s.retained, worker)
 		a.saveWorkerRetentionsLocked(s)
-		a.syncWorkerLeadFlagLocked(s, note.Lead, false)
+		if a.asks != nil {
+			a.asks.closeWorkerNotice(worker)
+		}
+		a.syncWorkerLeadAsksLocked(s, note.Lead, "")
 	}
 }
 func (a *apiServer) reconcileWorkerRetentions(enabled bool) {
@@ -286,10 +561,9 @@ func (a *apiServer) reconcileWorkerRetentions(enabled bool) {
 	a.loadWorkerRetentionsLocked(s)
 	changed := false
 	leads := map[string]bool{}
-	for _, p := range a.mgr.List() {
-		snap := p.Snapshot()
-		if snap.Flagged && snap.FlagOwner == "worker-manager" {
-			leads[p.ID] = true
+	if a.asks != nil {
+		for _, lead := range a.asks.workerAskLeads() {
+			leads[lead] = true
 		}
 	}
 	for id, note := range s.retained {
@@ -300,6 +574,9 @@ func (a *apiServer) reconcileWorkerRetentions(enabled bool) {
 				continue
 			}
 			delete(s.retained, id)
+			if a.asks != nil {
+				a.asks.closeWorkerNotice(id)
+			}
 			changed = true
 			s.mu.Lock()
 			delete(s.flagged, id)
@@ -309,6 +586,9 @@ func (a *apiServer) reconcileWorkerRetentions(enabled bool) {
 		snap := p.Snapshot()
 		if !enabled || paneTeamKind(snap.Origin) != paneTeamWorker || snap.Origin.Worker == nil || snap.Origin.Worker.State != "finished" {
 			delete(s.retained, id)
+			if a.asks != nil {
+				a.asks.closeWorkerNotice(id)
+			}
 			changed = true
 			s.mu.Lock()
 			delete(s.flagged, id)
@@ -319,7 +599,13 @@ func (a *apiServer) reconcileWorkerRetentions(enabled bool) {
 		a.saveWorkerRetentionsLocked(s)
 	}
 	for lead := range leads {
-		a.syncWorkerLeadFlagLocked(s, lead, false)
+		a.syncWorkerLeadAsksLocked(s, lead, "")
+	}
+	// Retry notices whose ask could not be saved when the worker was retained.
+	for id, note := range s.retained {
+		if note.Pending {
+			a.syncWorkerLeadAsksLocked(s, note.Lead, id)
+		}
 	}
 }
 func (a *apiServer) archiveFinishedWorkers(now time.Time) {
@@ -392,7 +678,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		return
 	}
 	// Transient non-idle observations do not mean retained work vanished.
-	if p.computeStateCached() != StateIdle {
+	if p.computeStateCached() != StateIdle && snap.Status != PaneExited {
 		return
 	}
 	s := a.workerArchives()
@@ -423,6 +709,13 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	ctx, cancel := context.WithTimeout(baseContext, 4*time.Second)
 	proof, reason := workerGitForArchive(ctx, snap, live)
 	cancel()
+	a.observeWorkerPublication(p.ID, reason, now)
+	if snap.Status == PaneExited {
+		if prior, known := a.retainedWorker(p.ID); reason == "" && known && !strings.Contains(prior.Reason, "final reply unread by lead") && !strings.HasPrefix(prior.Reason, "archive ") {
+			a.clearWorkerRetention(p.ID)
+		}
+		return // observe risk, but do not change the existing archive gate
+	}
 	if !final {
 		// Losing ephemeral read receipts at restart is not evidence of a new
 		// unread result. Preserve known notices, but do not re-flag a silent or
@@ -434,10 +727,10 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			}
 			return
 		}
-		if known && prior.Lead == a.workerLeadFor(snap.Origin) && (prior.Reason == reason || (!read && prior.Reason == reason+"; final reply unread by lead")) {
+		if known && prior.Lead == a.workerNoticeLead(snap.ID, snap.Origin) && (prior.Reason == reason || (!read && prior.Reason == reason+"; final reply unread by lead")) {
 			return
 		}
-		a.flagWorkerLead(a.workerLeadFor(snap.Origin), p.ID, reason)
+		a.flagWorkerLead(a.workerNoticeLead(snap.ID, snap.Origin), p.ID, reason)
 		return
 	}
 	allowed, flag := workerArchiveAllowed(true, key != "", read, noInput, reason == "")
@@ -451,7 +744,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			}
 			// Tell the lead once per final reply and reason: a person who
 			// clears the flag isn't flagged again until something changes.
-			lead := a.workerLeadFor(snap.Origin)
+			lead := a.workerNoticeLead(snap.ID, snap.Origin)
 			note := lead + "\x00" + key + "\x00" + reason
 			s.mu.Lock()
 			again := s.flagged[p.ID] == note
@@ -569,7 +862,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			keep = false
 		}
 		p.workerArchiving.Store(false)
-		a.flagWorkerLead(a.workerLeadFor(snap.Origin), p.ID, "archive layout persistence failed")
+		a.flagWorkerLead(a.workerNoticeLead(snap.ID, snap.Origin), p.ID, "archive layout persistence failed")
 		return
 	}
 	teardown := a.detachArchivedWorker
@@ -583,12 +876,12 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		if restored && a.discardWorkerArchive(archiveID) == nil {
 			keep = false
 		}
-		a.flagWorkerLead(a.workerLeadFor(snap.Origin), p.ID, "archive process shutdown failed")
+		a.flagWorkerLead(a.workerNoticeLead(snap.ID, snap.Origin), p.ID, "archive process shutdown failed")
 		return
 	}
 	if a.panes != nil {
 		if err = a.panes.Remove(p.ID); err != nil {
-			a.flagWorkerLead(a.workerLeadFor(snap.Origin), p.ID, "archive pane-store cleanup failed")
+			a.flagWorkerLead(a.workerNoticeLead(snap.ID, snap.Origin), p.ID, "archive pane-store cleanup failed")
 			return
 		}
 	}

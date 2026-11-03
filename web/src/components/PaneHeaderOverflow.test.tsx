@@ -13,7 +13,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('pane header details', () => {
   it('ranks details in the order the product owner approved', () => {
     const order = Object.entries(DETAIL_PRIORITY).sort((a, b) => a[1] - b[1]).map(([name]) => name);
-    expect(order).toEqual(['autoMode', 'role', 'credential', 'schedule', 'review', 'message', 'identity', 'origin', 'mode', 'pack', 'resume', 'memory', 'maximise']);
+    expect(order).toEqual(['autoMode', 'role', 'credential', 'schedule', 'review', 'message', 'identity', 'origin', 'mode', 'pack', 'resume', 'memory', 'maximise', 'workerNotice']);
     expect(new Set(Object.values(DETAIL_PRIORITY)).size).toBe(order.length);
   });
 

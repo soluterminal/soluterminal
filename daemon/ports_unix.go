@@ -99,6 +99,9 @@ func (pr *PortRegistry) scan() {
 // readCmdline returns /proc/<pid>/cmdline with null separators replaced by
 // spaces. Limited to 512 chars to keep the JSON response small.
 func readCmdline(pid int) string {
+	if cmd, ok := darwinReadCmdline(pid); ok {
+		return cmd
+	}
 	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
 	if err != nil {
 		return ""
@@ -254,6 +257,9 @@ func buildInodePidMap() map[uint64]int {
 }
 
 func readComm(pid int) string {
+	if name, ok := darwinReadComm(pid); ok {
+		return name
+	}
 	return providerProcessNameAt("/proc", pid)
 }
 

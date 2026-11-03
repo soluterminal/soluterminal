@@ -700,6 +700,22 @@ describe('refreshPanes heals a stale native agentMidTurn (stuck Focus spinner)',
 });
 
 describe('refreshPanes tracks delegated pending DTO changes', () => {
+  it('shows and clears quiet worker notes without another pane change', async () => {
+    const before = { id: 'lead_notes', cwd: '/x', cmd: ['claude'], title: 'lead', status: 'running', state: 'idle' } as PaneInfo;
+    const note = { id: 'n1', text: 'Worker @x kept open: uncommitted work', source: '@lead', createdAt: 1 };
+    useStore.setState({ panes: { [before.id]: before }, layout: null, parkedPaneIds: [] });
+    vi.spyOn(api, 'listPanes').mockResolvedValue([{ ...before, workerNotices: [note] }]);
+    await useStore.getState().refreshPanes();
+    const shown = useStore.getState().panes[before.id];
+    expect(shown.workerNotices).toEqual([note]);
+    vi.mocked(api.listPanes).mockResolvedValue([{ ...before, workerNotices: [{ ...note }] }]);
+    await useStore.getState().refreshPanes();
+    expect(useStore.getState().panes[before.id]).toBe(shown);
+    vi.mocked(api.listPanes).mockResolvedValue([{ ...before }]);
+    await useStore.getState().refreshPanes();
+    expect(useStore.getState().panes[before.id].workerNotices).toBeUndefined();
+  });
+
   it('invalidates a flag-owner-only change without churning stable owners', async () => {
     const before = {
       id: 'pane_owner', cwd: '/x', cmd: ['claude'], title: 'worker',

@@ -292,6 +292,10 @@ func TestShinoqueRelayCannotConferSiblingHumanAuthority(t *testing.T) {
 				req.Header.Set("Origin", "https://127.0.0.1:"+config.port)
 				probe := req.Clone(req.Context())
 				probe.Host = "127.0.0.1:" + config.port
+				// Without the /m/ marker, which alone already denies it
+				// (untracedCaller): the headers must confer authority, so
+				// the 403 below comes from the relay stripping them.
+				probe.Header.Del("X-Forwarded-Prefix")
 				if sibling.identifyCaller(probe).Kind != callerHuman {
 					t.Fatal("fixture does not confer browser authority before stripping")
 				}

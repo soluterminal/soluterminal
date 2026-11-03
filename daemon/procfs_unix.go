@@ -103,6 +103,9 @@ func (s processTreeSnapshot) descendantPids(root int) []int {
 }
 
 func readPpid(pid int) int {
+	if ppid, ok := darwinReadPpid(pid); ok {
+		return ppid
+	}
 	f, _ := statFieldsAfterComm(pid)
 	if len(f) < 2 {
 		return 0
@@ -189,6 +192,9 @@ func readHarnessCmdline(pid int) string {
 // into a map. ok=false on any read error (process exited, permission). Values
 // are kept but callers only ever key on presence; nothing here is logged.
 func readProcEnviron(pid int) (map[string]string, bool) {
+	if env, ok := darwinReadEnviron(pid); ok {
+		return env, true
+	}
 	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ")
 	if err != nil {
 		return nil, false

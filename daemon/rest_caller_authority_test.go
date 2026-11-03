@@ -108,6 +108,8 @@ func TestPaneWorkspaceRESTCallerAuthority(t *testing.T) {
 						req.Header.Set("Sec-Fetch-Site", "same-origin")
 						wantKind = callerWorker
 					case "unverified browser headers":
+						// Linux and Windows: a traced non-browser is unverified.
+						useTracedOutsiderRule(t, false)
 						stubPeerPID(t, 2147483647, true)
 						req.Header.Set("Sec-Fetch-Site", "same-origin")
 						oldBrowser, oldProxy := peerIsBrowser, peerIsRelayProxy

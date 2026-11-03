@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const removedTodosNotice = "Todos was removed from SoluTerminal. Your todos were exported to ~/.solu/todos-export.md. For a follow-up, flag the pane for attention (set_pane_flag) or keep it in a file in the repository."
+const removedTodosNotice = "Todos was removed from SoluTerminal. Your todos were exported to ~/.solu/todos-export.md. For a decision or action from the user, use post_user_ask (your own asks only), then resolve_user_ask when done. Keep other follow-ups in a file in the repository."
 
 // scratchSoluHome points HOME at a fresh directory and returns its ~/.solu,
 // so no test can ever see the real one.

@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package main
 
@@ -6,8 +6,10 @@ import (
 	"bufio"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // readPpid reads /proc live, so no snapshot needs refreshing first.
@@ -16,31 +18,68 @@ func refreshProcessTreeForCaller() {}
 // lookupPeerPIDPlatform finds the process owning the client end of a local
 // TCP connection: the /proc/net/tcp row whose local address is the client and
 // whose remote address is this server, then the process holding that socket.
-// Hosts without /proc (macOS) report not found.
+// A matched row without a readable owner is (0, true), never an unknown peer.
+// macOS has its own lookup (caller_peer_darwin.go).
 func lookupPeerPIDPlatform(client, server *net.TCPAddr) (int, bool) {
-	// /proc/net/tcp is not a consistent snapshot: a row can be skipped while
-	// other sockets open and close mid-read, so one miss gets a second read.
+	// WSL can route loopback through Windows and change the source port. No
+	// local socket has that tuple; retrying cannot reconstruct its owner.
+	// Those misses use the shared device-proof policy in untracedCaller.
+	return lookupPeerPIDInTables(client, server, []string{"/proc/net/tcp", "/proc/net/tcp6"}, findCallerInodePID, time.Sleep)
+}
+
+func lookupPeerPIDInTables(client, server *net.TCPAddr, paths []string, owner func(uint64) int, backoff func(time.Duration)) (int, bool) {
+	// One extra table read, with a short backoff, covers publication/churn.
+	// Missing tables and unreadable owners cannot improve on retry.
 	for attempt := 0; attempt < 2; attempt++ {
-		inode := uint64(0)
-		for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-			if inode = findConnectionInode(path, client, server); inode != 0 {
-				break
+		available := false
+		for _, path := range paths {
+			inode, readable, matched := findConnectionInode(path, client, server)
+			available = available || readable
+			if matched {
+				pid := owner(inode)
+				return pid, true
 			}
 		}
-		if inode == 0 {
-			continue
+		if !available || attempt == 1 {
+			return 0, false
 		}
-		if pid := buildInodePidMap()[inode]; pid > 0 {
-			return pid, true
-		}
+		backoff(time.Millisecond)
 	}
 	return 0, false
 }
 
-func findConnectionInode(path string, client, server *net.TCPAddr) uint64 {
-	f, err := os.Open(path)
+// Stop once a readable holder of the exact client socket is found, rather
+// than building a map of every socket on the host. An inherited descriptor
+// can still have several holders; this does not identify which one wrote.
+func findCallerInodePID(inode uint64) int {
+	if inode == 0 {
+		return 0
+	}
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0
+	}
+	want := "socket:[" + strconv.FormatUint(inode, 10) + "]"
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join("/proc", entry.Name(), "fd")
+		fds, _ := os.ReadDir(dir)
+		for _, fd := range fds {
+			if target, err := os.Readlink(filepath.Join(dir, fd.Name())); err == nil && target == want {
+				return pid
+			}
+		}
+	}
+	return 0
+}
+
+func findConnectionInode(path string, client, server *net.TCPAddr) (inode uint64, readable, matched bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false, false
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -55,8 +94,11 @@ func findConnectionInode(path string, client, server *net.TCPAddr) uint64 {
 		if len(fields) < 10 {
 			continue
 		}
-		// fields[1] = local, fields[2] = remote, fields[3] = state ("01" = ESTABLISHED)
-		if fields[3] != "01" {
+		// Only active sockets with a real inode can identify a client.
+		// TIME_WAIT/closed rows can belong to an earlier use of the tuple.
+		switch fields[3] {
+		case "01", "02", "03", "04", "05", "08": // ESTABLISHED, SYN, FIN_WAIT, CLOSE_WAIT
+		default:
 			continue
 		}
 		if !procNetAddrMatches(fields[1], client) || !procNetAddrMatches(fields[2], server) {
@@ -64,10 +106,10 @@ func findConnectionInode(path string, client, server *net.TCPAddr) uint64 {
 		}
 		inode, _ := strconv.ParseUint(fields[9], 10, 64)
 		if inode != 0 {
-			return inode
+			return inode, true, true
 		}
 	}
-	return 0
+	return 0, sc.Err() == nil, false
 }
 
 // procNetAddrMatches compares a /proc/net/tcp "ADDR:PORT" field with addr. An
@@ -114,3 +156,13 @@ func procNetHex(b []byte) string {
 	}
 	return string(out)
 }
+
+// tracedOutsiderJudgedUntraced: on Linux a traced program outside every pane
+// and worker that isn't a known browser is the person only with an approved
+// device's signature. A variable so tests can apply either platform's rule.
+var tracedOutsiderJudgedUntraced = false
+
+// platformBrowserProcessNames are Linux browsers' exact executable names (the
+// comm, at most 15 characters): Zen (launcher and binary), LibreWolf and
+// Floorp. Brave and Vivaldi are in browserProcessNames.
+var platformBrowserProcessNames = map[string]bool{"zen": true, "zen-bin": true, "librewolf": true, "floorp": true}

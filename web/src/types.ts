@@ -140,17 +140,19 @@ export interface PaneReview {
 
 /** An agent's open ask to the user (daemon asks.go): one line of plain
  *  text, and source, the daemon's label for the posting pane. */
-export interface PaneAsk { id: string; text: string; source: string; createdAt: number }
+export interface PaneAsk { id: string; text: string; source: string; createdAt: number; workerPane?: string }
 
 export interface PaneInfo {
   neverAutoAnswer?: boolean;
   /** Open asks this pane's agent posted for the user, oldest first. */
   asks?: PaneAsk[];
+  /** Quiet retention notes for the lead; not part of person attention. */
+  workerNotices?: PaneAsk[];
   /** text: the whole message a busy pane was not given (notTyped), shown
    *  before Send types it. */
   /** putBack: a queued agent message the agent put back into its input box
    *  (usually after the person stopped the turn); only the person acts on it. */
-  unsentMessage?: { id: string; sender: string; notTyped?: boolean; text?: string; putBack?: boolean };
+  unsentMessage?: { id: string; sender: string; notTyped?: boolean; text?: string; putBack?: boolean; edited?: boolean };
   /** Agents' messages held, untyped, while the person types in the pane;
    *  oldest first. The daemon types each once the input box is empty and the
    *  person has stopped typing. text is the message without its sender label. */

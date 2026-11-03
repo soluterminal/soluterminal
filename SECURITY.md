@@ -42,8 +42,12 @@ still welcome.
   your browser. It cannot reliably tell you apart from a program that runs as
   your own operating-system user and deliberately evades that tracing (for
   example by hiding its process details, sending the request from a Windows
-  program through WSL, or reading your browser's cookies). Run code you don't
-  trust under a separate user account, a container or the agent sandbox.
+  program through WSL, or reading your browser's cookies). Where the caller
+  can't be traced, Settings → Privacy & security → This computer can require
+  a browser or app you approved, whose key signs those requests; a program
+  that reads your browser's stored data or drives your windows can still act
+  as you. Run code you don't trust under a separate user account, a container
+  or the agent sandbox.
 - **Pane identity.** MCP pane ownership comes from process tracing. A pane ID
   supplied only by an untraced header or environment is an unverified claim;
   it grants no ownership. Closing, renaming or changing pane info needs the

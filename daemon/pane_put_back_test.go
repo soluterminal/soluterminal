@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,8 +24,27 @@ func putBackPane(t *testing.T, id string) *Pane {
 
 func putBackPaneFrames(t *testing.T, id string) (*Pane, <-chan directAutoFrameRead) {
 	t.Helper()
+	p, frames, _ := putBackPaneScreen(t, id)
+	return p, frames
+}
+
+// putBackPaneScreen also returns the screen delivery reads, to change it.
+func putBackPaneScreen(t *testing.T, id string) (*Pane, <-chan directAutoFrameRead, *atomic.Value) {
+	t.Helper()
 	p, frames, screen := queueAgentMessageScreen(t, id)
 	restored := codex0166Screen(t, "restored")
+	// The draft guard reads the put-back message in the box from the moment
+	// it is put back (its watch starts then). Installed once, before any
+	// drain or watch runs: tests change the box with setPutBackBox, never by
+	// writing draftGuardScreen while one may read it.
+	box := &atomic.Value{}
+	box.Store(putBackBox{plain: restored, typed: restored, ok: true})
+	putBackBoxes.Store(p, box)
+	t.Cleanup(func() { putBackBoxes.Delete(p) })
+	draftGuardScreen = func(*Pane) (string, string, bool) {
+		b := box.Load().(putBackBox)
+		return b.plain, b.typed, b.ok
+	}
 	screen.Store(restored)
 	deadline := time.Now().Add(2 * time.Second)
 	for p.Snapshot().UnsentMessage == nil {
@@ -32,9 +53,26 @@ func putBackPaneFrames(t *testing.T, id string) (*Pane, <-chan directAutoFrameRe
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// The draft guard now reads the put-back message in the box.
-	draftGuardScreen = func(*Pane) (string, string, bool) { return restored, restored, true }
-	return p, frames
+	return p, frames, screen
+}
+
+// putBackBox is what the draft guard reads on a put-back pane: the screen as
+// drawn, with the faint placeholder blanked, and whether it is readable.
+type putBackBox struct {
+	plain, typed string
+	ok           bool
+}
+
+var putBackBoxes sync.Map // *Pane → *atomic.Value holding a putBackBox
+
+// setPutBackBox changes what the draft guard reads on a put-back pane.
+func setPutBackBox(t *testing.T, p *Pane, b putBackBox) {
+	t.Helper()
+	box, ok := putBackBoxes.Load(p)
+	if !ok {
+		t.Fatal("not a put-back pane")
+	}
+	box.(*atomic.Value).Store(b)
 }
 
 func TestPutBackMessageIsMarkedAndHoldsLaterMessagesBehindIt(t *testing.T) {
@@ -114,7 +152,7 @@ func TestAgentKeysNeverActOnAPutBackMessage(t *testing.T) {
 // messages: typing would merge into it.
 func TestUnreadableBoxWithAPutBackMessageStillHolds(t *testing.T) {
 	p, frames := putBackPaneFrames(t, "pane_put_back_unread")
-	draftGuardScreen = func(*Pane) (string, string, bool) { return "", "", false }
+	setPutBackBox(t, p, putBackBox{})
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus()}
 	text, isErr := mcpResultText(t, a.mcpToolSendInput(map[string]any{"pane_id": "pane_put_back_unread", "text": "please review\n"}))
 	if !isErr || !strings.HasPrefix(text, "held: an unsent message from @flag-guard") {
@@ -244,7 +282,7 @@ func TestMessageBoxExplainsAPutBackMessageToThePerson(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/panes/pane_put_back_box/submit-message", strings.NewReader(`{"text":"my own words"}`))
 	req.SetPathValue("id", "pane_put_back_box")
 	a.submitPaneMessage(rec, req)
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "your input box holds an unsent message from @flag-guard") || !strings.Contains(rec.Body.String(), "Send or Clear it on the pane first") {
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "your input box holds an unsent message from @flag-guard") || !strings.Contains(rec.Body.String(), "Send or Clear it on the pane first, or remove it from the input box yourself.") {
 		t.Fatalf("submit-message = %d %s", rec.Code, rec.Body)
 	}
 }

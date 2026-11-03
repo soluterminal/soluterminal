@@ -139,7 +139,11 @@ func TestCodexPutBackOfAQueuedAgentMessageDoesNotHoldAutoApproval(t *testing.T) 
 		t.Fatal(err)
 	}
 	expectFrame(t, frames, "the person's Esc", "\x1b")
-	screen.Store(codex0166Screen(t, "restored"))
+	// The draft guard sees the box as Codex draws it once the message is
+	// back (set before any put-back watch reads it).
+	restored := codex0166Screen(t, "restored")
+	draftGuardScreen = func(*Pane) (string, string, bool) { return restored, restored, true }
+	screen.Store(restored)
 	deadline := time.Now().Add(2 * time.Second)
 	for p.Snapshot().UnsentMessage == nil {
 		if time.Now().After(deadline) {

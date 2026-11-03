@@ -1,0 +1,50 @@
+{
+ "cols": 49,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "list_idle",
+   "bytes": 9035
+  },
+  {
+   "name": "echo_idle",
+   "bytes": 13575
+  },
+  {
+   "name": "echo_draft",
+   "bytes": 13690
+  },
+  {
+   "name": "permission",
+   "bytes": 19899
+  },
+  {
+   "name": "permission_amend",
+   "bytes": 20109
+  },
+  {
+   "name": "permission_cancelled",
+   "bytes": 23202
+  },
+  {
+   "name": "ask_step1",
+   "bytes": 27080
+  },
+  {
+   "name": "ask_step1_moved",
+   "bytes": 27172
+  },
+  {
+   "name": "ask_step2",
+   "bytes": 27444
+  },
+  {
+   "name": "ask_step2_typed",
+   "bytes": 27760
+  },
+  {
+   "name": "ask_cancelled",
+   "bytes": 28724
+  }
+ ]
+}

@@ -85,3 +85,12 @@ func findTcp6Owner(clientIP net.IP, clientPort int, serverIP net.IP, serverPort 
 	}
 	return 0
 }
+
+// tracedOutsiderJudgedUntraced: on Windows a traced program outside every pane
+// and worker that isn't a known browser is the person only with an approved
+// device's signature. A variable so tests can apply either platform's rule.
+var tracedOutsiderJudgedUntraced = false
+
+// platformBrowserProcessNames are Windows browsers' exact executable names
+// (lower-cased, without .exe): Arc, Zen and LibreWolf.
+var platformBrowserProcessNames = map[string]bool{"arc": true, "zen": true, "librewolf": true}

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // PaneRuntimeState is a finer-grained status than PaneStatus — it captures
@@ -855,10 +857,36 @@ func activeChoicePromptBlock(s string) string {
 
 func approvalPromptMatches(s string, hasCodex bool) [][]int {
 	matches := choicePromptMatches(s)
-	if len(matches) == 0 && hasCodex {
-		matches = codexApprovalPromptMatches(s)
+	if !hasCodex {
+		return matches
+	}
+	if len(matches) == 0 {
+		return codexApprovalPromptMatches(s)
+	}
+	// Codex paints its modal's focused row as cell diffs, so in the raw tail
+	// the newest "› 1." row can be an older prompt echo above the modal.
+	// Anchor on the newer approval header instead: that is the instance
+	// computeState acks, so once the modal is answered the header is not
+	// mistaken for a new prompt, and the fingerprint names this request.
+	if latest := latestCodexApprovalPrompt(s); latest != nil && latest[0] > matches[len(matches)-1][0] {
+		matches = append(matches, latest)
 	}
 	return matches
+}
+
+// latestCodexApprovalPrompt returns the codexApprovalPromptRE match that
+// starts at the newest approval header in s, or nil.
+func latestCodexApprovalPrompt(s string) []int {
+	headers := codexApprovalHeaderRE.FindAllStringIndex(s, -1)
+	if len(headers) == 0 {
+		return nil
+	}
+	start := headers[len(headers)-1][0]
+	loc := codexApprovalPromptRE.FindStringIndex(s[start:])
+	if loc == nil || loc[0] != 0 {
+		return nil
+	}
+	return []int{start, start + loc[1]}
 }
 
 func isGridChoicePromptText(s string, hasCodex bool) bool {
@@ -874,9 +902,181 @@ func (p *Pane) isGridChoicePrompt(s string) bool {
 
 func choicePromptMatches(s string) [][]int {
 	matches := dropClaudeIdleFooterMatches(s, choicePromptRE.FindAllStringIndex(s, -1))
+	matches = dropIdleComposerMatches(s, matches)
 	matches = append(matches, folderTrustPromptMatches(s)...)
 	sort.Slice(matches, func(i, j int) bool { return matches[i][0] < matches[j][0] })
 	return matches
+}
+
+// dropIdleComposerMatches vetoes a "❯ 1." / "› 1." match when the agent's
+// idle input box is the last thing drawn below it. Claude Code and Codex echo
+// each prompt into the transcript behind the same glyph as a focused menu
+// row, so a prompt such as "1. yes it works" reads as "❯ 1. yes it works"
+// above the idle box; a draft starting "1." puts the same row inside the box.
+// Both TUIs replace the input box with the dialog while a menu is open
+// (captures in testdata/menu_screens).
+//
+// Agent-controlled text (a directory in "don't ask again for … in <dir>", an
+// AskUserQuestion label, a command prefix) can render after a real menu's
+// focused row, so a box shape alone proves nothing. The veto needs all of:
+// the box is the LAST input box on the screen or tail, nothing after it but
+// the agent's own status rows (no option rows, no dialog footer, no prompt
+// glyph, no rule), no sibling option row between the match and the box, and
+// box borders that start a row and span at least inputBoxMinRule columns. A
+// real dialog always draws its remaining option rows and its "Esc to cancel"
+// / "Press enter to confirm" footer after any label, so it never satisfies
+// this. Anything less keeps the match: a missed menu lets automation type
+// into a permission prompt.
+//
+// Claude redraws only changed cells, so its raw tail never ends in a complete
+// input box; for Claude the veto takes effect on the rendered screen, where
+// claudeMenuOffScreen then sets aside the raw-tail match.
+func dropIdleComposerMatches(s string, matches [][]int) [][]int {
+	if len(matches) == 0 {
+		return matches
+	}
+	claudePrompt, claudeEnd, claudeOK := lastClaudeInputBox(s)
+	codexPrompt, codexEnd, codexOK := lastCodexComposer(s)
+	var kept [][]int
+	for _, match := range matches {
+		if claudeOK && idleComposerBelow(s, match[0], claudePrompt, claudeEnd, claudeFooterLineRE) ||
+			codexOK && idleComposerBelow(s, match[0], codexPrompt, codexEnd, codexTrailerLineRE) {
+			continue
+		}
+		kept = append(kept, match)
+	}
+	return kept
+}
+
+// idleComposerBelow reports whether the composer whose prompt glyph sits at
+// byte offset prompt (its structure ending at end) proves the match at byte
+// offset match is not a menu: the composer is at or after the match, no
+// sibling option row lies between them, and only footer rows follow it.
+func idleComposerBelow(s string, match, prompt, end int, footer *regexp.Regexp) bool {
+	return prompt >= match &&
+		!menuSiblingOptionRE.MatchString(s[match:prompt]) &&
+		idleComposerTrailer(s[end:], footer)
+}
+
+// idleTrailerDenyRE matches structure that never follows an idle input box
+// but always follows a dialog's focused row: option rows, prompt or focus
+// glyphs, and horizontal rules (another box or dialog border).
+var idleTrailerDenyRE = regexp.MustCompile(`(?m)^[\s\p{Zs}]*\d{1,2}[.)]|[❯❭›▶]|─{8,}`)
+
+// claudeFooterLineRE matches the status rows Claude Code 2.1.3xx draws under
+// its input box: notices ("⚠ Transcript saving is off…", "You've used 80% of
+// your weekly limit…"), the cwd/model row ("~/repo [Opus 5.5 | ctx: 4% | …]",
+// truncated to "…/repo/sub…" in narrow panes), the permission-mode row
+// ("⏸ manual mode on · 2 shells", "⏵⏵ auto mode on…"), the effort row
+// ("● high · /effort") and the shortcuts hint. A row of any other shape
+// keeps the match.
+var claudeFooterLineRE = regexp.MustCompile(`^(?:⚠|⏸|⏵|\?[\s\p{Zs}]+for shortcuts|You've used \d{1,3}%|[~…/]\S*|.*\bctx:[\s\p{Zs}]*\d{0,3}|.*·[\s\p{Zs}]*/effort$)`)
+
+// codexTrailerLineRE matches what can follow Codex's status row: in the raw
+// tail, the "Worked for 8s • 16:49" completion row its redraw leaves behind.
+var codexTrailerLineRE = regexp.MustCompile(`^Worked for `)
+
+// idleTrailerMaxLines bounds the footer below an idle input box. Claude draws
+// at most a handful of status rows; Codex draws one.
+const idleTrailerMaxLines = 8
+
+// idleComposerTrailer reports whether t, the text after an input box or
+// composer status row, holds only blank rows and rows matching footer.
+func idleComposerTrailer(t string, footer *regexp.Regexp) bool {
+	if menuDialogFooterRE.MatchString(t) || idleTrailerDenyRE.MatchString(t) {
+		return false
+	}
+	lines := 0
+	for _, line := range strings.Split(t, "\n") {
+		line = strings.TrimFunc(line, unicode.IsSpace)
+		if line == "" {
+			continue
+		}
+		if lines++; lines > idleTrailerMaxLines || !footer.MatchString(line) {
+			return false
+		}
+	}
+	return true
+}
+
+// inputBoxMinRule is the shortest border accepted as Claude's input box,
+// which spans the pane width. Narrower panes keep the match.
+const inputBoxMinRule = 40
+
+// inputBoxDraftBytes bounds the composer text between the input box's
+// borders. A longer draft simply keeps the match (no veto).
+const inputBoxDraftBytes = 1000
+
+// lastClaudeInputBox locates Claude Code's input box at the LAST ❯ in s: a
+// rule of at least inputBoxMinRule "─" that starts a row (after a newline,
+// whitespace, or the start of s, never after other text such as a path),
+// then only whitespace, the ❯ row (empty or a possibly wrapped draft without
+// rule characters), and a closing rule of the same minimum. In the stripped
+// raw tail rows can be joined by spaces where cursor motion was dropped, so
+// whitespace stands in for a newline. It returns the ❯ offset and the offset
+// just past the closing rule.
+func lastClaudeInputBox(s string) (prompt, end int, ok bool) {
+	i := strings.LastIndex(s, "❯")
+	if i < 0 {
+		return 0, 0, false
+	}
+	above := strings.TrimRightFunc(s[:i], unicode.IsSpace)
+	top := strings.TrimRight(above, "─")
+	if utf8.RuneCountInString(above[len(top):]) < inputBoxMinRule {
+		return 0, 0, false
+	}
+	if r, _ := utf8.DecodeLastRuneInString(top); top != "" && !unicode.IsSpace(r) {
+		return 0, 0, false
+	}
+	rest := s[i+len("❯"):]
+	j := strings.Index(rest, "─")
+	if j < 0 || j > inputBoxDraftBytes {
+		return 0, 0, false
+	}
+	rule := rest[j:]
+	after := strings.TrimLeft(rule, "─")
+	if utf8.RuneCountInString(rule[:len(rule)-len(after)]) < inputBoxMinRule {
+		return 0, 0, false
+	}
+	return i, len(s) - len(after), true
+}
+
+// codexStatusFooterRE matches the status line Codex draws under its composer
+// ("Context 1% used · GPT-… · ~/repo", or "98% context left" beside the
+// queue hint while a turn runs). Codex hides it while an approval is open.
+var codexStatusFooterRE = regexp.MustCompile(`(?i)\bcontext[\s\p{Zs}]+\d{1,3}%[\s\p{Zs}]+used\b|\b\d{1,3}%[\s\p{Zs}]+context[\s\p{Zs}]+left\b`)
+
+// codexComposerBytes bounds the composer text between Codex's "›" row and its
+// status footer. A longer draft keeps the match.
+const codexComposerBytes = 600
+
+// lastCodexComposer locates Codex's composer at the LAST "›" in s: the glyph
+// starts a row (after a newline, whitespace or the start of s) and Codex's
+// status footer follows within codexComposerBytes. It returns the "›" offset
+// and the end of the footer's row.
+func lastCodexComposer(s string) (prompt, end int, ok bool) {
+	i := strings.LastIndex(s, "›")
+	if i < 0 {
+		return 0, 0, false
+	}
+	if r, _ := utf8.DecodeLastRuneInString(s[:i]); i > 0 && !unicode.IsSpace(r) {
+		return 0, 0, false
+	}
+	composer := s[i+len("›"):]
+	if len(composer) > codexComposerBytes {
+		composer = composer[:codexComposerBytes]
+	}
+	loc := codexStatusFooterRE.FindStringIndex(composer)
+	if loc == nil {
+		return 0, 0, false
+	}
+	end = i + len("›") + loc[1]
+	if nl := strings.IndexByte(s[end:], '\n'); nl >= 0 {
+		end += nl
+	} else {
+		end = len(s)
+	}
+	return i, end, true
 }
 
 // dropClaudeIdleFooterMatches vetoes only a lone focused row followed by
@@ -1143,8 +1343,14 @@ func (p *Pane) claudePromptVisible() bool {
 // response and must not produce an interrupted-conversation notice.
 var (
 	codexComposerLineRE = regexp.MustCompile(`(?m)^\s*›(?:[\s\x{2800}-\x{28ff}]|$).*$`)
-	codexFooterLineRE   = regexp.MustCompile(`(?mi)^\s*(?:Context\s+\d+%\s+used\s+·\s+)?(?:gpt|codex)[^\n·]*\s+·\s+(?:[/~]|[a-z]:[\\/]).*$`)
-	codexActiveTurnRE   = regexp.MustCompile(`(?mi)^\s*[•·]?\s*Working\s*\([^\n)]*esc to interrupt[^\n)]*\)`)
+	// codexFooterShapeRE: a line shaped like Codex's footer. Wide, with the
+	// working directory ("Context 2% used · GPT-6.1-Sol high · ~/projects/demo"),
+	// or narrow, where Codex elides it ("Context 59% used · GPT-6.1-Sol high
+	// …", maybe followed by "⚠ 1 warning · f2 to view"). The shape alone
+	// proves nothing, since text typed into the box can look the same: only
+	// codexFooterIndex says which line is the footer.
+	codexFooterShapeRE = regexp.MustCompile(`(?i)^\s*(?:Context\s+\d+%\s+used\s+·\s+(?:gpt|codex)|(?:gpt|codex)[^\n·]*\s+·\s+(?:[/~]|[a-z]:[\\/]))`)
+	codexActiveTurnRE  = regexp.MustCompile(`(?mi)^\s*[•·]?\s*Working\s*\([^\n)]*esc to interrupt[^\n)]*\)`)
 )
 
 // Codex 0.166 chrome around a running turn. With a draft in the box the footer
@@ -1284,7 +1490,26 @@ func codexTurnRunningText(screen string) bool {
 }
 
 func looksLikeCodexPrompt(s string) bool {
-	return codexComposerLineRE.MatchString(s) && codexFooterLineRE.MatchString(s)
+	return codexComposerLineRE.MatchString(s) && codexFooterIndex(strings.Split(s, "\n")) >= 0
+}
+
+// codexFooterIndex is the index of Codex's footer in a screen's lines: its
+// last non-blank line, when that line is footer-shaped (codexFooterShapeRE),
+// and -1 otherwise. A footer-shaped line above it is text in the input box.
+// Every reader of Codex's box ends it here, and when there is no footer to
+// end it the box runs to the end of the screen: an unclear screen reads as
+// holding text, never as empty.
+func codexFooterIndex(lines []string) int {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		if codexFooterShapeRE.MatchString(lines[i]) {
+			return i
+		}
+		return -1
+	}
+	return -1
 }
 
 func (p *Pane) codexPromptVisible() bool {

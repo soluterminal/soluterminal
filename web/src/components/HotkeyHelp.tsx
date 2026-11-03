@@ -92,6 +92,7 @@ const GROUPS: ShortcutGroup[] = [
   {
     title: 'Sidebar',
     items: [
+      { label: 'Needs you and Waiting on you are person actions. Routine worker notes stay quiet in the lead pane header or its details menu.' },
       { label: 'Expand all / Collapse all — one toggle button in the Workspaces header; it shows Expand all while anything is folded' },
       { keys: ['*', '/', '-'], label: 'Expand / collapse the focused row and its sibling branches (focus the sidebar tree first)' },
       { keys: ['Alt', 'click chevron'], label: 'Toggle the whole subtree' },

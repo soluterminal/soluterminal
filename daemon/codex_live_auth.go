@@ -473,10 +473,12 @@ func codexLiveMigrationScreenSafe(screen string) bool {
 	if text != "" && text != "Ask Codex to do anything" {
 		return false
 	}
+	// The footer is the screen's last non-blank line (codexFooterIndex): a
+	// shell prompt below an old Codex footer is not a live TUI.
+	footer := codexFooterIndex(lines)
 	for i, line := range lines[composer+1:] {
-		if codexFooterLineRE.MatchString(line) {
-			// A shell prompt below an old Codex footer is not a live TUI.
-			return strings.TrimSpace(strings.Join(lines[composer+i+2:], "\n")) == ""
+		if composer+1+i == footer {
+			return true
 		}
 		if strings.TrimSpace(line) != "" {
 			return false

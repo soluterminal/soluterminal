@@ -8,8 +8,10 @@ export function isPromptForUser(p: PaneInfo): boolean {
 
 export type PaneRowStatus = 'busy' | 'idle' | 'finished' | 'needs-you';
 export function paneRowStatus(p: PaneInfo): PaneRowStatus {
+  // An exited retained worker can still host a real preservation decision.
+  if ((p.asks?.length ?? 0) > 0) return 'needs-you';
   if (p.status === 'exited') return 'finished';
-  if (p.attention === 'needs-user' || isPromptForUser(p) || (p.asks?.length ?? 0) > 0) return 'needs-you';
+  if (p.attention === 'needs-user' || isPromptForUser(p)) return 'needs-you';
   // 'recent' is only the 3s tail after any screen change, including the user's
   // own typing and composer redraws. 'busy' is fresh output, with immediate
   // keystroke echo already reported idle by the daemon.

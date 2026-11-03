@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, configureApi } from '../../api';
+import { api, configureApi, j } from '../../api';
 import { markDeviceEnrolled, pinComputerIdentity } from '../../lib/deviceIdentity';
 import { privateRelayEnabled } from '../../lib/privateRelay';
 import { PRIVATE_RELAY_LABEL, REMOTE_POLICY_LABEL, RemoteDevicesSetting, remoteDevicePendingText } from './RemoteDevicesSetting';
@@ -12,6 +12,17 @@ const pendingPhone = {
 };
 
 describe('RemoteDevicesSetting', () => {
+  it.each(['Approve', 'Remove'] as const)('shows enrolment steps when %s returns device_required', async (button) => {
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'approved', devices: [pendingPhone] });
+    const message = "This screen isn't an approved device yet, so it can't manage devices. Open Settings → Privacy & security → Ask to approve this browser, then approve it from a browser or app you've already approved. If that button isn't shown here, use an already-approved device instead. If you're locked out, recovery steps are in Settings → Privacy & security on the computer.";
+    const refusal = () => j<never>(new Response(JSON.stringify({ error: 'device_required', message }), { status: 403 }));
+    if (button === 'Approve') vi.spyOn(api, 'approveRemoteDevice').mockImplementation(refusal);
+    else vi.spyOn(api, 'removeRemoteDevice').mockImplementation(refusal);
+    render(<RemoteDevicesSetting />);
+    fireEvent.click(await screen.findByRole('button', { name: button }));
+    expect(await screen.findByText(/Open Settings → Privacy & security → Ask to approve this browser/)).toHaveTextContent(message);
+  });
+
   it('confirms verification separately from approval', async () => {
     const phone = { ...pendingPhone, status: 'approved' as const, verify: {
       state: 'revealed' as const, enrolmentId: 'enr_AAECAwQFBgcICQoLDA0ODw', code: 'V3-LOCAL-CODE',

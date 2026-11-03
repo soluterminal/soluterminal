@@ -54,7 +54,7 @@ func TestOrchestratorBriefTextConstraints(t *testing.T) {
 	if strings.Contains(orchestratorBrief, "'--resume' '") {
 		t.Fatal("brief contains the wrapped --resume marker resumeSessionIDFromCmd scans for")
 	}
-	for _, phrase := range []string{"Work directly", "ask_pane", "wait_for_pane", "read_pane_tail", "create_schedule", "set_pane_flag", "scripts/solu-review", "at most two review rounds", "The user decides what merges"} {
+	for _, phrase := range []string{"Work directly", "ask_pane", "wait_for_pane", "read_pane_tail", "create_schedule", "post_user_ask", "resolve_user_ask", "scripts/solu-review", "at most two review rounds", "The user decides what merges"} {
 		if !strings.Contains(orchestratorBrief, phrase) {
 			t.Fatalf("brief never mentions %q", phrase)
 		}

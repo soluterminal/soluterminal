@@ -1,6 +1,10 @@
 import { expect, it } from 'vitest';
 import type { PaneInfo } from '../types';
 import { paneRowStatus } from './paneStatus';
+
+it('does not mark quiet lead housekeeping as needs-you', () => {
+  expect(paneRowStatus({ id: 'lead', status: 'running', state: 'idle', attention: 'none', workerNotices: [{ id: 'n1', text: 'Worker @x kept open', source: '@lead', createdAt: 1 }] } as PaneInfo)).toBe('idle');
+});
 const p = { id: 'worker', status: 'running', state: 'idle', turn: { active: false, count: 1, last: { n: 1, endedMs: 10, startedMs: 1, files: 0, added: 0, removed: 0, outcome: 'completed' } } } as PaneInfo;
 it('requires completion evidence instead of an idle timeout', () => {
   expect(paneRowStatus({ ...p, turn: undefined })).toBe('idle');
@@ -23,5 +27,5 @@ it("counts an agent's open ask as needing you, until the pane exits", () => {
   const ask = { id: 'a1', text: 'OK to deploy?', source: '@lead', createdAt: 1 };
   expect(paneRowStatus({ ...p, state: 'busy', asks: [ask] })).toBe('needs-you');
   expect(paneRowStatus({ ...p, asks: [] })).toBe('finished');
-  expect(paneRowStatus({ ...p, status: 'exited', asks: [ask] })).toBe('finished');
+  expect(paneRowStatus({ ...p, status: 'exited', asks: [ask] })).toBe('needs-you');
 });

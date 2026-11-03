@@ -60,17 +60,21 @@ type Ask struct {
 	Text       string `json:"text"`
 	ResolveOn  string `json:"resolveOn,omitempty"`
 	WorkerPane string `json:"workerPane,omitempty"`
-	State      string `json:"state"`
-	CreatedAt  int64  `json:"createdAt"`
-	UpdatedAt  int64  `json:"updatedAt"`
-	ClosedAt   int64  `json:"closedAt,omitempty"`
-	ClosedBy   string `json:"closedBy,omitempty"`
+	// Worker notices are quiet unless the daemon identifies a person decision.
+	NeedsUser bool   `json:"needsUser,omitempty"`
+	State     string `json:"state"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+	ClosedAt  int64  `json:"closedAt,omitempty"`
+	ClosedBy  string `json:"closedBy,omitempty"`
 }
 
 type askFile struct {
 	Version int   `json:"version"`
 	Asks    []Ask `json:"asks"`
 }
+
+func askNeedsUser(a Ask) bool { return a.Kind != askKindWorker || a.NeedsUser }
 
 var askKeyRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,39}$`)
 
@@ -127,7 +131,7 @@ type askStore struct {
 	path string
 	now  func() time.Time
 	// changed runs after a change is saved, outside the lock; created after
-	// a new ask is saved (the phone push, asks_push.go).
+	// a new ask is saved or a quiet note becomes a person ask (asks_push.go).
 	changed   func()
 	onCreated func(Ask)
 
@@ -248,6 +252,13 @@ type askPost struct {
 	Text       string
 	ResolveOn  string
 	WorkerPane string
+	NeedsUser  bool // worker manager only; never accepted from MCP arguments
+	// UpdateID: refresh only this open ask. A dismissal or a newer ask under
+	// the same key must not be undone by a stale worker-notice snapshot.
+	UpdateID string
+	// Internal: the daemon posts it for the pane (a migrated flag), so the
+	// agent limits don't apply.
+	Internal bool
 }
 
 // post adds an ask, or updates the pane's open ask with the same key. It
@@ -276,7 +287,12 @@ func (s *askStore) post(in askPost) (Ask, bool, error) {
 	existing := -1
 	norm := askTextKey(text)
 	for i, a := range s.asks {
-		if a.SourcePane != in.Pane {
+		// An agent's asks and the worker manager's asks on the same pane are
+		// separate: neither can see, update, close or crowd out the other's.
+		// Only the daemon's exact worker-notice refresh may change its host
+		// pane (e.g. a lead closed). MCP never accepts these internal fields.
+		relocatingWorker := in.Kind == askKindWorker && a.Kind == askKindWorker && in.UpdateID == a.ID && in.WorkerPane == a.WorkerPane && a.Key == key
+		if (a.SourcePane != in.Pane && !relocatingWorker) || a.Kind != in.Kind {
 			continue
 		}
 		if a.State == askOpen {
@@ -289,10 +305,14 @@ func (s *askStore) post(in askPost) (Ask, bool, error) {
 			lastDismissed = i
 		}
 	}
-	limited := in.Kind == askKindAgent
+	if in.UpdateID != "" && (existing < 0 || s.asks[existing].ID != in.UpdateID) {
+		s.mu.Unlock()
+		return Ask{}, false, errAskNotFound
+	}
+	limited := in.Kind == askKindAgent && !in.Internal
 	if existing >= 0 {
 		cur := s.asks[existing]
-		if cur.Text == text && cur.ResolveOn == in.ResolveOn && cur.WorkerPane == in.WorkerPane {
+		if cur.SourcePane == in.Pane && cur.Text == text && cur.ResolveOn == in.ResolveOn && cur.WorkerPane == in.WorkerPane && cur.NeedsUser == in.NeedsUser {
 			s.mu.Unlock()
 			return cur, false, nil
 		}
@@ -304,7 +324,9 @@ func (s *askStore) post(in askPost) (Ask, bool, error) {
 		next[existing].Text = text
 		next[existing].ResolveOn = in.ResolveOn
 		next[existing].WorkerPane = in.WorkerPane
+		next[existing].NeedsUser = in.NeedsUser
 		next[existing].Source = in.Source
+		next[existing].SourcePane = in.Pane
 		next[existing].UpdatedAt = now.UnixMilli()
 		// Saving prunes old closed asks, so the index no longer holds after it.
 		got := next[existing]
@@ -312,9 +334,15 @@ func (s *askStore) post(in askPost) (Ask, bool, error) {
 			s.mu.Unlock()
 			return Ask{}, false, err
 		}
-		s.posts[in.Pane] = append(posts, now)
+		if limited {
+			s.posts[in.Pane] = append(posts, now)
+		}
+		onCreated := s.onCreated
 		s.mu.Unlock()
 		s.notify()
+		if !askNeedsUser(cur) && askNeedsUser(got) && onCreated != nil {
+			onCreated(got)
+		}
 		return got, false, nil
 	}
 	if limited {
@@ -347,13 +375,15 @@ func (s *askStore) post(in askPost) (Ask, bool, error) {
 		s.mu.Unlock()
 		return Ask{}, false, err
 	}
-	a := Ask{ID: "ask_" + id, Key: key, SourcePane: in.Pane, Source: in.Source, Kind: in.Kind, Text: text, ResolveOn: in.ResolveOn, WorkerPane: in.WorkerPane, State: askOpen, CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()}
+	a := Ask{ID: "ask_" + id, Key: key, SourcePane: in.Pane, Source: in.Source, Kind: in.Kind, Text: text, ResolveOn: in.ResolveOn, WorkerPane: in.WorkerPane, NeedsUser: in.NeedsUser, State: askOpen, CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()}
 	if err := s.commitLocked(append(s.clone(), a)); err != nil {
 		s.mu.Unlock()
 		return Ask{}, false, err
 	}
-	s.posts[in.Pane] = append(posts, now)
-	s.created[in.Pane] = append(created, now)
+	if limited {
+		s.posts[in.Pane] = append(posts, now)
+		s.created[in.Pane] = append(created, now)
+	}
 	onCreated := s.onCreated
 	s.mu.Unlock()
 	s.notify()
@@ -408,7 +438,7 @@ func (s *askStore) closeWhereLocked(state, by string, match func(Ask) bool) (int
 // with it, or no longer needs it).
 func (s *askStore) resolve(pane, key string) error {
 	key = strings.ToLower(strings.TrimSpace(key))
-	n, err := s.closeWhere(askResolved, "agent", func(a Ask) bool { return a.SourcePane == pane && a.Key == key })
+	n, err := s.closeWhere(askResolved, "agent", func(a Ask) bool { return a.SourcePane == pane && a.Kind == askKindAgent && a.Key == key })
 	if err == nil && n == 0 {
 		return errAskNotFound
 	}
@@ -476,7 +506,7 @@ func (s *askStore) movePane(from, to, label string) {
 // asks about it. Called only where a pane is gone for good (asksPaneClosed),
 // never on a respawn in place.
 func (s *askStore) paneGone(id string) {
-	if _, err := s.closeWhere(askResolved, "pane_closed", func(a Ask) bool { return a.SourcePane == id }); err != nil {
+	if _, err := s.closeWhere(askResolved, "pane_closed", func(a Ask) bool { return a.SourcePane == id && a.Kind != askKindWorker }); err != nil {
 		log.Printf("asks: close asks of pane %s: %v", id, err)
 	}
 	if _, err := s.closeWhere(askResolved, "worker_gone", func(a Ask) bool { return a.WorkerPane == id }); err != nil {
@@ -487,12 +517,65 @@ func (s *askStore) paneGone(id string) {
 // closeMissing closes open asks whose pane no longer exists (it closed while
 // the daemon was down). Run once the panes are restored.
 func (s *askStore) closeMissing(exists func(id string) bool) {
-	if _, err := s.closeWhere(askResolved, "pane_closed", func(a Ask) bool { return !exists(a.SourcePane) }); err != nil {
+	if _, err := s.closeWhere(askResolved, "pane_closed", func(a Ask) bool { return !exists(a.SourcePane) && a.Kind != askKindWorker }); err != nil {
 		log.Printf("asks: close asks of missing panes: %v", err)
 	}
-	if _, err := s.closeWhere(askResolved, "worker_gone", func(a Ask) bool { return a.WorkerPane != "" && !exists(a.WorkerPane) }); err != nil {
-		log.Printf("asks: close worker asks of missing panes: %v", err)
+	// Worker asks are the worker manager's: a worker whose archive cleanup is
+	// still pending is gone from the panes but keeps its notice until the
+	// manager's next reconcile (worker_archives.go).
+}
+
+// workerAsks is the open worker-manager asks on a lead.
+func (s *askStore) workerAsks(lead string) []Ask {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Ask
+	for _, a := range s.asks {
+		if a.State == askOpen && a.Kind == askKindWorker && a.SourcePane == lead {
+			out = append(out, a)
+		}
 	}
+	return out
+}
+
+// workerAskLeads is every pane with an open worker-manager ask.
+func (s *askStore) workerAskLeads() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range s.asks {
+		if a.State == askOpen && a.Kind == askKindWorker && !seen[a.SourcePane] {
+			seen[a.SourcePane] = true
+			out = append(out, a.SourcePane)
+		}
+	}
+	return out
+}
+
+// closeWorkerKey closes the worker manager's open ask with that key on the
+// lead, recording by.
+func (s *askStore) closeWorkerKey(lead, key, by string) error {
+	_, err := s.closeWhere(askResolved, by, func(a Ask) bool { return a.SourcePane == lead && a.Kind == askKindWorker && a.Key == key })
+	return err
+}
+
+func (s *askStore) closeWorkerNotice(worker string) {
+	if _, err := s.closeWhere(askResolved, "worker_cleared", func(a Ask) bool { return a.Kind == askKindWorker && a.WorkerPane == worker }); err != nil {
+		log.Printf("worker notice cleanup for %s: %v", worker, err)
+	}
+}
+
+// openAgentAsks is the pane agent's own open asks (not the worker manager's
+// on it), oldest first.
+func (s *askStore) openAgentAsks(pane string) []Ask {
+	var out []Ask
+	for _, a := range s.openFor(pane) {
+		if a.Kind == askKindAgent {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // personReplied closes the pane's resolve_on "reply" asks posted before the
@@ -568,13 +651,13 @@ func (s *askStore) openByPane() map[string][]Ask {
 	return out
 }
 
-// openCounts is each pane's number of open asks.
+// openCounts counts only asks that need the person, never quiet worker notes.
 func (s *askStore) openCounts() map[string]int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := map[string]int{}
 	for _, a := range s.asks {
-		if a.State == askOpen {
+		if a.State == askOpen && askNeedsUser(a) {
 			out[a.SourcePane]++
 		}
 	}

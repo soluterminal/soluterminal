@@ -56,6 +56,9 @@ func (a *apiServer) scheduleAskPushLocked(b *askPushBatch) {
 
 // queueAskPush is the store's onCreated hook.
 func (a *apiServer) queueAskPush(x Ask) {
+	if !askNeedsUser(x) {
+		return
+	}
 	b := &a.askPush
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -105,7 +108,7 @@ func (a *apiServer) askPushText(ids []string) (title, summary, pane string) {
 	}
 	var open []Ask
 	for _, x := range a.asks.list() {
-		if x.State == askOpen && want[x.ID] {
+		if x.State == askOpen && askNeedsUser(x) && want[x.ID] {
 			open = append(open, x) // newest first
 		}
 	}

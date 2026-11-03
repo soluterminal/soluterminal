@@ -21,20 +21,24 @@ import (
 func stubDraftGuard(t *testing.T, p *Pane, screen *atomic.Value) {
 	t.Helper()
 	prevScreen, prevSleep, prevPoll := draftGuardScreen, draftGuardSleep, draftGuardPoll
+	prevWatchSleep, prevWatchPoll := putBackWatchSleep, putBackWatchPoll
 	draftGuardScreen = func(*Pane) (string, string, bool) {
 		s := screen.Load().(string)
 		return s, s, true
 	}
 	draftGuardSleep = func(time.Duration) { time.Sleep(time.Millisecond) }
 	draftGuardPoll = time.Millisecond
+	putBackWatchSleep = func(time.Duration) { time.Sleep(time.Millisecond) }
+	putBackWatchPoll = time.Millisecond
 	t.Cleanup(func() {
 		draftGuardScreen, draftGuardSleep, draftGuardPoll = prevScreen, prevSleep, prevPoll
+		putBackWatchSleep, putBackWatchPoll = prevWatchSleep, prevWatchPoll
 	})
 	t.Cleanup(func() { stopHeldDrain(t, p) })
 }
 
-// stopHeldDrain ends the pane's drain goroutine: an exited pane drops its
-// held messages.
+// stopHeldDrain ends the pane's drain and put-back watch goroutines: an
+// exited pane drops its held messages and has no put-back message.
 func stopHeldDrain(t *testing.T, p *Pane) {
 	p.mu.Lock()
 	p.Status = PaneExited
@@ -42,7 +46,7 @@ func stopHeldDrain(t *testing.T, p *Pane) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		p.mu.Lock()
-		draining := p.heldDraining
+		draining := p.heldDraining || p.putBackWatching
 		p.mu.Unlock()
 		if !draining {
 			return

@@ -38,6 +38,17 @@ describe('AttentionBell', () => {
     expect(btn.querySelector('.attention-bell-count')).toBeNull();
   });
 
+  it('keeps routine worker notes out of the count, but includes an escalated person ask', () => {
+    const note = { id: 'n1', text: 'Worker @x kept open: uncommitted work', source: '@lead', createdAt: 1 };
+    useStore.setState({ panes: { lead: needsUserPane('lead', { state: 'idle', attention: 'none', workerNotices: [note] }) } });
+    const { rerender } = render(<AttentionBell />);
+    expect(screen.getByRole('button', { name: /nothing is waiting/i }).querySelector('.attention-bell-count')).toBeNull();
+    useStore.setState({ panes: { lead: needsUserPane('lead', { state: 'idle', attention: 'none', asks: [{ ...note, text: 'Decide how to preserve unpublished work' }] }) } });
+    rerender(<AttentionBell />);
+    fireEvent.click(screen.getByRole('button', { name: /1 item is waiting/i }));
+    expect(screen.getByText('Decide how to preserve unpublished work')).toBeTruthy();
+  });
+
   it('counts needs-user panes and lists them with the graded summary on open', () => {
     useStore.setState({
       panes: {

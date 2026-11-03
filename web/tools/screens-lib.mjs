@@ -295,6 +295,12 @@ export function buildAmbientAppObjectResponses(healthVersion, now = Date.parse('
     '/api/entitlements': TEAM_ENTITLEMENTS,
     // Settings → Devices reads the anonymous check-in preference.
     '/api/settings/checkin': { enabled: true },
+    // Approved devices at this computer (lib/localProof.ts): nothing approved
+    // yet, so Privacy & security offers "Approve this browser" and no banner.
+    '/api/human-proof': {
+      mode: 'report', effective: 'report', target: 'local/dmn_screens0000000000000', serverTime: now,
+      envOff: false, approvedDevices: 0, canBootstrap: true,
+    },
     // The Claude Code / Codex opt-in: an answered install, so the first-run
     // question never covers the screens under test.
     '/api/settings/agent-integration': {

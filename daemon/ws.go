@@ -141,6 +141,15 @@ func isTerminalReply(data []byte) bool {
 	return false
 }
 
+// wsDeviceID is a socket's device identity: the client's own ?device=,
+// for the person's sockets only (see handleWS).
+func wsDeviceID(device string, human bool) string {
+	if !human {
+		return ""
+	}
+	return truncateString(device, 64)
+}
+
 // handleWS serves a pane's terminal stream. policy, when given, classifies
 // each connection (see wsInputPolicy); without it the socket is treated as a
 // non-human viewer whose input is never held by a prompt gate.
@@ -172,8 +181,7 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 			writeInput = func(b []byte) (int, error) {
 				var check func() error
 				if !isTerminalReplyOnly(b) {
-					_, claude := paneAgentProvider(p)
-					check = p.putBackKeysCheck(!claude)
+					check = p.putBackKeysCheck()
 				}
 				policy := p.autoModePolicy()
 				n, err := p.writeWithFleetAdmissionPolicy(b, true, false, &policy, time.Now().Add(ariaJevTimeout), check)
@@ -256,7 +264,10 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 			// "the owner is this same device's abandoned socket" and displace
 			// it instantly instead of denying with a false "in use somewhere
 			// else". Bounded so a hostile query string can't bloat sub state.
-			deviceID:           truncateString(q.Get("device"), 64),
+			// The client names it, so only the person's socket gets one: an
+			// agent naming the person's device would pass as it and take the
+			// pane, and its keys would count as the person at that device.
+			deviceID:           wsDeviceID(q.Get("device"), inPolicy.human),
 			retirementViewerID: ownerViewerClientID(q.Get("retirement_viewer")),
 			// Driven browsers (navigator.webdriver) self-identify so they
 			// never vote on PTY sizing (see subEntry.automation).
@@ -518,9 +529,16 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 					// back, and the daemon grants it only if nobody owns
 					// the pane now — so it can never undo a takeover that
 					// happened while the claimer was away.
-					if msg.Reason == "adopt-unowned" {
+					// An agent's socket never takes the pane from the person:
+					// whatever reason it sends, its claim is arbitrated like an
+					// automatic one (denied while the person's owner is live
+					// there) and never sets the pane's size.
+					switch {
+					case msg.Reason == "adopt-unowned":
 						p.AdoptIfUnowned(subID)
-					} else {
+					case !inPolicy.human:
+						p.ClaimWithReason(subID, false, "agent")
+					default:
 						p.ClaimWithReason(subID, msg.Reason != "reconnect", msg.Reason)
 					}
 				case "repaint":

@@ -4424,6 +4424,10 @@ button.cloud-gate-inline-link {
 .pane-unsent-message button { flex-shrink: 0; padding: 0 2px; font-size: inherit; color: inherit; }
 /* Asks wait on the person: accent, not the warn colour of a stuck message. */
 .pane-asks-chip { border-color: var(--accent); color: var(--accent); max-width: 40ch; }
+/* Lead housekeeping is quiet information, outside the attention group. */
+.pane-worker-notices { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 40ch; color: var(--fg-dim); font-size: 11px; }
+.pane-worker-notices-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-worker-notices button { flex-shrink: 0; padding: 0 2px; font-size: inherit; color: inherit; }
 .attention-ask-dismiss { flex-shrink: 0; align-self: center; padding: 0 4px; color: var(--fg-dim); background: none; border: 0; cursor: pointer; font-size: 14px; line-height: 1; }
 .attention-ask-dismiss:hover { color: var(--fg); }
 .pane-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }

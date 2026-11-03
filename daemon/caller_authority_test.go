@@ -300,9 +300,9 @@ func TestPutAgentAuthority(t *testing.T) {
 
 // TestLookupPeerPIDFindsThisProcess drives the real platform lookup over a
 // loopback connection: the client end belongs to the test process. WSL's
-// consomme networking relays some loopback connections (the server then sees
-// a port no local socket owns), so a few attempts are allowed; one traced
-// connection proves the lookup.
+// consomme networking can remap loopback source ports (no local socket then
+// has the accepted tuple). This test checks direct lookup; the repeated
+// connection test separately checks classification of every miss.
 func TestLookupPeerPIDFindsThisProcess(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		t.Skip("peer lookup is implemented for Linux and Windows")
@@ -382,8 +382,26 @@ func TestSendInputHeldAtPermissionPrompt(t *testing.T) {
 	}
 }
 
+// useTracedOutsiderRule applies one platform's rule for a traced program
+// outside every pane that isn't a known browser: macOS (true) judges it as
+// untraced, Linux and Windows (false) need an approved device's signature.
+func useTracedOutsiderRule(t *testing.T, darwin bool) {
+	t.Helper()
+	prev := tracedOutsiderJudgedUntraced
+	t.Cleanup(func() { tracedOutsiderJudgedUntraced = prev })
+	tracedOutsiderJudgedUntraced = darwin
+}
+
+func TestTracedOutsiderRuleIsDarwinOnly(t *testing.T) {
+	if tracedOutsiderJudgedUntraced != (runtime.GOOS == "darwin") {
+		t.Fatalf("tracedOutsiderJudgedUntraced = %t on %s", tracedOutsiderJudgedUntraced, runtime.GOOS)
+	}
+}
+
 // A traced caller that detached from its pane (no pane id, re-parented away)
-// and forges a browser's headers is not the person unless it is a browser.
+// and forges a browser's headers is not the person on Linux and Windows
+// unless it is a browser. On macOS it is judged as untraced: only an
+// unproven person (Off here; require refuses it, human_proof_test.go).
 func TestIdentifyCallerTracedNonBrowserWithForgedHeaders(t *testing.T) {
 	a := authorityTestServer(t)
 	stubPeerPID(t, 1, true) // outside every pane, environment unreadable
@@ -393,13 +411,43 @@ func TestIdentifyCallerTracedNonBrowserWithForgedHeaders(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/workflow/tasks/x/approve", nil)
 	r.Header.Set("Sec-Fetch-Site", "same-origin")
 
-	peerIsBrowser = func(int) bool { return false }
-	if got := a.identifyCaller(r); got.Kind != callerUnverified {
-		t.Fatalf("forged headers from a non-browser = %+v, want unverified", got)
+	for _, darwin := range []bool{false, true} {
+		useTracedOutsiderRule(t, darwin)
+		peerIsBrowser = func(int) bool { return false }
+		got := a.identifyCaller(r)
+		if !darwin && got.Kind != callerUnverified {
+			t.Fatalf("linux/windows: forged headers from a non-browser = %+v, want unverified", got)
+		}
+		if darwin && (got.Kind != callerHuman || !got.Unproven) {
+			t.Fatalf("darwin: headers from an unknown program = %+v, want an unproven person", got)
+		}
+		if got := a.identifyCaller(httptest.NewRequest("POST", "/api/workflow/tasks/x/approve", nil)); got.Kind != callerUnverified {
+			t.Fatalf("darwin=%t: unknown program without browser headers = %+v, want unverified", darwin, got)
+		}
+		peerIsBrowser = func(int) bool { return true }
+		if got := a.identifyCaller(r); got.Kind != callerHuman || got.Unproven {
+			t.Fatalf("darwin=%t: browser process = %+v, want human", darwin, got)
+		}
 	}
-	peerIsBrowser = func(int) bool { return true }
-	if got := a.identifyCaller(r); got.Kind != callerHuman {
-		t.Fatalf("browser process = %+v, want human", got)
+}
+
+// The name lists are exact names, looked up lower-cased and without .exe.
+func TestBrowserProcessNamesPerPlatform(t *testing.T) {
+	want := map[string][]string{
+		"linux":   {"brave", "vivaldi", "zen", "zen-bin", "librewolf", "floorp"},
+		"windows": {"arc", "zen", "librewolf", "chrome", "msedge"},
+		"darwin":  {"google chrome helper", "brave browser helper"},
+	}[runtime.GOOS]
+	for _, name := range want {
+		if !isBrowserProcessName(name) {
+			t.Errorf("%s is not a browser on %s", name, runtime.GOOS)
+		}
+	}
+	if runtime.GOOS == "linux" && isBrowserProcessName("arc") {
+		t.Error("Windows' Arc name counts on Linux")
+	}
+	if isBrowserProcessName("Zen") || isBrowserProcessName("zen.exe") || isBrowserProcessName("curl") {
+		t.Error("only exact lower-cased names count")
 	}
 }
 

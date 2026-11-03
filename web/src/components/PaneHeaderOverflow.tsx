@@ -18,6 +18,7 @@ export const DETAIL_PRIORITY = {
   resume: 11,     // copy the session id; also in the pane menu
   memory: 12,     // display-only RSS readout
   maximise: 13,   // Alt+Z and double-clicking the header do the same
+  workerNotice: 14, // quiet lead housekeeping, first to move into details
 } as const;
 
 export interface DetailMetric { id: string; priority: number; width: number }

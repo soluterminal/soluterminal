@@ -126,6 +126,8 @@ func (a *Aria) writeJevEnter(ctx context.Context, p *Pane, proof *jevAmbiguousPr
 		if writeErr == nil {
 			wrote = 1
 			commits = p.observeSuccessfulInputLocked([]byte("\r"), false, menuInputNone)
+			// It answered an approval menu, not the input box.
+			p.carryPutBackPastMenuKeyLocked(p.inputRevision.Load())
 		}
 	})
 	if leaseErr != nil {

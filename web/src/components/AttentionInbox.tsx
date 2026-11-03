@@ -60,7 +60,7 @@ export interface AttentionItem {
   dismissed: boolean;
   workspaceName: string | null;
   /** 'unsent': a message another pane sent is still sitting in this pane's
-   *  input box (Send/Clear on the pane header). 'ask': an agent's open ask
+   *  input box, or never typed (Send/Clear or Send…/Discard on the pane header). 'ask': an agent's open ask
    *  (`ask`); one item per ask, not per pane. */
   kind: 'choice' | 'awaiting' | 'unsent' | 'ask';
   ask?: PaneAsk;
@@ -85,6 +85,8 @@ export function unsentSummary(p: PaneInfo): string {
   if (!msg) return '';
   const held = p.heldMessages?.length ?? 0;
   const behind = held > 0 && !msg.notTyped ? ` (${held} more ${held === 1 ? 'message waits' : 'messages wait'} behind it)` : '';
+  if (msg.notTyped) return `Message from ${msg.sender} not sent — Send… or Discard it on the pane`;
+  if (msg.putBack && msg.edited) return `Message from ${msg.sender} still in the input box after your edit${behind} — Clear it or keep it as your draft on the pane`;
   if (msg.putBack) return `Message from ${msg.sender} put back in the input box after you stopped it${behind} — Send or Clear it on the pane`;
   return `Message from ${msg.sender} not sent${behind} — Send or Clear it on the pane`;
 }

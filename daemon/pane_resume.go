@@ -416,6 +416,29 @@ func (p *Pane) tryAcquireRespawn() bool { return p.respawning.CompareAndSwap(fal
 // releaseRespawn releases the shared respawn single-flight.
 func (p *Pane) releaseRespawn() { p.respawning.Store(false) }
 
+func (a *apiServer) trackPaneRespawn(id string) func() {
+	a.respawnPresenceMu.Lock()
+	if a.respawnPresence == nil {
+		a.respawnPresence = map[string]int{}
+	}
+	a.respawnPresence[id]++
+	a.respawnPresenceMu.Unlock()
+	return func() {
+		a.respawnPresenceMu.Lock()
+		defer a.respawnPresenceMu.Unlock()
+		a.respawnPresence[id]--
+		if a.respawnPresence[id] == 0 {
+			delete(a.respawnPresence, id)
+		}
+	}
+}
+
+func (a *apiServer) paneRespawnInProgress(id string) bool {
+	a.respawnPresenceMu.Lock()
+	defer a.respawnPresenceMu.Unlock()
+	return a.respawnPresence[id] > 0
+}
+
 // respawnInPlace is the shared kill→respawn primitive behind resume AND refresh:
 // it frees the pane id, reaps any orphan agent that still owns the socket, then
 // re-spawns under the SAME id with `opts` — removing the stale socket each
@@ -430,6 +453,8 @@ func (p *Pane) releaseRespawn() { p.respawning.Store(false) }
 // a dangling tool_use for `--resume` to repair. On total failure the original
 // identity, layout reference and metadata remain as a retryable recovery tile.
 func (a *apiServer) respawnInPlace(snap PaneSnapshot, opts SpawnOpts) (*Pane, error) {
+	finishPresence := a.trackPaneRespawn(snap.ID)
+	defer finishPresence()
 	opts.AutoMode, opts.NeverAutoAnswer = snap.AutoMode, snap.NeverAutoAnswer
 	opts.CreatedAt = snap.CreatedAt
 	// Snapshot the agent's full descendant set BEFORE the kill. A managed

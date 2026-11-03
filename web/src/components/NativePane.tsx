@@ -29,6 +29,7 @@ import { PaneOriginButton } from './PaneOriginButton';
 import { PaneIdentityChip } from './PaneIdentityChip';
 import { PaneReviewChip } from './PaneReviewChip';
 import { PaneMessageChip } from './PaneMessageChip';
+import { WorkerNoticesChip } from './WorkerNoticesChip';
 import { ScrollToLatestButton, STICK_BOTTOM_SLOP } from './ScrollToLatestButton';
 import { PaneFindBar } from './PaneFindBar';
 import { useNativeFind } from './useNativeFind';
@@ -1829,6 +1830,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
         <PaneOriginButton pane={pane} />
         <PaneReviewChip pane={pane} />
         <PaneMessageChip pane={pane} />
+        <WorkerNoticesChip pane={pane} />
         {/* model · cwd moved OUT of this header into the bottom NativeMetaBar
             vitals row — the header is now identity + actions only. */}
         <div className="pane-actions">

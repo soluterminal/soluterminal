@@ -27,6 +27,22 @@ func newTypingHoldPane(t *testing.T, id string) (*Pane, <-chan directAutoFrameRe
 	}
 	t.Cleanup(func() {
 		close(p.done)
+		// A put-back watch reads the test hooks: it must have ended before
+		// a later test changes them.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			p.mu.Lock()
+			watching := p.putBackWatching
+			p.mu.Unlock()
+			if !watching {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Error("put-back watch did not end")
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 		p.shutdownGrid()
 	})
 

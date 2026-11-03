@@ -50,6 +50,10 @@ const heldDeliveryMaxBytes = 4096
 var (
 	draftGuardPoll  = 500 * time.Millisecond
 	draftGuardSleep = time.Sleep
+	// putBackWatchPoll and putBackWatchSleep pace watchPutBack: its own, so
+	// a test can hold the held-message drain without touching the watch.
+	putBackWatchPoll  = 500 * time.Millisecond
+	putBackWatchSleep = time.Sleep
 	// heldDeliveryLimit: a message held longer than this is dropped and its
 	// sender told. It matches how long a queued ask is waited on.
 	heldDeliveryLimit = queueWatchLimit
@@ -129,8 +133,12 @@ func typedComposerScreen(screen, blanked string, codex bool) string {
 	if start < 0 {
 		return screen
 	}
+	footer := -1
+	if codex {
+		footer = codexFooterIndex(lines)
+	}
 	for i := start; i < len(lines); i++ {
-		if i > start && (codex && codexFooterLineRE.MatchString(lines[i]) || !codex && (claudeBoxRule(lines[i]) || boxBottomRE.MatchString(lines[i]) || newPromptFooterRE.MatchString(lines[i]))) {
+		if i > start && (codex && i == footer || !codex && (claudeBoxRule(lines[i]) || boxBottomRE.MatchString(lines[i]) || newPromptFooterRE.MatchString(lines[i]))) {
 			break
 		}
 		lines[i] = solid[i]
@@ -174,11 +182,16 @@ func (p *Pane) draftGuardReason(codex, typing bool, now time.Time, recorder func
 		}
 	}
 	// The box cannot be read: an agent's unsent message there still holds
-	// (typing would merge into it), as does a person's recorded draft.
+	// (typing would merge into it), as does a person's recorded draft. A
+	// put-back message holds whatever input came since, kept as the person's
+	// draft or not: only a readable box without it releases it.
 	p.mu.Lock()
 	msg := p.currentUnsentMessageLocked()
 	p.mu.Unlock()
 	if msg != nil && !msg.NotTyped {
+		return unsentInBoxReason(msg.Sender)
+	}
+	if msg := p.putBackReceipt(); msg != nil {
 		return unsentInBoxReason(msg.Sender)
 	}
 	if n, at := recorder(); n > 0 && at > 0 && now.Sub(time.UnixMilli(at)) < ariaAutoDraftStaleAfter {
@@ -196,15 +209,12 @@ func (p *Pane) holdDelivery(body string, claude bool, mode deliveryMode, sender 
 	queued := len(p.heldDeliveries) > 0
 	p.mu.Unlock()
 	// The reason is read again even behind other held messages, so senders
-	// are told what holds the pane now.
+	// are told what holds the pane now, not what held it before.
 	reason := p.draftGuardReason(!claude, true, time.Now(), p.humanComposerPendingSnapshot)
 	if !queued && reason == "" {
 		return false, nil
 	}
-	if reason != "" {
-		p.setHeldReason(reason)
-	}
-	return true, p.enqueueHeldDelivery(body, claude, mode, sender, delivered, senderKeys...)
+	return true, p.enqueueHeldDelivery(body, claude, mode, sender, delivered, reason, senderKeys...)
 }
 
 // withoutInvisibleFormat removes format characters (Unicode category Cf)
@@ -228,18 +238,23 @@ func withoutInvisibleFormat(s string) string {
 
 const unsentInBoxPrefix = "an unsent message from "
 
+// heldMenuReason: the input box is free, but a menu is open in the pane.
+const heldMenuReason = "a menu is open in that pane"
+
 // errPutBackInBox: an agent's keys would act on a put-back message.
 var errPutBackInBox = errors.New("nothing was typed into that pane")
 
 // putBackKeysCheck is putBackInputCheck for raw keys, except keys answering
 // a menu live on screen at the moment of the write (they go to the menu).
-// The screen is read under the writer lock, with the write.
-func (p *Pane) putBackKeysCheck(codex bool) func() error {
+// The screen is read under the writer lock, with the write, and only when
+// there is a put-back message: other keys pay for one receipt read.
+func (p *Pane) putBackKeysCheck() func() error {
 	return func() error {
-		if menuBeforeKey(p, codex) {
+		msg := p.putBackReceipt()
+		if msg == nil || menuBeforeKey(p, !msg.claude) {
 			return nil
 		}
-		return p.putBackInputCheck()
+		return p.putBackRefusal(msg)
 	}
 }
 
@@ -248,13 +263,187 @@ func (p *Pane) putBackKeysCheck(codex bool) func() error {
 // only the person does. A write precondition, run under the writer lock;
 // callers skip it for keys that answer a live menu.
 func (p *Pane) putBackInputCheck() error {
-	p.mu.Lock()
-	msg := p.currentUnsentMessageLocked()
-	p.mu.Unlock()
-	if msg != nil && msg.PutBack {
-		return fmt.Errorf("%w: its input box holds an unsent message from %s that was put back after the person stopped the turn, and only the person sends or clears it", errPutBackInBox, msg.Sender)
+	msg := p.putBackReceipt()
+	if msg == nil {
+		return nil
 	}
-	return nil
+	return p.putBackRefusal(msg)
+}
+
+// putBackPersonCheck is putBackInputCheck for the person's own message box:
+// a put-back message they kept as their draft does not refuse it.
+func (p *Pane) putBackPersonCheck() error {
+	msg := p.putBackReceipt()
+	if msg == nil || msg.kept {
+		return nil
+	}
+	return p.putBackRefusal(msg)
+}
+
+// keepPutBack is the person's "Keep as my draft" on an edited put-back
+// message: its chip goes and their own message box may type again. The
+// receipt stays, kept, so agents, schedules and ARIA are refused until the
+// box shows no part of it (watchPutBack drops it then).
+func (p *Pane) keepPutBack(msg *unsentPaneMessage) {
+	p.mu.Lock()
+	if p.unsentMessage == msg {
+		next := *msg
+		next.kept = true
+		p.unsentMessage = &next
+	}
+	p.mu.Unlock()
+}
+
+// watchPutBack follows the pane's put-back message while there is one. It
+// drops the receipt once the readable box shows no part of it (sent, cleared
+// or deleted, by anyone), and after the person types in the box while part
+// of it still shows, keeps it current, marked edited, so its chip stays and
+// the guard holds. Each pass runs under deliveryMu, so it never interleaves
+// with Send, Clear or Keep acting on the receipt.
+func (p *Pane) watchPutBack() {
+	for {
+		putBackWatchSleep(putBackWatchPoll)
+		select {
+		case <-p.done:
+			p.mu.Lock()
+			p.putBackWatching = false
+			p.mu.Unlock()
+			return
+		default:
+		}
+		p.deliveryMu.Lock()
+		more := p.checkPutBack()
+		p.deliveryMu.Unlock()
+		if !more {
+			return
+		}
+	}
+}
+
+// checkPutBack is one watchPutBack pass; false ends the watch. Caller holds
+// deliveryMu.
+func (p *Pane) checkPutBack() bool {
+	msg := p.putBackReceipt()
+	var shown, known bool
+	if msg != nil {
+		if _, typed, ok := draftGuardScreen(p); ok {
+			shown, known = putBackShown(typed, !msg.claude, msg.body)
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if msg == nil || p.unsentMessage != msg {
+		// Gone, or replaced: a newer put-back receipt is watched on.
+		if cur := p.unsentMessage; msg == nil || cur == nil || !cur.PutBack {
+			p.putBackWatching = false
+			return false
+		}
+		return true
+	}
+	switch rev := p.inputRevision.Load(); {
+	case known && !shown:
+		p.unsentMessage = nil
+		p.putBackWatching = false
+		return false
+	case known && msg.revision != rev:
+		next := *msg
+		next.revision = rev
+		next.Edited = true
+		p.unsentMessage = &next
+	}
+	return true
+}
+
+// putBackReceipt is the pane's put-back message for its current agent, also
+// after input that did not edit it (an answer to a menu, a refused write):
+// the input box, not the receipt, says whether it is still there.
+func (p *Pane) putBackReceipt() *unsentPaneMessage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	msg := p.unsentMessage
+	if msg == nil || !msg.PutBack || p.Status != PaneRunning || p.Kind == "native" || p.respawning.Load() || msg.connection != p.agentConn {
+		return nil
+	}
+	return msg
+}
+
+// keptPutBack is the pane's put-back receipt while the input box may still
+// show any part of its text (it does, or the box can't be read), kept as the
+// person's draft or not. A newer unsent receipt must not replace it then:
+// that would lift the guard on agents' keys with the agent's text still in
+// the box.
+func (p *Pane) keptPutBack() *unsentPaneMessage {
+	msg := p.putBackReceipt()
+	if msg == nil {
+		return nil
+	}
+	if _, typed, ok := draftGuardScreen(p); ok {
+		if shown, known := putBackShown(typed, !msg.claude, msg.body); known && !shown {
+			return nil
+		}
+	}
+	return msg
+}
+
+// putBackRefusal refuses while the input box shows msg at all
+// (putBackShown), so a box showing only part of it, or it with more text,
+// still refuses. Only a readable box positively without it lifts the
+// refusal. When the box cannot be read, the receipt refuses, the person's
+// typing in the box since included: their edit does not make the agent's
+// text safe to send.
+func (p *Pane) putBackRefusal(msg *unsentPaneMessage) error {
+	if _, typed, ok := draftGuardScreen(p); ok {
+		if shown, known := putBackShown(typed, !msg.claude, msg.body); known && !shown {
+			return nil
+		}
+	}
+	return putBackError(msg)
+}
+
+// putBackMarkerRunes is how much of a message must show to count as it,
+// as deliveryMarker.
+const putBackMarkerRunes = 24
+
+// putBackShown reports whether the input box shows any of body: its start or
+// its end (a box taller than the screen, or the screen tail, can drop
+// either), a stretch of it at the box's own start or end (only the middle
+// shown), or, for a long or multi-line body, the placeholder a paste
+// collapses into. known is false when the box cannot be read.
+func putBackShown(screen string, codex bool, body string) (shown, known bool) {
+	draft, known := composerDraft(screen, codex)
+	if !known || draft == "" {
+		return false, known
+	}
+	if strings.Contains(draft, "[Pasted") && (len(body) > 200 || strings.Contains(body, "\n")) {
+		return true, true
+	}
+	msg := conditionalDraftText(body)
+	m := []rune(msg)
+	n := min(putBackMarkerRunes, len(m))
+	if n == 0 {
+		return false, true
+	}
+	if strings.Contains(draft, string(m[:n])) || strings.Contains(draft, string(m[len(m)-n:])) {
+		return true, true
+	}
+	d := []rune(draft)
+	return len(d) >= n && (strings.Contains(msg, string(d[:n])) || strings.Contains(msg, string(d[len(d)-n:]))), true
+}
+
+func putBackError(msg *unsentPaneMessage) error {
+	return fmt.Errorf("%w: its input box holds an unsent message from %s that was put back after the person stopped the turn, and only the person sends or clears it", errPutBackInBox, msg.Sender)
+}
+
+// carryPutBackPastMenuKeyLocked keeps a put-back receipt current across a
+// key that answered a menu (rev is that key's input revision): the key went
+// to the menu, not into the input box, so the message is still there and its
+// chip stays. Caller holds agentWriteMu (so rev is its own key's) and mu.
+func (p *Pane) carryPutBackPastMenuKeyLocked(rev uint64) {
+	if msg := p.unsentMessage; msg != nil && msg.PutBack && msg.revision+1 == rev {
+		next := *msg
+		next.revision = rev
+		p.unsentMessage = &next
+	}
 }
 
 // unsentInBoxReason: the input box holds an agent's message that was not
@@ -309,7 +498,10 @@ func heldText(s string) string {
 	}, s)
 }
 
-func (p *Pane) enqueueHeldDelivery(body string, claude bool, mode deliveryMode, sender string, delivered func(deliveryOutcome), senderKeys ...string) error {
+// reason is why it waits (draftGuardReason, "" behind other held messages
+// alone); it becomes the pane's held reason with the message, under one lock,
+// so the drain cannot clear it in between.
+func (p *Pane) enqueueHeldDelivery(body string, claude bool, mode deliveryMode, sender string, delivered func(deliveryOutcome), reason string, senderKeys ...string) error {
 	senderKey := heldSenderKey(sender, senderKeys)
 	quotaKey := heldSenderQuotaKey(senderKey)
 	body = heldText(body)
@@ -322,6 +514,7 @@ func (p *Pane) enqueueHeldDelivery(body string, claude bool, mode deliveryMode, 
 	mine := 0
 	for _, h := range p.heldDeliveries {
 		if h.senderKey == senderKey && stripSenderLabel(h.body) == stripSenderLabel(body) {
+			p.heldReason = reason
 			p.mu.Unlock()
 			return nil
 		}
@@ -343,6 +536,7 @@ func (p *Pane) enqueueHeldDelivery(body string, claude bool, mode deliveryMode, 
 	p.heldSeq++
 	h := &heldDelivery{ID: fmt.Sprintf("held-%d-%d", now.UnixNano(), p.heldSeq), Sender: sender, senderKey: senderKey, Text: text, At: now.UnixMilli(), body: body, claude: claude, mode: mode, connection: p.agentConn, delivered: delivered}
 	p.heldDeliveries = append(p.heldDeliveries, h)
+	p.heldReason = reason
 	start := !p.heldDraining
 	p.heldDraining = true
 	p.mu.Unlock()
@@ -472,11 +666,14 @@ func (p *Pane) drainHeldDeliveries() {
 			p.resolveHeld(head, "expired", nil)
 			continue
 		}
-		if reason := p.draftGuardReason(!head.claude, true, time.Now(), p.humanComposerPendingSnapshot); reason != "" {
-			p.setHeldReason(reason)
-			continue
+		reason := p.draftGuardReason(!head.claude, true, time.Now(), p.humanComposerPendingSnapshot)
+		if reason == "" && menuBeforeKey(p, !head.claude) {
+			reason = heldMenuReason
 		}
-		if menuBeforeKey(p, !head.claude) {
+		// Refreshed every pass, cleared too: a message sent or cleared since
+		// must not still be named to senders.
+		p.setHeldReason(reason)
+		if reason != "" {
 			continue
 		}
 		p.deliverHeld(head, true)
@@ -532,6 +729,12 @@ func (p *Pane) deliverHeld(h *heldDelivery, typing bool) (deliveryOutcome, error
 func heldNotice(paneID, reason string) string {
 	if strings.HasPrefix(reason, unsentInBoxPrefix) {
 		return fmt.Sprintf("held: %s %s, so nothing was typed. Your message waits on that pane, queued behind it, and goes in once the person sends or clears that message. Do not resend it; use ask_pane to wait for a reply.", strings.TrimSuffix(reason, " is in that pane's input box"), "is in pane "+paneID+"'s input box")
+	}
+	if reason == heldMenuReason {
+		return fmt.Sprintf("queued: a menu is open in pane %s, so nothing was typed yet. Your message is held on that pane with your name and goes in by itself once the menu is answered (the person can also send it now or discard it). Do not resend it; use ask_pane to wait for a reply.", paneID)
+	}
+	if reason == "" {
+		return fmt.Sprintf("queued: other held messages go into pane %s first, so nothing was typed yet. Your message is held on that pane with your name and goes in by itself after them (the person can also send it now or discard it). Do not resend it; use ask_pane to wait for a reply.", paneID)
 	}
 	return fmt.Sprintf("queued: the person is typing in pane %s, so nothing was typed. Your message is held on that pane with your name and goes in by itself once their input box is empty and they have stopped typing (they can also send it now or discard it). Do not resend it; use ask_pane to wait for a reply.", paneID)
 }

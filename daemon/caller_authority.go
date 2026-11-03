@@ -36,10 +36,13 @@ import (
 //
 // The peer process is found from the TCP connection itself (caller_peer_*.go)
 // and walked up its parents; headers alone never outrank a traced process,
-// and a traced caller counts as the person only when it is a browser.
-// When the connection cannot be traced — a Windows process reaching a WSL
-// daemon, or WSL's consomme networking relaying a loopback connection — only
-// browser fetch metadata remains, which a program can imitate on purpose.
+// and a traced caller counts as the person only when it is a browser or
+// signs as an approved device. macOS is the exception: there any other
+// traced program is judged like one that can't be traced
+// (tracedOutsiderJudgedUntraced). When process lookup is unavailable,
+// untracedCaller uses approved-device proof and the shared
+// Off/Report/Require policy. Report preserves desktop
+// compatibility while recording requests before Require is enabled.
 // This is a guard against agents widening their own authority, not a sandbox:
 // a program that is already hostile and running as the same OS user can edit
 // the daemon's files directly. That boundary needs OS-level isolation.
@@ -61,9 +64,15 @@ type callerIdentity struct {
 	// FromEnv: PaneID came from SOLU_PANE_ID in the environment of a process
 	// with no pane above it, not from the pane's own process tree.
 	FromEnv bool
-	// Unproven: classified as the person from browser fetch headers alone,
-	// with no traced browser process behind them.
+	// Device is the approved device whose signature this request carried
+	// (human_proof.go).
+	Device string
+	// Unproven: classified only from browser fetch headers, with no traced
+	// browser process and no device signature behind them.
 	Unproven bool
+	// Automation: a traced browser that a program drives (solubrowse,
+	// Playwright).
+	Automation bool
 }
 
 // tracedPane excludes detached environment/header claims from operations that
@@ -96,14 +105,64 @@ func requestViaRelay(r *http.Request) bool {
 	return relayTransport(r) || isCloudForwardedPrefix(r.Header.Get("X-Forwarded-Prefix"))
 }
 
-// lookupPeerPID finds the local process on the other end of r's connection.
-// A variable so tests can stand in for the platform lookup.
+// lookupPeerPID reports whether the client socket was found locally. A true
+// result with pid 0 means the socket was observed but its owner is unavailable;
+// that is distinct from an unknown tuple. A variable for platform test fixtures.
 var lookupPeerPID = func(r *http.Request) (int, bool) {
+	memo, _ := r.Context().Value(connPeerMemoKey{}).(*connPeerMemo)
+	if pid, ok := memo.get(); ok {
+		return pid, true
+	}
+	pid, known := lookupPeerPIDUncached(r)
+	if known && pid > 0 {
+		memo.set(pid)
+	}
+	return pid, known
+}
+
+// connPeerMemo remembers, for one TCP connection, the process found holding
+// its client end, so a keep-alive connection (the app, an MCP client) is
+// looked up once instead of on every request. Only a found process is kept:
+// the same connection is the same socket, while a miss may be retried.
+type connPeerMemo struct {
+	mu  sync.Mutex
+	pid int
+}
+
+type connPeerMemoKey struct{}
+
+// withConnPeerMemo is the server's ConnContext: one memo per connection.
+func withConnPeerMemo(ctx context.Context, _ net.Conn) context.Context {
+	return context.WithValue(ctx, connPeerMemoKey{}, &connPeerMemo{})
+}
+
+func (m *connPeerMemo) get() (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pid, m.pid > 0
+}
+
+func (m *connPeerMemo) set(pid int) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.pid = pid
+	m.mu.Unlock()
+}
+
+func lookupPeerPIDUncached(r *http.Request) (int, bool) {
+	server, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if _, unixSocket := server.(*net.UnixAddr); unixSocket {
+		return 0, true
+	}
 	client, ok := tcpAddrFromString(r.RemoteAddr)
 	if !ok {
 		return 0, false
 	}
-	server, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
 	serverTCP, ok := server.(*net.TCPAddr)
 	if !ok {
 		return 0, false
@@ -134,19 +193,33 @@ func (a *apiServer) identifyCaller(r *http.Request) callerIdentity {
 	if relayTransport(r) {
 		return callerIdentity{Kind: callerHuman, Relay: true}
 	}
-	if pid, ok := lookupPeerPID(r); ok && pid > 0 {
+	if pid, local := lookupPeerPID(r); local && pid > 0 {
 		if id, known := a.classifyPeerProcess(pid); known {
 			return id
 		}
-		// A traced caller must really be a browser, not just send a
-		// browser's headers: otherwise an agent that detaches from its pane
-		// (`setsid -f env -i curl -H 'Sec-Fetch-Site: same-origin' …`) would
-		// pass as the person.
-		if peerIsRelayProxy(pid) {
+		if peerIsRelayProxy(pid) || peerIsSharedNetworkService(pid) {
 			return a.untracedCaller(r, pid)
 		}
 		if browserOriginated(r) && peerIsBrowser(pid) {
-			return callerIdentity{Kind: callerHuman, PID: pid}
+			return a.tracedBrowserCaller(r, pid)
+		}
+		// Any other program outside panes and workers. On macOS it is judged
+		// as if it couldn't be traced, as it was before macOS was traced: a
+		// browser missing from the name list (Arc, other Chromium builds)
+		// keeps working and can approve its first device. That includes an
+		// agent that detaches from its pane and forges the headers (`setsid
+		// -f env -i curl -H 'Sec-Fetch-Site: same-origin' …`): there only
+		// require stops it. Elsewhere such a program is the person only with
+		// an approved device's signature, the same proof it would be on a
+		// connection that can't be traced.
+		if tracedOutsiderJudgedUntraced {
+			if browserOriginated(r) && localVerifiedDevice(r) == "" {
+				log.Printf("authority: traced pid %d (%s) is no known browser; judging it as untraced", pid, readComm(pid))
+			}
+			return a.untracedCaller(r, pid)
+		}
+		if dev := localVerifiedDevice(r); dev != "" {
+			return callerIdentity{Kind: callerHuman, PID: pid, Device: dev}
 		}
 		return callerIdentity{Kind: callerUnverified, PID: pid}
 	}
@@ -156,13 +229,37 @@ func (a *apiServer) identifyCaller(r *http.Request) callerIdentity {
 // untracedCaller classifies a caller whose process can't be found (pid 0),
 // or was found to be a proxy carrying other programs' connections (pid > 0:
 // WSL's init, the desktop app's router). Every untraceable classification goes
-// through here. Only browser fetch headers are left to go on, so each request
-// taken as the person's this way is logged for review.
+// through here. A request signed by an approved device is the person's
+// (human_proof.go). Otherwise only browser fetch headers are left to go on:
+// each request taken as the person's that way is logged for review, and when
+// approved devices are required it is refused. A request that says another
+// program forwarded it for a remote device (the /m/ marker) never counts on
+// headers: they are the remote device's, passed along, so only a signature
+// does. The marker only takes authority away, so it needn't be trusted.
 func (a *apiServer) untracedCaller(r *http.Request, pid int) callerIdentity {
+	// Keep this check first: Windows desktop connections and local sockets
+	// remapped by WSL can have the same untraceable loopback tuple. Socket
+	// absence cannot replace positive device proof. Require applies to both;
+	// Off/Report keep the window working until its signing is verified.
+	if dev := localVerifiedDevice(r); dev != "" {
+		return callerIdentity{Kind: callerHuman, PID: pid, Device: dev}
+	}
 	if !browserOriginated(r) {
 		return callerIdentity{Kind: callerUnverified, PID: pid}
 	}
+	if isCloudForwardedPrefix(r.Header.Get("X-Forwarded-Prefix")) {
+		log.Printf("authority: forwarded request isn't the person on headers %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+		return callerIdentity{Kind: callerUnverified, PID: pid, Unproven: true}
+	}
+	mode := a.humanProofMode()
+	if mode == humanProofRequire {
+		log.Printf("authority: refused unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+		return callerIdentity{Kind: callerUnverified, PID: pid, Unproven: true}
+	}
 	log.Printf("authority: unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+	if mode == humanProofReport {
+		log.Printf("authority: would refuse unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+	}
 	return callerIdentity{Kind: callerHuman, PID: pid, Unproven: true}
 }
 
@@ -228,12 +325,33 @@ func (a *apiServer) classifyPeerProcess(pid int) (callerIdentity, bool) {
 // browserProcessNames are the processes (or their parents) that make a
 // browser's network requests: Chromium-family network services, Firefox's
 // parent and socket processes, WebKit's network process, and the Windows
-// desktop shell's WebView2.
+// desktop shell's WebView2. On macOS the names are the executables' file
+// names (procinfo_darwin.go): the Chromium "… Helper" network services.
+// WebKit's network service is not here: see peerIsSharedNetworkService.
+// Each platform adds its own exact names (platformBrowserProcessNames).
+//
+// The list is a convenience, not a boundary: a renamed binary passes it.
+// It keeps the browsers people use working without a signature in off and
+// report; require mode, an approved device's signature, is the boundary.
 var browserProcessNames = map[string]bool{
 	"chrome": true, "chromium": true, "chromium-browse": true, "msedge": true,
 	"msedgewebview2": true, "brave": true, "vivaldi-bin": true, "opera": true,
 	"firefox": true, "firefox-bin": true, "firefox-esr": true, "socket process": true,
 	"webkitnetworkpr": true, "epiphany": true, "solubrowse": true,
+	"google chrome": true, "google chrome helper": true, "google chrome canary": true,
+	"google chrome canary helper": true, "chromium helper": true, "microsoft edge": true,
+	"microsoft edge helper": true, "brave browser": true, "brave browser helper": true,
+	"vivaldi": true, "vivaldi helper": true, "opera helper": true, "safari": true,
+	// The kernel's 16-byte p_comm, the fallback when the executable path
+	// can't be read.
+	"google chrome he": true, "google chrome ca": true,
+	"microsoft edge h": true, "brave browser he": true,
+}
+
+// isBrowserProcessName reports a lower-cased executable name (without .exe)
+// from either list.
+func isBrowserProcessName(name string) bool {
+	return browserProcessNames[name] || platformBrowserProcessNames[name]
 }
 
 // peerIsBrowser reports whether pid or one of its near parents is a browser.
@@ -243,7 +361,7 @@ var peerIsBrowser = func(pid int) bool {
 	for depth := 0; depth < 6 && cur > 1; depth++ {
 		name := strings.ToLower(strings.TrimSpace(readComm(cur)))
 		name = strings.TrimSuffix(name, ".exe")
-		if browserProcessNames[name] {
+		if isBrowserProcessName(name) {
 			return true
 		}
 		next := readPpid(cur)
@@ -266,6 +384,19 @@ var peerIsRelayProxy = func(pid int) bool {
 	}
 	name := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(readComm(pid))), ".exe")
 	return name == "init" || name == "solud"
+}
+
+// sharedNetworkServiceNames are macOS's WebKit network service (full name
+// and the kernel's 16-byte p_comm). launchd starts it for whichever app hosts
+// a web view, Safari, the desktop app or a WKWebView any program creates, so
+// its connections can't be tied to an app: they are judged like untraceable
+// ones (untracedCaller), where an approved device's signature decides.
+var sharedNetworkServiceNames = map[string]bool{"com.apple.webkit.networking": true, "com.apple.webkit": true}
+
+// peerIsSharedNetworkService reports a peer that carries several apps'
+// requests. A variable so tests can stand one in.
+var peerIsSharedNetworkService = func(pid int) bool {
+	return sharedNetworkServiceNames[strings.TrimSuffix(strings.ToLower(strings.TrimSpace(readComm(pid))), ".exe")]
 }
 
 // browserOriginated reports whether r is a script fetch from the page the
@@ -293,11 +424,23 @@ func browserOriginated(r *http.Request) bool {
 func (a *apiServer) requireHuman(w http.ResponseWriter, r *http.Request, action string, mcpTools ...string) bool {
 	id := a.identifyCaller(r)
 	if id.Kind == callerHuman {
-		log.Printf("authority: %s by a person (pid %d, relay %t)", action, id.PID, id.Relay)
+		a.logPersonAct(id, action)
 		return true
 	}
 	a.refuseCaller(w, id, action, false, mcpTools...)
 	return false
+}
+
+// logPersonAct records an act the person was taken to make. One taken only
+// from browser headers is counted, so report mode shows what require would
+// refuse.
+func (a *apiServer) logPersonAct(id callerIdentity, action string) {
+	if id.Unproven {
+		log.Printf("authority: %s by a person without device proof (pid %d, automation %t; refused when approved devices are required)", action, id.PID, id.Automation)
+		a.humanProof.noteUnproven(action, time.Now())
+		return
+	}
+	log.Printf("authority: %s by a person (pid %d, relay %t, device %q)", action, id.PID, id.Relay, id.Device)
 }
 
 // requireHumanOrDelegated also admits an interactive pane while the person has
@@ -307,7 +450,7 @@ func (a *apiServer) requireHumanOrDelegated(w http.ResponseWriter, r *http.Reque
 	id := a.identifyCaller(r)
 	switch id.Kind {
 	case callerHuman:
-		log.Printf("authority: %s by a person (pid %d, relay %t)", action, id.PID, id.Relay)
+		a.logPersonAct(id, action)
 		return true
 	case callerPane:
 		if a.agentAuthority.active(time.Now()) {
@@ -324,7 +467,13 @@ func (a *apiServer) refuseCaller(w http.ResponseWriter, id callerIdentity, actio
 		log.Printf("authority: refused %s caller=%s pane=%s pid=%d", action, id.Kind, id.PaneID, id.PID)
 	}
 	var msg string
+	errCode := "human_required"
 	switch {
+	case id.Unproven && id.Automation:
+		msg = fmt.Sprintf("This browser is run by automation, so it can't %s unless it is an approved device.", action)
+	case id.Unproven:
+		errCode = "device_required"
+		msg = fmt.Sprintf("This screen isn't an approved device yet, so it can't %s. Open Settings → Privacy & security → Ask to approve this browser, then approve it from a browser or app you've already approved. If that button isn't shown here, use an already-approved device instead. If you're locked out, recovery steps are in Settings → Privacy & security on the computer.", action)
 	case id.Kind == callerPane && id.PID > 0 && peerIsBrowser(id.PID):
 		// Deliberate: a browser an agent launches must not act as the
 		// person, so a browser started from inside a pane counts as that
@@ -343,7 +492,7 @@ func (a *apiServer) refuseCaller(w http.ResponseWriter, id callerIdentity, actio
 		msg += " Agents must use the MCP tool " + strings.Join(mcpTools, " or ") + ", which applies its ownership and in-app Allow rules."
 	}
 	writeJSON(w, http.StatusForbidden, map[string]any{
-		"error":   "human_required",
+		"error":   errCode,
 		"caller":  string(id.Kind),
 		"message": msg,
 	})
@@ -476,23 +625,40 @@ func (a *apiServer) handlePutAgentAuthority(w http.ResponseWriter, r *http.Reque
 
 // promptInputGate decides, once per connection, whether input from r may reach
 // a pane while that pane is showing a permission prompt. Typing "1" or "y" into
-// a prompt answers it, so an agent without the person's grant must not. Only
-// callers identified as agents are held back; an untraceable caller (a Windows
-// browser reaching a WSL daemon, a relayed loopback connection) keeps today's
-// behaviour so the person's own keystrokes are never dropped.
+// a prompt answers it, so an agent without the person's grant must not.
+// Callers identified as agents are held back. An unverified caller (one that
+// can't be traced, such as a Windows browser reaching a WSL daemon) is held
+// back only when approved devices are required (human_proof.go), since the
+// person's own sockets are then signed; otherwise its keystrokes go through so
+// the person's are never dropped.
 func (a *apiServer) promptInputGate(r *http.Request) func(*Pane) bool {
 	return a.promptInputGateFor(a.identifyCaller(r))
 }
 
 func (a *apiServer) promptInputGateFor(id callerIdentity) func(*Pane) bool {
-	if id.Kind != callerPane && id.Kind != callerWorker {
+	agent := id.Kind == callerPane || id.Kind == callerWorker
+	// An unverified caller, or one taken for the person from browser headers
+	// alone, is held back like an agent while approved devices are required:
+	// the person's own untraceable sockets are then signed. A socket lives
+	// long, so this is decided on each input, not when the socket opened.
+	unproven := id.Kind == callerUnverified || (id.Kind == callerHuman && id.Unproven)
+	// A socket signed by a device keeps that standing only while the device
+	// stays approved: removing it withdraws the socket's say at prompts too.
+	signed := id.Kind == callerHuman && id.Device != ""
+	if !agent && !unproven && !signed {
 		return func(*Pane) bool { return true }
 	}
 	return func(p *Pane) bool {
-		if id.Kind == callerPane && a.agentAuthority.active(time.Now()) {
+		if p == nil || p.computeStateCached() != StateChoicePrompt {
 			return true
 		}
-		return p == nil || p.computeStateCached() != StateChoicePrompt
+		if signed && a.trustedDevices != nil && a.trustedDevices.isApproved(id.Device) {
+			return true
+		}
+		if !agent {
+			return a.humanProofMode() != humanProofRequire
+		}
+		return id.Kind == callerPane && a.agentAuthority.active(time.Now())
 	}
 }
 

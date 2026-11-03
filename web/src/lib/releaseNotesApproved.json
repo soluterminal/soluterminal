@@ -103,6 +103,12 @@
       "approvedBy": "Benjamin",
       "date": "2026-11-02",
       "note": "Benjamin approved the 14-line set in the CMO pane (\"yes, 1235 notes\"); all separable lines merged (#902, #910, #917)."
+    },
+    "0.0.1236": {
+      "sha256": "61888deb094d3a3b115c50b6a58c1707514f438dfb5dfbfa4661f9e8f01699b4",
+      "approvedBy": "Benjamin",
+      "date": "2026-11-03",
+      "note": "Benjamin approved the 8-line set in the CMO pane (\"yes 1236 notes\"); BULLETIN 4c6664d."
     }
   }
 }

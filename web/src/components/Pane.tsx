@@ -5,6 +5,7 @@ import { PreservedTerminalInput } from './PreservedTerminalInput';
 import { abandonTerminalRetirement, beginTerminalInteraction, beginTerminalRetirement, cancelTerminalRetirement, holdTerminalInput, releaseTerminalRetirement, terminalHasPendingInteraction, terminalRecoveredInput, terminalInputAllowed, useTerminalRetirementPaused } from '../lib/terminalInteractionState';
 import { quickReplyHasPendingInteraction } from '../lib/quickReplyDrafts';
 import { currentRoutingScope, routingPrincipalEpoch, routingPrincipalAllowed, signStreamUrl, streamSigningNeeded } from '../api';
+import { localSocketStanding, localSocketStandingChanged, onLocalProofChange } from '../lib/localProof';
 import { effectiveVisiblePaneIds, effectiveTerminalTarget } from '../store';
 import { ensureTerminalSession, registerTerminalCloseGuard, registerSessionKeepalive, captureSessionGesture, sessionVisible, processIdentity, useTerminalWindowVisible, type TerminalViewSession } from '../lib/terminalViewSessions';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
@@ -1876,13 +1877,31 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       // for an already-signed URL, so a toggle turned on while signing can't
       // let this connect over the plaintext relay.
       const viaPrivateRelay = privateRelaySocketsFor(session.scope);
-      if (!signedUrl && !viaPrivateRelay && streamSigningNeeded(session.scope)) {
+      if (!signedUrl && !viaPrivateRelay && streamSigningNeeded(session.scope, streamUrl)) {
         void signStreamUrl(streamUrl, session.scope).then((url) => connect(url));
         return;
       }
       const ws = viaPrivateRelay
         ? openWebSocket(streamUrl, api.wsProtocols(), session.scope)
         : new WebSocket(streamUrl, api.wsProtocols());
+      // At this computer the daemon fixes a socket's caller when it opens
+      // (approved devices, lib/localProof.ts). If this browser is approved or
+      // removed afterwards, or the clock it signed with turns out wrong,
+      // reopen the socket so its standing matches; the reconnect below signs
+      // it afresh.
+      if (!session.scope.prefix) {
+        const proofBackend = session.scope.backendPrefix;
+        const openedWith = localSocketStanding(proofBackend);
+        // A replaced socket's watcher removes itself on the next change
+        // (the status is refreshed at least every 30 s).
+        const stopWatching = onLocalProofChange(() => {
+          if (wsRef.current !== ws) { stopWatching(); return; }
+          if (!localSocketStandingChanged(openedWith, localSocketStanding(proofBackend))) return;
+          stopWatching();
+          lifecycleLog('pane.ws.device-proof-changed', { paneId: pane.id });
+          try { ws.close(4001, 'device proof changed'); } catch { /* already closing */ }
+        });
+      }
       // One transport choke point covers every terminal input/claim/geometry
       // path, including xterm protocol replies and delayed callbacks. Hidden
       // viewers retain output parsing and keepalive, never input authority.

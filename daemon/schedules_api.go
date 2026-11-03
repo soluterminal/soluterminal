@@ -289,13 +289,12 @@ func (a *apiServer) injectPane(w http.ResponseWriter, r *http.Request) {
 	}
 	write := p.Write
 	if caller.Kind != callerHuman {
-		write = p.writeProgrammaticInput
-		// Nor may it send or clear a put-back message in the input box,
-		// except with keys that answer a live menu.
-		_, claude := paneAgentProvider(p)
+		// As writeProgrammaticInput, but it may not send or clear a put-back
+		// message in the input box either, except with keys that answer a
+		// live menu.
 		write = func(b []byte) (int, error) {
 			policy := p.autoModePolicy()
-			return p.writeWithFleetAdmissionPolicy(b, true, false, &policy, time.Now().Add(ariaJevTimeout), p.putBackKeysCheck(!claude))
+			return p.writeWithFleetAdmissionPolicy(b, true, false, &policy, time.Now().Add(ariaJevTimeout), p.putBackKeysCheck())
 		}
 	}
 	if _, err := write([]byte(req.Text)); err != nil {

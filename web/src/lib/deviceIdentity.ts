@@ -236,16 +236,21 @@ export function deviceIdentity(): Promise<DeviceIdentity> {
   return identity;
 }
 
-/** Sign one request for target (`<machineId>` or `<machineId>/<backendId>`). */
+/**
+ * Sign one request for target (`<machineId>` or `<machineId>/<backendId>`
+ * over the relay, `local/<daemon key id>` at this computer). clockOffsetMs
+ * corrects for a daemon clock that differs from this one (WSL after sleep).
+ */
 export async function signDeviceRequest(
   target: string,
   method: string,
   path: string,
   rawQuery: string,
   body: Uint8Array,
+  clockOffsetMs = 0,
 ): Promise<DeviceSignature> {
   const me = await deviceIdentity();
-  const time = String(Math.floor(Date.now() / 1000));
+  const time = String(Math.floor((Date.now() + clockOffsetMs) / 1000));
   const nonce = b64url(crypto.getRandomValues(new Uint8Array(16)));
   const msg = await deviceSigMessage(target, method, path, rawQuery, time, nonce, body);
   // WebCrypto ECDSA returns r||s (P1363), the form the daemon verifies.

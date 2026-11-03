@@ -52,7 +52,13 @@ func (a *apiServer) submitPaneMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, reason, http.StatusConflict)
 		return
 	}
-	bytes, outcome, err := submitAgentMessage(p, body, claude, "you")
+	// Only the person's own message box may type onto a put-back message
+	// they kept as their draft; any other caller of this route may not.
+	submit := submitAgentMessage
+	if a.identifyCaller(r).Kind == callerHuman {
+		submit = submitPersonMessage
+	}
+	bytes, outcome, err := submit(p, body, claude, "you")
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, errDeliveryChoicePrompt) {
@@ -64,7 +70,7 @@ func (a *apiServer) submitPaneMessage(w http.ResponseWriter, r *http.Request) {
 			if msg := p.Snapshot().UnsentMessage; msg != nil {
 				sender = msg.Sender
 			}
-			http.Error(w, "Nothing was sent: your input box holds an unsent message from "+sender+", put back after you stopped the turn. Send or Clear it on the pane first.", http.StatusConflict)
+			http.Error(w, "Nothing was sent: your input box holds an unsent message from "+sender+", put back after you stopped the turn. Send or Clear it on the pane first, or remove it from the input box yourself.", http.StatusConflict)
 			return
 		}
 		http.Error(w, err.Error(), status)

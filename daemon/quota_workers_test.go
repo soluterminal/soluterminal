@@ -95,6 +95,7 @@ func newQuotaWorkerAPI(t *testing.T) (*apiServer, *[]SpawnOpts) {
 	lead := transactionTestPane("lead")
 	mgr.panes[lead.ID] = lead
 	a := &apiServer{mgr: mgr, ws: ws, panes: &failingPaneStore{}, dataDir: t.TempDir(), mcpScopes: newMcpScopeStore()}
+	a.asks = newAskStore(t.TempDir(), nil)
 	var calls []SpawnOpts
 	a.spawnPane = func(o SpawnOpts) (*Pane, error) {
 		calls = append(calls, o)

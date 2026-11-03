@@ -84,7 +84,7 @@ func todosExportDisplayPath(dataDir string) string {
 
 func todosRemovedMessage(exportPath string) string {
 	return "Todos was removed from SoluTerminal. Your todos were exported to " + exportPath +
-		". For a follow-up, flag the pane for attention (set_pane_flag) or keep it in a file in the repository."
+		". For a decision or action from the user, use post_user_ask (your own asks only), then resolve_user_ask when done. Keep other follow-ups in a file in the repository."
 }
 
 // removedTodoMCPTools keeps the old names registered with the smallest schema
