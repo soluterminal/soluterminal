@@ -1,6 +1,6 @@
 import type { ClosedPane } from './lib/closedPanes';
 import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, NativeSettings, OrchestratorHostsInfo, PaneEffort, PaneIdentity, PaneInfo, PaneOrigin, PaneRole, Port, RecoverySettings, ReleaseCheck, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, Workspace, WorkspaceSummary } from './types';
-import { isRouterMode } from './dualBackend';
+import { isRouterMode, isDesktopRouterMode } from './dualBackend';
 import { setEnterGapConfig } from './ptySubmit';
 import { openTicketedEventSource, type EventStream } from './lib/ticketedEventSource';
 import { SupportBundleRemoteError, type SupportBundleResponse } from './lib/supportBundle';
@@ -2128,6 +2128,9 @@ export async function j<T>(r: Response): Promise<T> {
 // stall rejects with a readable timeout instead of hanging. Callers that own
 // their own AbortController (e.g. usageFetch) pass a signal and opt out of this default.
 const API_FETCH_TIMEOUT_MS = 30_000;
+export const ROUTER_RESTART_EVENT = 'soluterminal:router-restart-required';
+let routerRestartDetected = false;
+export function routerRestartNeeded(): boolean { return routerRestartDetected; }
 // POST /api/update/apply-shell: the daemon's installer download may take up to
 // 15 minutes (daemon/updater_download.go) and its launch check about 30 s more.
 export const SHELL_APPLY_TIMEOUT_MS = 16 * 60_000;
@@ -2165,6 +2168,11 @@ async function fetchBounded(url: string, init: RequestInit, headers: Headers): P
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  if (!requestPrefix && isDesktopRouterMode() && response.headers.get('X-Solu-Router-Restart') === 'required' && !routerRestartDetected) {
+    routerRestartDetected = true;
+    window.dispatchEvent(new Event(ROUTER_RESTART_EVENT));
   }
 
   // The daemon refusing this device (approved devices, daemon
@@ -2358,8 +2366,18 @@ export function streamSigningNeeded(scope?: RoutingScope, url?: string): boolean
   return streamSigningTarget(scope?.prefix ?? prefix, scope?.backendPrefix ?? backendPrefix, url) !== null;
 }
 
-export function apiFetch(path: string, init?: RequestInit, opts?: { signRead?: boolean }): Promise<Response> {
+function apiRequestHeaders(init?: RequestInit): Headers {
   const headers = new Headers(init?.headers);
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !headers.has('Content-Type') &&
+    (init?.body == null || typeof init.body === 'string')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  return headers;
+}
+
+export function apiFetch(path: string, init?: RequestInit, opts?: { signRead?: boolean }): Promise<Response> {
+  const headers = apiRequestHeaders(init);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const requestPrefix = prefix;
   const requestBackendPrefix = backendPrefix;
@@ -2404,7 +2422,7 @@ function apiFetchScoped(scope: RoutingScope, path: string, init?: RequestInit): 
       { code: WORKFLOW_SCOPE_MISMATCH },
     ));
   }
-  const headers = new Headers(init?.headers);
+  const headers = apiRequestHeaders(init);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const target = requestSigningTarget(scope.prefix, scope.backendPrefix, init);
   if (!target) return fetchBounded(scope.prefix + scope.backendPrefix + path, init ?? {}, headers);
@@ -2756,7 +2774,7 @@ function ccUsagePrefetch<T extends CCUsagePayload>(path: string): void {
  * startup without disturbing the currently-active backend prefix.
  */
 function apiFetchBackend(backend: BackendId, path: string, init?: RequestInit): Promise<Response> {
-  const headers = new Headers(init?.headers);
+  const headers = apiRequestHeaders(init);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const target = requestSigningTarget(prefix, `/b/${backend}`, init);
   if (!target) return fetchBounded(`${prefix}/b/${backend}${path}`, init ?? {}, headers);
@@ -2812,7 +2830,7 @@ export async function mintRelayTicket(url: string, kind: RelayTicketKind): Promi
 // relaying to the user's local daemon. In local mode `prefix` is
 // empty so this behaves identically to apiFetch.
 export function rootFetch(path: string, init?: RequestInit): Promise<Response> {
-  const headers = new Headers(init?.headers);
+  const headers = apiRequestHeaders(init);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return fetch(path, { ...init, headers });
 }

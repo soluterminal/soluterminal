@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { api } from '../../api';
+import { api, currentRoutingScope } from '../../api';
+import { confirmDialog } from '../../lib/dialog';
 import type { RemoteDevice } from '../../api';
 import { approveThisBrowserFirst, askToApproveThisBrowser, thisDeviceName, type LocalProofMode } from '../../lib/localProof';
 import { useLocalProof } from '../../lib/useLocalProof';
@@ -66,21 +67,26 @@ export function HumanProofSetting() {
 
   const approved = status.device === 'approved';
   const changeMode = (mode: LocalProofMode) => {
+    const scope = currentRoutingScope();
     void run(async () => {
       if (mode === 'require') {
         const list = await api.listRemoteDevices();
+        if (scope.key !== currentRoutingScope().key) return;
         // Only the person's own devices act for them: an alerts-only device
         // can't approve anything, so it is never listed as a way back in.
         const devices = (list?.devices ?? []).filter(isFullApprovedDevice);
         if (devices.length === 0) {
           throw new Error(REQUIRE_NEEDS_FULL_DEVICE);
         }
-        const ok = window.confirm(
+        const ok = await confirmDialog({ message:
           'Only these can then act for you on connections that can’t be traced:\n\n' +
           devices.map((d) => `• ${d.name}${d.approvedVia ? ` (${approvalProvenance(d)})` : ''}`).join('\n') +
-          '\n\nRemove any you don’t recognise first. Continue?');
+          '\n\nRemove any you don’t recognise first. Continue?' });
         if (!ok) return;
       }
+      // The person reviewed devices on this computer; switching computers
+      // while the dialog waits cancels that consent.
+      if (scope.key !== currentRoutingScope().key) return;
       await api.setHumanProofMode(mode);
     });
   };

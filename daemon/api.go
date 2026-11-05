@@ -449,7 +449,7 @@ func (a *apiServer) getPusher() *Pusher {
 // channel): team features gated, and a view-only caller refused every change
 // (forwardedViewOnly).
 func (a *apiServer) apiHandler(mux http.Handler) http.Handler {
-	return a.forwardedViewOnly(a.teamFeatureGate(mux))
+	return a.gate.browserOriginPolicy(a.forwardedViewOnly(a.teamFeatureGate(requestMediaObserver(mux))))
 }
 
 func (a *apiServer) routes(mux *http.ServeMux) {
@@ -1054,6 +1054,9 @@ func (a *apiServer) liveHealthIdentity() map[string]any {
 
 func (a *apiServer) health(w http.ResponseWriter, r *http.Request) {
 	body := a.liveHealthIdentity()
+	if a.gate != nil {
+		body["routerSkewRequests"] = a.gate.routerSkewRequests.Load()
+	}
 	// This exact query is the authenticated desktop startup probe. Return
 	// before pane enumeration, system/readiness decoration, or fleet
 	// inventory; older daemons safely ignore it and return the full payload.
@@ -1159,12 +1162,6 @@ type paneDTO struct {
 	// when needs-user has one (never-auto tool, decline, escalation).
 	Attention       string `json:"attention,omitempty"`
 	AttentionReason string `json:"attentionReason,omitempty"`
-	// LLM-graded attention item for the CURRENT needs-user prompt (see
-	// aria_attention_summary.go). Empty until the async summary lands;
-	// clients fall back to their heuristic tail preview.
-	AttentionSummary string `json:"attentionSummary,omitempty"`
-	AttentionRisk    string `json:"attentionRisk,omitempty"`
-	AttentionAction  string `json:"attentionAction,omitempty"`
 	// Asks are the pane's open asks to the user (asks.go), oldest first.
 	Asks []paneAskDTO `json:"asks,omitempty"`
 	// WorkerNotices are quiet notes to the lead, outside person attention.
@@ -1585,13 +1582,6 @@ func makePaneDTOWithProcessSnapshot(p *Pane, aria *Aria, att *attentionEngine, p
 	} else {
 		a, reason := p.AttentionNow()
 		d.Attention, d.AttentionReason = string(a), reason
-	}
-	// Summary only rides needs-user DTOs — anything else would describe a
-	// prompt the engine no longer considers the human's problem.
-	if d.Attention == string(AttentionNeedsUser) {
-		if rec := p.attentionSummaryNow(); rec != nil {
-			d.AttentionSummary, d.AttentionRisk, d.AttentionAction = rec.Summary, rec.Risk, rec.Action
-		}
 	}
 	// Derive the switch-confirm signal from the state we just computed (no second
 	// buffer strip): only a busy/recent terminal pane pays the small prompt-box

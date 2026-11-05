@@ -79,6 +79,9 @@ func startAriaWatcher(ctx context.Context, mgr *Manager, bus *uiBus, aria *Aria)
 		if !found {
 			return false
 		}
+		if toState == string(StateChoicePrompt) && aria.completionRefused(p) {
+			return false
+		}
 		minGap := awaitingInputMinGap
 		var pos int64
 		if toState == string(StateChoicePrompt) {

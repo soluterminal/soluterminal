@@ -1,7 +1,7 @@
 import { isPromptForUser } from '../lib/paneStatus';
 import { useMemo } from 'react';
 import { useStore, ariaObservationFingerprint, ARIA_DISMISSAL_TTL_MS, type AriaTail } from '../store';
-import { isActionable } from '../lib/actionability';
+import { isActionable, pickPreviewLine } from '../lib/actionability';
 import type { PaneAsk, PaneInfo } from '../types';
 import { api } from '../api';
 
@@ -61,21 +61,18 @@ export interface AttentionItem {
   workspaceName: string | null;
   /** 'unsent': a message another pane sent is still sitting in this pane's
    *  input box, or never typed (Send/Clear or Send…/Discard on the pane header). 'ask': an agent's open ask
-   *  (`ask`); one item per ask, not per pane. */
-  kind: 'choice' | 'awaiting' | 'unsent' | 'ask';
+   *  (`ask`); one item per ask, not per pane. 'held': messages held behind
+   *  text in the input box that nobody is working on; listed even when the
+   *  pane also has a prompt row, because the prompt row does not say so. */
+  kind: 'choice' | 'awaiting' | 'held' | 'unsent' | 'ask';
   ask?: PaneAsk;
   /** Daemon's explanation of WHY the human is needed, when it has one
    *  ("AskUserQuestion needs your answer…", "won't auto-approve —
    *  touches secrets", a cautious-mode decline). Undefined for plain
    *  no-auto-policy prompts. */
   reason?: string;
-  /** LLM-graded one-liner for the current prompt, when the async
-   *  summarizer has run ("wants to run a prod DB migration"). */
+  /** Plain preview, posted ask, or unsent-message explanation. */
   summary?: string;
-  /** low | medium | high blast-radius grade accompanying `summary`. */
-  risk?: string;
-  /** Suggested next step accompanying `summary`. */
-  action?: string;
 }
 
 /** The bell row for a pane's unsent message: a put-back one says so, and how
@@ -87,8 +84,33 @@ export function unsentSummary(p: PaneInfo): string {
   const behind = held > 0 && !msg.notTyped ? ` (${held} more ${held === 1 ? 'message waits' : 'messages wait'} behind it)` : '';
   if (msg.notTyped) return `Message from ${msg.sender} not sent — Send… or Discard it on the pane`;
   if (msg.putBack && msg.edited) return `Message from ${msg.sender} still in the input box after your edit${behind} — Clear it or keep it as your draft on the pane`;
-  if (msg.putBack) return `Message from ${msg.sender} put back in the input box after you stopped it${behind} — Send or Clear it on the pane`;
+  if (msg.putBack) return `Message from ${msg.sender} is back in the input box, unsent${behind} — Send or Clear it on the pane`;
   return `Message from ${msg.sender} not sent${behind} — Send or Clear it on the pane`;
+}
+
+/** Distinct senders by handle, oldest first; three names and "N more". */
+function heldSenderNames(p: PaneInfo): string {
+  // An unverified mark stays, so a claimed sender never reads as the real one.
+  const short = (sender: string) => {
+    const name = sender.split(' · ')[0];
+    return sender.endsWith(' (unverified)') && !name.endsWith(' (unverified)') ? `${name} (unverified)` : name;
+  };
+  const names = [...new Set((p.heldMessages ?? []).map((h) => short(h.sender)))];
+  return names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ');
+}
+
+/** The row for held messages stuck behind text in the input box: how many,
+ *  from whom, and what the person can do. It names no message text. */
+export function heldStuckSummary(p: PaneInfo): string {
+  const n = p.heldMessages?.length ?? 0;
+  const waiting = `${n} ${n === 1 ? 'message' : 'messages'} from ${heldSenderNames(p)} ${n === 1 ? 'waits' : 'wait'}`;
+  const msg = p.unsentMessage;
+  if (msg && !msg.notTyped) {
+    return msg.putBack && msg.edited
+      ? `${waiting} behind ${msg.sender}'s unsent message — Clear it or keep it as your draft on the pane`
+      : `${waiting} behind ${msg.sender}'s unsent message — Send or Clear it on the pane`;
+  }
+  return `${waiting} behind the text in the input box — send or clear it in the pane`;
 }
 
 // Shared selector. Memoized on the inputs so Bell + Panel + Sidebar
@@ -113,7 +135,9 @@ export function useAttentionItems(opts: { includeDismissed?: boolean } = {}): At
     // A stuck message is listed whenever the pane has no prompt row of its
     // own (no prompt, or one that is dismissed or not actionable).
     const pushUnsent = (p: PaneInfo) => {
-      if (!p.unsentMessage) return;
+      // The held row names a typed receipt; a message never typed keeps its own
+      // row for Send… and Discard.
+      if (!p.unsentMessage || (p.heldStuck && !p.unsentMessage.notTyped)) return;
       items.push({
         pane: p, dismissed: false, workspaceName: ownerByPane.get(p.id) ?? null, kind: 'unsent',
         summary: unsentSummary(p),
@@ -121,6 +145,12 @@ export function useAttentionItems(opts: { includeDismissed?: boolean } = {}): At
     };
     for (const p of Object.values(panes)) {
       if (p.status !== 'running') continue;
+      if (p.heldStuck) {
+        items.push({
+          pane: p, dismissed: false, workspaceName: ownerByPane.get(p.id) ?? null, kind: 'held',
+          summary: heldStuckSummary(p),
+        });
+      }
       if (!isPromptForUser(p)) {
         pushUnsent(p);
         continue;
@@ -153,9 +183,7 @@ export function useAttentionItems(opts: { includeDismissed?: boolean } = {}): At
         workspaceName: ownerByPane.get(p.id) ?? null,
         kind: p.state === 'choice-prompt' ? 'choice' : 'awaiting',
         reason: p.attentionReason,
-        summary: p.attentionSummary,
-        risk: p.attentionRisk,
-        action: p.attentionAction,
+        summary: p.attentionReason || (tail ? pickPreviewLine(tail.text) : undefined),
       });
     }
     for (const p of Object.values(panes)) {
@@ -163,16 +191,11 @@ export function useAttentionItems(opts: { includeDismissed?: boolean } = {}): At
         items.push({ pane: p, dismissed: false, workspaceName: ownerByPane.get(p.id) ?? null, kind: 'ask', ask, summary: ask.text });
       }
     }
-    // Choice prompts are more urgent than passive awaiting-input; within a
-    // kind, graded risk sorts high → low (a prod migration outranks a Read),
-    // then newest-activity first.
-    const riskWeight = (r?: string) => (r === 'high' ? 3 : r === 'medium' ? 2 : r === 'low' ? 1 : 0);
-    const kindWeight = { choice: 0, awaiting: 1, ask: 2, unsent: 3 } as const;
+    // Prompt kind, then newest activity. No model-derived ordering.
+    const kindWeight = { choice: 0, held: 1, awaiting: 2, ask: 3, unsent: 4 } as const;
     items.sort((a, b) => {
       if (a.kind !== b.kind) return kindWeight[a.kind] - kindWeight[b.kind];
       if (a.ask && b.ask) return b.ask.createdAt - a.ask.createdAt;
-      const rw = riskWeight(b.risk) - riskWeight(a.risk);
-      if (rw !== 0) return rw;
       return (b.pane.lastActivityMs ?? 0) - (a.pane.lastActivityMs ?? 0);
     });
     return items;
@@ -190,7 +213,7 @@ export function useAttentionBadge(): { count: number; hasChoice: boolean; firstP
     let hasChoice = false;
     let firstPaneId: string | null = null;
     const countUnsent = (p: PaneInfo) => {
-      if (!p.unsentMessage) return;
+      if (!p.unsentMessage || (p.heldStuck && !p.unsentMessage.notTyped)) return;
       count++;
       if (firstPaneId === null) firstPaneId = p.id;
     };
@@ -198,6 +221,10 @@ export function useAttentionBadge(): { count: number; hasChoice: boolean; firstP
       if (p.status !== 'running') continue;
       // Same gates as useAttentionItems, so the bell count and the panel
       // rows stay mathematically identical.
+      if (p.heldStuck) {
+        count++;
+        if (firstPaneId === null) firstPaneId = p.id;
+      }
       if (!isPromptForUser(p)) {
         countUnsent(p);
         continue;
@@ -249,13 +276,11 @@ export function AttentionInbox({
         const title = it.pane.title || it.pane.cmd.join(' ') || it.pane.id.slice(-6);
         const wsLabel = it.workspaceName ?? 'background';
         const age = shortRelative(it.pane.lastActivityMs ?? 0);
-        const kindLabel = it.kind === 'choice' ? 'approval needed' : it.kind === 'unsent' ? 'message not sent' : 'waiting for input';
-        const hoverDetail = it.summary
-          ? `${it.summary}${it.action ? `\n→ ${it.action}` : ''}`
-          : kindLabel;
+        const kindLabel = it.kind === 'choice' ? 'approval needed' : it.kind === 'held' ? 'messages waiting' : it.kind === 'unsent' ? 'message not sent' : 'waiting for input';
+        const hoverDetail = it.summary || kindLabel;
         return (
           <div
-            key={it.pane.id}
+            key={it.kind === 'held' ? `${it.pane.id}:held` : it.pane.id}
             className={`attention-row attention-${it.kind}`}
             title={`${title} · ${wsLabel} · ${hoverDetail} · ${age}`}
             onClick={() => {
@@ -272,7 +297,6 @@ export function AttentionInbox({
               </span>
               {it.summary && (
                 <span className="attention-summary-line">
-                  {it.risk && <span className={`attention-risk attention-risk-${it.risk}`}>{it.risk}</span>}
                   <span className="attention-summary">{it.summary}</span>
                 </span>
               )}

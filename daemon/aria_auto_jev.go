@@ -154,7 +154,7 @@ func ariaJevMenuEvidence(tail string, full bool) string {
 		if bytes > ariaJevMaxTailBytes {
 			break
 		}
-		if menuOptionRowRE.MatchString(line) {
+		if isMenuOptionRow(line) {
 			break
 		}
 		header := ariaJevActionHeaderRE.MatchString(line) || ariaJevToolActionHeaderRE.MatchString(line) || strings.HasPrefix(strings.ToLower(line), "suggestion:") || (full && ariaJevFullActionHeader(line))
@@ -902,7 +902,7 @@ func ariaJevHasActionContext(tail string) bool {
 	}
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
-		if menuOptionRowRE.MatchString(line) {
+		if isMenuOptionRow(line) {
 			return false
 		}
 		if strings.HasPrefix(strings.ToLower(line), "suggestion:") {
@@ -911,7 +911,7 @@ func ariaJevHasActionContext(tail string) bool {
 		if ariaJevActionHeaderRE.MatchString(line) || ariaJevToolActionHeaderRE.MatchString(line) {
 			for _, payload := range lines[i+1:] {
 				payload = strings.TrimSpace(payload)
-				if menuOptionRowRE.MatchString(payload) {
+				if isMenuOptionRow(payload) {
 					return false
 				}
 				if payload != "" && !strings.HasSuffix(payload, "?") && !strings.HasPrefix(strings.ToLower(payload), "do you want") && !strings.HasPrefix(strings.ToLower(payload), "would you like") && !strings.HasPrefix(payload, "╌") {

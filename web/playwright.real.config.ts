@@ -8,7 +8,7 @@ if (!/^\d+$/.test(process.env.SOLU_REAL_E2E_PID ?? '')) throw new Error('Missing
 
 // Run only when selected: the failure probe, and specs that need a startup
 // scenario (scripts/side-daemon-e2e.py SCENARIOS).
-const selectedOnly = ['failure-artifacts.spec.ts', 'approve-device.spec.ts'];
+const selectedOnly = ['failure-artifacts.spec.ts', 'approve-device.spec.ts', 'browser-origin.spec.ts'];
 
 export default defineConfig({
   testDir: './e2e-real',

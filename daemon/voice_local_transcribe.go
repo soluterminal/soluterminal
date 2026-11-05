@@ -95,7 +95,7 @@ func (a *apiServer) transcribeViaCloudCleanLocally(w http.ResponseWriter, r *htt
 		writeJSON(w, 200, m)
 		return
 	}
-	log.Printf("voice[daemon]: local cleanup failed (%s); using the cloud", out.Detail)
+	log.Printf("voice[daemon]: local cleanup failed detailLen=%d; using the cloud", len(out.Detail))
 	cleanBody, _ := json.Marshal(map[string]string{"text": text, "context": termContext, "mode": string(profile), "language": voiceclean.NormalizeLanguage(r.FormValue("language"))})
 	cleanBody = cloudCleanupBody(cleanBody, a.trustedDevices.policy() == remoteAccessApproved)
 	status, header, cloudPayload, err := a.cloudCleanupCall(r.Context(), cloudBase, cloudToken, cleanBody)

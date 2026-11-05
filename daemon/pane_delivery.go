@@ -118,6 +118,10 @@ var (
 	queueWatchLimit    = 4 * time.Hour
 	queueWatchSleep    = time.Sleep
 	queueWatchEnded    = func(*Pane, string) {}
+	// returnWatchGrace: how long after a turn ends the input box is still
+	// watched for a message that came back. returnWatchEnded is a test seam.
+	returnWatchGrace = 5 * time.Second
+	returnWatchEnded = func(*Pane, string) {}
 )
 
 // paneVisibleScreen prefers the grid model the state machine reads (menus,
@@ -359,6 +363,9 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 	codex := !hasClaude
 	// A working Claude queues the Enter; only then is its queue read.
 	claudeBusy := hasClaude && (deliveryPaneBusy(p) || claudeTurnRunningText(deliveryScreenText(p)))
+	// An agent's message to a working pane is followed after it leaves the box
+	// (startReturnWatch). Only agents': the person's own box is theirs to see.
+	watchReturn := mode == deliveryNoSteer && (claudeBusy || codex && (deliveryPaneBusy(p) || codexTurnRunningText(deliveryScreenText(p)) || deliveryCodexTurnOpen(p)))
 	first := []byte(body)
 	if codex {
 		first = []byte("\x1b[200~" + body + "\x1b[201~")
@@ -448,7 +455,7 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 		return wrote, deliveryUnconfirmed, nil
 	}
 	if !holds {
-		return wrote, p.leftComposerOutcome(codex, queue, body, senders...), nil
+		return wrote, p.leftComposerOutcome(codex, queue, watchReturn, typed, body, senders...), nil
 	}
 	// Still in the box after the settle delay: the first key landed too soon
 	// (a newline inside the paste, or before Claude took the paste in). It is
@@ -483,7 +490,7 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 	case holds:
 		return wrote, deliveryLeftInComposer, nil
 	}
-	return wrote, p.leftComposerOutcome(codex, queue, body, senders...), nil
+	return wrote, p.leftComposerOutcome(codex, queue, watchReturn, revision, body, senders...), nil
 }
 
 // chooseSubmitKey picks the key for the pasted draft, or says why none may
@@ -561,9 +568,19 @@ func deliverySubmitKey(p *Pane, codex bool) (key []byte, queue bool) {
 // queue key, or Enter into a working Claude, it is queued when the agent's
 // queue shows it (the list can draw a frame after the box empties, so it is
 // read a few times); otherwise the turn ended first and the agent submitted
-// it as a new turn.
-func (p *Pane) leftComposerOutcome(codex, queue bool, body string, senders ...string) deliveryOutcome {
+// it as a new turn. watchReturn: the pane was working when this was sent, so a
+// message that did not show as queued is followed until the turn ends. keyRev
+// is the input revision right after the submit key: input later than it is
+// not this message.
+func (p *Pane) leftComposerOutcome(codex, queue, watchReturn bool, keyRev uint64, body string, senders ...string) deliveryOutcome {
+	by := ""
+	if len(senders) > 0 {
+		by = senders[0]
+	}
 	if !queue {
+		if watchReturn {
+			p.startReturnWatch(body, by, codex, keyRev)
+		}
 		return deliverySubmitted
 	}
 	for i := 0; i < deliveryQueueListPolls; i++ {
@@ -571,15 +588,116 @@ func (p *Pane) leftComposerOutcome(codex, queue bool, body string, senders ...st
 			deliverySleep(deliveryPollInterval)
 		}
 		if agentQueueHolds(deliveryScreenText(p), codex, body) {
-			by := ""
-			if len(senders) > 0 {
-				by = senders[0]
-			}
 			go p.watchQueuedMessage(body, by, codex)
 			return deliveryQueued
 		}
 	}
+	if watchReturn {
+		p.startReturnWatch(body, by, codex, keyRev)
+	}
 	return deliverySubmitted
+}
+
+// returnWatch is one watch of a message sent to a working pane. Its seams are
+// read when it starts: it can outlive the delivery that started it.
+type returnWatch struct {
+	screen          func(*Pane) string
+	turnOpen        func(*Pane) bool
+	sleep           func(time.Duration)
+	interval, limit time.Duration
+	grace           time.Duration
+	ended           func(*Pane, string)
+	body, by        string
+	codex           bool
+	revision        uint64
+}
+
+// startReturnWatch follows a message that left the input box of a working
+// pane without showing in its queue. "Left the box" is not "the agent took
+// it": on 2026-11-04 such a message was in the box again once the turn ended,
+// logged as submitted, with six messages held behind it for 72 minutes and
+// no receipt to show for it.
+func (p *Pane) startReturnWatch(body, by string, codex bool, keyRev uint64) {
+	w := returnWatch{
+		screen: deliveryScreenText, turnOpen: deliveryCodexTurnOpen,
+		sleep: queueWatchSleep, interval: queueWatchInterval, limit: queueWatchLimit,
+		grace: returnWatchGrace, ended: returnWatchEnded,
+		body: body, by: by, codex: codex, revision: keyRev,
+	}
+	go p.watchForReturn(w)
+}
+
+// watchForReturn records the message as unsent if the input box holds it and
+// nothing else. It ends when the pane has not been working for the grace
+// period, and it reads the screen only: nothing is typed.
+func (p *Pane) watchForReturn(w returnWatch) {
+	sender := w.by
+	if sender == "" {
+		sender = "SoluTerminal"
+	}
+	p.mu.Lock()
+	conn := p.agentConn
+	p.mu.Unlock()
+	same := func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.Status == PaneRunning && p.agentConn == conn && !p.respawning.Load()
+	}
+	outcome := "gone"
+	defer func() { w.ended(p, outcome) }()
+	var settled time.Time
+	for deadline := time.Now().Add(w.limit); time.Now().Before(deadline); {
+		w.sleep(w.interval)
+		if !same() {
+			return
+		}
+		screen := w.screen(p)
+		// A menu covers the input box, and the queue may still hold it.
+		if isGridChoicePromptText(deliveryMenuTextFrom(p, w.codex, screen), w.codex) || agentQueueHolds(screen, w.codex, w.body) {
+			settled = time.Time{}
+			continue
+		}
+		if p.boxHoldsReturned(screen, w) {
+			p.deliveryMu.Lock()
+			screen = w.screen(p)
+			returned := same() && !isGridChoicePromptText(deliveryMenuTextFrom(p, w.codex, screen), w.codex) && p.boxHoldsReturned(screen, w)
+			if returned {
+				p.recordPutBackMessage(sender, w.body, !w.codex, p.inputRevision.Load())
+			}
+			p.deliveryMu.Unlock()
+			if returned {
+				outcome = string(deliveryLeftInComposer)
+				coordLog.record(coordinationEvent{Kind: "queued", Pane: p.ID, By: w.by, Outcome: outcome})
+				return
+			}
+			continue
+		}
+		if (w.codex && (codexTurnRunningText(screen) || w.turnOpen(p))) || (!w.codex && claudeTurnRunningText(screen)) {
+			settled = time.Time{}
+			continue
+		}
+		if settled.IsZero() {
+			settled = time.Now()
+		}
+		if time.Since(settled) >= w.grace {
+			outcome = string(deliverySubmitted)
+			return
+		}
+	}
+}
+
+// boxHoldsReturned reports the input box holding this message and nothing
+// else. A collapsed paste placeholder could be the person's own, so it counts
+// only if no input reached the pane since the message was sent.
+func (p *Pane) boxHoldsReturned(screen string, w returnWatch) bool {
+	draft, known := composerDraft(screen, w.codex)
+	if !known || draft == "" {
+		return false
+	}
+	if draft == conditionalDraftText(w.body) {
+		return true
+	}
+	return p.inputRevision.Load() == w.revision && composerHoldsExactly(screen, w.codex, w.body)
 }
 
 // recordPutBackMessage is recordUnsentMessage for a queued message the agent

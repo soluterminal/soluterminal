@@ -168,6 +168,21 @@ func (a *Aria) recordEvalOutcome(o AriaEvalOutcome) {
 	a.noteAttentionOutcome(o)
 }
 
+const ariaModelDeclineReason = "Auto-approve left this request for your review."
+
+// Model explanations belong in the bounded evaluation record, never in the
+// attention reason consumed by the inbox, pane DTO and phone push payload.
+func (a *Aria) recordModelEvalOutcome(o AriaEvalOutcome) {
+	if a == nil {
+		return
+	}
+	a.evalLog.record(o)
+	if o.Kind == "declined" {
+		o.Reason = ariaModelDeclineReason
+	}
+	a.noteAttentionOutcome(o)
+}
+
 // recordEvalOutcomeDedup is recordEvalOutcome but collapses back-to-back
 // identical entries for a pane (used for the per-sweep "never auto-answered"
 // skip so it logs once per distinct question, not every 5s).

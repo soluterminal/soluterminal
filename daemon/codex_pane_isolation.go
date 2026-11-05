@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -62,7 +61,7 @@ func codexPaneNeedsOption(cmd []string, option string) bool {
 func codexSupportsNoDaemon(bin string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "--help")
+	cmd := hiddenCommand(ctx, bin, "--help")
 	cmd.Env = providerChildEnvForBin(bin, os.Environ())
 	out, err := cmd.Output()
 	return err == nil && strings.Contains(string(out), "--no-daemon")

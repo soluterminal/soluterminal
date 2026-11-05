@@ -862,7 +862,7 @@ func liveWSLInterop(probeExe string) string {
 func interopWorks(probeExe, sock string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, probeExe, "-NoProfile", "-NonInteractive", "-Command", "exit 0")
+	cmd := hiddenCommand(ctx, probeExe, "-NoProfile", "-NonInteractive", "-Command", "exit 0")
 	cmd.Env = envWithInterop(os.Environ(), sock)
 	return cmd.Run() == nil
 }

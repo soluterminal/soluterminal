@@ -301,6 +301,7 @@ func (u *Updater) syncChannel() {
 	u.controlFetchedAt = time.Time{}
 	u.ctrlEffective = nil
 	u.status.Latest = ""
+	u.status.LastSuccessMs = 0
 	u.status.Notes = ""
 	u.status.SourceSha = ""
 	u.status.SourceProvenance = ""

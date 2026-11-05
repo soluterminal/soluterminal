@@ -79,10 +79,14 @@ func applyDetached(cmd *exec.Cmd) {
 	cmd.SysProcAttr = detachedSysProcAttr()
 }
 
-// applyNoWindow suppresses console flashes for short-lived probe commands that
-// still need stdout/stderr pipes, such as `claude --version`.
+// applyNoWindow suppresses console flashes for background commands that still
+// need stdout/stderr pipes, such as `claude --version`. It keeps any attributes
+// already set; Windows ignores CREATE_NO_WINDOW alongside DETACHED_PROCESS.
 func applyNoWindow(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= createNoWindow
 }
 
 // applyDetachedNoBreakaway is the fallback for applyDetached when the

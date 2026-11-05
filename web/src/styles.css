@@ -2799,6 +2799,11 @@ button.section-header-toggle:hover:not(:disabled) {
 .ws-badge-unsent {
   background: var(--fg-dim);
 }
+/* Messages stuck behind text in a pane's input box: work has stopped there,
+   so the waiting-on-you colour, not the dim one. */
+.ws-badge-held {
+  background: var(--accent);
+}
 .ws-badge-choice {
   background: var(--warn);
   box-shadow: 0 0 8px color-mix(in srgb, var(--warn) 70%, transparent);
@@ -2955,22 +2960,6 @@ body.mobile-approval-visible .approval-actions { display: none; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* Risk chip: the blast-radius grade from the attention summarizer. */
-.attention-risk {
-  flex-shrink: 0;
-  font-size: 9px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 0 4px;
-  border-radius: 3px;
-  line-height: 14px;
-  color: var(--fg-dim);
-  background: var(--bg-3);
-}
-.attention-risk-medium { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
-.attention-risk-high { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
-
 /* Small relative-time label next to workspace name. Shows "now" / "2m" /
    "3d" — tells you when this workspace was last touched without taking
    much space. */

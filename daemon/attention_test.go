@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -689,5 +690,44 @@ func TestCurrentForReconcilesStaleRecord(t *testing.T) {
 	att, reason = e.CurrentFor(p, StateChoicePrompt)
 	if att != AttentionNeedsUser || reason != "kept-reason" {
 		t.Fatalf("CurrentFor with agreeing record = %q/%q, want needs-user/kept-reason", att, reason)
+	}
+}
+
+// Attention is a local signal. Even an enabled operator's pane must not
+// request a completion merely because a person needs to answer it.
+func TestAttentionRefreshNeverRequestsCompletion(t *testing.T) {
+	completionTestVerdict(t, true)
+	for _, mode := range []string{"", "cautious", "always"} {
+		for _, native := range []bool{false, true} {
+			t.Run(mode+"/native="+strconv.FormatBool(native), func(t *testing.T) {
+				fixture, calls := completionTestServer(t)
+				p := testPaneWithTail(t, "local-attention", "Fixture", "Do you want to proceed?\n❯ 1. Yes\n  2. No\n")
+				p.AutoMode = mode
+				if native {
+					p.Kind = "native"
+					p.setNativePending(&NativeApproval{RequestID: "fixture-request", ToolName: "AskUserQuestion", RawInput: json.RawMessage(`{"question":"Review this?"}`)})
+				}
+				p.computeStateCached()
+				p.SetAutoDeclined("Review this request")
+				mgr := testManagerWithPane(p)
+				base, credential := fixture.cloudCreds()
+				a, err := NewAria(mgr, nil, nil, nil, base, credential, t.TempDir(), nil)
+				if err != nil {
+					t.Fatal("could not construct attention fixture")
+				}
+				engine := newAttentionEngine(a.mgr)
+				engine.SetAria(a)
+				for i := 0; i < 3; i++ {
+					engine.Refresh(p)
+				}
+				if state, _ := p.AttentionNow(); state != AttentionNeedsUser {
+					t.Fatal("fixture does not need the person")
+				}
+				time.Sleep(100 * time.Millisecond)
+				if calls.Load() != 0 {
+					t.Fatal("attention refresh sent pane text for a completion")
+				}
+			})
+		}
 	}
 }

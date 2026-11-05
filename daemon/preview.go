@@ -620,14 +620,6 @@ func (m *previewManager) startOwnedAdmitted(ctx context.Context, target PreviewT
 		if err != nil {
 			return nil, 0, 0, "", err
 		}
-		// Mount the live daemon behind /api/* so a previewed app talks to
-		// real data instead of rendering empty state.
-		if previewAPIUpstream != "" {
-			if upErr := server.setUpstream(previewAPIUpstream); upErr != nil {
-				_ = server.Close()
-				return nil, 0, 0, "", upErr
-			}
-		}
 		_ = previewTouchBundle(target.BundleDir)
 		return &previewOwnedRuntime{static: server}, server.Port(), 0, "", nil
 	case previewModeSpawn:

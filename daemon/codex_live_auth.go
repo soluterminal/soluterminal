@@ -108,7 +108,7 @@ func codexLiveCLISupported(cmd, env []string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	versionCmd := exec.CommandContext(ctx, bin, "--version")
+	versionCmd := hiddenCommand(ctx, bin, "--version")
 	versionCmd.Env = providerChildEnvForBin(bin, os.Environ())
 	out, err := versionCmd.Output()
 	return err == nil && codexLiveVersionSupported(string(out))

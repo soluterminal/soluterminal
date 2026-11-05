@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -131,7 +130,7 @@ type hostStorageLedger struct {
 }
 
 var hostStorageWSLPath = func(ctx context.Context, windowsPath string) ([]byte, error) {
-	return exec.CommandContext(ctx, "wslpath", "-u", windowsPath).Output()
+	return hiddenCommand(ctx, "wslpath", "-u", windowsPath).Output()
 }
 
 func newHostStorageLedger(dataDir string) *hostStorageLedger {

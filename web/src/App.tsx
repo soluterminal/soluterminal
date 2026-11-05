@@ -150,6 +150,7 @@ import { useAskToConnectOnSignIn } from './accountConnect';
 import { useAgentIntegrationPrompt } from './agentIntegration';
 import { startAgent } from './agentStart';
 import { AgentInstallPrompt } from './components/AgentInstallPrompt';
+import { heldStuckSummary } from './components/AttentionInbox';
 import { DeviceApprovalPrompt } from './components/DeviceApprovalPrompt';
 import { ApproveThisScreenPrompt } from './components/ApproveThisScreenPrompt';
 import { HumanProofBanner } from './components/HumanProofBanner';
@@ -1328,11 +1329,6 @@ export default function App() {
             };
             st.setAriaStatusSnapshot(payload);
           } catch { /* malformed; ignore */ }
-        } else if (msg.type === 'pane-attention-summary') {
-          // An LLM-graded attention summary landed for a needs-user pane.
-          // Low frequency (one per prompt, capped hourly) — a level resync
-          // of the pane list picks up the new DTO fields.
-          void st.refreshPanes();
         } else if (msg.type === 'aria-auto-suppressed') {
           // Paused or burst-limited. Refresh status so the footer pill
           // reflects the current pause state.
@@ -1463,6 +1459,8 @@ export default function App() {
   //   lastAttention : the most recent attention we've seen ('' = never seen)
   //   idleSince : when the pane first became idle after being busy (fallback path)
   //   fired     : whether we've already notified for the current idle run
+  //   heldAlerted: already alerted for this stuck episode; ends when the
+  //               pane has no held messages, so typing doesn't re-alert
   //   primed    : true after we've observed at least one state — prevents
   //               firing on the very first observation (e.g. after page reload
   //               the pane might already be awaiting-input from hours ago)
@@ -1471,6 +1469,7 @@ export default function App() {
     lastAttention: string;
     idleSince: number;
     fired: boolean;
+    heldAlerted: boolean;
     primed: boolean;
   };
   const schedRef = useRef<Record<string, SchedEntry>>({});
@@ -1609,6 +1608,7 @@ export default function App() {
           lastAttention: attention ?? '',
           idleSince: 0,
           fired: false,
+          heldAlerted: false,
           primed: false,
         };
 
@@ -1617,6 +1617,7 @@ export default function App() {
           // already awaiting-input (pane may have been sitting there for hours).
           st.lastState = state;
           st.lastAttention = attention ?? '';
+          st.heldAlerted = !!pane.heldStuck;
           st.primed = true;
           schedRef.current[pane.id] = st;
           continue;
@@ -1643,6 +1644,15 @@ export default function App() {
         }
         if ((attention ?? '') !== prevAttention) {
           logEvent('attention-change', pane, `${prevAttention || '∅'} → ${attention ?? '∅'}`);
+        }
+
+        // Held messages stuck behind text in the input box: once per episode.
+        if (pane.heldStuck && !st.heldAlerted) {
+          st.heldAlerted = true;
+          logEvent('held-stuck', pane, `held=${pane.heldMessages?.length ?? 0}`);
+          fire(pane, `Messages waiting · ${loc}`, heldStuckSummary(pane), { alsoToast: true });
+        } else if (!pane.heldMessages?.length) {
+          st.heldAlerted = false;
         }
 
         // Tier 1: Claude prompts. When the daemon reports the attention

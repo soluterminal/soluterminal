@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -79,7 +78,7 @@ func newWfHostStorageProber() *hostStorageProber {
 	p := &hostStorageProber{insideWSL: isInsideWSL, resolvePS: resolvePowerShell, env: wslInteropEnv, now: time.Now, timeout: 12 * time.Second, minInterval: time.Minute, failBackoff: time.Minute}
 	p.distroName = resolveDistroName
 	p.run = func(ctx context.Context, psExe string, env []string, script string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, psExe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+		cmd := hiddenCommand(ctx, psExe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
 		cmd.Env = env
 		return cmd.Output()
 	}
@@ -89,7 +88,7 @@ func newWfHostStorageProber() *hostStorageProber {
 func resolveDistroName(ctx context.Context) (string, error) {
 	c, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(c, "wslpath", "-w", "/").Output()
+	out, err := hiddenCommand(c, "wslpath", "-w", "/").Output()
 	if err == nil {
 		if name, ok := distroFromWindowsRoot(strings.TrimSpace(string(out))); ok {
 			return name, nil

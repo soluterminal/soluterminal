@@ -290,7 +290,7 @@ func reportWatchdogRespawn(ev *watchdogRespawnEvidence) {
 var reUserPath = regexp.MustCompile(`(^|[\s"'=(\[])((?:~|[A-Za-z]:)?[\\/][^\s"'` + "`" + `:,;()<>\[\]{}]+)`)
 
 // scrubUserPaths replaces paths that could name a user's own folders with
-// "[path]". The app's own Go source files (stack frames), its data folder
+// "[path]". Module-relative Go source files (official builds use -trimpath), its data folder
 // (~/.solu) and API routes are kept because they are what makes a report
 // debuggable and say nothing about the user.
 func scrubUserPaths(s string) string {
@@ -307,8 +307,6 @@ func scrubUserPaths(s string) string {
 
 func isAppOwnPath(p string) bool {
 	switch {
-	case strings.HasSuffix(p, ".go"):
-		return true
 	case strings.HasPrefix(p, "~/.solu"), strings.HasPrefix(p, "~\\.solu"):
 		return true
 	case strings.HasPrefix(p, "/api/"):

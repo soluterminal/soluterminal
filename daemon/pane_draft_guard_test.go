@@ -262,7 +262,7 @@ func TestSendInputRefusesWhileThePersonTypes(t *testing.T) {
 	screen.Store(deliveryCodexScreen("halfway through"))
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus()}
 	text, isErr := mcpResultText(t, a.mcpToolSendInput(map[string]any{"pane_id": "pane_draft", "text": codexProbeMessage + "\n"}, "pane_caller"))
-	if !isErr || !strings.HasPrefix(text, "queued: the person is typing in pane pane_draft") || !strings.Contains(text, "Do not resend") {
+	if !isErr || !strings.HasPrefix(text, "held: pane pane_draft's input box has text") || !strings.Contains(text, "Do not resend") {
 		t.Fatalf("send_input = %q (error %v)", text, isErr)
 	}
 	expectNoFrame(t, frames, "nothing typed")
@@ -283,7 +283,7 @@ func TestAskPaneWaitsOnAHeldMessageAndReportsADiscard(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &res); err != nil {
 		t.Fatal(err)
 	}
-	if res.Status != "still_working" || res.Delivery != "held" || !strings.HasPrefix(res.Hint, "queued: the person is typing") {
+	if res.Status != "still_working" || res.Delivery != "held" || !strings.HasPrefix(res.Hint, "held: that pane's input box has text") {
 		t.Fatalf("ask_pane = %+v", res)
 	}
 	expectNoFrame(t, frames, "nothing typed")

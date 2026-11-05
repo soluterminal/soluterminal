@@ -444,15 +444,6 @@ func (p *Pusher) fire(pane *Pane, kind string) {
 	// explain itself instead of a generic state line. Empty for plain
 	// no-auto-policy prompts; older clouds ignore the extra field.
 	_, attReason := pane.AttentionNow()
-	// LLM-graded attention item, when the async summarizer already ran for
-	// this prompt: the phone notification reads "wants to run a prod DB
-	// migration — risky" instead of a generic state line. Empty when the
-	// summary hasn't landed (push often fires first); older clients ignore
-	// the extra fields.
-	var aiSummary, aiRisk string
-	if rec := pane.attentionSummaryNow(); rec != nil {
-		aiSummary, aiRisk = rec.Summary, rec.Risk
-	}
 	body, _ := json.Marshal(map[string]string{
 		"paneId":        snap.ID,
 		"state":         kind,
@@ -463,8 +454,6 @@ func (p *Pusher) fire(pane *Pane, kind string) {
 		"toolName":      toolName,
 		"summary":       summary,
 		"reason":        attReason,
-		"aiSummary":     aiSummary,
-		"aiRisk":        aiRisk,
 	})
 	p.deliver(body, snap.ID, kind)
 }
@@ -758,8 +747,6 @@ var pushContentFields = map[string]string{
 	"cwd":           "",
 	"toolName":      "",
 	"reason":        "",
-	"aiSummary":     "",
-	"aiRisk":        "",
 }
 
 func minimisePushBody(body []byte) []byte {
@@ -767,6 +754,9 @@ func minimisePushBody(body []byte) []byte {
 	if json.Unmarshal(body, &m) != nil {
 		return body
 	}
+	// Discard legacy model-written fields rather than forwarding them.
+	delete(m, "aiSummary")
+	delete(m, "aiRisk")
 	for k, neutral := range pushContentFields {
 		if _, ok := m[k]; ok {
 			m[k] = neutral

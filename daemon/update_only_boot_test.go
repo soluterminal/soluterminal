@@ -52,6 +52,8 @@ var updateOnlyBootCalls = map[string]bool{
 	"updater.SetCloudTeamUpdates": true, "updater.SetCloudCreds": true, "entitlements.refreshMachine": true,
 	"loadOrCreateToken": true, "gate.middleware": true, "maxRequestBodyMiddleware": true,
 	"logMiddleware": true, "writeJSON": true, "a.liveHealthIdentity": true, "a.updateApplyShell": true,
+	// Observational compatibility counters; no services or boot work.
+	"observeRequestMedia": true,
 }
 
 // The structural guard: every call in update_only_boot.go is on the list.

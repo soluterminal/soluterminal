@@ -317,7 +317,7 @@ func (p *Pane) writeCodexProtocolFrame(frame []byte, what string) {
 		// A history read is continuity enrichment, not a failed model turn.
 		// Logging preserves diagnostics without injecting EvError, which generic
 		// native bookkeeping interprets as a live-turn settle signal.
-		log.Printf("native(codex): pane=%s %s failed: %v", p.ID, what, err)
+		log.Printf("native(codex): pane=%s %s failed errorType=%T", p.ID, what, err)
 	}
 }
 
@@ -814,8 +814,8 @@ func (p *Pane) submitNativeInputWithContext(context, text string) (nativeSubmitR
 		p.emitNativeEvent(NativeEvent{Type: EvUserText, Text: context})
 	}
 	userSeq := p.emitNativeEvent(NativeEvent{Type: EvUserText, Text: text})
-	log.Printf("[native-input] pane=%s freshTurn=%v userSeq=%d textLen=%d text=%q",
-		p.ID, freshTurn, userSeq, len(text), truncateForLog(text, 64))
+	log.Printf("[native-input] pane=%s freshTurn=%v userSeq=%d textLen=%d",
+		p.ID, freshTurn, userSeq, len(text))
 
 	return nativeSubmitResult{Bytes: len(envelope), FreshTurn: freshTurn, UserSeq: userSeq}, nil
 }

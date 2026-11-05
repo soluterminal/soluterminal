@@ -8,7 +8,7 @@ it('names a put-back message and the messages waiting behind it in the bell', ()
     unsentMessage: { id: 'r1', sender: '@flag-guard', putBack: true },
     heldMessages: [{ id: 'h1', sender: '@a', text: 'x', at: 1 }, { id: 'h2', sender: '@b', text: 'y', at: 2 }],
   } as PaneInfo;
-  expect(unsentSummary(pane)).toBe('Message from @flag-guard put back in the input box after you stopped it (2 more messages wait behind it) — Send or Clear it on the pane');
+  expect(unsentSummary(pane)).toBe('Message from @flag-guard is back in the input box, unsent (2 more messages wait behind it) — Send or Clear it on the pane');
   expect(unsentSummary({ id: 'p2', unsentMessage: { id: 'r2', sender: '#5 Claude' } } as PaneInfo)).toBe('Message from #5 Claude not sent — Send or Clear it on the pane');
 });
 

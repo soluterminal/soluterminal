@@ -9,6 +9,7 @@ import { userFacingNotes } from '../lib/releaseNotes';
 import { useOperatorFeatures } from '../entitlements';
 import { isPreviewBuild } from '../previewBoot';
 import { installerUpdate } from '../lib/installerUpdate';
+import { channelReleaseWait } from '../lib/channelReleaseWait';
 import { applyShellUpdateNative, browserPanePing, isDesktopApp, revealShellInstallerNative } from '../tauri-browser';
 import { fallBackToDownloadPage } from '../lib/shellUpdateFallback';
 import { daemonOnThisComputer, installerNeedsLocalMode, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from '../lib/shellUpdateRoute';
@@ -193,6 +194,9 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   // server for days otherwise renders a green check. Say so instead, anchored
   // to the last time a check actually got through (lastSuccessMs).
   const unreachable = !!lastError && !anyAvailable;
+  // Nothing to install, but "Up to date" would hide that this install follows
+  // the other build and is on the old one until that build's next release.
+  const channelWait = channelReleaseWait(status);
   // Keep one queued surface mounted while the typed cause/details update.
   const workflowBackoff = holdPresentation.workflowBackoff;
   const queued = !!queuedRollbackTarget || ((!!deferredUpdate || workflowDeferred) && available);
@@ -475,6 +479,8 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
             <span className="vp-verdict-warn" aria-hidden="true"><IconAlertTriangle size={12} style={{ verticalAlign: '-2px' }} /></span>
             Can't reach update server
           </>
+        ) : channelWait ? (
+          <span data-testid="vp-channel-wait">{channelWait}</span>
         ) : (
           <>
             <span className="vp-verdict-check" aria-hidden="true">✓</span>

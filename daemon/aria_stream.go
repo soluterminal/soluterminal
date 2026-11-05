@@ -177,7 +177,7 @@ func (a *Aria) consumeStream(r io.Reader, emit func(map[string]any)) ([]ariaBloc
 			} `json:"usage,omitempty"`
 		}
 		if err := json.Unmarshal([]byte(data), &evt); err != nil {
-			log.Printf("aria: bad SSE payload: %v (%q)", err, truncateStr(data, 200))
+			log.Printf("aria: bad SSE payload bytes=%d", len(data))
 			continue
 		}
 		switch evt.Type {

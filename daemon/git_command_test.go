@@ -185,7 +185,10 @@ func TestWfGitSlowWarningAndSnapshot(t *testing.T) {
 	if after.LastWedge.Command != "git -C /repo status --short" || after.LastWedge.RepoKey != "repo-key" || !after.LastWedge.LandLockHeld {
 		t.Fatalf("last wedge = %+v", after.LastWedge)
 	}
-	for _, want := range []string{"workflow: WARN git slow", "git -C /repo status --short", "timeout", "repo=repo-key", "landLockHeld=true"} {
+	if strings.Contains(logs.String(), "status --short") {
+		t.Fatal("command arguments reached application log")
+	}
+	for _, want := range []string{"workflow: WARN git slow", "cwd=/repo argCount=2", "timeout", "repo=repo-key", "landLockHeld=true"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Fatalf("warning missing %q: %s", want, logs.String())
 		}

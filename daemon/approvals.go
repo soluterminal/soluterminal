@@ -597,8 +597,8 @@ func (p *Pane) resolveApprovalWithPolicy(reqID string, allow bool, denyReason st
 	if !allow {
 		action = "deny"
 	}
-	log.Printf("[native-turn] pane=%s approval_resolved callId=%s reqId=%s tool=%s action=%s reason=%q",
-		p.ID, pending.ToolUseID, pending.RequestID, pending.ToolName, action, denyReason)
+	log.Printf("[native-turn] pane=%s approval_resolved callId=%s reqId=%s tool=%s action=%s reasonLen=%d",
+		p.ID, pending.ToolUseID, pending.RequestID, pending.ToolName, action, len(denyReason))
 	// Emit a durable, request-correlated resolution edge on the SAME native
 	// stream as permission_request. Focus can now dismiss the exact card as soon
 	// as the control response is written, instead of waiting for a long-running

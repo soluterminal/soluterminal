@@ -257,7 +257,7 @@ func removeClaudeMcpServer(home, backupDir string, owner agentIntegrationOwner) 
 			return res
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		out, runErr := exec.CommandContext(ctx, claudeBin, "mcp", "remove", "--scope", "user", "soluterminal").CombinedOutput()
+		out, runErr := hiddenCommand(ctx, claudeBin, "mcp", "remove", "--scope", "user", "soluterminal").CombinedOutput()
 		cancel()
 		if runErr == nil {
 			res.Result = "removed"

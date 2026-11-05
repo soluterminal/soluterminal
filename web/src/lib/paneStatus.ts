@@ -11,7 +11,7 @@ export function paneRowStatus(p: PaneInfo): PaneRowStatus {
   // An exited retained worker can still host a real preservation decision.
   if ((p.asks?.length ?? 0) > 0) return 'needs-you';
   if (p.status === 'exited') return 'finished';
-  if (p.attention === 'needs-user' || isPromptForUser(p)) return 'needs-you';
+  if (p.attention === 'needs-user' || isPromptForUser(p) || p.heldStuck) return 'needs-you';
   // 'recent' is only the 3s tail after any screen change, including the user's
   // own typing and composer redraws. 'busy' is fresh output, with immediate
   // keystroke echo already reported idle by the daemon.
@@ -20,4 +20,14 @@ export function paneRowStatus(p: PaneInfo): PaneRowStatus {
   // Completion evidence, not an idle timeout: idle alone doesn't mean done.
   if (p.attention !== 'auto-pending' && !p.turn?.uncertain && last && !last.historical && last.outcome !== 'failed' && last.outcome !== 'interrupted') return 'finished';
   return 'idle';
+}
+
+/** What a needs-you row says: a menu is answered in the pane, while an ask may
+ *  be a job to do elsewhere and has no prompt to look for. */
+export function paneNeedsYouLabel(p: PaneInfo): string {
+  const asks = p.asks?.length ?? 0;
+  const parts: string[] = [];
+  if (p.status !== 'exited' && p.state === 'choice-prompt' && isPromptForUser(p)) parts.push('needs answer');
+  if (asks > 0) parts.push(asks === 1 ? '1 ask' : `${asks} asks`);
+  return parts.join(' · ') || 'needs you';
 }

@@ -147,6 +147,7 @@ func TestCautiousProvidersReceiveCurrentDialogWithoutEarlierOutput(t *testing.T)
 			}
 			observed := make(chan string, 1)
 			if test.team {
+				completionTestVerdict(t, true)
 				a.teamFeatures = func() bool { return true }
 				a.settings = &ariaSettingsStore{}
 				t.Setenv(ariaJevAutoEnv, "0")

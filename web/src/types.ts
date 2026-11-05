@@ -158,6 +158,9 @@ export interface PaneInfo {
    *  oldest first. The daemon types each once the input box is empty and the
    *  person has stopped typing. text is the message without its sender label. */
   heldMessages?: { id: string; sender: string; text: string; at: number }[];
+  /** The held messages wait behind text in the input box that nobody is
+   *  working on: only the person can clear it, so the pane reads nothing. */
+  heldStuck?: boolean;
 	// Current live-auth evidence, distinct from selection captured at launch.
 	codexAuth?: {
 		state: string; account?: string; canReconnect?: boolean; recovery?: string; retryAt?: number;
@@ -278,13 +281,6 @@ export interface PaneInfo {
   // Current hold reason for auto-pending, or explanation when needs-user has one ("AskUserQuestion needs
   // your answer…", "won't auto-approve — touches secrets", a decline reason).
   attentionReason?: string;
-  // LLM-graded attention item for the CURRENT needs-user prompt — a one-line
-  // summary, a low|medium|high risk grade, and a suggested next step
-  // (daemon/aria_attention_summary.go). Undefined until the async summary
-  // lands; consumers fall back to the heuristic tail preview.
-  attentionSummary?: string;
-  attentionRisk?: 'low' | 'medium' | 'high' | '';
-  attentionAction?: string;
   // The pane's SINGLE open native tool-permission (daemon approvalHint):
   // present only for a native pane with exactly one open approval, so
   // notifications can say WHAT is being asked ("Bash: git push …") without
@@ -799,6 +795,8 @@ export interface Port {
 }
 
 export interface Health {
+  // Temporary desktop-router update compatibility usage, for release rollout.
+  routerSkewRequests?: number;
   // Live workflow task-engine availability, independent of shared services.
   workflowEngineAvailable?: boolean;
   status: string;
@@ -982,6 +980,9 @@ export interface UpdateStatus {
   // The build this install follows (daemon/update_channel.go): "team" only
   // after a positive team verdict. Absent until the first decision.
   updateChannel?: 'public' | 'team';
+  // The build this daemon binary is (daemon/update_flavor.go). It differs from
+  // updateChannel when the install follows the other build.
+  runningFlavor?: 'public' | 'team';
   // Tauri-shell installer channel. Empty/false when the daemon was
   // launched standalone (no --shell-version) or when there's no shell
   // installer in the manifest for this platform.

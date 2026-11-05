@@ -172,19 +172,6 @@ func (a *apiServer) relaunchPreview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, target)
 }
 
-// previewProxyOriginHeader marks a request forwarded by a daemon-owned
-// preview proxy. The exposure mount and the mounted static/spawn previews sit
-// on a non-loopback origin but forward the proxied request with a loopback
-// Host so it still authenticates as local. Without this marker the daemon's
-// origin gate saw the browser's real Origin next to the rewritten loopback
-// Host and answered 403 "cross-origin request rejected", which surfaced in the
-// app as a DAEMON UNREACHABLE board instead of real data. The proxies strip any
-// inbound value before stamping the per-process token, so a hostile page cannot
-// forge same-origin.
-const previewProxyOriginHeader = "X-Soluterminal-Preview-Proxy"
-
-var previewProxyOriginToken = randomHex(32)
-
 func previewLoopbackProxy(targetPort uint16, prefix string, targetBases ...string) *httputil.ReverseProxy {
 	targetBase := ""
 	if len(targetBases) > 0 {
@@ -208,11 +195,6 @@ func previewLoopbackProxy(targetPort uint16, prefix string, targetBases ...strin
 			req.URL.RawPath = ""
 			req.Host = targetURL.Host
 			stripPreviewLoopbackRequest(req)
-			// Re-stamp after the strip so the trusted marker is never the
-			// client's own value.
-			if previewProxyOriginToken != "" {
-				req.Header.Set(previewProxyOriginHeader, previewProxyOriginToken)
-			}
 		},
 		Transport: &http.Transport{DisableKeepAlives: true, ResponseHeaderTimeout: 30 * time.Second},
 	}
@@ -249,9 +231,8 @@ func stripPreviewLoopbackRequest(req *http.Request) {
 	req.Header.Del("Authorization")
 	req.Header.Del("Proxy-Authorization")
 	req.Header.Del("Forwarded")
-	// Strip any client-supplied preview-proxy marker; the proxy re-stamps its
-	// own unguessable token after this returns.
-	req.Header.Del(previewProxyOriginHeader)
+	// Drop the retired marker as well as ordinary credentials.
+	req.Header.Del("X-Soluterminal-Preview-Proxy")
 	for name := range req.Header {
 		if strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
 			req.Header.Del(name)

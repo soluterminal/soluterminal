@@ -84,12 +84,10 @@ func ariaToolsWithCacheBreakpoint(tools []ariaToolDef) []any {
 	return out
 }
 
-// executeTool runs a tool by name with parsed input. Returns a string
-// result that gets passed back to the model as the tool_result. If
-// the tool errors (bad args, unknown pane, etc.) we return the error
-// as the result text rather than failing the whole turn — the model
-// is better at recovering from a visible error message than from a
-// missing response block.
+// executeTool runs a tool by name with parsed input. Its result is emitted
+// locally for the permission decision's activity record. Bad arguments or
+// local refusals leave the permission with the person; results are not sent
+// back for another model attempt.
 //
 // Every turn is autonomous now, so the surface is exactly the two
 // action tools; the daemon-bound fields on req (pane id, prompt
@@ -560,11 +558,9 @@ func (a *Aria) toolReadFile(path string, startLine, maxLines int) string {
 	return string(b)
 }
 
-// toolSendInput parks the tool loop on the auto-countdown confirm,
-// then (if approved) writes the bytes to the pane's PTY. The result
-// string is what the model sees on the next turn — so rejections
-// and errors must read like prose a model can reason about, not
-// stack traces.
+// toolSendInput waits for the auto-countdown confirmation, then (if
+// approved) writes the bytes to the pane's PTY. The returned explanation
+// is kept in the local activity record.
 func (a *Aria) toolSendInput(ctx context.Context, toolUseID, paneID, input string, autonomousPromptPos int64, autonomousPromptHash uint64, autonomousCautious bool, emit func(map[string]any)) string {
 	return a.toolSendInputWithJevProof(ctx, toolUseID, paneID, input, autonomousPromptPos, autonomousPromptHash, autonomousCautious, nil, emit)
 }
@@ -707,7 +703,7 @@ func (a *Aria) toolSendInputWithJevProof(ctx context.Context, toolUseID, paneID,
 	// genuine multi-character text without an Enter (rare but possible)
 	// still works as the user typed it.
 	if !strings.ContainsAny(input, "\r\n") && isObviousMenuReply(input) {
-		log.Printf("aria: send_input pane=%s auto-appending newline to short reply %q", paneID, input)
+		log.Printf("aria: send_input pane=%s auto-appending newline to short reply inputLen=%d", paneID, len(input))
 		input = input + "\n"
 	}
 	if proof != nil {
@@ -810,8 +806,8 @@ func (a *Aria) toolSendInputWithJevProof(ctx context.Context, toolUseID, paneID,
 		if body != "" {
 			gap = EnterGap(hasClaude)
 		}
-		log.Printf("aria: send_input pane=%s hasClaude=%v hasCodex=%v body=%q submit=%v gap=%v auto=%v",
-			paneID, hasClaude, hasCodex, body, submit, gap, auto)
+		log.Printf("aria: send_input pane=%s hasClaude=%v hasCodex=%v bodyLen=%d submit=%v gap=%v auto=%v",
+			paneID, hasClaude, hasCodex, len(body), submit, gap, auto)
 		if gap > 0 {
 			select {
 			case <-ctx.Done():
@@ -846,8 +842,8 @@ func (a *Aria) toolSendInputWithJevProof(ctx context.Context, toolUseID, paneID,
 			a.verifyAutoFireLanded(paneID, p.Title, atomic.LoadInt64(&p.LastInputMs))
 		}
 	} else {
-		log.Printf("aria: send_input pane=%s hasClaude=%v hasCodex=%v input=%q submit=false auto=%v",
-			paneID, hasClaude, hasCodex, input, auto)
+		log.Printf("aria: send_input pane=%s hasClaude=%v hasCodex=%v inputLen=%d submit=false auto=%v",
+			paneID, hasClaude, hasCodex, len(input), auto)
 	}
 	emit(map[string]any{"type": "confirm_resolved", "id": confirmID, "approved": true, "auto": auto})
 	b, _ := json.Marshal(map[string]any{
@@ -1098,7 +1094,7 @@ func choiceLineForInput(tail, input string) string {
 	lines := strings.Split(tail, "\n")
 	withContinuation := func(i int) string {
 		end := i + 1
-		for end < len(lines) && strings.TrimSpace(lines[end]) != "" && !menuOptionRowRE.MatchString(lines[end]) {
+		for end < len(lines) && strings.TrimSpace(lines[end]) != "" && !isMenuOptionRow(lines[end]) {
 			end++
 		}
 		return strings.Join(lines[i:end], "\n")
@@ -1108,7 +1104,7 @@ func choiceLineForInput(tail, input string) string {
 		// row belongs to the menu currently awaiting input; choosing the first
 		// row could miss a persistent grant in the active menu.
 		for i := len(lines) - 1; i >= 0; i-- {
-			if row := menuOptionRowRE.FindStringSubmatch(lines[i]); row != nil && row[1] == choice {
+			if row := menuOptionRow(lines[i]); row != nil && row[1] == choice {
 				return withContinuation(i)
 			}
 		}

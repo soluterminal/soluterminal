@@ -4,6 +4,7 @@ import { confirmClosePane } from '../usePaneContextMenu';
 import { useStore } from '../../store';
 import { paneLeadRole, paneTeamKind } from '../../lib/paneTeam';
 import { paneRowLabel } from '../../lib/paneRowLabel';
+import { paneNeedsYouLabel } from '../../lib/paneStatus';
 
 /** Indent per tree level; it stops growing past MAX_INDENT_LEVELS so a deep
  *  chain cannot push titles out of a narrow sidebar (the guides still show it). */
@@ -79,7 +80,8 @@ export function WorkspacePaneRows({ nodes, workspaceKey, collapsed, toggle, setB
     const hasMeta = !open && (needsYouBelow > 0 || shortCounts !== '');
     // Solid: this pane needs you. Ring: only something below it does.
     const dot = status === 'needs-you' ? 'needs-you' : needsYouBelow > 0 ? 'needs-you-below' : status;
-    const dotTitle = status === 'needs-you' ? 'needs you'
+    const needsYouLabel = status === 'needs-you' ? paneNeedsYouLabel(pane) : '';
+    const dotTitle = needsYouLabel ? needsYouLabel
       : needsYouBelow > 0 ? `${status} · ${needsYouBelow} below need${needsYouBelow === 1 ? 's' : ''} you` : status;
     const onChevron = (e: ReactMouseEvent) => {
       e.stopPropagation();
@@ -112,8 +114,8 @@ export function WorkspacePaneRows({ nodes, workspaceKey, collapsed, toggle, setB
               never take width from the handle. */}
           {(description || status === 'needs-you' || hasMeta) && <span className="pane-tree-sub">
             {(description || status === 'needs-you') && <span className="pane-tree-desc">
-              {status === 'needs-you' && <span className="pane-tree-needs-you">needs you</span>}
-              {status === 'needs-you' && description && ' · '}
+              {needsYouLabel && <span className="pane-tree-needs-you">{needsYouLabel}</span>}
+              {needsYouLabel && description && ' · '}
               {description}
             </span>}
             {hasMeta && <span className="pane-tree-meta">
@@ -124,7 +126,7 @@ export function WorkspacePaneRows({ nodes, workspaceKey, collapsed, toggle, setB
           </span>}
           {/* The dot shows the state; words are for screen readers (aria-describedby). */}
           <span id={statusId} className="pane-tree-status sr-only">
-            {[status === 'needs-you' ? 'needs you' : status, ...counts, node.startedBy ? `started by ${node.startedBy}` : ''].filter(Boolean).join(' · ')}
+            {[needsYouLabel || status, ...counts, node.startedBy ? `started by ${node.startedBy}` : ''].filter(Boolean).join(' · ')}
           </span>
         </span>
         <button type="button" className={`iconbtn pane-tree-close${finishedWorker ? ' is-pinned' : ''}`} tabIndex={-1} aria-label={`Close ${label.text}`} title="Close pane"

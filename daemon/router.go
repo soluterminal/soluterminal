@@ -245,18 +245,20 @@ func newPrefixProxy(target *url.URL, prefix string, token string) *httputil.Reve
 		// selected backend. Never trust a caller-supplied forwarding prefix.
 		req.Header.Del("X-Forwarded-Prefix")
 		req.Header.Del("X-Solu-Proxy-Auth")
+		req.Header.Set("X-Solu-Proxy-Auth", "router")
 		if strings.HasPrefix(req.URL.Path, "/api/proxy/") {
 			req.Header.Set("X-Forwarded-Prefix", prefix)
-			req.Header.Set("X-Solu-Proxy-Auth", "router")
 		}
 		// Inject per-backend auth. Overwrite any pre-existing
 		// Authorization to avoid a smuggled header leaking across
 		// backends.
 		req.Header.Set("Authorization", "Bearer "+token)
-		// NewSingleHostReverseProxy leaves req.Host as the caller's
-		// host (e.g. 127.0.0.1:28787). Be explicit so the upstream
-		// sees a well-formed request.
-		req.Host = target.Host
+		// Keep the authority the browser addressed after the router's guard
+		// has checked it. URL.Host still selects the backend transport; its
+		// bearer authenticates this handoff. Headerless probes work as before.
+		if token == "" || !safeLoopbackHost(req.Host) || !routerExactOrigin(req) {
+			req.Host = target.Host
+		}
 	}
 	return p
 }
@@ -357,11 +359,17 @@ func mirrorPairingToWin(method, path string, body []byte, winURL *url.URL, winTo
 // every proxied request carries a token, so the router has to check here.
 func routerGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The router's injected credential must never confer diagnostic
+		// authority. Diagnostics use a direct backend connection instead.
+		if path := appPolicyPath(r.URL.Path); path == "/debug" || strings.HasPrefix(path, "/debug/") {
+			http.NotFound(w, r)
+			return
+		}
 		if !safeLoopbackHost(r.Host) {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
-		if !originProtected(r) {
+		if !originProtected(r) && !(isRouterPreviewPath(r.URL.Path) && previewNavigationShape(r)) {
 			rejectCrossOrigin(w, r)
 			return
 		}
@@ -374,21 +382,21 @@ func routerGuard(next http.Handler) http.Handler {
 // which shares the hostname, cannot use the app. The preview listener itself
 // is framed by the app (a same-site navigation), so it keeps routerGuard only.
 func routerAppGuard(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return appDocumentHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !routerExactOrigin(r) {
 			rejectCrossOrigin(w, r)
 			return
 		}
 		next.ServeHTTP(w, r)
-	})
+	}))
 }
 
 // routerExactOrigin requires the request's own origin, port included. The
 // router's two listeners (the app, and previews) share a hostname, and
-// originProtected compares hostnames only; another port is another origin.
-// Top-level navigations are exempt, as in originProtected.
+// another port is another browser authority. App document navigations have
+// the same top-level and explicitly permitted frame allowances as authGate.
 func routerExactOrigin(r *http.Request) bool {
-	if isTopLevelNavigation(r) {
+	if isTopLevelNavigation(r) || permittedAppFrame(r) {
 		return true
 	}
 	if r.Header.Get("Sec-Fetch-Site") == "same-site" {

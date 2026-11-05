@@ -70,7 +70,7 @@ func (a *apiServer) submitPaneMessage(w http.ResponseWriter, r *http.Request) {
 			if msg := p.Snapshot().UnsentMessage; msg != nil {
 				sender = msg.Sender
 			}
-			http.Error(w, "Nothing was sent: your input box holds an unsent message from "+sender+", put back after you stopped the turn. Send or Clear it on the pane first, or remove it from the input box yourself.", http.StatusConflict)
+			http.Error(w, "Nothing was sent: your input box holds an unsent message from "+sender+". Send or Clear it on the pane first, or remove it from the input box yourself.", http.StatusConflict)
 			return
 		}
 		http.Error(w, err.Error(), status)

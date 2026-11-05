@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 )
 
 // Auth model:
@@ -35,7 +36,8 @@ const (
 )
 
 type authGate struct {
-	token string
+	token              string
+	routerSkewRequests atomic.Uint64
 }
 
 // loadOrCreateToken reads ~/.solu/token, or generates a new one on first run.
@@ -138,6 +140,14 @@ func (a *authGate) isAuthed(r *http.Request) bool {
 	if tokenlessLoopbackAllowed(r) {
 		return true
 	}
+	return a.hasOwnerCredential(r)
+}
+
+// hasOwnerCredential deliberately excludes the loopback convenience grant.
+func (a *authGate) hasOwnerCredential(r *http.Request) bool {
+	if a == nil {
+		return false
+	}
 	if c, err := r.Cookie(tokenCookie); err == nil && a.validToken(c.Value) {
 		return true
 	}
@@ -150,6 +160,9 @@ func (a *authGate) isAuthed(r *http.Request) bool {
 }
 
 func sameOriginOrTrusted(r *http.Request) bool {
+	if len(r.Header.Values("Origin")) > 1 || len(r.Header.Values("Referer")) > 1 {
+		return false
+	}
 	source := r.Header.Get("Origin")
 	if source == "" {
 		source = r.Header.Get("Referer")
@@ -158,30 +171,19 @@ func sameOriginOrTrusted(r *http.Request) bool {
 		return true
 	}
 	u, err := url.Parse(source)
-	if err != nil {
+	if err != nil || u.User != nil || u.Opaque != "" || u.Host == "" ||
+		(u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	originHost := u.Hostname()
-	reqHost := r.Host
-	if h, _, err := net.SplitHostPort(reqHost); err == nil {
-		reqHost = h
-	}
-	if strings.EqualFold(originHost, reqHost) {
+	// Compare the complete authority. Scheme is deliberately omitted because
+	// TLS may terminate before this listener; the port remains significant.
+	if strings.EqualFold(u.Host, r.Host) {
 		return true
 	}
 	// The cloud relay bypasses authGate, but WebSocket upgrades still run
 	// their own origin check. Cloud-authenticated browser traffic arrives
 	// through the yamux reverse proxy with this prefix marker.
-	if r.Header.Get("X-Forwarded-Prefix") != "" {
-		return true
-	}
-	// A daemon-owned mounted-preview proxy forwards /api/* from a non-loopback
-	// exposure origin with a loopback Host (so the request still authenticates
-	// as local), which would otherwise look cross-origin. The proxy strips any
-	// inbound value and stamps an unguessable per-process token, so only its
-	// own forwarded requests are trusted.
-	if token := r.Header.Get(previewProxyOriginHeader); token != "" &&
-		subtle.ConstantTimeCompare([]byte(token), []byte(previewProxyOriginToken)) == 1 {
+	if relayTransport(r) && isCloudForwardedPrefix(r.Header.Get("X-Forwarded-Prefix")) {
 		return true
 	}
 	return false
@@ -204,7 +206,7 @@ func isTopLevelNavigation(r *http.Request) bool {
 		return false
 	}
 	// /api/ is the state-changing surface even on GET — never exempt it.
-	if strings.HasPrefix(r.URL.Path, "/api/") {
+	if path := appPolicyPath(r.URL.Path); path == "/api" || strings.HasPrefix(path, "/api/") {
 		return false
 	}
 	if r.Header.Get("Upgrade") != "" {
@@ -215,8 +217,8 @@ func isTopLevelNavigation(r *http.Request) bool {
 		if mode != "navigate" {
 			return false
 		}
-		// A sub-frame navigation is how a hostile page would embed the UI
-		// for clickjacking. Only the top-level document gets the exemption.
+		// Embedded app navigation has its own narrow allowance, coupled to
+		// the response's frame-ancestors policy (embed_policy.go).
 		if dest := r.Header.Get("Sec-Fetch-Dest"); dest != "" && dest != "document" {
 			return false
 		}
@@ -228,16 +230,50 @@ func isTopLevelNavigation(r *http.Request) bool {
 }
 
 func originProtected(r *http.Request) bool {
-	if isTopLevelNavigation(r) {
+	if legacyRouterAccepted(r) {
 		return true
 	}
+	if isTopLevelNavigation(r) || permittedAppFrame(r) {
+		return true
+	}
+	return browserRequestOriginMatches(r)
+}
+
+func browserRequestOriginMatches(r *http.Request) bool {
 	if !sameOriginOrTrusted(r) {
 		return false
 	}
-	if sf := r.Header.Get("Sec-Fetch-Site"); sf == "cross-site" {
+	if sf := r.Header.Get("Sec-Fetch-Site"); sf == "cross-site" || sf == "same-site" {
 		return false
 	}
 	return true
+}
+
+func (a *authGate) browserOriginAllowed(r *http.Request) bool {
+	// Authenticated relay preview traffic retains its opaque-origin CORS
+	// and public-preview navigation contract. The actual transport, not a
+	// forwarding header, establishes this exception; target validation and
+	// document sandboxing still happen in the two preview handlers.
+	path := r.URL.Path
+	relayPreview := relayTransport(r) && (path == "/api/proxy" || strings.HasPrefix(path, "/api/proxy/") ||
+		path == "/api/preview-serve" || strings.HasPrefix(path, "/api/preview-serve/"))
+	// The guarded desktop preview listener carries the backend bearer.
+	// The exception cannot reach an app API or a non-navigation request.
+	return relayPreview || originProtected(r) || (a.hasOwnerCredential(r) && r.Header.Get("X-Solu-Proxy-Auth") == "router" &&
+		strings.HasPrefix(path, "/api/proxy/") && previewNavigationShape(r))
+}
+
+func (a *authGate) browserOriginPolicy(next http.Handler) http.Handler {
+	return appDocumentHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.browserOriginAllowed(r) {
+			if !a.legacyRouterOriginAllowed(r) {
+				rejectCrossOrigin(w, r)
+				return
+			}
+			r = a.acceptLegacyRouter(w, r)
+		}
+		next.ServeHTTP(w, r)
+	}))
 }
 
 // rejectCrossOrigin writes the 403 for a request that failed originProtected.
@@ -268,19 +304,15 @@ setTimeout(go,1500)</script>`)
 // middleware wraps a handler with the auth gate. Must run before the mux
 // so that /api routes and WS upgrades are both covered.
 func (a *authGate) middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return a.browserOriginPolicy(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The Jev decision bridge owns a separate bearer namespace. Let the
-		// exact path reach that handler before ordinary origin, cookie, master
-		// token, and tokenless-loopback handling. Near matches stay protected.
+		// exact path reach that handler after the browser origin check, before
+		// cookie, master-token and tokenless-loopback handling. Near matches
+		// stay protected.
 		if r.URL.Path == jevBridgePath || strings.HasPrefix(r.URL.Path, modelGatewayPrefix+"/") {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !originProtected(r) {
-			rejectCrossOrigin(w, r)
-			return
-		}
-
 		// One-time login via ?token=…: bank it as a cookie and redirect
 		// to the same path without the token. Keeps the token out of
 		// the browser history, bookmarks, and referers.
@@ -319,5 +351,5 @@ func (a *authGate) middleware(next http.Handler) http.Handler {
 		}
 
 		next.ServeHTTP(w, r)
-	})
+	}))
 }

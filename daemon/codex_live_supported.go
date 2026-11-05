@@ -338,6 +338,7 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, routeOve
 	server.Stdin = nil
 	server.Stdout = io.Discard
 	server.Stderr = io.Discard // never mix RPC diagnostics into the TUI
+	applyNoWindow(server)
 	if err = server.Start(); err != nil {
 		return errors.New("could not start Codex app-server")
 	}
@@ -388,6 +389,7 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, routeOve
 	}
 	defer closeRelay()
 	clientArgs := codexLiveClientArgs(engineArgs, relaySocket)
+	// Stays on the pane's console: this is the interactive Codex terminal.
 	client := exec.Command(bin, clientArgs...)
 	client.Env = providerChildEnvForBin(bin, relayEnv)
 	client.Stdin = os.Stdin

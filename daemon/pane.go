@@ -132,9 +132,11 @@ type Pane struct {
 	inputRevision atomic.Uint64
 	// Agents' messages held while the person types (pane_draft_guard.go),
 	// oldest first, and the last few that left the queue. Guarded by mu.
-	heldDeliveries   []*heldDelivery
-	heldResolved     []*heldDelivery
-	heldDraining     bool
+	heldDeliveries []*heldDelivery
+	heldResolved   []*heldDelivery
+	heldDraining   bool
+	// heldStuckNoted: this stuck episode was logged and pushed. Guarded by mu.
+	heldStuckNoted   bool
 	heldSeq          uint64
 	lastHumanInputMs atomic.Int64
 	// agentDeliveryWrite marks the write in progress as an agent's message
@@ -144,9 +146,9 @@ type Pane struct {
 	// lastAgentInputMs is LastInputMs as of the last agent delivery write.
 	lastAgentInputMs atomic.Int64
 	// heldReason: why heldDeliveries wait (draftGuardReason). Guarded by mu.
-	heldReason              string
+	heldReason string
 	// putBackWatching: watchPutBack runs (one per pane). Guarded by mu.
-	putBackWatching bool
+	putBackWatching         bool
 	Credential              *paneCredentialInfo `json:"credential,omitempty"`
 	credentialSelection     func(provider string) string
 	credentialTeamSelection func(provider string) string
@@ -572,13 +574,6 @@ type Pane struct {
 	// flagMu serializes flag checks, writes and persistence across manual,
 	// scoped paths. p.mu still protects snapshots.
 	flagMu sync.Mutex
-
-	// attentionSummary is the LLM-written one-liner for the CURRENT
-	// needs-user prompt (see aria_attention_summary.go). Written by the
-	// summarizer goroutine, cleared when the pane leaves needs-user; read
-	// lock-free by DTO builds and the pusher. Nil = no summary (heuristic
-	// preview stands). Never persisted.
-	attentionSummary atomic.Pointer[attentionSummaryRecord]
 
 	// autoDecline records the most recent auto-approval decline for the
 	// pane's CURRENT menu (scoped by LastAckedChoicePromptPos so a new menu
@@ -1097,8 +1092,10 @@ func (p *Pane) setAITitleCache(title string) {
 type PaneSnapshot struct {
 	UnsentMessage *unsentPaneMessage `json:"unsentMessage,omitempty"`
 	// HeldMessages are agents' messages waiting while the person types.
-	HeldMessages []heldDelivery      `json:"heldMessages,omitempty"`
-	Credential   *paneCredentialInfo `json:"credential,omitempty"`
+	HeldMessages []heldDelivery `json:"heldMessages,omitempty"`
+	// HeldStuck: they wait behind text nobody is working on (heldStuckLocked).
+	HeldStuck  bool                `json:"heldStuck,omitempty"`
+	Credential *paneCredentialInfo `json:"credential,omitempty"`
 
 	ID              string     `json:"id"`
 	Cwd             string     `json:"cwd"`
@@ -1187,6 +1184,7 @@ func (p *Pane) Snapshot() PaneSnapshot {
 	return PaneSnapshot{
 		UnsentMessage:            p.currentUnsentMessageLocked(),
 		HeldMessages:             p.heldDeliveriesLocked(),
+		HeldStuck:                p.heldStuckLocked(time.Now()),
 		Credential:               clonePaneCredential(p.Credential),
 		ID:                       p.ID,
 		Cwd:                      p.Cwd,

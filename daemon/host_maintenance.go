@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -33,7 +32,7 @@ var runHostMaintenancePowerShell = func(ctx context.Context, script string) ([]b
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd := hiddenCommand(ctx, ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
 	cmd.Env = wslInteropEnv(ps)
 	return cmd.Output()
 }

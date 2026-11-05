@@ -147,12 +147,18 @@ func serviceOwnOrigin(r *http.Request, signed bool) bool {
 	if err != nil || u.Scheme != "http" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return false
 	}
+	// The router's bearer and preserved Host are not device proof. Fixed
+	// desktop origins also need proof when an old proxy omits its marker.
+	desktopOrigin := u.Host == "127.0.0.1:18787" || u.Host == "127.0.0.1:28787"
+	if !signed && (requestHasForwardingMetadata(r) || desktopOrigin) {
+		return false
+	}
 	if strings.EqualFold(u.Host, r.Host) {
 		return true
 	}
-	// The Windows byte proxy and Dual router rewrite Host before forwarding to
-	// WSL. Only approved-device requests may use those fixed desktop origins.
-	return signed && (u.Host == "127.0.0.1:18787" || u.Host == "127.0.0.1:28787")
+	// Older Windows byte proxies and Dual routers rewrite Host before
+	// forwarding. Only approved-device requests may use their fixed origins.
+	return signed && desktopOrigin
 }
 
 func (a *apiServer) restartService(w http.ResponseWriter, r *http.Request) {

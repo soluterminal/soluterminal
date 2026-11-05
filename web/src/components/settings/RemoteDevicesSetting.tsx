@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, currentRoutingScope } from '../../api';
+import { confirmDialog } from '../../lib/dialog';
 import type { RemoteDevice, RemoteDevicesState } from '../../api';
 import { privateRelayCandidate, privateRelayEnabled, privateRelayTarget, setPrivateRelayEnabled } from '../../lib/privateRelay';
 import { isEmbedded } from '../../embed';
@@ -147,11 +148,15 @@ export function RemoteDevicesSetting() {
   const anyPending = state.devices.some((d) => d.status === 'pending');
   const names = Object.fromEntries(state.devices.map((d) => [d.id, d.name]));
   const changePolicy = (policy: 'any' | 'approved') => {
-    if (policy === 'approved' && approved === 0 &&
-      !window.confirm('No device is approved yet, so your phone and other browsers will lose access until you approve them here. Continue?')) {
-      return;
-    }
-    void run('change remote access', () => api.setRemoteAccessPolicy(policy).then(setState));
+    const scope = currentRoutingScope();
+    void run('change remote access', async () => {
+      if (policy === 'approved' && approved === 0 &&
+        !await confirmDialog({ message: 'No device is approved yet, so your phone and other browsers will lose access until you approve them here. Continue?' })) {
+        return;
+      }
+      if (scope.key !== currentRoutingScope().key) return;
+      await api.setRemoteAccessPolicy(policy).then(setState);
+    });
   };
 
   return (

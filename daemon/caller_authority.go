@@ -118,6 +118,20 @@ func requestViaRelay(r *http.Request) bool {
 	return relayTransport(r) || isCloudForwardedPrefix(r.Header.Get("X-Forwarded-Prefix"))
 }
 
+// Forwarding metadata can remove authority, never grant it. Older Go routers
+// append X-Forwarded-For even without the current authenticated handoff marker.
+func requestHasForwardingMetadata(r *http.Request) bool {
+	if routerCarriedRequest(r) {
+		return true
+	}
+	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Prefix", "X-Solu-Proxy-Auth"} {
+		if len(r.Header.Values(name)) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // lookupPeerPID reports whether the client socket was found locally. A true
 // result with pid 0 means the socket was observed but its owner is unavailable;
 // that is distinct from an unknown tuple. A variable for platform test fixtures.
@@ -311,8 +325,8 @@ func (a *apiServer) untracedCaller(r *http.Request, pid int) callerIdentity {
 func (a *apiServer) classifyPeerProcess(pid int) (callerIdentity, bool) {
 	self := os.Getpid()
 	if pid == self {
-		// The daemon's own proxies (previews, exposure mounts) forward
-		// candidate pages to the API.
+		// A daemon-owned connection is a worker, never a person. Mounted
+		// static previews do not forward missing API paths to this daemon.
 		return callerIdentity{Kind: callerWorker, PID: pid}, true
 	}
 	refreshProcessTreeForCaller()

@@ -687,13 +687,13 @@ func cachedOperatorVerdictFresh() (on, ok, fresh bool) {
 }
 
 // teamCloudLLMAllowed reports whether calls to the operator-only cloud LLM
-// (/api/aria/complete: attention summaries) may be made. The
+// (/api/aria/complete: cautious evaluations and dry runs) may be made. The
 // cloud refuses everyone else, so asking anyway only wastes requests and
-// uploads pane text for nothing. Before the cache is published (tests) the
-// historical behavior holds.
+// uploads pane text for nothing. An unknown verdict leaves the local
+// review in place without making a completion request.
 func teamCloudLLMAllowed() bool {
 	on, ok := cachedOperatorVerdict()
-	return !ok || on
+	return ok && on
 }
 
 // teamFeaturesFromCache reports the install's team verdict for paths that

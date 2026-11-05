@@ -128,6 +128,7 @@ func runCodexInlineShim(cliArgs []string) int {
 		args = inline
 	}
 	if live := codexLiveShellCommand(args, childEnv, shimDir); len(live) > 0 {
+		// Stays on the pane's console: this is the interactive CLI the user typed.
 		c := daemonCommand(live[0], live[1:]...)
 		c.Env = append(filterOutEnvKeys(childEnv, []string{"PATH"}), "PATH="+realPath)
 		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -141,6 +142,7 @@ func runCodexInlineShim(cliArgs []string) int {
 		return 0
 	}
 	args = codexPaneLaunchCommand(args)
+	// Stays on the pane's console: this is the interactive CLI the user typed.
 	c := exec.Command(bin, args[1:]...)
 	c.Env = append(filterOutEnvKeys(childEnv, []string{"PATH"}), "PATH="+realPath)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -246,6 +248,7 @@ func runUnknownPaneShim(argv0 string, args []string) int {
 		if err != nil {
 			continue
 		}
+		// Stays on the pane's console: the user typed this command in the pane.
 		c := exec.Command(bin, args...)
 		c.Env = append(filterOutEnvKeys(os.Environ(), []string{"PATH"}), "PATH="+realPath)
 		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr

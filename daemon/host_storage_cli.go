@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -20,11 +19,11 @@ import (
 var (
 	hostStorageCLIProber = func() hostStorageSource { return newWfHostStorageProber() }
 	hostStorageCLIRun    = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		return exec.CommandContext(ctx, name, args...).CombinedOutput()
+		return hiddenCommand(ctx, name, args...).CombinedOutput()
 	}
 	hostStorageCLIGetRequest = hostStorageCLIGet
 	hostStorageCLIWSLVersion = func(ctx context.Context) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, "wsl.exe", "--version")
+		cmd := hiddenCommand(ctx, "wsl.exe", "--version")
 		cmd.Env = wslInteropEnv("wsl.exe")
 		return cmd.CombinedOutput()
 	}
@@ -420,7 +419,7 @@ func hostStorageCLIResolveWindowsScript(ctx context.Context) (string, error) {
 			script := filepath.Join(dir, "scripts", "wsl-vhdx-compact.ps1")
 			if st, err := os.Stat(script); err == nil && !st.IsDir() {
 				probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-				out, err := exec.CommandContext(probeCtx, "wslpath", "-w", script).Output()
+				out, err := hiddenCommand(probeCtx, "wslpath", "-w", script).Output()
 				cancel()
 				if err != nil {
 					return "", err

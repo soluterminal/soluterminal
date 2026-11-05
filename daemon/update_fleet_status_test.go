@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"soluterminal-shared/machineauth"
+	"soluterminal-shared/releases"
 	"soluterminal-shared/updatestatus"
 )
 
@@ -89,6 +90,70 @@ func TestFleetUpdateStatusDisabledAndTimes(t *testing.T) {
 	u.fleetPollDisabled = "signature-key-invalid"
 	if s = u.fleetUpdateStatus(); s.AutoUpdate || s.DisabledReason != "signature-key-invalid" {
 		t.Fatalf("key %+v", s)
+	}
+}
+
+func TestUpdateStatusReportsRunningFlavorAndChannel(t *testing.T) {
+	for _, tc := range []struct{ stamp, channel, running string }{
+		{buildFlavorMarkerPrefix + releases.FlavorPublic, releases.FlavorTeam, releases.FlavorPublic},
+		{buildFlavorMarkerPrefix + releases.FlavorTeam, releases.FlavorPublic, releases.FlavorTeam},
+		{buildFlavorMarkerPrefix + releases.FlavorTeam, releases.FlavorTeam, releases.FlavorTeam},
+	} {
+		setBuildFlavorStamp(t, tc.stamp)
+		u := fleetTestUpdater()
+		u.status.UpdateChannel = tc.channel
+		if st := u.Status(); st.RunningFlavor != tc.running || st.UpdateChannel != tc.channel {
+			t.Fatalf("update status %+v, want running %s channel %s", st, tc.running, tc.channel)
+		}
+		if s := u.fleetUpdateStatus(); s.RunningFlavor != tc.running || s.UpdateChannel != tc.channel || s.Channel != "stable" {
+			t.Fatalf("fleet status %+v, want running %s channel %s", s, tc.running, tc.channel)
+		}
+	}
+}
+
+// The channel's repo can still serve another flavour's release that is not newer
+// (the one-time migration release). Check treats that as a successful answer
+// with no release of the channel, and the status must let the app say so.
+func TestUpdateStatusAfterAnAnswerWithNoReleaseOfTheChannel(t *testing.T) {
+	disableControlSignature(t)
+	setBuildFlavorStamp(t, buildFlavorMarkerPrefix+releases.FlavorTeam)
+	u := directFlavorUpdater(t, releases.FlavorPublic, flavorManifest(releases.FlavorTeam, "1.0.0"), nil)
+	u.status.UpdateChannel = releases.FlavorPublic
+	st, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Available || st.Latest != "" || st.LastError != "" || st.LastSuccessMs == 0 ||
+		st.RunningFlavor != releases.FlavorTeam || st.UpdateChannel != releases.FlavorPublic {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// A check that succeeded on the previous channel says nothing about this one.
+func TestChannelSwitchForgetsTheLastSuccessfulCheck(t *testing.T) {
+	u := fleetTestUpdater()
+	u.manifestURLOverride = true
+	u.status.LastSuccessMs = 123
+	u.channelStore = newUpdateChannelStore(t.TempDir())
+	u.channelEvidence = func() channelEvidence {
+		return channelEvidence{Verdict: releases.FlavorTeam, VerdictAt: time.Now(), Initial: releases.FlavorPublic}
+	}
+	u.syncChannel()
+	if st := u.Status(); st.UpdateChannel != releases.FlavorTeam || st.LastSuccessMs != 0 {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+func TestFleetStatusSanitizesFlavorFields(t *testing.T) {
+	s := updatestatus.Status{Channel: "stable", RunningFlavor: "team-private", UpdateChannel: "https://example.test/repo"}.Sanitize()
+	if s.RunningFlavor != "" || s.UpdateChannel != "" {
+		t.Fatalf("unknown values survived: %+v", s)
+	}
+	var r fleetStatusReporter
+	now := time.Now()
+	r.last, r.lastAttempt, r.lastDelivered = updatestatus.Status{Channel: "stable", UpdateChannel: "public"}, now.Add(-time.Minute), true
+	if !r.due(updatestatus.Status{Channel: "stable", UpdateChannel: "team"}, now) {
+		t.Fatal("a channel change must be reported on the next sample")
 	}
 }
 

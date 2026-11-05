@@ -222,6 +222,7 @@ func updateOnlyRouter(api *apiServer) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h, ok := routes[r.Method+" "+r.URL.Path]; ok {
+			observeRequestMedia(r, r.Method+" "+r.URL.Path)
 			h(w, r)
 			return
 		}

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 
 // Everything Tab can land on. [tabindex="-1"] is excluded: those are
@@ -16,12 +16,16 @@ const FOCUSABLE =
 // The listener is document-level CAPTURE on purpose: dialog overlays
 // stopPropagation() on keys so they don't leak to global hotkey handlers,
 // which would also swallow a bubble-phase trap listener.
-export function useFocusTrap(ref: RefObject<HTMLElement | null>, active: boolean) {
+// A parent modal can pause its trap while a confirmation is in front without
+// releasing the original opener or restoring focus in the middle of that dialog.
+export function useFocusTrap(ref: RefObject<HTMLElement | null>, active: boolean, paused = false) {
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
   useEffect(() => {
     if (!active) return;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab') return;
+      if (pausedRef.current || e.key !== 'Tab') return;
       const root = ref.current;
       if (!root) return;
       // offsetParent filters display:none / detached candidates cheaply.

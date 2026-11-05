@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LocalProofStatus } from '../../lib/localProof';
 
@@ -15,7 +15,9 @@ vi.mock('../../lib/localProof', async (orig) => {
   };
 });
 
-import { api } from '../../api';
+import { api, setBackend } from '../../api';
+import { DialogHost } from '../DialogHost';
+import { useStore } from '../../store';
 import { approveThisBrowserFirst, askToApproveThisBrowser } from '../../lib/localProof';
 import { HumanProofBanner } from '../HumanProofBanner';
 import { HUMAN_PROOF_LABEL, HumanProofSetting, REQUIRE_NEEDS_FULL_DEVICE, approvalProvenance } from './HumanProofSetting';
@@ -26,7 +28,10 @@ const base: LocalProofStatus = {
 };
 
 beforeEach(() => { status.current = { ...base }; });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  act(() => { useStore.getState().closeDialog(null); setBackend(null); });
+  vi.restoreAllMocks();
+});
 
 describe('HumanProofSetting', () => {
   it('offers the first-device approval while nothing is approved', async () => {
@@ -51,18 +56,81 @@ describe('HumanProofSetting', () => {
     expect(await screen.findByText(/ABCD-EFGH-JKMN-PQRS/)).toBeInTheDocument();
   });
 
-  it('lets an approved browser require approved devices after listing them', async () => {
+  it.each(['browser', 'async plugin', 'refused plugin'])('waits for an in-app choice before requiring devices (%s)', async (native) => {
     status.current = { ...base, canBootstrap: false, approvedDevices: 1, device: 'approved' };
     vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [
       { id: 'dev_a', name: 'Edge on Windows', status: 'approved', createdAt: '', approvedVia: 'first-device', surface: 'local' },
     ] });
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const confirm = vi.spyOn(window, 'confirm').mockImplementation((() => {
+      if (native === 'refused plugin') return Promise.reject(new Error('dialog not allowed'));
+      return native === 'async plugin' ? Promise.resolve(false) : true;
+    }) as typeof window.confirm);
     const set = vi.spyOn(api, 'setHumanProofMode').mockResolvedValue({ ...base, mode: 'require', effective: 'require' });
+    render(<><HumanProofSetting /><DialogHost /></>);
+    const select = await screen.findByRole('combobox', { name: HUMAN_PROOF_LABEL });
+    fireEvent.change(select, { target: { value: 'require' } });
+    expect(await screen.findByRole('dialog')).toHaveTextContent('Edge on Windows (asked at this computer, approved as the first device)');
+    expect(set).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(select).toHaveValue('report');
+    expect(set).not.toHaveBeenCalled();
+    fireEvent.change(select, { target: { value: 'require' } });
+    await screen.findByRole('dialog');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(set).toHaveBeenCalledExactlyOnceWith('require'));
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('does not require devices when no dialog host is mounted', async () => {
+    status.current = { ...base, canBootstrap: false, approvedDevices: 1, device: 'approved' };
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [
+      { id: 'dev_a', name: 'Preview browser', status: 'approved', createdAt: '' },
+    ] });
+    const set = vi.spyOn(api, 'setHumanProofMode');
     render(<HumanProofSetting />);
     const select = await screen.findByRole('combobox', { name: HUMAN_PROOF_LABEL });
     fireEvent.change(select, { target: { value: 'require' } });
-    await waitFor(() => expect(set).toHaveBeenCalledWith('require'));
-    expect(confirm.mock.calls[0][0]).toContain('Edge on Windows (asked at this computer, approved as the first device)');
+    await waitFor(() => expect(useStore.getState().dialog).not.toBeNull());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(set).not.toHaveBeenCalled();
+    act(() => useStore.getState().closeDialog(false));
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('cancels a device-proof choice if the selected backend changes while the dialog waits', async () => {
+    status.current = { ...base, canBootstrap: false, approvedDevices: 1, device: 'approved' };
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [
+      { id: 'dev_a', name: 'Original computer browser', status: 'approved', createdAt: '' },
+    ] });
+    const set = vi.spyOn(api, 'setHumanProofMode');
+    render(<><HumanProofSetting /><DialogHost /></>);
+    const select = await screen.findByRole('combobox', { name: HUMAN_PROOF_LABEL });
+    fireEvent.change(select, { target: { value: 'require' } });
+    await screen.findByRole('dialog');
+    act(() => setBackend('win'));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(select).toHaveValue('report');
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('discards a device list fetched for a backend that is no longer selected', async () => {
+    status.current = { ...base, canBootstrap: false, approvedDevices: 1, device: 'approved' };
+    let resolve!: (value: Awaited<ReturnType<typeof api.listRemoteDevices>>) => void;
+    vi.spyOn(api, 'listRemoteDevices').mockImplementation(() => new Promise((done) => { resolve = done; }));
+    const set = vi.spyOn(api, 'setHumanProofMode');
+    render(<><HumanProofSetting /><DialogHost /></>);
+    const select = await screen.findByRole('combobox', { name: HUMAN_PROOF_LABEL });
+    fireEvent.change(select, { target: { value: 'require' } });
+    await act(async () => {
+      setBackend('win');
+      resolve({ policy: 'any', devices: [{ id: 'dev_a', name: 'Original computer browser', status: 'approved', createdAt: '' }] });
+    });
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(set).not.toHaveBeenCalled();
   });
 
   it('never lists an alerts-only device as one that can act for you', async () => {
@@ -71,13 +139,14 @@ describe('HumanProofSetting', () => {
       { id: 'dev_a', name: 'Edge on Windows', status: 'approved', createdAt: '', approvedVia: 'first-device', surface: 'local' },
       { id: 'dev_w', name: 'Desktop window', status: 'approved', scope: 'alerts', createdAt: '', approvedVia: 'device:dev_a', surface: 'local' },
     ] });
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const set = vi.spyOn(api, 'setHumanProofMode').mockResolvedValue({ ...base, mode: 'require', effective: 'require' });
-    render(<HumanProofSetting />);
+    render(<><HumanProofSetting /><DialogHost /></>);
     fireEvent.change(await screen.findByRole('combobox', { name: HUMAN_PROOF_LABEL }), { target: { value: 'require' } });
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('Edge on Windows');
+    expect(dialog).not.toHaveTextContent('Desktop window');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     await waitFor(() => expect(set).toHaveBeenCalledWith('require'));
-    expect(confirm.mock.calls[0][0]).toContain('Edge on Windows');
-    expect(confirm.mock.calls[0][0]).not.toContain('Desktop window');
   });
 
   it('refuses to require approved devices when the list shows only an alerts-only device', async () => {

@@ -182,7 +182,7 @@ func (a *apiServer) voiceCleanup(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, map[string]string{"text": out.Text, "cleanup": out.Status, "by": "local", "mode": string(profile), "requestedLanguage": voiceclean.RequestedLanguage(req.Language), "cleanupProvider": out.Provider, "rawText": raw})
 			return
 		}
-		log.Printf("voice[daemon]: local cleanup failed (%s); using the cloud", out.Detail)
+		log.Printf("voice[daemon]: local cleanup failed detailLen=%d; using the cloud", len(out.Detail))
 	}
 	a.proxyCleanupToCloud(w, r, cloudCleanupBody(body, a.trustedDevices.policy() == remoteAccessApproved))
 }

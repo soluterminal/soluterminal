@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -42,7 +41,7 @@ type hostOffenderProber struct {
 func newWfHostOffenderProber() *hostOffenderProber {
 	p := &hostOffenderProber{resolvePS: resolvePowerShell, env: wslInteropEnv, now: time.Now, timeout: 20 * time.Second, minInterval: 10 * time.Minute}
 	p.run = func(ctx context.Context, psExe string, env []string, script string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, psExe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+		cmd := hiddenCommand(ctx, psExe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
 		cmd.Env = env
 		return cmd.Output()
 	}

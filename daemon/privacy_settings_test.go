@@ -221,10 +221,10 @@ func TestCrashReportRespectsPrivacy(t *testing.T) {
 }
 
 func TestScrubUserPathsKeepsAppPaths(t *testing.T) {
-	in := "goroutine 1 [running]:\nsoluterminal/grid.(*Grid).Resize(...)\n\t/build/src/daemon/grid/grid.go:42 +0x1a\n" +
+	in := "goroutine 1 [running]:\nsoluterminal/grid.(*Grid).Resize(...)\n\tsoluterminal/grid/grid.go:42 +0x1a\n" +
 		"open ~/projects/acme/secret.txt: no such file; cfg ~/.solu/settings.json; route /api/settings/privacy; win C:\\Users\\bob\\work\\x.txt"
 	out := scrubUserPaths(in)
-	for _, keep := range []string{"/build/src/daemon/grid/grid.go:42", "soluterminal/grid.(*Grid).Resize", "~/.solu/settings.json", "/api/settings/privacy"} {
+	for _, keep := range []string{"soluterminal/grid/grid.go:42", "soluterminal/grid.(*Grid).Resize", "~/.solu/settings.json", "/api/settings/privacy"} {
 		if !strings.Contains(out, keep) {
 			t.Fatalf("lost %q in %q", keep, out)
 		}
@@ -236,15 +236,81 @@ func TestScrubUserPathsKeepsAppPaths(t *testing.T) {
 	}
 }
 
+func TestScrubUserPathsRedactsGoPaths(t *testing.T) {
+	for _, path := range []string{
+		"/home/x/client/secret.go",
+		"/Users/x/client/secret.go",
+		`C:\Users\x\client\secret.go`,
+		"~/client/secret.go",
+		"/build/src/daemon/grid/grid.go",
+	} {
+		t.Run(path, func(t *testing.T) {
+			in := "open " + path + ": denied\n\t" + path + ":42 +0x1a\n"
+			want := "open [path]: denied\n\t[path]:42 +0x1a\n"
+			if got := scrubUserPaths(in); got != want {
+				t.Fatalf("scrubUserPaths() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestCrashReportScrubsGoPaths(t *testing.T) {
+	t.Setenv(crashReportsDisabledEnv, "")
+	for _, team := range []bool{false, true} {
+		name := "public"
+		if team {
+			name = "team"
+		}
+		t.Run(name, func(t *testing.T) {
+			withActivePrivacy(t, newPrivacySettings(t.TempDir(), func() bool { return team }))
+			prevRing := globalLogRing
+			globalLogRing = newLogRing(logRingSize)
+			t.Cleanup(func() { globalLogRing = prevRing })
+			globalLogRing.add("open /home/x/client/secret.go: denied")
+			reports := make(chan crashReportPayload, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var p crashReportPayload
+				if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+				reports <- p
+			}))
+			defer srv.Close()
+			sink := &crashSink{lastSent: map[string]time.Time{}}
+			sink.setCreds(srv.URL, "tok")
+			sink.report("go-path", "panic", "open /home/x/client/secret.go: denied",
+				"\t/home/x/client/secret.go:42 +0x1a\n\tsoluterminal/grid/grid.go:7 +0x2\n")
+			select {
+			case got := <-reports:
+				if got.Message != "open [path]: denied" || got.Stack != "\t[path]:42 +0x1a\n\tsoluterminal/grid/grid.go:7 +0x2\n" {
+					t.Fatalf("unexpected message/stack: %q / %q", got.Message, got.Stack)
+				}
+				wantLogs := ""
+				if team {
+					wantLogs = "open [path]: denied"
+				}
+				if got.RecentLogs != wantLogs {
+					t.Fatalf("recent logs = %q, want %q", got.RecentLogs, wantLogs)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("crash report not sent")
+			}
+		})
+	}
+}
+
 func TestGoTracebackLinesDropsOtherLogLines(t *testing.T) {
 	tail := "2026/10/21 pane 3 title: client-acme deploy\n" +
-		"panic: runtime error: index out of range\n\ngoroutine 7 [running]:\nmain.(*x).y(...)\n\t/build/daemon/x.go:10 +0x1\n\n" +
+		"panic: runtime error: index out of range\n\ngoroutine 7 [running]:\nmain.(*x).y(...)\n\tsoluterminal/x.go:10 +0x1\n\n" +
 		"2026/10/21 typed: rm -rf build\n"
 	out := goTracebackLines(tail)
 	if strings.Contains(out, "acme") || strings.Contains(out, "rm -rf") {
 		t.Fatalf("kept non-traceback lines: %q", out)
 	}
-	if !strings.Contains(out, "panic: runtime error") || !strings.Contains(out, "/build/daemon/x.go:10") {
+	if !strings.Contains(out, "panic: runtime error") || !strings.Contains(out, "soluterminal/x.go:10") {
 		t.Fatalf("lost traceback: %q", out)
 	}
 }

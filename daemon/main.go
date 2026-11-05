@@ -344,14 +344,6 @@ func main() {
 		log.Printf("retirement authority unavailable; destructive cleanup held: %v", retirementErr)
 	}
 
-	// A mounted acceptance preview proxies /api/* to this daemon so the
-	// previewed app runs against live data. Always loopback, never the bind
-	// address: the daemon must not be reachable through the preview beyond
-	// the exposure that already gates it.
-	if _, port, splitErr := net.SplitHostPort(*addr); splitErr == nil && port != "" {
-		previewAPIUpstream = "http://127.0.0.1:" + port
-	}
-
 	// Fallback for systemd / standalone launches that can't pass the
 	// --shell-version flag: the Tauri shell drops ~/.solu/shell-info.json
 	// on every startup, and we read it here so the installer-update
@@ -1203,13 +1195,13 @@ func main() {
 	api.routes(mux)
 
 	// Diagnostics: /debug/pprof/* heap/goroutine/cpu profiles. Gated by
-	// the same authGate as the rest of the API (see srv.Handler below),
-	// so the daemon's bearer token is required — not exposed to anyone
-	// who can reach :8787. Without this we cannot diagnose OOM episodes
+	// diagnosticAccess on every transport: an explicit owner credential or
+	// the app's person policy is required; tokenless loopback is insufficient.
+	// Without this we cannot diagnose OOM episodes
 	// (last incident: failed systemd unit, 22.5 GB peak, no journal,
 	// no profile data). The side-effect import above registers the
 	// handlers on http.DefaultServeMux; we delegate the prefix here.
-	mux.Handle("/debug/pprof/", http.DefaultServeMux)
+	mux.Handle("/debug/pprof/", api.diagnosticAccess(http.DefaultServeMux))
 
 	// Static web assets (embedded build, or a live local dir via the dev
 	// override). The override is resolved through env/marker files as well as

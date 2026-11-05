@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -50,14 +50,14 @@ func (registryArtifactInfo) Sys() any           { return nil }
 
 func uninstallArtifactStat(path string) (os.FileInfo, error) {
 	if runtime.GOOS == "windows" && path == `WSL:$HOME/.solu` {
-		if err := exec.Command("wsl.exe", "-e", "sh", "-lc", `test -e "$HOME/.solu"`).Run(); err != nil {
+		if err := hiddenCommand(context.Background(), "wsl.exe", "-e", "sh", "-lc", `test -e "$HOME/.solu"`).Run(); err != nil {
 			return nil, os.ErrNotExist
 		}
 		return registryArtifactInfo(path), nil
 	}
 	if runtime.GOOS == "windows" && strings.HasPrefix(path, `HKCU\`) {
 		key := `HKCU\` + strings.TrimPrefix(path, `HKCU\`)
-		if err := exec.Command("reg.exe", "query", key).Run(); err != nil {
+		if err := hiddenCommand(context.Background(), "reg.exe", "query", key).Run(); err != nil {
 			return nil, os.ErrNotExist
 		}
 		return registryArtifactInfo(filepath.Base(path)), nil

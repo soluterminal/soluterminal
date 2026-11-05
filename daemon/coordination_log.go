@@ -36,7 +36,8 @@ type coordinationEvent struct {
 	// queued | menu | would_steer | busy (not typed) | error; queued (a
 	// queued Codex or Claude message leaving the queue) → submitted |
 	// left_in_composer | gone; unsent → send | clear (confirmed) or
-	// send_unresolved | clear_unresolved.
+	// send_unresolved | clear_unresolved; held → discarded | gone | expired |
+	// failed, or stuck when a stuck episode starts (heldStuckLocked).
 	Outcome string `json:"outcome,omitempty"`
 	AgeSec  int64  `json:"ageSec,omitempty"`
 }

@@ -10,6 +10,25 @@ import (
 	"time"
 )
 
+const ariaNativeObservationTemplate = `[AUTONOMOUS NATIVE-PANE EVALUATION — you were invoked by the pane-state watcher, not by the user.]
+
+Pane %q (id: %s) runs in native mode and is asking permission to use ONE tool. The exact request:
+
+Tool: %s
+Input:
+<pane_output>
+%s
+</pane_output>
+
+Policy for this pane:
+"%s"
+
+Decide:
+1. If the policy clearly permits THIS tool call, call resolve_permission (it takes no arguments) to approve it. The user will see a %s before it actually fires.
+2. If the policy does NOT clearly permit it (out of scope, risky, ambiguous), DO NOT call any tool — reply with ONE short sentence saying why. The request stays pending for the user to handle.
+
+There is exactly one pending request bound to this turn; resolve_permission approves THAT request and no other. Do not call read_pane_tail. Be decisive; don't narrate.`
+
 // aria_native_auto.go wires ARIA auto-mode (AutoMode "always" / "cautious" and
 // per-pane standing orders) into NATIVE-renderer panes.
 //
@@ -467,6 +486,9 @@ func (a *Aria) evaluateNativeObservation(ctx context.Context, paneID, paneTitle 
 	if p == nil {
 		return
 	}
+	if a.completionRefused(p) {
+		return
+	}
 	ctx, _ = withAriaAutoModePolicy(ctx, p)
 	// Cap / pause gate up front so a paused or capped ARIA never burns an LLM
 	// call. (Per-turn budget is still enforced again at confirm time.)
@@ -499,8 +521,9 @@ func (a *Aria) evaluateNativeObservation(ctx context.Context, paneID, paneTitle 
 		if allowed, _ := a.autoAllowed(); !allowed {
 			break
 		}
-		evaluatedAny = true
-		if a.runNativeApprovalTurn(ctx, paneID, paneTitle, ap, instruction, orderID, countdownMs, cautious) {
+		fired, evaluated := a.runNativeApprovalTurn(ctx, paneID, paneTitle, ap, instruction, orderID, countdownMs, cautious)
+		evaluatedAny = evaluatedAny || evaluated
+		if fired {
 			firedAny = true
 		}
 	}
@@ -515,23 +538,29 @@ func (a *Aria) evaluateNativeObservation(ctx context.Context, paneID, paneTitle 
 }
 
 // runNativeApprovalTurn runs ONE LLM turn for ONE native approval, bound to its
-// exact RequestID. Returns true if the approval was auto-resolved. Mirrors
+// exact RequestID. Returns whether it fired and whether the provider evaluated
+// it (local refusals are neutral). Mirrors
 // evaluateObservation's emit-wrapper / outcome bookkeeping, but for a native
 // pane: the model is offered only resolve_permission, and the daemon binds the
 // reqID so the model never selects among parallel approvals.
-func (a *Aria) runNativeApprovalTurn(ctx context.Context, paneID, paneTitle string, ap *NativeApproval, instruction, orderID string, countdownMs int, cautious bool) bool {
+func (a *Aria) runNativeApprovalTurn(ctx context.Context, paneID, paneTitle string, ap *NativeApproval, instruction, orderID string, countdownMs int, cautious bool) (bool, bool) {
 	if ap == nil || ap.RequestID == "" {
-		return false
+		return false, false
 	}
 	start := time.Now()
 	p, ok := a.mgr.Get(paneID)
 	if !ok {
-		return false
+		return false, false
 	}
+	ctx, approvalPolicy := withAriaAutoModePolicy(ctx, p)
 	// Don't spend an LLM call on an approval that already vanished.
 	if p.peekNativePending(ap.RequestID) == nil {
-		return false
+		return false, false
 	}
+	if a.nativeCompletionRefused(p, ap.RequestID) {
+		return false, false
+	}
+	inputAllowed := completionStructuredInputAllowed(ap.RawInput)
 
 	title, preview := nativeApprovalSummary(ap)
 	policy := instruction
@@ -545,26 +574,12 @@ func (a *Aria) runNativeApprovalTurn(ctx context.Context, paneID, paneTitle stri
 	// Wrap the (untrusted) tool args in the same <pane_output> boundary the
 	// terminal path sanitises, so pane-controlled content can't break out and
 	// inject instructions.
-	safeInput := sanitizePromptWrapper(truncateStr(strings.TrimSpace(string(ap.RawInput)), 4000))
-	msg := fmt.Sprintf(`[AUTONOMOUS NATIVE-PANE EVALUATION — you were invoked by the pane-state watcher, not by the user.]
-
-Pane %q (id: %s) runs in native mode and is asking permission to use ONE tool. The exact request:
-
-Tool: %s
-Input:
-<pane_output>
-%s
-</pane_output>
-
-Policy for this pane:
-"%s"
-
-Decide:
-1. If the policy clearly permits THIS tool call, call resolve_permission (it takes no arguments) to approve it. The user will see a %s before it actually fires.
-2. If the policy does NOT clearly permit it (out of scope, risky, ambiguous), DO NOT call any tool — reply with ONE short sentence saying why. The request stays pending for the user to handle.
-
-There is exactly one pending request bound to this turn; resolve_permission approves THAT request and no other. Do not call read_pane_tail. Be decisive; don't narrate.`,
-		paneTitle, paneID, ap.ToolName, safeInput, policy, countdownPhrase)
+	var msg string
+	if inputAllowed {
+		safeInput := sanitizePromptWrapper(strings.TrimSpace(string(ap.RawInput)))
+		msg = fmt.Sprintf(ariaNativeObservationTemplate,
+			paneTitle, paneID, ap.ToolName, safeInput, policy, countdownPhrase)
+	}
 
 	convID := fmt.Sprintf("auto_native_%s", paneID)
 	innerEmit := a.autoEmitter(paneID, paneTitle, orderID, countdownMs)
@@ -609,7 +624,18 @@ There is exactly one pending request bound to this turn; resolve_permission appr
 		AutonomousNative:    true,
 		AutonomousRequestID: ap.RequestID,
 	}
-	if err := a.runTurn(ctx, req, emit); err != nil {
+	completionAllowed := teamCloudLLMAllowed()
+	turnErr := errAriaCompletionInput
+	if inputAllowed {
+		turnErr = a.runTurn(ctx, req, emit)
+	}
+	if err := turnErr; err != nil {
+		if errors.Is(err, errAriaCompletionInput) {
+			a.rememberNativeCompletionRefusal(p, approvalPolicy, completionAllowed, ap.RequestID)
+			emit(map[string]any{"type": "auto-eval-done", "pane_id": paneID, "pane_title": paneTitle})
+			a.recordEvalOutcomeDedup(AriaEvalOutcome{PaneID: paneID, Kind: "declined", Reason: errAriaCompletionInput.Error(), Model: req.Model, LatencyMs: time.Since(start).Milliseconds()})
+			return false, false
+		}
 		log.Printf("aria-auto-native: eval failed pane=%s req=%s: %v", paneID, ap.RequestID, err)
 		emit(map[string]any{"type": "auto-eval-error", "pane_id": paneID, "pane_title": paneTitle, "error": err.Error()})
 		kind := "error"
@@ -622,7 +648,7 @@ There is exactly one pending request bound to this turn; resolve_permission appr
 			Model:        req.Model, LatencyMs: time.Since(start).Milliseconds(),
 			ToolCalls: toolCalls, SendInput: "approve " + ap.ToolName,
 		})
-		return fired
+		return fired, true
 	}
 	emit(map[string]any{"type": "auto-eval-done", "pane_id": paneID, "pane_title": paneTitle})
 
@@ -634,13 +660,13 @@ There is exactly one pending request bound to this turn; resolve_permission appr
 		reason = ""
 		sendInput = "approve " + ap.ToolName
 	}
-	a.recordEvalOutcome(AriaEvalOutcome{
+	a.recordModelEvalOutcome(AriaEvalOutcome{
 		PaneID: paneID, Kind: kind, Reason: reason,
 		TailSnapshot: strings.TrimSpace(ap.ToolName + " " + preview),
 		Model:        req.Model, LatencyMs: time.Since(start).Milliseconds(),
 		ToolCalls: toolCalls, SendInput: sendInput,
 	})
-	return fired
+	return fired, true
 }
 
 // toolResolvePermission is the executor for the resolve_permission tool (the

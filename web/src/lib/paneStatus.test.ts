@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import type { PaneInfo } from '../types';
-import { paneRowStatus } from './paneStatus';
+import { paneNeedsYouLabel, paneRowStatus } from './paneStatus';
 
 it('does not mark quiet lead housekeeping as needs-you', () => {
   expect(paneRowStatus({ id: 'lead', status: 'running', state: 'idle', attention: 'none', workerNotices: [{ id: 'n1', text: 'Worker @x kept open', source: '@lead', createdAt: 1 }] } as PaneInfo)).toBe('idle');
@@ -28,4 +28,23 @@ it("counts an agent's open ask as needing you, until the pane exits", () => {
   expect(paneRowStatus({ ...p, state: 'busy', asks: [ask] })).toBe('needs-you');
   expect(paneRowStatus({ ...p, asks: [] })).toBe('finished');
   expect(paneRowStatus({ ...p, status: 'exited', asks: [ask] })).toBe('needs-you');
+});
+it('says why a row needs you', () => {
+  const ask = { id: 'a1', text: 'OK to deploy?', source: '@lead', createdAt: 1 };
+  const asks = [ask, { ...ask, id: 'a2' }];
+  expect(paneNeedsYouLabel({ ...p, state: 'choice-prompt', attention: 'needs-user' })).toBe('needs answer');
+  expect(paneNeedsYouLabel({ ...p, asks: [ask] })).toBe('1 ask');
+  expect(paneNeedsYouLabel({ ...p, asks })).toBe('2 asks');
+  expect(paneNeedsYouLabel({ ...p, state: 'choice-prompt', attention: 'needs-user', asks })).toBe('needs answer · 2 asks');
+  // A menu auto-approval is handling, or a dead pane's stale state, isn't waiting on anyone.
+  expect(paneNeedsYouLabel({ ...p, state: 'choice-prompt', attention: 'auto-pending', asks })).toBe('2 asks');
+  expect(paneNeedsYouLabel({ ...p, status: 'exited', state: 'choice-prompt', attention: 'needs-user', asks: [ask] })).toBe('1 ask');
+  // Anything else stays generic rather than guessing.
+  expect(paneNeedsYouLabel({ ...p, state: 'awaiting-input', attention: 'needs-user' })).toBe('needs you');
+});
+it('marks a pane with stuck held messages as needing you, only while running', () => {
+  const held = [{ id: 'h', sender: '@a', text: 'x', at: 1 }];
+  expect(paneRowStatus({ ...p, heldMessages: held, heldStuck: true })).toBe('needs-you');
+  expect(paneRowStatus({ ...p, heldMessages: held })).toBe('finished');
+  expect(paneRowStatus({ ...p, status: 'exited', heldMessages: held, heldStuck: true })).toBe('finished');
 });

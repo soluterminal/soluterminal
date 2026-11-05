@@ -88,7 +88,8 @@ var (
 	// A real Claude/Codex menu renders at least one sibling numbered option
 	// below its focused row. Accept siblings 2-9 so an ANSI-collapse glitch on
 	// option 2 cannot make a real approval menu look like idle composer chrome.
-	menuSiblingOptionRE = regexp.MustCompile(`(?m)^[\s\p{Zs}]*(?:[❯❭›▶][\s\p{Zs}]*)?[2-9](?:\.|\)|[\s\p{Zs}]{2,})`)
+	// A scroll-marker row ("↓ 2.", see menuScrollMarkerRowRE) is a sibling too.
+	menuSiblingOptionRE = regexp.MustCompile(`(?m)^[\s\p{Zs}]*(?:(?:[❯❭›▶][\s\p{Zs}]*)?[2-9](?:\.|\)|[\s\p{Zs}]{2,})|[↑↓][\s\p{Zs}]*[2-9]\.)`)
 
 	// Codex/Ratatui sometimes renders an approval modal without the
 	// focused "› 1. Yes" option row in the reconstructed grid. The
@@ -663,7 +664,7 @@ func codexCommandApprovalIdentity(s string) string {
 			}
 			continue
 		}
-		if trimmed == "" || menuOptionRowRE.MatchString(line) {
+		if trimmed == "" || isMenuOptionRow(line) {
 			break
 		}
 		command = append(command, trimmed)

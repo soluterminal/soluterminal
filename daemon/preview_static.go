@@ -13,8 +13,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,11 +27,6 @@ const (
 	previewBundleMaxBytes     = int64(500 << 20)
 	previewCacheMaxBytes      = int64(500 << 20)
 )
-
-// previewAPIUpstream is the loopback daemon origin a mounted acceptance
-// preview proxies /api/* to. Set once at startup from the daemon's own listen
-// address; empty disables the proxy (the historical static-only behavior).
-var previewAPIUpstream string
 
 type previewBundleManifest struct {
 	SchemaVersion int       `json:"schemaVersion"`
@@ -820,44 +813,6 @@ type previewStaticServer struct {
 	integrity map[string]previewStaticFileIntegrity
 	listener  net.Listener
 	server    *http.Server
-	// apiUpstream, when set, reverse-proxies /api/* to the live daemon instead
-	// of answering "preview backend unavailable". The daemon sees a loopback
-	// request, so a mounted acceptance preview runs the real app against real
-	// data instead of an empty shell.
-	apiUpstream *httputil.ReverseProxy
-}
-
-// setUpstream enables the /api reverse proxy. The engine only ever passes the
-// loopback daemon origin.
-func (s *previewStaticServer) setUpstream(raw string) error {
-	target, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return err
-	}
-	if target.Scheme != "http" || target.Host == "" {
-		return fmt.Errorf("preview api upstream must be an http origin")
-	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	// SSE (ui events) and long-poll endpoints must stream unbuffered.
-	proxy.FlushInterval = -1
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, _ error) {
-		previewWriteBackendUnavailable(w, r)
-	}
-	s.mu.Lock()
-	s.apiUpstream = proxy
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *previewStaticServer) serveAPI(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	proxy := s.apiUpstream
-	s.mu.Unlock()
-	if proxy == nil {
-		previewWriteBackendUnavailable(w, r)
-		return
-	}
-	proxy.ServeHTTP(w, r)
 }
 
 type previewStaticFileIntegrity struct {
@@ -979,10 +934,8 @@ func previewWriteBackendUnavailable(w http.ResponseWriter, r *http.Request) {
 
 func (s *previewStaticServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	cleanURL := filepath.ToSlash(filepath.Clean("/" + r.URL.Path))
-	// An API path that is not a real bundled file is a backend call. When a
-	// live upstream is configured it is proxied to the daemon; otherwise it is
-	// answered with the honest "preview backend unavailable" JSON so the run
-	// classifies as an infrastructure gap rather than a product routing defect.
+	// Missing API paths stay unavailable. App acceptance that needs a backend
+	// uses its own isolated daemon and home, never the host's running daemon.
 	// A bundle may legitimately ship files under /api/, so existence wins.
 	backendPath := previewIsBackendPath(cleanURL)
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && !backendPath {
@@ -1027,7 +980,7 @@ func (s *previewStaticServer) serveHTTP(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if backendPath {
-			s.serveAPI(w, r)
+			previewWriteBackendUnavailable(w, r)
 			return
 		}
 		http.NotFound(w, r)

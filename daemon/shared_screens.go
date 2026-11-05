@@ -86,7 +86,7 @@ func resolvePlaywrightModuleForApp(worktree, originRepo, appDir string) (string,
 	// when an earlier candidate resolved. Besides preserving precedence, this
 	// keeps the fresh-worktree path independent of global npm state.
 	if npmBin, err := exec.LookPath("npm"); err == nil {
-		if out, err := guardedOutput(exec.Command(npmBin, "root", "-g")); err == nil {
+		if out, err := guardedOutput(hiddenCommand(context.Background(), npmBin, "root", "-g")); err == nil {
 			if root := strings.TrimSpace(string(out)); root != "" {
 				candidates = []string{
 					filepath.Join(root, "playwright"),

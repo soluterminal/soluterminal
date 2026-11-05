@@ -67,8 +67,6 @@ function NeedsYouChip({ pane }: { pane: PaneInfo }) {
         <p className="pane-needs-you-source">Detected in the terminal output; no agent posted an ask for it.</p>
         <dl className="pane-origin-card-rows">
           {pane.attentionReason && (<><dt>Why you</dt><dd>{pane.attentionReason}</dd></>)}
-          {pane.attentionSummary && (<><dt>Summary</dt><dd>{pane.attentionRisk ? `${pane.attentionRisk} risk: ` : ''}{pane.attentionSummary}</dd></>)}
-          {pane.attentionAction && (<><dt>Suggested</dt><dd>{pane.attentionAction}</dd></>)}
         </dl>
         {lines.length > 0
           ? <>

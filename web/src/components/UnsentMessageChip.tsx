@@ -33,10 +33,13 @@ function HeldMessageChip({ pane, actionGuard }: { pane: PaneInfo; actionGuard?: 
     } finally { setPending(false); }
   };
   const more = held.length > 1 ? ` (+${held.length - 1} more)` : '';
+  // The box has text and nobody is typing: "while you type" would be wrong,
+  // and Send now could only be refused.
+  const blocked = behindUnsent(pane) || !!pane.heldStuck;
+  const where = behindUnsent(pane) ? 'waits behind the unsent message' : pane.heldStuck ? 'waits behind the text in the input box' : 'waits while you type';
   return <span className="pane-unsent-message" role="status" title={msg.text} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-    <span className="pane-unsent-message-label">{`Message from ${msg.sender} ${behindUnsent(pane) ? 'waits behind the unsent message' : 'waits while you type'}${more}`} —{' '}</span>
-    {/* Behind an unsent message in the box, Send now could only be refused. */}
-    {!behindUnsent(pane) && <><button type="button" disabled={pending} title="Type it now. Your input box must be empty." onClick={() => void act('send')}>Send now</button>{' / '}</>}
+    <span className="pane-unsent-message-label">{`Message from ${msg.sender} ${where}${more}`} —{' '}</span>
+    {!blocked && <><button type="button" disabled={pending} title="Type it now. Your input box must be empty." onClick={() => void act('send')}>Send now</button>{' / '}</>}
     <button type="button" disabled={pending} title="Drop the message; nothing is typed." onClick={() => void act('clear')}>Discard</button>
   </span>;
 }
@@ -88,7 +91,7 @@ function ReceiptChip({ pane, actionGuard }: { pane: PaneInfo; actionGuard?: () =
     </span>;
   }
   return <span className="pane-unsent-message" role="status" title={msg.notTyped ? msg.text : undefined} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-    <span className="pane-unsent-message-label">{msg.notTyped ? `Message from ${msg.sender} not sent (the pane was busy)` : msg.putBack ? `Unsent message from ${msg.sender} in the input box (put back after you stopped it). Agents can't type into this pane until it's sent or cleared` : `Unsent message from ${msg.sender}`} —{' '}</span>
+    <span className="pane-unsent-message-label">{msg.notTyped ? `Message from ${msg.sender} not sent (the pane was busy)` : msg.putBack ? `Unsent message from ${msg.sender} is back in the input box. Agents can't type into this pane until it's sent or cleared` : `Unsent message from ${msg.sender}`} —{' '}</span>
     <button type="button" disabled={pending} title={msg.notTyped ? 'Read the message, then type it into the pane and press Enter.' : undefined} onClick={() => void act('send')}>{msg.notTyped ? 'Send…' : 'Send'}</button>{' / '}
     {msg.notTyped
       ? <button type="button" disabled={pending} title="Discard the message; nothing was typed." onClick={() => void act('clear')}>Discard</button>

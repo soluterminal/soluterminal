@@ -64,3 +64,14 @@ it('does not reopen its card for the next prompt once attention has cleared', ()
   rerender(<PaneNeedsYouChip pane={pane()} />);
   expect(screen.queryByRole('dialog')).toBeNull();
 });
+
+it('ignores retired model fields from an older daemon', () => {
+  const legacy = { attentionSummary: 'old model summary', attentionRisk: 'high', attentionAction: 'old model action' };
+  render(<PaneNeedsYouChip pane={pane({ ...legacy, attentionReason: 'A person must answer' })} />);
+  fireEvent.click(screen.getByRole('button', { name: 'needs you' }));
+  expect(screen.getByText('A person must answer')).toBeTruthy();
+  expect(screen.queryByText('old model summary')).toBeNull();
+  expect(screen.queryByText('old model action')).toBeNull();
+  expect(screen.queryByText('Summary')).toBeNull();
+  expect(screen.queryByText('Suggested')).toBeNull();
+});

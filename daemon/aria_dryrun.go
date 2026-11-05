@@ -1,14 +1,33 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 )
+
+const ariaDryRunObservationTemplate = `[AUTONOMOUS EVALUATION — you were invoked by the pane-state watcher, not by the user.]
+
+Pane %q (id: dryrun_%s) just entered awaiting-input. Here is its current tail:
+
+<pane_output>
+%s
+</pane_output>
+
+The user has set this standing order for this pane:
+"%s"
+
+Decide:
+1. If the standing order clearly covers THIS prompt, call send_input with the appropriate reply. The user will see a 5-second cancel window before it actually fires.
+2. If the order does NOT cover this prompt (wrong type, outside scope, ambiguous), respond with a single short sentence explaining why, and DO NOT call any tools. The user still has the observation card and will handle it manually.
+
+CRITICAL — send_input newline:
+- The 'input' arg MUST end with '\n' to actually press Enter and submit. Bare '1' types the digit but Claude Code never sees it because Enter wasn't pressed.
+- For a numbered menu, pass input='1\n' (or whatever the choice is). For y/n, pass input='y\n'. The trailing newline is mandatory for ANY reply you intend to submit.
+
+Be decisive. Don't narrate. Don't call read_pane_tail — the full tail is already above.`
 
 // ARIA dry-run: regression-test surface for prompts. Given a synthetic
 // pane tail + standing-order instruction, run the same model the
@@ -96,26 +115,7 @@ func (a *Aria) dryRun(ctx context.Context, paneTitle, paneTail, instruction, mod
 	// the "5-second cancel window" phrase is fine here — we're testing
 	// what the model would decide, not what the UI would render, and
 	// the prompt's countdown phrasing has historically been stable.
-	msg := fmt.Sprintf(`[AUTONOMOUS EVALUATION — you were invoked by the pane-state watcher, not by the user.]
-
-Pane %q (id: dryrun_%s) just entered awaiting-input. Here is its current tail:
-
-<pane_output>
-%s
-</pane_output>
-
-The user has set this standing order for this pane:
-"%s"
-
-Decide:
-1. If the standing order clearly covers THIS prompt, call send_input with the appropriate reply. The user will see a 5-second cancel window before it actually fires.
-2. If the order does NOT cover this prompt (wrong type, outside scope, ambiguous), respond with a single short sentence explaining why, and DO NOT call any tools. The user still has the observation card and will handle it manually.
-
-CRITICAL — send_input newline:
-- The 'input' arg MUST end with '\n' to actually press Enter and submit. Bare '1' types the digit but Claude Code never sees it because Enter wasn't pressed.
-- For a numbered menu, pass input='1\n' (or whatever the choice is). For y/n, pass input='y\n'. The trailing newline is mandatory for ANY reply you intend to submit.
-
-Be decisive. Don't narrate. Don't call read_pane_tail — the full tail is already above.`,
+	msg := fmt.Sprintf(ariaDryRunObservationTemplate,
 		paneTitle, paneTitle, paneTail, instruction)
 
 	model := strings.TrimSpace(modelOverride)
@@ -138,23 +138,13 @@ Be decisive. Don't narrate. Don't call read_pane_tail — the full tail is alrea
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	cloudBase, cloudTok := a.cloudCreds()
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", cloudBase+"/api/aria/complete", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+cloudTok)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-
-	resp, err := ariaClient.Load().Do(httpReq)
+	resp, err := a.sendCompletion(ctx, payload)
 	if err != nil {
 		return nil, fmt.Errorf("cloud: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("cloud http %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("cloud http %d", resp.StatusCode)
 	}
 
 	// No emit — we don't need streaming events on the dryrun path; the

@@ -1,4 +1,15 @@
 {
+  "0.0.1238": [
+    "Security fixes. We recommend updating.",
+    "If SoluTerminal asks you to restart the desktop app after updating, please do.",
+    "If you reach SoluTerminal through your own reverse proxy, make sure it forwards the port in the Host header.",
+    "On Windows, fewer console windows now flash on screen when SoluTerminal’s background service runs its helper programs.",
+    "Fixed: auto-approve could refuse a plain Yes when Claude Code’s menu was scrolled in a short pane.",
+    "If messages wait behind text left in a pane’s input box and nobody is typing, the inbox, bell, sidebar and pane now say so, and you get an alert, including on your phone if you’ve turned on phone notifications (needs a free account). Send or clear the text in the pane to let them through.",
+    "Sidebar rows now say why a pane needs you: “needs answer” for a waiting menu, “2 asks” for open asks, both if it has both, and “needs you” for anything else.",
+    "Fixed: in the desktop app, the warnings before Restart background service, Require and Only devices I approve now wait for your answer.",
+    "Fixed: crash reports could include full paths to your own .go files. They’re now removed."
+  ],
   "0.0.1237": [
     "Correction: earlier versions described Settings › Privacy & security › “Share usage statistics” wrongly. Sent while this computer is connected to your account, even after you sign out. Turning this on or connecting can also send earlier turns still on this computer.",
     "Settings › Devices & updates now has Restart background service, when SoluTerminal runs in Linux (WSL or a command-line install) and can restart it safely. It reloads ~/.solu/env. Panes keep running with their old environment and reconnect. Before you confirm, it shows how many held messages and put-back receipts may be lost.",

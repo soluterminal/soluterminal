@@ -265,7 +265,11 @@ func (p *Pane) codexMenuIsEcho(hasCodex bool) bool {
 // deliveryMenuText is the delivery's screen (deliveryScreenText) for its
 // menu checks, read from the emulator paneVisibleScreen reads first.
 func deliveryMenuText(p *Pane, codex bool) string {
-	text := deliveryScreenText(p)
+	return deliveryMenuTextFrom(p, codex, deliveryScreenText(p))
+}
+
+// deliveryMenuTextFrom is deliveryMenuText for a screen already read.
+func deliveryMenuTextFrom(p *Pane, codex bool, text string) string {
 	if !mayBeEcho(text, codex) {
 		return text
 	}

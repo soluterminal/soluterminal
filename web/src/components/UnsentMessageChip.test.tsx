@@ -111,7 +111,7 @@ it('says a put-back message is in the input box, and held messages wait behind i
     heldMessages: [{ id: 'h1', sender: '@release-lead', text: 'next', at: 1 }],
   } as PaneInfo} />);
   const [receipt, held] = screen.getAllByRole('status');
-  expect(receipt.textContent).toContain('Unsent message from @flag-guard in the input box (put back after you stopped it). Agents can\'t type into this pane until it\'s sent or cleared');
+  expect(receipt.textContent).toContain('Unsent message from @flag-guard is back in the input box. Agents can\'t type into this pane until it\'s sent or cleared');
   expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Clear' })).toBeTruthy();
   expect(held.textContent).toContain('Message from @release-lead waits behind the unsent message');
@@ -143,4 +143,15 @@ it('surfaces a refused Clear on a multi-line edited message', async () => {
   render(<UnsentMessageChip pane={{ id: 'p9', unsentMessage: { id: 'r9', sender: '@flag-guard', putBack: true, edited: true } } as PaneInfo} />);
   fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
   await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('more than one line'), { kind: 'warn' }));
+});
+
+it('stops saying "while you type" once held messages are stuck, and offers no Send now', () => {
+  render(<UnsentMessageChip pane={{
+    id: 'p8',
+    heldMessages: [{ id: 'h1', sender: '@a', text: 'first', at: 1 }, { id: 'h2', sender: '@b', text: 'second', at: 2 }],
+    heldStuck: true,
+  } as PaneInfo} />);
+  expect(screen.getByRole('status').textContent).toContain('Message from @a waits behind the text in the input box (+1 more)');
+  expect(screen.queryByRole('button', { name: 'Send now' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Discard' })).toBeTruthy();
 });

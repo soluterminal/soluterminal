@@ -145,7 +145,7 @@ func findPreviewSourceRepo() string {
 func runFollowMain(ctx context.Context, repo string, args ...string) ([]byte, error) {
 	// A login shell picks up the owner's PATH (nvm node, gh, go).
 	script := "exec bash scripts/follow-main.sh " + strings.Join(args, " ")
-	cmd := exec.CommandContext(ctx, "bash", "-lc", script)
+	cmd := hiddenCommand(ctx, "bash", "-lc", script)
 	cmd.Dir = repo
 	return cmd.Output()
 }
@@ -162,6 +162,7 @@ func spawnFollowMain(repo, logPath string, args ...string) (int, error) {
 	cmd.Dir = repo
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = previewDetachAttr()
+	applyNoWindow(cmd)
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}

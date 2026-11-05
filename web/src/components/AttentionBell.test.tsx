@@ -6,7 +6,7 @@ import type { PaneInfo } from '../types';
 
 // The bell reads the real store through useAttentionBadge/useAttentionItems —
 // seed panes directly and assert the badge count + the opened list rows
-// (including the LLM-graded summary line) render from the same data.
+// (including its plain reason line) render from the same data.
 
 function needsUserPane(id: string, over: Partial<PaneInfo> = {}): PaneInfo {
   return {
@@ -49,13 +49,11 @@ describe('AttentionBell', () => {
     expect(screen.getByText('Decide how to preserve unpublished work')).toBeTruthy();
   });
 
-  it('counts needs-user panes and lists them with the graded summary on open', () => {
+  it('uses plain reasons and ignores model fields from older daemons', () => {
+    const legacy = { attentionSummary: 'old model summary', attentionRisk: 'high', attentionAction: 'old model action' };
     useStore.setState({
       panes: {
-        p1: needsUserPane('p1', {
-          attentionSummary: 'wants to run a prod DB migration',
-          attentionRisk: 'high',
-        }),
+        p1: needsUserPane('p1', { ...legacy, attentionReason: 'This prompt needs your decision' }),
         p2: needsUserPane('p2', { state: 'awaiting-input' }),
         // auto-pending panes are auto-approval's problem, never the bell's.
         p3: needsUserPane('p3', { attention: 'auto-pending' }),
@@ -70,8 +68,10 @@ describe('AttentionBell', () => {
     expect(screen.getByText('pane p1')).toBeTruthy();
     expect(screen.getByText('pane p2')).toBeTruthy();
     expect(screen.queryByText('pane p3')).toBeNull();
-    expect(screen.getByText('wants to run a prod DB migration')).toBeTruthy();
-    expect(screen.getByText('high')).toBeTruthy();
+    expect(screen.getByText('This prompt needs your decision')).toBeTruthy();
+    expect(screen.queryByText('old model summary')).toBeNull();
+    expect(screen.queryByText('old model action')).toBeNull();
+    expect(screen.queryByText('high')).toBeNull();
   });
 
   it("lists a message stuck in an idle pane's input box until it is sent or cleared", () => {

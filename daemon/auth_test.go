@@ -295,35 +295,12 @@ func TestMiddlewareStrictModeBlocksTokenlessLoopback(t *testing.T) {
 	}
 }
 
-// The daemon-owned mounted-preview proxy forwards /api/* from a non-loopback
-// exposure origin with a loopback Host, so the request authenticates as local
-// but would otherwise look cross-origin. The proxy stamps an unguessable
-// per-process marker (after stripping any inbound value); the gate must honor
-// exactly that marker and reject a forged one.
-func TestOriginProtectedTrustsDaemonOwnedPreviewProxy(t *testing.T) {
-	t.Parallel()
-	if previewProxyOriginToken == "" {
-		t.Fatal("test setup: preview proxy token is empty")
-	}
-	r := httptest.NewRequest("GET", "http://127.0.0.1:8787/api/health", nil)
-	r.Host = "127.0.0.1:39703"
-	r.Header.Set("Origin", "http://172.22.149.245:39703")
-	r.Header.Set(previewProxyOriginHeader, previewProxyOriginToken)
-
-	if !originProtected(r) {
-		t.Fatal("daemon-owned preview proxy request was rejected as cross-origin")
-	}
-}
-
-func TestOriginProtectedRejectsForgedPreviewProxyMarker(t *testing.T) {
-	t.Parallel()
-	r := httptest.NewRequest("GET", "http://127.0.0.1:8787/api/health", nil)
-	r.Host = "127.0.0.1:39703"
-	r.Header.Set("Origin", "http://172.22.149.245:39703")
-	r.Header.Set(previewProxyOriginHeader, "forged-token")
-
+func TestOriginProtectedIgnoresRetiredPreviewMarker(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:41001/api/health", nil)
+	r.Header.Set("Origin", "http://127.0.0.1:41002")
+	r.Header.Set("X-Soluterminal-Preview-Proxy", "retired-marker")
 	if originProtected(r) {
-		t.Fatal("forged preview proxy marker was trusted")
+		t.Fatal("retired marker was trusted")
 	}
 }
 

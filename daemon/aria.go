@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -101,7 +100,8 @@ type Aria struct {
 	// evals/hr forever. Once a pane racks up enough consecutive
 	// no-action / error outcomes, the sweeper suspends it until the
 	// pane's choice-prompt position genuinely advances (new menu).
-	sweepStreaks map[string]*sweepStreak
+	sweepStreaks       map[string]*sweepStreak
+	completionRefusals map[string]completionRefusalMemo // guarded by mu; no pane text
 
 	// Per-pane direct auto-fire counts for one unchanged visible-screen
 	// identity. Guarded by a.mu with the other autoresponder safety rails.
@@ -117,9 +117,6 @@ type Aria struct {
 	// "backed off" badge.
 	evalLog *ariaEvalLog
 
-	// attnSum drives the LLM-graded attention items (one cheap summary
-	// call per needs-user prompt). See aria_attention_summary.go.
-	attnSum *attentionSummarizer
 	// Test seam for the opt-in Jev cautious auto path. Production uses the
 	// TypeSafe client with the late-bound workflow runtime credential.
 	jevClientFactory func(string) jevSystemOneClient
@@ -420,7 +417,6 @@ func NewAria(mgr *Manager, bus *uiBus, ws *WorkspaceStore, ports *PortRegistry, 
 		inFlightEvals:    map[string]bool{},
 		autoFireLogPath:  filepath.Join(dataDir, "aria_auto_fires.json"),
 		evalLog:          newAriaEvalLog(),
-		attnSum:          newAttentionSummarizer(),
 	}
 	a.loadAutoFireTimes()
 	// Restore persisted pause flag. If it was true at last shutdown,
@@ -729,6 +725,9 @@ func (a *Aria) resetAutoModeEvaluation(p *Pane) {
 	if memo, ok := a.jevCautiousMemo[p.ID]; ok && memo.policy != policy {
 		delete(a.jevCautiousMemo, p.ID)
 	}
+	if memo, ok := a.completionRefusals[p.ID]; ok && memo.policy != policy {
+		delete(a.completionRefusals, p.ID)
+	}
 	a.mu.Unlock()
 	p.autoDeclineMu.Lock()
 	p.autoDeclineReason = ""
@@ -801,6 +800,7 @@ func (a *Aria) OnPaneExit(paneID string) {
 	delete(a.autoFirePace, paneID)
 	delete(a.jevDetectCache, paneID)
 	delete(a.jevCautiousMemo, paneID)
+	delete(a.completionRefusals, paneID)
 	delete(a.autoPending, paneID)
 	a.mu.Unlock()
 	// inFlightEvals is guarded by its OWN mutex everywhere else
@@ -1204,13 +1204,11 @@ Style (important — the user has explicitly asked for this):
 - If you are unsure which pane or workspace the user means, call list_panes / list_workspaces and ask.
 - After a rejected confirm, ask what they'd prefer instead rather than retrying the same thing.`
 
-// runTurn drives the full tool-use loop for one autonomous turn (a
-// cautious-mode / standing-order evaluation fired by the watcher —
-// there is no interactive chat anymore). `emit` forwards
-// {type:delta|tool_call|tool_result|error} events to the caller as
-// they happen. The loop terminates when the model returns a
-// non-tool_use stop_reason or when we hit the safety cap on loop
-// iterations (10 — well beyond any legit evaluation turn).
+// runTurn makes one autonomous permission decision. Only send_input or the
+// bound native resolve_permission is offered; a tool attempt ends this turn,
+// whether it acts, is cancelled, is held or fails. No follow-up completion is
+// needed, and provider thinking/signatures and tool results stay local.
+// `emit` forwards {type:delta|tool_call|tool_result|error} as they happen.
 func (a *Aria) runTurn(ctx context.Context, req ariaQueryReq, emit func(map[string]any)) error {
 	// Each evaluation is an independent decision — history never spans
 	// turns (the old chat's convs map is gone).
@@ -1221,146 +1219,109 @@ func (a *Aria) runTurn(ctx context.Context, req ariaQueryReq, emit func(map[stri
 
 	model := strings.TrimSpace(req.Model)
 
-	const maxLoopIters = 10
-	for iter := 0; iter < maxLoopIters; iter++ {
-		// Build the Anthropic-shape request. system + tools are static
-		// across the turn loop's iterations (and across many calls on
-		// repeat queries) — flagging them with cache_control: ephemeral
-		// on Anthropic-routed models lets the prompt cache serve the
-		// prefix at ~10% of the input rate. DeepSeek's Anthropic-compat
-		// layer already does automatic prefix caching, so we keep the
-		// plain string shape there to avoid surprising the compat-layer
-		// parser.
-		tools := ariaAutonomousTools()
-		if req.AutonomousNative {
-			// Native panes are answered with a structured control_response
-			// frame, so the turn gets resolve_permission instead of the
-			// PTY-byte send_input tool.
-			tools = ariaNativeAutonomousTools()
+	// Build the Anthropic-shape request. system + tools are static
+	// across independent evaluations — flagging them with cache_control: ephemeral
+	// on Anthropic-routed models lets the prompt cache serve the
+	// prefix at ~10% of the input rate. DeepSeek's Anthropic-compat
+	// layer already does automatic prefix caching, so we keep the
+	// plain string shape there to avoid surprising the compat-layer
+	// parser.
+	tools := ariaAutonomousTools()
+	if req.AutonomousNative {
+		// Native panes are answered with a structured control_response
+		// frame, so the turn gets resolve_permission instead of the
+		// PTY-byte send_input tool.
+		tools = ariaNativeAutonomousTools()
+	}
+	body := map[string]any{
+		"messages":   history,
+		"max_tokens": 4096,
+		"stream":     true,
+	}
+	if model != "" {
+		body["model"] = model
+	}
+	if model == "" || strings.HasPrefix(model, "claude-") {
+		body["system"] = []map[string]any{
+			{"type": "text", "text": ariaSystemPrompt, "cache_control": map[string]any{"type": "ephemeral"}},
 		}
-		body := map[string]any{
-			"messages":   history,
-			"max_tokens": 4096,
-			"stream":     true,
-		}
-		if model != "" {
-			body["model"] = model
-		}
-		if model == "" || strings.HasPrefix(model, "claude-") {
-			body["system"] = []map[string]any{
-				{"type": "text", "text": ariaSystemPrompt, "cache_control": map[string]any{"type": "ephemeral"}},
-			}
-			body["tools"] = ariaToolsWithCacheBreakpoint(tools)
-		} else {
-			body["system"] = ariaSystemPrompt
-			body["tools"] = tools
-		}
-		payload, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
-		}
-
-		cloudBase, cloudTok := a.cloudCreds()
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", cloudBase+"/api/aria/complete", bytes.NewReader(payload))
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		httpReq.Header.Set("Authorization", "Bearer "+cloudTok)
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Accept", "text/event-stream")
-
-		resp, err := ariaClient.Load().Do(httpReq)
-		if err != nil {
-			return fmt.Errorf("cloud request: %w", err)
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			// Anthropic returns 400 with "prompt is too long: X tokens >
-			// 200000 maximum" when context overflows. An autonomous
-			// evaluation is single-shot, so there is nothing to compact —
-			// treat it as a plain eval error.
-			bodyStr := string(body)
-			if isAriaContextOverflow(resp.StatusCode, bodyStr) {
-				return errors.New("context overflow: evaluation request too large for the model window")
-			}
-			return fmt.Errorf("cloud %d: %s", resp.StatusCode, truncateStr(bodyStr, 300))
-		}
-
-		assistantBlocks, stopReason, callUsage, err := a.consumeStream(resp.Body, emit)
-		resp.Body.Close()
-		if err != nil {
-			return fmt.Errorf("stream: %w", err)
-		}
-
-		// Fire-and-forget usage report to cloud. One row per upstream
-		// call — including each tool-loop iteration, since each one
-		// hits the API independently. Kind is derived from the
-		// conversation id: autonomous evaluations all use auto_pane_*
-		// (see aria_auto.go), everything else is the user's manual
-		// chat. Failures are logged, never blocking the user-facing
-		// turn — this is observability, not enforcement.
-		reportModel := callUsage.Model
-		if reportModel == "" {
-			reportModel = model
-		}
-		go a.reportUsageToCloud(ariaUsageKindFor(req.ConversationID), reportModel, callUsage)
-
-		// Append the assistant turn to history even if we're about to
-		// loop — next iteration needs it in context.
-		history = append(history, ariaMessage{
-			Role:    "assistant",
-			Content: assistantBlocks,
-		})
-
-		if stopReason != "tool_use" {
-			return nil
-		}
-
-		// Execute every tool_use block in order. Emit tool_call +
-		// tool_result events so the UI can show the action log.
-		toolResults := make([]ariaBlock, 0, 2)
-		for _, b := range assistantBlocks {
-			if b.Type != "tool_use" {
-				continue
-			}
-			emit(map[string]any{
-				"type": "tool_call",
-				"id":   b.ID,
-				"name": b.Name,
-				"args": json.RawMessage(b.Input),
-			})
-			// Mirror to Activity feed so "ARIA did X" shows up
-			// alongside Claude Code tool calls in the existing UI.
-			a.uiBus.publish(uiEvent{
-				Type: "aria-action",
-				Tool: b.Name,
-				Ts:   time.Now().UnixMilli(),
-			})
-			result := a.executeTool(ctx, b.ID, b.Name, b.Input, req, emit)
-			emit(map[string]any{
-				"type": "tool_result",
-				"id":   b.ID,
-				"text": result,
-			})
-			toolResults = append(toolResults, ariaBlock{
-				Type:      "tool_result",
-				ToolUseID: b.ID,
-				Content:   result,
-			})
-		}
-		history = append(history, ariaMessage{
-			Role:    "user",
-			Content: toolResults,
-		})
-		// Loop — Anthropic will see tool_result and either produce
-		// more tool_use or give the final answer.
+		body["tools"] = ariaToolsWithCacheBreakpoint(tools)
+	} else {
+		body["system"] = ariaSystemPrompt
+		body["tools"] = tools
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	// Hit the safety cap. Very unlikely with a single-tool surface,
-	// but surface it as an error so a bug doesn't silently burn the
-	// user's quota.
-	return errors.New("ARIA tool loop exceeded maximum iterations")
+	resp, err := a.sendCompletion(ctx, payload)
+	if err != nil {
+		return fmt.Errorf("cloud request: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		// Anthropic returns 400 with "prompt is too long: X tokens >
+		// 200000 maximum" when context overflows. An autonomous
+		// evaluation is single-shot, so there is nothing to compact —
+		// treat it as a plain eval error.
+		bodyStr := string(body)
+		if isAriaContextOverflow(resp.StatusCode, bodyStr) {
+			return errors.New("context overflow: evaluation request too large for the model window")
+		}
+		return fmt.Errorf("cloud http %d", resp.StatusCode)
+	}
+
+	assistantBlocks, stopReason, callUsage, err := a.consumeStream(resp.Body, emit)
+	resp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("stream: %w", err)
+	}
+
+	// Fire-and-forget usage report to cloud. One row per upstream
+	// call. Kind is derived from the autonomous conversation id.
+	// Failures are logged without blocking the permission decision.
+	reportModel := callUsage.Model
+	if reportModel == "" {
+		reportModel = model
+	}
+	go a.reportUsageToCloud(ariaUsageKindFor(req.ConversationID), reportModel, callUsage)
+
+	if stopReason != "tool_use" {
+		return nil
+	}
+
+	// Execute every tool_use block in order. Emit tool_call +
+	// tool_result events so the UI can show the action log.
+	for _, b := range assistantBlocks {
+		if b.Type != "tool_use" {
+			continue
+		}
+		emit(map[string]any{
+			"type": "tool_call",
+			"id":   b.ID,
+			"name": b.Name,
+			"args": json.RawMessage(b.Input),
+		})
+		// Mirror to Activity feed so "ARIA did X" shows up
+		// alongside Claude Code tool calls in the existing UI.
+		a.uiBus.publish(uiEvent{
+			Type: "aria-action",
+			Tool: b.Name,
+			Ts:   time.Now().UnixMilli(),
+		})
+		result := a.executeTool(ctx, b.ID, b.Name, b.Input, req, emit)
+		emit(map[string]any{
+			"type": "tool_result",
+			"id":   b.ID,
+			"text": result,
+		})
+		// One permission, one tool attempt. A second model tool block must
+		// not type another answer into a pane that may already have advanced.
+		return nil
+	}
+	return nil
 }
 
 func isAriaContextOverflow(status int, body string) bool {

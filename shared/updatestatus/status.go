@@ -13,6 +13,11 @@ type Status struct {
 	LastSuccessMs int64  `json:"lastSuccessMs,omitempty"`
 	Reason        string `json:"reason,omitempty"`
 	LatestVersion string `json:"latestVersion,omitempty"`
+	// RunningFlavor is the build this binary is; UpdateChannel is the build this
+	// install follows. They differ between an install's channel switch and that
+	// channel's next installable release. Channel above is the release ring.
+	RunningFlavor string `json:"runningFlavor,omitempty"`
+	UpdateChannel string `json:"updateChannel,omitempty"`
 }
 
 var version = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){1,3}([-+][a-zA-Z0-9.-]+)?$`)
@@ -41,6 +46,8 @@ func (s Status) Sanitize() Status {
 	s.LastCheckError = oneOf(s.LastCheckError, "network", "signature", "manifest", "control", "check-failed")
 	s.Reason = oneOf(s.Reason, "kill-switch", "quarantined", "floor", "rollout-cohort", "version-hold", "drain", "restart-pending", "busy", "applying")
 	s.LatestVersion = Version(s.LatestVersion)
+	s.RunningFlavor = oneOf(s.RunningFlavor, "public", "team")
+	s.UpdateChannel = oneOf(s.UpdateChannel, "public", "team")
 	if s.LastCheckMs < 0 {
 		s.LastCheckMs = 0
 	}

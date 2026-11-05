@@ -82,6 +82,7 @@ func executeCapabilityRecipe(ctx context.Context, req envRequirement) (result ca
 		}
 		cmd.Dir = dir
 		cmd.SysProcAttr = pipeChildSysProcAttr()
+		applyNoWindow(cmd)
 		cmd.Cancel = func() error { return killChildTree(cmd.Process) }
 		cmd.WaitDelay = time.Second
 		// Discard arbitrary stdout/stderr; exit and spawn errno are evidence.

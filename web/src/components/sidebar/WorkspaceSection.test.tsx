@@ -351,24 +351,28 @@ describe('WorkspaceSection', () => {
     const lead = pane({ id: 'lead', title: '@ops · deploys', state: 'idle', identity: { handle: 'ops', workingOn: 'Rolling out 1.2' } });
     const asking = pane({ id: 'asking', title: '@db migrate', state: 'choice-prompt', attention: 'needs-user', identity: { handle: 'db' }, origin: { source: 'agent', byPaneId: 'lead', at: 1 } });
     const quiet = pane({ id: 'quiet', title: 'Plain worker', state: 'idle', origin: { source: 'agent', byPaneId: 'lead', at: 2 } });
-    renderWorkspaceSection({ named: [workspace({ name: 'Project', paneIds: ['lead'] })], panes: { lead, asking, quiet }, activeWorkspace: 'Project' });
+    const ask = { id: 'a1', text: 'Back up the key', source: '@keys', createdAt: 1 };
+    const posted = pane({ id: 'posted', title: '@keys rotate', state: 'idle', asks: [ask, { ...ask, id: 'a2' }], identity: { handle: 'keys' }, origin: { source: 'agent', byPaneId: 'lead', at: 3 } });
+    renderWorkspaceSection({ named: [workspace({ name: 'Project', paneIds: ['lead'] })], panes: { lead, asking, quiet, posted }, activeWorkspace: 'Project' });
     const row = (name: string) => screen.getByRole('treeitem', { name }).querySelector(':scope > .workspace-pane-row')!;
     // Folded by default, the counts stand in for its rows.
-    expect(row('@ops · deploys').querySelector('.pane-tree-count')).toHaveTextContent(/^2w$/);
+    expect(row('@ops · deploys').querySelector('.pane-tree-count')).toHaveTextContent(/^3w$/);
     fireEvent.click(screen.getByRole('button', { name: 'Expand @ops · deploys' }));
     expect(row('@ops · deploys').querySelector('.pane-tree-desc')).toHaveTextContent(/^Rolling out 1\.2$/);
-    expect(row('@db · migrate').querySelector('.pane-tree-desc')).toHaveTextContent(/^needs you · migrate$/);
+    expect(row('@db · migrate').querySelector('.pane-tree-desc')).toHaveTextContent(/^needs answer · migrate$/);
+    expect(row('@keys · rotate').querySelector('.pane-tree-desc')).toHaveTextContent(/^2 asks · rotate$/);
     expect(row('Plain worker').querySelector('.pane-tree-desc')).toBeNull();
-    expect(screen.getByRole('treeitem', { name: '@ops · deploys' })).toHaveAccessibleDescription('idle · 2 workers');
-    expect(screen.getByRole('treeitem', { name: '@db · migrate' })).toHaveAccessibleDescription('needs you');
+    expect(screen.getByRole('treeitem', { name: '@ops · deploys' })).toHaveAccessibleDescription('idle · 3 workers');
+    expect(screen.getByRole('treeitem', { name: '@db · migrate' })).toHaveAccessibleDescription('needs answer');
+    expect(screen.getByRole('treeitem', { name: '@keys · rotate' })).toHaveAccessibleDescription('2 asks');
     // Counts show only on a folded branch, where its rows are out of sight.
     // Open, the rows replace the counts; folded again, they come back.
     expect(row('@ops · deploys').querySelector('.pane-tree-count')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Collapse @ops · deploys' }));
     const count = row('@ops · deploys').querySelector('.pane-tree-count');
-    expect(count).toHaveTextContent(/^2w$/);
-    expect(count).toHaveAttribute('title', '2 workers');
-    expect(row('@ops · deploys').querySelector('.pane-tree-attn-count')).toHaveTextContent('1●');
+    expect(count).toHaveTextContent(/^3w$/);
+    expect(count).toHaveAttribute('title', '3 workers');
+    expect(row('@ops · deploys').querySelector('.pane-tree-attn-count')).toHaveTextContent('2●');
   });
 
   it('shows a lead another lead started as a peer, with its workers folded under it and its attention on its row', () => {

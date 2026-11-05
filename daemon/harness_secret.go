@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -84,9 +85,9 @@ func (b execSecretBackend) Get(account string) ([]byte, bool) {
 	var out []byte
 	var err error
 	if filepath.Base(b.tool) == "security" {
-		out, err = exec.Command(b.tool, "find-generic-password", "-s", "soluterminal-harness", "-a", account, "-w").Output()
+		out, err = hiddenCommand(context.Background(), b.tool, "find-generic-password", "-s", "soluterminal-harness", "-a", account, "-w").Output()
 	} else {
-		out, err = exec.Command(b.tool, "lookup", "service", "soluterminal-harness", "account", account).Output()
+		out, err = hiddenCommand(context.Background(), b.tool, "lookup", "service", "soluterminal-harness", "account", account).Output()
 	}
 	if err != nil {
 		return nil, false
@@ -101,9 +102,9 @@ func (b execSecretBackend) Get(account string) ([]byte, bool) {
 func (b execSecretBackend) Set(account string, key []byte) error {
 	encoded := hex.EncodeToString(key)
 	if filepath.Base(b.tool) == "security" {
-		return exec.Command(b.tool, "add-generic-password", "-s", "soluterminal-harness", "-a", account, "-w", encoded, "-U").Run()
+		return hiddenCommand(context.Background(), b.tool, "add-generic-password", "-s", "soluterminal-harness", "-a", account, "-w", encoded, "-U").Run()
 	}
-	cmd := exec.Command(b.tool, "store", "--label=soluterminal harness credential key", "service", "soluterminal-harness", "account", account)
+	cmd := hiddenCommand(context.Background(), b.tool, "store", "--label=soluterminal harness credential key", "service", "soluterminal-harness", "account", account)
 	cmd.Stdin = strings.NewReader(encoded + "\n")
 	return cmd.Run()
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -313,18 +312,18 @@ func ensureCodexMcpRegistration(listenAddr string) {
 			// with the right schema.
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			if action == "fix" {
-				removeCmd := exec.CommandContext(ctx, codexBin, "mcp", "remove", "soluterminal")
+				removeCmd := hiddenCommand(ctx, codexBin, "mcp", "remove", "soluterminal")
 				removeCmd.Env = providerChildEnvForBin(codexBin, os.Environ())
 				_ = removeCmd.Run()
 			}
-			addCmd := exec.CommandContext(ctx, codexBin,
+			addCmd := hiddenCommand(ctx, codexBin,
 				"mcp", "add", "soluterminal", "--url", desired,
 			)
 			addCmd.Env = providerChildEnvForBin(codexBin, os.Environ())
 			out, cmdErr := addCmd.CombinedOutput()
 			cancel()
 			if cmdErr != nil {
-				log.Printf("codex-mcp: could not register %s: %v (%s)", desired, cmdErr, strings.TrimSpace(string(out)))
+				log.Printf("codex-mcp: could not register %s: %v outputLen=%d", desired, cmdErr, len(out))
 			} else {
 				switch action {
 				case "fix":

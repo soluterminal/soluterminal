@@ -199,7 +199,7 @@ func ariaJevScopeDecline(tail string) string {
 	if focus < 0 {
 		return ""
 	}
-	row := menuOptionRowRE.FindStringSubmatch(allLines[focus])
+	row := menuOptionRow(allLines[focus])
 	if row == nil || row[1] != "1" {
 		return "focused option is not the first once/turn permission"
 	}
@@ -210,7 +210,7 @@ func ariaJevScopeDecline(tail string) string {
 	lines := allLines[focus:]
 	var label string
 	for i, line := range lines {
-		if row := menuOptionRowRE.FindStringSubmatch(line); row != nil {
+		if row := menuOptionRow(line); row != nil {
 			if i > 0 {
 				break
 			}
@@ -234,7 +234,7 @@ func ariaJevProjectMenuLines(lines []string, start, focus int) string {
 	end := focus + 1
 	expected := 2
 	for i := focus + 1; i < len(lines); i++ {
-		if row := menuOptionRowRE.FindStringSubmatch(lines[i]); row != nil {
+		if row := menuOptionRow(lines[i]); row != nil {
 			if row[1] != strconv.Itoa(expected) {
 				break
 			}
@@ -255,7 +255,7 @@ func ariaJevProjectMenuLines(lines []string, start, focus int) string {
 			if strings.TrimSpace(lines[j]) == "" {
 				break
 			}
-			if row := menuOptionRowRE.FindStringSubmatch(lines[j]); row != nil {
+			if row := menuOptionRow(lines[j]); row != nil {
 				wrapped = row[1] == strconv.Itoa(expected)
 				break
 			}

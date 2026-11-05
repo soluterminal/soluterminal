@@ -38,6 +38,7 @@ func cautiousRenderedFixture(t *testing.T, menu string) (*Aria, *Pane, <-chan di
 
 func TestCautiousTeamProviderReceivesRenderedPermission(t *testing.T) {
 	a, p, frames, _ := cautiousRenderedFixture(t, cautiousRenderedCodexMenu)
+	completionTestVerdict(t, true)
 	a.teamFeatures = func() bool { return true }
 	a.settings = &ariaSettingsStore{}
 	t.Setenv(ariaJevAutoEnv, "0")

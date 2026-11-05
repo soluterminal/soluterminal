@@ -1,6 +1,7 @@
 
 import { useEffect } from 'react';
 import { useSettings, type SettingsTab } from '../settings';
+import { useStore } from '../store';
 import { useOperatorFeatures } from '../entitlements';
 import { slotList } from '../extensions';
 import { useDraggableDialog } from './useDraggableDialog';
@@ -43,6 +44,7 @@ const TEAM_ONLY_TABS = new Set<SettingsTab>(['tasks']);
 
 export function SettingsModal() {
   const open = useSettings((s) => s.open);
+  const dialogOpen = useStore((s) => !!s.dialog);
   const tab = useSettings((s) => s.tab);
   const setTab = useSettings((s) => s.setTab);
   const close = useSettings((s) => s.closeSettings);
@@ -57,7 +59,7 @@ export function SettingsModal() {
   const featureVisible = featureTabs.map((t) => t.useVisible());
 
   const { cardRef, cardStyle, dragHandleProps } = useDraggableDialog(open);
-  useFocusTrap(cardRef, open);
+  useFocusTrap(cardRef, open, dialogOpen);
 
   useEffect(() => {
     if (!open) return;

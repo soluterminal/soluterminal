@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"unicode/utf8"
 )
@@ -49,7 +48,7 @@ func runTitleCLI(ctx context.Context, prompt string) (string, error) {
 	if err != nil {
 		return "", errTitleCLIUnavailable
 	}
-	cmd := exec.CommandContext(ctx, bin, titleCLIArgs()...)
+	cmd := hiddenCommand(ctx, bin, titleCLIArgs()...)
 	// A neutral directory: the title needs no project files.
 	cmd.Dir = os.TempDir()
 	cmd.Env = providerChildEnvForBin(bin, withResolvedNodeBin(os.Environ(), resolveNodeBin))

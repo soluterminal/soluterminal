@@ -13,6 +13,27 @@ import (
 	"time"
 )
 
+const ariaAutoObservationTemplate = `[AUTONOMOUS EVALUATION — you were invoked by the pane-state watcher, not by the user.]
+
+Pane %q (id: %s) just entered awaiting-input. Here is its current tail:
+
+<pane_output>
+%s
+</pane_output>
+
+The user has set this standing order for this pane:
+"%s"
+
+Decide:
+1. If the standing order clearly covers THIS prompt, call send_input with the appropriate reply. The user will see a %s before it actually fires.
+2. If the order does NOT cover this prompt (wrong type, outside scope, ambiguous), respond with a single short sentence explaining why, and DO NOT call any tools. The user still has the observation card and will handle it manually.
+
+CRITICAL — send_input newline:
+- The 'input' arg MUST end with '\n' to actually press Enter and submit. Bare '1' types the digit but Claude Code never sees it because Enter wasn't pressed.
+- For a numbered menu, pass input='1\n' (or whatever the choice is). For y/n, pass input='y\n'. The trailing newline is mandatory for ANY reply you intend to submit.
+
+Be decisive. Don't narrate. Don't call read_pane_tail — the full tail is already above.`
+
 // Autonomous evaluator. When the pane-state watcher fires an
 // observation for a pane with a standing order, we build a one-shot
 // ARIA turn (no browser initiation) that gives the model the
@@ -165,6 +186,9 @@ func (a *Aria) evaluateObservation(ctx context.Context, paneID, paneTitle, obser
 	if p.Snapshot().NeverAutoAnswer {
 		return
 	}
+	if a.completionRefused(p) {
+		return
+	}
 	ctx, policy := withAriaAutoModePolicy(ctx, p)
 	isNative := p.Snapshot().Kind == "native"
 	if !isNative && p.Snapshot().AutoMode == "cautious" {
@@ -298,26 +322,7 @@ func (a *Aria) evaluateObservation(ctx context.Context, paneID, paneTitle, obser
 	// Prevent pane-controlled output from closing the wrapper tag and
 	// injecting instructions outside the <pane_output> boundary.
 	safeObservation := sanitizePromptWrapper(observationText)
-	msg := fmt.Sprintf(`[AUTONOMOUS EVALUATION — you were invoked by the pane-state watcher, not by the user.]
-
-Pane %q (id: %s) just entered awaiting-input. Here is its current tail:
-
-<pane_output>
-%s
-</pane_output>
-
-The user has set this standing order for this pane:
-"%s"
-
-Decide:
-1. If the standing order clearly covers THIS prompt, call send_input with the appropriate reply. The user will see a %s before it actually fires.
-2. If the order does NOT cover this prompt (wrong type, outside scope, ambiguous), respond with a single short sentence explaining why, and DO NOT call any tools. The user still has the observation card and will handle it manually.
-
-CRITICAL — send_input newline:
-- The 'input' arg MUST end with '\n' to actually press Enter and submit. Bare '1' types the digit but Claude Code never sees it because Enter wasn't pressed.
-- For a numbered menu, pass input='1\n' (or whatever the choice is). For y/n, pass input='y\n'. The trailing newline is mandatory for ANY reply you intend to submit.
-
-Be decisive. Don't narrate. Don't call read_pane_tail — the full tail is already above.`,
+	msg := fmt.Sprintf(ariaAutoObservationTemplate,
 		paneTitle, paneID, safeObservation, instruction, countdownPhrase)
 
 	// Run the turn via the same machinery browser-initiated turns use.
@@ -404,11 +409,21 @@ Be decisive. Don't narrate. Don't call read_pane_tail — the full tail is alrea
 		AutonomousPromptHash: promptHash,
 		AutonomousCautious:   orderID == "automode_cautious",
 	}
+	completionAllowed := teamCloudLLMAllowed()
+	completionPos, completionHash := completionPromptIdentity(p)
 	turnErr := a.runTurn(ctx, req, emit)
 	current, currentExists := a.mgr.Get(paneID)
 	if !fired && (!currentExists || current != p || !policy.matches(p)) {
 		emit(map[string]any{"type": "auto-eval-done", "pane_id": paneID, "pane_title": paneTitle})
 		a.recordEvalOutcomeDedup(AriaEvalOutcome{PaneID: paneID, Kind: "held", Reason: "approval policy changed", Model: req.Model, LatencyMs: time.Since(start).Milliseconds(), ToolCalls: toolCalls})
+		return
+	}
+	if errors.Is(turnErr, errAriaCompletionInput) {
+		a.rememberCompletionRefusal(p, policy, completionAllowed, completionPos, completionHash)
+		// Local input policy is a human-review outcome, not a provider failure
+		// or a no-action streak. Do not back off a pane for withheld input.
+		emit(map[string]any{"type": "auto-eval-done", "pane_id": paneID, "pane_title": paneTitle})
+		a.recordEvalOutcomeDedup(AriaEvalOutcome{PaneID: paneID, Kind: "declined", Reason: errAriaCompletionInput.Error(), Model: req.Model, LatencyMs: time.Since(start).Milliseconds()})
 		return
 	}
 	if err := turnErr; err != nil {
@@ -487,7 +502,7 @@ Be decisive. Don't narrate. Don't call read_pane_tail — the full tail is alrea
 		})
 		return
 	}
-	a.recordEvalOutcome(AriaEvalOutcome{
+	a.recordModelEvalOutcome(AriaEvalOutcome{
 		PaneID:       paneID,
 		Kind:         kind,
 		Reason:       reason,
@@ -1324,7 +1339,7 @@ func (a *Aria) directAutoFireWithJevProof(ctx context.Context, paneID, paneTitle
 	}
 
 	_, _, promptSource := currentAutoApprovalPrompt(p)
-	log.Printf("aria-auto-direct: pane=%s hasClaude=%v hasCodex=%v body=%q gap=%v src=%s fired", paneID, hasClaude, hasCodex, body, gap, promptSource)
+	log.Printf("aria-auto-direct: pane=%s hasClaude=%v hasCodex=%v bodyLen=%d gap=%v src=%s fired", paneID, hasClaude, hasCodex, len(body), gap, promptSource)
 
 	// Fire-resolved emit BEFORE the cap bump so autoEmitter's
 	// confirm_resolved branch is what calls autoRecordFire +

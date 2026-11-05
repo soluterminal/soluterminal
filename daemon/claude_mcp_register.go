@@ -268,11 +268,11 @@ func ensureClaudeMcpRegistration(listenAddr string) {
 		// `claude mcp add` refuses to overwrite an existing name; remove
 		// first. Failure is fine (racing session, already gone) — the add
 		// below is what matters.
-		_ = exec.CommandContext(ctx, claudeBin, "mcp", "remove", "--scope", "user", "soluterminal").Run()
+		_ = hiddenCommand(ctx, claudeBin, "mcp", "remove", "--scope", "user", "soluterminal").Run()
 	}
-	out, err := exec.CommandContext(ctx, claudeBin, claudeMcpAddArgs(desired)...).CombinedOutput()
+	out, err := hiddenCommand(ctx, claudeBin, claudeMcpAddArgs(desired)...).CombinedOutput()
 	if err != nil {
-		log.Printf("claude-mcp: could not register %s: %v (%s)", desired, err, strings.TrimSpace(string(out)))
+		log.Printf("claude-mcp: could not register %s: %v outputLen=%d", desired, err, len(out))
 		// A CLI without --header support must not leave a fresh install
 		// unregistered or a previously healthy registration deleted.
 		if haveCfg {

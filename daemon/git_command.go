@@ -259,8 +259,8 @@ func gitRecordSlow(dir string, timeout time.Duration, args []string, attempt git
 		At:           time.Now().UTC(),
 	}
 	gitMetricsState.mu.Unlock()
-	log.Printf("workflow: WARN git slow: git -C %s %s took %s (timeout %s, repo=%s, landLockHeld=%v)",
-		dir, strings.Join(args, " "), attempt.duration, timeout, repoKey, held)
+	log.Printf("workflow: WARN git slow: cwd=%s argCount=%d took %s (timeout %s, repo=%s, landLockHeld=%v)",
+		dir, len(args), attempt.duration, timeout, repoKey, held)
 }
 
 func gitMetricsSnapshot() *statsGit {

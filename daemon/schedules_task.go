@@ -261,7 +261,7 @@ func (s *ScheduleStore) runTaskProcessWithTimeout(schedID, bin, cwd, prompt, per
 			log.Printf("scheduler: task %s hit a temporary error after it may have acted (tools=%v hooks=%v); not retrying", schedID, trace.toolStarted, trace.hooksRan)
 			run.Detail += " · not retried: " + trace.whyNoRetry()
 		default:
-			log.Printf("scheduler: task %s hit a temporary error (%s) before any tool use; retrying once in %s", schedID, run.Summary, taskRetryDelay)
+			log.Printf("scheduler: task %s hit a temporary error before any tool use; retrying once in %s", schedID, taskRetryDelay)
 			if s.waitTaskRetry(schedID, launch) {
 				first := strings.TrimPrefix(run.Summary, "failed: ")
 				run, out, _ = s.runTaskAttempt(schedID, bin, cwd, prompt, permission, model, timeout)
@@ -291,7 +291,7 @@ func (s *ScheduleStore) runTaskProcessWithTimeout(schedID, bin, cwd, prompt, per
 	if !limitUntil.IsZero() && stillOn {
 		s.deferOneTime(schedID, limitUntil, seq)
 	}
-	log.Printf("scheduler: task %s finished: %s", schedID, run.Detail)
+	log.Printf("scheduler: task %s finished status=%s detailLen=%d", schedID, run.Status, len(run.Detail))
 
 	if s.uiBus != nil {
 		s.uiBus.publish(uiEvent{Type: "schedule-fired", Text: schedID})

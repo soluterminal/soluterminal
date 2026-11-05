@@ -458,6 +458,12 @@ describe('VersionPopover installer route', () => {
     useStore.setState({ applyShellUpdate: realApplyShellUpdate });
   });
 
+  it('says it is waiting, not up to date, when the install follows the other build', async () => {
+    renderPopover({ ...installerStatus('team'), shellAvailable: false, shellLatest: undefined, runningFlavor: 'public', lastSuccessMs: 1000 });
+    expect(await screen.findByText('Waiting for the next team release')).toBeInTheDocument();
+    expect(screen.queryByText('Up to date')).not.toBeInTheDocument();
+  });
+
   it('on the team channel, installs through the local daemon and never runs the app updater', async () => {
     useCloud.setState({ mode: 'cloud', isLocal: true });
     const invoke = desktop(() => { throw new Error('the app updater must not run on the team channel'); });

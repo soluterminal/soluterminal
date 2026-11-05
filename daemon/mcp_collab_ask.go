@@ -47,6 +47,8 @@ type collabResult struct {
 	Hint          string  `json:"hint,omitempty"`
 	// Delivery is "queued" when a working Codex queued ask_pane's message.
 	Delivery string `json:"delivery,omitempty"`
+	// HeldMessages: messages held on that pane, anyone's (no text).
+	HeldMessages *paneHeldSummary `json:"held_messages,omitempty"`
 }
 
 func collabTimeout(args map[string]any, def time.Duration) time.Duration {
@@ -394,7 +396,22 @@ func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
 		}
 	}
 	noteHeldAsk(p, base.HeldID, &res)
+	noteHeldOnPane(p, c, &res)
 	return collabJSON(res)
+}
+
+// noteHeldOnPane adds the pane's held messages to a wait result, and says so
+// when they are stuck: the pane looks idle while nothing can reach it.
+func noteHeldOnPane(p *Pane, c paneCaller, res *collabResult) {
+	res.HeldMessages = heldSummaryFor(p.Snapshot(), c.ID != "")
+	if res.HeldMessages != nil && res.HeldMessages.Stuck {
+		res.Hint = strings.TrimSpace(res.Hint + " " + heldStuckHint(res.HeldMessages.Count))
+	}
+}
+
+// heldStuckHint tells an agent why a stuck pane is not reading its messages.
+func heldStuckHint(count int) string {
+	return fmt.Sprintf("%d held on that pane behind text in its input box, and only the person can clear that, so the pane is not reading messages until then. The pane is flagged for the person, who may not have seen it yet; tell the user if it is urgent. Do not resend.", count)
 }
 
 // noteHeldAsk marks a wait result whose message is still held while the
@@ -410,6 +427,10 @@ func noteHeldAsk(p *Pane, heldID string, res *collabResult) {
 	reason := p.heldDeliveryReason()
 	if strings.HasPrefix(reason, unsentInBoxPrefix) {
 		res.Hint = "held: " + reason + ", so nothing has been typed yet. Your message waits on the pane, queued behind it, and goes in once the person sends or clears that message. Call wait_for_pane to keep waiting; do not resend."
+		return
+	}
+	if reason == heldBoxTextReason {
+		res.Hint = "held: that pane's input box has text, so nothing has been typed yet. Your message is held on the pane with your name and goes in by itself once the box is empty and nobody is typing. Call wait_for_pane to keep waiting; do not resend."
 		return
 	}
 	if reason == heldMenuReason {
@@ -475,6 +496,7 @@ func (a *apiServer) mcpToolWaitForPaneAs(args map[string]any, c paneCaller) any 
 	if res.Status == "replied" {
 		res.Status = "idle"
 	}
+	noteHeldOnPane(p, c, &res)
 	return collabJSON(res)
 }
 

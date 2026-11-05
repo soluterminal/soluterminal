@@ -44,7 +44,8 @@ func (u *Updater) fleetUpdateStatus() updatestatus.Status {
 	ctrl := u.ctrlEffective
 	r := updatestatus.Status{AutoUpdate: enabled || s.Required, Channel: "stable",
 		LastCheckMs: s.LastCheckedMs, LastCheckError: u.fleetLastCheckError,
-		LastSuccessMs: u.fleetLastSuccessMs, LatestVersion: s.Latest}
+		LastSuccessMs: u.fleetLastSuccessMs, LatestVersion: s.Latest,
+		RunningFlavor: s.RunningFlavor, UpdateChannel: s.UpdateChannel}
 	if _, ahead := previewChangesAhead(u.current); ahead > 0 || strings.Count(u.current, ".") >= 3 {
 		r.Channel = "preview"
 	}

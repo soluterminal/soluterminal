@@ -168,6 +168,9 @@ type writeLineResp struct {
 }
 
 func (a *apiServer) writeFileLine(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "edit a file", "write_file_line") {
+		return
+	}
 	var req writeLineReq
 	if !decodeJSON(w, r, &req, defaultJSONBodyBytes) {
 		return

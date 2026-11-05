@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -43,6 +45,11 @@ const heldPerSenderMax = 5
 // senders. All unverified identities share one per-sender allowance.
 const heldPerPaneMax = 20
 
+// heldStuckAfter is when messages held behind text in the input box become
+// the person's to deal with: the oldest has waited this long and nobody has
+// typed in the pane for this long. Before that they are probably mid-prompt.
+const heldStuckAfter = 60 * time.Second
+
 // heldDeliveryMaxBytes bounds the text a held message shows on the pane; the
 // whole message is still what is typed.
 const heldDeliveryMaxBytes = 4096
@@ -66,7 +73,7 @@ var (
 	errDraftGuardHeld = errors.New("the person is typing in that pane")
 	// Queue limits refuse the new message without typing or keeping it.
 	errHeldPaneFull  = fmt.Errorf("%d messages already wait in that pane, so this one was NOT sent and NOT kept. Wait for them to go in (wait_for_pane) or tell the user, then send it again", heldPerPaneMax)
-	errHeldQueueFull = fmt.Errorf("the person is typing in that pane and %d of your messages already wait there, so this one was NOT sent and NOT kept. Wait for those to go in (wait_for_pane) or tell the user, then send it again", heldPerSenderMax)
+	errHeldQueueFull = fmt.Errorf("%d of your messages already wait in that pane, so this one was NOT sent and NOT kept. Wait for those to go in (wait_for_pane) or tell the user, then send it again", heldPerSenderMax)
 	// errDraftGuardTypedAfterPaste: input reached the pane between the paste
 	// and its submit key, so the key was not pressed.
 	errDraftGuardTypedAfterPaste = errors.New("input arrived after the message was typed")
@@ -176,7 +183,7 @@ func (p *Pane) draftGuardReason(codex, typing bool, now time.Time, recorder func
 				if who := p.unsentMessageInBox(typedComposerScreen(screen, blanked, codex), codex); who != "" {
 					return unsentInBoxReason(who)
 				}
-				return "the person's input box has text"
+				return heldBoxTextReason
 			}
 			return ""
 		}
@@ -195,7 +202,7 @@ func (p *Pane) draftGuardReason(codex, typing bool, now time.Time, recorder func
 		return unsentInBoxReason(msg.Sender)
 	}
 	if n, at := recorder(); n > 0 && at > 0 && now.Sub(time.UnixMilli(at)) < ariaAutoDraftStaleAfter {
-		return "the person's input box has text"
+		return heldBoxTextReason
 	}
 	return ""
 }
@@ -240,6 +247,11 @@ const unsentInBoxPrefix = "an unsent message from "
 
 // heldMenuReason: the input box is free, but a menu is open in the pane.
 const heldMenuReason = "a menu is open in that pane"
+
+// heldBoxTextReason: the input box has text that is not a known unsent
+// message. Usually the person's draft, but it can be a message the daemon lost
+// track of, so it does not say the person is typing.
+const heldBoxTextReason = "the person's input box has text"
 
 // errPutBackInBox: an agent's keys would act on a put-back message.
 var errPutBackInBox = errors.New("nothing was typed into that pane")
@@ -431,7 +443,7 @@ func putBackShown(screen string, codex bool, body string) (shown, known bool) {
 }
 
 func putBackError(msg *unsentPaneMessage) error {
-	return fmt.Errorf("%w: its input box holds an unsent message from %s that was put back after the person stopped the turn, and only the person sends or clears it", errPutBackInBox, msg.Sender)
+	return fmt.Errorf("%w: its input box holds an unsent message from %s, and only the person sends or clears it", errPutBackInBox, msg.Sender)
 }
 
 // carryPutBackPastMenuKeyLocked keeps a put-back receipt current across a
@@ -560,6 +572,121 @@ func (p *Pane) heldDeliveriesLocked() []heldDelivery {
 	return out
 }
 
+// heldStuckLocked reports held messages waiting on text in the input box that
+// nobody is working on (heldStuckAfter). A menu or a person typing is not
+// stuck. It needs no unsent receipt: text the daemon cannot name holds the
+// queue just the same. Caller holds mu.
+func (p *Pane) heldStuckLocked(now time.Time) bool {
+	if len(p.heldDeliveries) == 0 || p.Status != PaneRunning {
+		return false
+	}
+	if p.heldReason != heldBoxTextReason && !strings.HasPrefix(p.heldReason, unsentInBoxPrefix) {
+		return false
+	}
+	if now.Sub(time.UnixMilli(p.heldDeliveries[0].At)) < heldStuckAfter {
+		return false
+	}
+	last := p.lastHumanInputMs.Load()
+	return last == 0 || now.Sub(time.UnixMilli(last)) >= heldStuckAfter
+}
+
+// paneHeldSummary is what agents are told about a pane's held messages:
+// how many, whose and whether they are stuck. Never their text.
+type paneHeldSummary struct {
+	Count int `json:"count"`
+	// Senders: omitted for an unverified caller, which gets counts only.
+	Senders []string `json:"senders,omitempty"`
+	Stuck   bool     `json:"stuck,omitempty"`
+}
+
+// heldSummaryFor summarises snap's held messages for an agent; nil when there
+// are none. verified: the caller was traced to a pane.
+func heldSummaryFor(snap PaneSnapshot, verified bool) *paneHeldSummary {
+	if len(snap.HeldMessages) == 0 {
+		return nil
+	}
+	s := &paneHeldSummary{Count: len(snap.HeldMessages), Stuck: snap.HeldStuck}
+	if verified {
+		s.Senders = heldSenderLabels(snap.HeldMessages)
+	}
+	return s
+}
+
+// heldSenderLabels is the distinct senders of held, oldest first.
+func heldSenderLabels(held []heldDelivery) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, h := range held {
+		if !seen[h.Sender] {
+			seen[h.Sender] = true
+			out = append(out, h.Sender)
+		}
+	}
+	return out
+}
+
+// heldStuckPush hands a stuck pane's notice to the cloud push channel; nil
+// while the machine is not paired.
+var heldStuckPush atomic.Pointer[func(paneID, title, summary string)]
+
+func init() {
+	registerCloudPusherHook(func(_ *apiServer, pusher *Pusher) {
+		if pusher == nil {
+			heldStuckPush.Store(nil)
+			return
+		}
+		fire := func(paneID, title, summary string) { pusher.FireAsks(paneID, title, summary) }
+		heldStuckPush.Store(&fire)
+	})
+}
+
+// noteHeldStuck records the start of a stuck episode, once until the queue
+// empties: a log line and a push, with sender labels and no message text.
+func (p *Pane) noteHeldStuck(now time.Time) {
+	p.mu.Lock()
+	if p.heldStuckNoted || !p.heldStuckLocked(now) {
+		p.mu.Unlock()
+		return
+	}
+	p.heldStuckNoted = true
+	held := p.heldDeliveriesLocked()
+	title := p.Title
+	p.mu.Unlock()
+	coordLog.record(coordinationEvent{Kind: "held", Pane: p.ID, By: held[0].Sender, Outcome: "stuck"})
+	if fire := heldStuckPush.Load(); fire != nil {
+		pushTitle, summary := heldStuckPushText(title, held)
+		go (*fire)(p.ID, pushTitle, summary)
+	}
+}
+
+// heldShortSender is a sender label without its pane number. An unverified
+// mark stays: "@lead · #1 Claude (unverified)" must not read as the real @lead.
+func heldShortSender(label string) string {
+	name, _, _ := strings.Cut(label, " · ")
+	if mark := " (unverified)"; strings.HasSuffix(label, mark) && !strings.HasSuffix(name, mark) {
+		name += mark
+	}
+	return name
+}
+
+// heldStuckPushText words the push for a stuck pane.
+func heldStuckPushText(paneTitle string, held []heldDelivery) (title, summary string) {
+	var names []string
+	for _, label := range heldSenderLabels(held) {
+		if name := heldShortSender(label); !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	if len(names) > 3 {
+		names = append(names[:3], fmt.Sprintf("%d more", len(names)-3))
+	}
+	title = "Messages waiting"
+	if paneTitle != "" {
+		title += " · " + paneTitle
+	}
+	return title, fmt.Sprintf("%d from %s, behind the text in the input box", len(held), strings.Join(names, ", "))
+}
+
 // resolveHeldLocked takes h out of the queue with its resolution. It reports
 // whether h was still queued. Caller holds mu.
 func (p *Pane) resolveHeldLocked(h *heldDelivery, resolution string, err error) bool {
@@ -645,6 +772,7 @@ func (p *Pane) drainHeldDeliveries() {
 		if len(p.heldDeliveries) == 0 {
 			p.heldDraining = false
 			p.heldReason = ""
+			p.heldStuckNoted = false
 			p.mu.Unlock()
 			return
 		}
@@ -667,12 +795,15 @@ func (p *Pane) drainHeldDeliveries() {
 			continue
 		}
 		reason := p.draftGuardReason(!head.claude, true, time.Now(), p.humanComposerPendingSnapshot)
-		if reason == "" && menuBeforeKey(p, !head.claude) {
+		// The menu first: Codex's "› 1. Yes, proceed" row reads as text in the
+		// box, and a menu is not text anyone can send or clear.
+		if menuBeforeKey(p, !head.claude) {
 			reason = heldMenuReason
 		}
 		// Refreshed every pass, cleared too: a message sent or cleared since
 		// must not still be named to senders.
 		p.setHeldReason(reason)
+		p.noteHeldStuck(time.Now())
 		if reason != "" {
 			continue
 		}
@@ -732,6 +863,9 @@ func heldNotice(paneID, reason string) string {
 	}
 	if reason == heldMenuReason {
 		return fmt.Sprintf("queued: a menu is open in pane %s, so nothing was typed yet. Your message is held on that pane with your name and goes in by itself once the menu is answered (the person can also send it now or discard it). Do not resend it; use ask_pane to wait for a reply.", paneID)
+	}
+	if reason == heldBoxTextReason {
+		return fmt.Sprintf("held: pane %s's input box has text, so nothing was typed. Your message is held on that pane with your name and goes in by itself once the box is empty and nobody is typing (the person can also discard it). Do not resend it; use ask_pane to wait for a reply.", paneID)
 	}
 	if reason == "" {
 		return fmt.Sprintf("queued: other held messages go into pane %s first, so nothing was typed yet. Your message is held on that pane with your name and goes in by itself after them (the person can also send it now or discard it). Do not resend it; use ask_pane to wait for a reply.", paneID)

@@ -258,8 +258,9 @@ export function WorkspaceSection({
             if (badgeKind !== 'choice') badgeKind = 'awaiting';
             flagged = true;
             attentionCount++;
-          } else if ((p.asks?.length ?? 0) > 0) {
-            // An agent's open ask (daemon asks.go) waits on you like a prompt.
+          } else if ((p.asks?.length ?? 0) > 0 || p.heldStuck) {
+            // An agent's open ask (daemon asks.go), or messages stuck behind
+            // text in the input box, wait on you like a prompt.
             if (badgeKind !== 'choice') badgeKind = 'awaiting';
             flagged = true;
             attentionCount++;

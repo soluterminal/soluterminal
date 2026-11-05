@@ -28,7 +28,7 @@ test('routine worker notes stay quiet, dismiss cleanly, and person escalations s
   await expect(memo).toBeVisible();
   await expect(memo).toContainText(note.text);
   await expect(page.getByRole('button', { name: 'Nothing is waiting on you', exact: true })).toBeVisible();
-  await expect(page.getByRole('treeitem', { name: 'Release lead', exact: true })).not.toContainText('needs you');
+  await expect(page.getByRole('treeitem', { name: 'Release lead', exact: true }).locator('.pane-tree-needs-you')).toHaveCount(0);
   await page.screenshot({ animations: 'disabled', path: info.outputPath('quiet-lead-worker-note.png') });
   await memo.getByRole('button', { name: 'Dismiss', exact: true }).click();
   await expect(pane.locator('.pane-worker-notices:visible')).toHaveCount(0);
@@ -40,6 +40,6 @@ test('routine worker notes stay quiet, dismiss cleanly, and person escalations s
   await page.reload();
   await expect(pane.locator('.pane-asks-chip:visible')).toContainText('Waiting on you: Decide how to preserve');
   await expect(page.getByRole('button', { name: '1 item is waiting on you', exact: true })).toBeVisible();
-  await expect(page.getByRole('treeitem', { name: 'Release lead', exact: true })).toContainText('needs you');
+  await expect(page.getByRole('treeitem', { name: 'Release lead', exact: true }).locator('.pane-tree-needs-you')).toHaveText('1 ask');
   await page.screenshot({ animations: 'disabled', path: info.outputPath('worker-person-decision.png') });
 });

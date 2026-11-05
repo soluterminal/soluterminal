@@ -565,6 +565,7 @@ func (a *apiServer) ensureHarnessRuntimeWithStarter(provider string, start func(
 	cmd := exec.Command(installer[0], installer[1:]...)
 	cmd.Env = os.Environ()
 	cmd.Stdout, cmd.Stderr = logFile, logFile
+	applyNoWindow(cmd)
 	if err := start(cmd); err != nil {
 		_ = logFile.Close()
 		a.finishHarnessInstall(provider, err)

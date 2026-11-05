@@ -3,7 +3,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { isPreviewBuild } from './previewBoot';
 import { isPreviewAcceptanceHost } from './previewAcceptanceShell';
-import { loadEnterGapConfig, onRoutingScopeChange, setBackend } from './api';
+import { loadEnterGapConfig, onRoutingScopeChange, setBackend, ROUTER_RESTART_EVENT, routerRestartNeeded } from './api';
 import { isRouterMode } from './dualBackend';
 import { loadRouterPreviewOrigin, ROUTER_RESTART_NOTICE } from './lib/portBrowser';
 import { useStore } from './store';
@@ -89,6 +89,14 @@ if (popoutConfig) {
 // toggle) picks which side is active for this page load. Defaults to
 // WSL so fresh loads feel the same as before.
 if (isRouterMode()) {
+  const showRouterRestart = () => {
+    const state = useStore.getState();
+    if (!state.toasts.some(toast => toast.message === ROUTER_RESTART_NOTICE)) {
+      state.toast(ROUTER_RESTART_NOTICE, { kind: 'warn', icon: '↻', ttlMs: 0 });
+    }
+  };
+  window.addEventListener(ROUTER_RESTART_EVENT, showRouterRestart);
+  if (routerRestartNeeded()) showRouterRestart();
   const params = new URLSearchParams(window.location.search);
   const b = params.get('b') === 'win' ? 'win' : 'wsl';
   setBackend(b);
@@ -96,7 +104,7 @@ if (isRouterMode()) {
   // redirects app-origin preview routes to the preview origin.
   void loadRouterPreviewOrigin().then((status) => {
     if (status === 'old-router') {
-      useStore.getState().toast(ROUTER_RESTART_NOTICE, { kind: 'warn', icon: '↻', ttlMs: 0 });
+      showRouterRestart();
     }
   });
 }

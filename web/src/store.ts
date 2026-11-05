@@ -1953,6 +1953,7 @@ function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
     // The unsent-message chip appears and clears with no other pane change.
     && sameJsonValue(a.unsentMessage, b.unsentMessage)
     && sameJsonValue(a.heldMessages, b.heldMessages)
+    && (a.heldStuck ?? false) === (b.heldStuck ?? false)
     // Asks open and close with no other pane change.
     && sameJsonValue(a.asks, b.asks)
     && sameJsonValue(a.workerNotices, b.workerNotices)

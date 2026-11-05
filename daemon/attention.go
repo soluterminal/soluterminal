@@ -405,17 +405,6 @@ func (e *attentionEngine) Refresh(p *Pane) {
 
 	att, reason := classifyAttention(f)
 	key := promptKeyForAttention(p, f, pos)
-	// LLM-graded attention items: kick (or clear) the one-per-prompt summary.
-	// Runs on every tick, not just transitions, so a NEW prompt on an
-	// already-needs-user pane still gets summarized; maybeSummarizeAttention's
-	// fast path is a map lookup, so the 2s ticker cost is negligible.
-	if a := e.aria.Load(); a != nil {
-		if att == AttentionNeedsUser {
-			a.maybeSummarizeAttention(p, reason)
-		} else {
-			a.noteAttentionLeft(p)
-		}
-	}
 	if e.beforeAttentionStore != nil {
 		e.beforeAttentionStore(p, key)
 	}

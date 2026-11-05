@@ -37,6 +37,13 @@ var (
 	// menuSiblingOptionRE ("1." / "1)" / "1  " after an ANSI-collapse glitch).
 	menuOptionRowRE = regexp.MustCompile(`^[\s\p{Zs}]*(?:[❯❭›▶][\s\p{Zs}]*)?([0-9]{1,2})(?:\.|\)|[\s\p{Zs}]{2,})[\s\p{Zs}]*(.*)$`)
 
+	// Claude's Select draws "↓" (more rows below) on the last visible row and
+	// "↑" (more above) on the first visible row, in the pointer column of an
+	// unfocused row; the focused row always keeps its pointer. Strict on
+	// purpose: the "N." trailer only, so counters like "↓  12  tokens" never
+	// read as a row. Same groups as menuOptionRowRE.
+	menuScrollMarkerRowRE = regexp.MustCompile(`^[\s\p{Zs}]*[↑↓][\s\p{Zs}]*([0-9]{1,2})\.[\s\p{Zs}]*(.*)$`)
+
 	// Latest Codex command/edit modal header, used to decide whether the
 	// header-only fast path describes the NEWEST menu on screen or a stale
 	// modal left in scrollback above a later focused menu.
@@ -149,6 +156,19 @@ func normalizePromptText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// menuOptionRow parses one screen line as a numbered menu row: group 1 = the
+// number, group 2 = the label. It accepts everything menuOptionRowRE does plus
+// a row carrying a scroll marker in place of its pointer. It never reports a
+// row as focused: focus detection stays on the pointer-only regexes.
+func menuOptionRow(line string) []string {
+	if row := menuOptionRowRE.FindStringSubmatch(line); row != nil {
+		return row
+	}
+	return menuScrollMarkerRowRE.FindStringSubmatch(line)
+}
+
+func isMenuOptionRow(line string) bool { return menuOptionRow(line) != nil }
+
 // autoApprovalMenu is the parsed shape of the focused menu about to be
 // answered.
 type autoApprovalMenu struct {
@@ -185,7 +205,7 @@ func parseAutoApprovalMenu(s string, focus int) autoApprovalMenu {
 	lastRow := ""
 	cont := false
 	for _, line := range lines {
-		if row := menuOptionRowRE.FindStringSubmatch(line); row != nil {
+		if row := menuOptionRow(line); row != nil {
 			if row[1] != strconv.Itoa(len(labels)+1) {
 				break
 			}

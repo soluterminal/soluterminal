@@ -227,6 +227,7 @@ func TestCautiousPolicyRevokedDuringProviderCall(t *testing.T) {
 
 func TestCautiousRevokedTeamTextReplyDoesNotCountAsFailure(t *testing.T) {
 	a, p, frames, _ := cautiousAcceptanceFixture(t)
+	completionTestVerdict(t, true)
 	a.teamFeatures = func() bool { return true }
 	a.settings = &ariaSettingsStore{}
 	t.Setenv(ariaJevAutoEnv, "0")

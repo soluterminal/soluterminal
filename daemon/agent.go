@@ -300,6 +300,7 @@ func runAgent() int {
 		c.Stdout = outW
 		c.Stderr = outW
 		c.SysProcAttr = pipeChildSysProcAttr()
+		applyNoWindow(c)
 		if err := startWithoutCoreDumps(c); err != nil {
 			log.Fatalf("pipe start: %v", err)
 		}

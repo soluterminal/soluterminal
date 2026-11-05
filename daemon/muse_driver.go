@@ -230,6 +230,7 @@ func runMuseTurn(museBin, sessionID, model, effort, provider, prompt string, int
 	}
 
 	var stderr bytes.Buffer
+	// Stays on the driver's console: its stdout can be the pane's console itself.
 	c := exec.Command(museBin, args...)
 	c.Env = providerChildEnvForBin(museBin, os.Environ())
 	c.Stdout = os.Stdout

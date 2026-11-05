@@ -30,7 +30,7 @@ const mcpServerInstructions = mcpDirectServerInstructions
 // The engine-free brief is also used by the generated global Codex policy.
 // Keep schedules and pane coordination available without
 // advertising task lifecycle or repair capabilities that cannot run.
-const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. The workflow task engine is unavailable. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards. Workers close and archive automatically once finished, their result is read, and their work is committed and pushed, or once their work has merged into the default branch and their worktree is clean. Never close a lead. Close plain finished panes you started with kill_pane unless the user wants them kept. Message agents with ask_pane, never send_input. send_input and ask_pane messages are held while the person types, then delivered once their input box is empty and they stop typing; do not resend. Messages put back after the person stops a turn wait for them to Send or Clear; held deliveries wait behind them. For a decision or action from the user, agents in verified panes use post_user_ask (one item per ask, your own only); resolve_user_ask when done or no longer needed. Unverified or scoped callers ask in their reply instead. Do not repeat open asks in replies. list_panes open_asks counts person asks; worker_notices holds lead housekeeping, with needsUser marking escalations; flagOwner records bookmark ownership. Flags are the person’s bookmarks; agents in panes no longer set or clear them. Pick each worker's agent for its task (cmd claude or codex, optionally with model and effort): work that writes code goes to a visible worker pane, and in-session subagents are for read-only research. Keep your own pane's working_on line current with set_pane_info as your work moves on. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Preserve user authorization and required approval gates. Answering another pane's permission prompt (answer_prompt, or send_input keys at a prompt) needs the person's Agent permissions and a pane traced to your own process; a pane id, header or SOLU_PANE_ID you name is never enough, and no pane answers its own prompt. Codex panes can't answer other panes' prompts where their connection can't be traced, including WSL's default networking, until the Codex bridge ships. Use list_workspaces to discover names; move_pane_to_workspace targets existing layouts only. Moving someone else's pane and all rename_workspace/delete_workspace operations require user_requested and the person's Allow in the app, regardless of Agent permissions; deletion is empty-only. Never use _current for these tools. If your pane identity is unverified, name the target explicitly; pane changes need the user's request and Allow in the app, even for your own workers. Message labels mark such claims as unverified. Unverified callers have no automatic self-pane default or list_panes you marker. New panes have no starter or inherited worker/lead relationship and do not auto-archive; cmd auto and caller-owned queue cancellation are unavailable. Use explicit commands and workspace names; otherwise spawn placement falls back to the most recently active visible workspace. Do not update working_on without the user's request and Allow when unverified. Use MCP tools for pane and workspace changes; the matching REST mutation routes are for the human UI and do not accept agent callers."
+const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. The workflow task engine is unavailable. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards. Workers close and archive automatically once finished, their result is read, and their work is committed and pushed, or once their work has merged into the default branch and their worktree is clean. Never close a lead. Close plain finished panes you started with kill_pane unless the user wants them kept. Message agents with ask_pane, never send_input. send_input and ask_pane messages are held while the person types, then delivered once their input box is empty and they stop typing; do not resend. Messages back in an input box unsent wait for the person to Send or Clear; held deliveries wait behind them, and list_panes held_messages marks them stuck. For a decision or action from the user, agents in verified panes use post_user_ask (one item per ask, your own only); resolve_user_ask when done or no longer needed. Unverified or scoped callers ask in their reply instead. Do not repeat open asks in replies. list_panes open_asks counts person asks; worker_notices holds lead housekeeping, with needsUser marking escalations; flagOwner records bookmark ownership. Flags are the person’s bookmarks; agents in panes no longer set or clear them. Pick each worker's agent for its task (cmd claude or codex, optionally with model and effort): work that writes code goes to a visible worker pane, and in-session subagents are for read-only research. Keep your own pane's working_on line current with set_pane_info as your work moves on. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Preserve user authorization and required approval gates. Answering another pane's permission prompt (answer_prompt, or send_input keys at a prompt) needs the person's Agent permissions and a pane traced to your own process; a pane id, header or SOLU_PANE_ID you name is never enough, and no pane answers its own prompt. Codex panes can't answer other panes' prompts where their connection can't be traced, including WSL's default networking, until the Codex bridge ships. Use list_workspaces to discover names; move_pane_to_workspace targets existing layouts only. Moving someone else's pane and all rename_workspace/delete_workspace operations require user_requested and the person's Allow in the app, regardless of Agent permissions; deletion is empty-only. Never use _current for these tools. If your pane identity is unverified, name the target explicitly; pane changes need the user's request and Allow in the app, even for your own workers. Message labels mark such claims as unverified. Unverified callers have no automatic self-pane default or list_panes you marker. New panes have no starter or inherited worker/lead relationship and do not auto-archive; cmd auto and caller-owned queue cancellation are unavailable. Use explicit commands and workspace names; otherwise spawn placement falls back to the most recently active visible workspace. Do not update working_on without the user's request and Allow when unverified. Use MCP tools for pane and workspace changes; the matching REST mutation routes are for the human UI and do not accept agent callers."
 
 // SOLU_MCP_MUTATION_POLICY controls MCP tools that directly mutate local
 // state without the ARIA confirmation channel. Default "allow" preserves
@@ -385,7 +385,7 @@ func mcpCoreTools() []mcpTool {
 				"as the user sees them in the app, a label like \"#2 Codex\", the live state " +
 				"(busy, recent, idle, awaiting-input, choice-prompt, exited), agent identity (claude | " +
 				"codex | muse, empty for a plain shell), title, cwd and flagged state. Optional JSON fields: " +
-				"open_asks (person asks only; omitted when zero), worker_notices (lead notes with id, text, workerPane, createdAt and needsUser; only marked person escalations count or push), flagOwner (bookmark owner; omitted when unset; flags are the person’s bookmarks), " +
+				"open_asks (person asks only; omitted when zero), held_messages (messages waiting on the pane, untyped: count, senders, and stuck when they wait behind text in its input box that only the person can clear; do not resend), worker_notices (lead notes with id, text, workerPane, createdAt and needsUser; only marked person escalations count or push), flagOwner (bookmark owner; omitted when unset; flags are the person’s bookmarks), " +
 				"teamKind (lead or worker), leadRole (a lead’s role), handle (stable @name), " +
 				"workingOn (current one-line status), startedBy (who opened it and why; absent for user-opened panes). " +
 				"Also includes worker requests without a pane yet: status queued, running (starting), or closed " +
@@ -396,7 +396,7 @@ func mcpCoreTools() []mcpTool {
 				"workspace. Open pane ids, #numbers or @handles are the inputs to ask_pane, wait_for_pane, " +
 				"read_pane_tail, get_pane_state, send_input and kill_pane. Message agents with ask_pane, never send_input. " +
 				"send_input and ask_pane messages are held while the person types, then delivered when their input box is empty and they stop typing; do not resend. " +
-				"Messages put back after the person stops a turn wait for them to Send or Clear; held deliveries wait behind them.",
+				"Messages back in an input box unsent wait for the person to Send or Clear; held deliveries wait behind them, and list_panes held_messages marks them stuck.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {},
@@ -437,7 +437,8 @@ func mcpCoreTools() []mcpTool {
 			Description: "Return the runtime state of a pane — one of busy, idle, recent, " +
 				"awaiting-input, choice-prompt, or exited. Use this for a quick check of " +
 				"whether a pane is working, finished, or waiting for a human, without " +
-				"pulling its full scrollback.",
+				"pulling its full scrollback. A note follows the state when messages are stuck behind text in " +
+				"its input box, which only the person can clear; do not resend.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -461,7 +462,7 @@ func mcpCoreTools() []mcpTool {
 				"busy or on a menu, or is your own pane. While the person is typing in that pane, " +
 				"nothing is typed: the message waits on the pane (delivery \"held\") and goes in " +
 				"once their input box is empty and they stop typing; keep waiting, do not resend. " +
-				"Sender labels say unverified when the caller cannot be traced to a pane. All unverified senders share five held messages per target; the total queue limit is twenty.",
+				"Sender labels say unverified when the caller cannot be traced to a pane. All unverified senders share five held messages per target; the total queue limit is twenty. held_messages (count, senders, stuck; never text) reports what waits on that pane.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -487,7 +488,7 @@ func mcpCoreTools() []mcpTool {
 			Description: "Wait until another pane's agent finishes what it is doing, then return its " +
 				"latest reply (JSON: pane, status, state, reply). status is idle, needs_approval, " +
 				"still_working (timed out; call again) or exited. Use after spawn_pane with a prompt, " +
-				"after ask_pane returned still_working, or after send_input.",
+				"after ask_pane returned still_working, or after send_input. held_messages (count, senders, stuck; never text) reports what waits on that pane.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -1511,6 +1512,8 @@ type mcpPaneSummary struct {
 	FlagOwner string `json:"flagOwner,omitempty"`
 	// OpenAsks is how many of the pane's asks wait on the user (asks.go).
 	OpenAsks int `json:"open_asks,omitempty"`
+	// HeldMessages: messages waiting on the pane, untyped (no text).
+	HeldMessages *paneHeldSummary `json:"held_messages,omitempty"`
 	// Lead-facing worker notes, including explicitly marked person escalations.
 	WorkerNotices []paneAskDTO `json:"worker_notices,omitempty"`
 	// Number is the #n the UI shows on the pane in Workspace; Label is
@@ -1581,6 +1584,7 @@ func paneSummaryAgent(p *Pane, snap PaneSnapshot) string {
 }
 
 func (a *apiServer) mcpToolListPanes(_ map[string]any, callerPane string) any {
+	verifiedCaller := splitMCPCaller(callerPane).ID != ""
 	panes := a.mgr.List()
 	slots := paneSlotsByID(a.ws)
 	var asks map[string]int
@@ -1617,6 +1621,7 @@ func (a *apiServer) mcpToolListPanes(_ map[string]any, callerPane string) any {
 			FlagMemo:       snap.FlagMemo,
 			FlagOwner:      snap.FlagOwner,
 			OpenAsks:       asks[snap.ID],
+			HeldMessages:   heldSummaryFor(snap, verifiedCaller),
 			WorkerNotices:  workerNotices,
 			Number:         slot.Number,
 			Workspace:      slot.Workspace,
@@ -1715,7 +1720,11 @@ func (a *apiServer) mcpToolGetPaneState(args map[string]any) any {
 	// the attention engine's own 2s sample saw it — suppressing a "waiting
 	// for you" signal. The cache shares one compute with the watchers
 	// (≤1s staleness), so polling here can no longer eat their edges.
-	return toolOK(string(p.computeStateCached()))
+	state := string(p.computeStateCached())
+	if held := heldSummaryFor(p.Snapshot(), false); held != nil && held.Stuck {
+		return toolOK(state + "; " + heldStuckHint(held.Count))
+	}
+	return toolOK(state)
 }
 
 // mcpToolSendInput is an agent's send_input: a message to a running Codex

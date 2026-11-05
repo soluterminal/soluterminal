@@ -271,6 +271,9 @@ type UpdateStatus struct {
 	// UpdateChannel is the build this install follows: "public" or "team"
 	// (update_channel.go). Empty until the first decision is known.
 	UpdateChannel string `json:"updateChannel,omitempty"`
+	// RunningFlavor is the build this binary is (update_flavor.go). It differs
+	// from UpdateChannel when the install follows the other build.
+	RunningFlavor string `json:"runningFlavor,omitempty"`
 }
 
 type Updater struct {
@@ -1138,6 +1141,7 @@ func (u *Updater) statusCopy() *UpdateStatus {
 	s := u.status
 	s.Applying = u.applying
 	s.ShellApplying = u.shellApplying
+	s.RunningFlavor = currentBuildFlavor()
 	if !u.drainStart.IsZero() && (u.status.Available || u.rollbackDrain) && time.Since(u.drainStart) < u.drainWindow {
 		s.WorkflowDeferred = true
 		s.WorkflowDeferSinceMs = u.drainStart.UnixMilli()

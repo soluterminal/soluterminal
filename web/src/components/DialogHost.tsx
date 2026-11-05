@@ -67,8 +67,10 @@ export function DialogHost() {
   const onKeyDown = (e: React.KeyboardEvent) => {
     e.stopPropagation();
     if (e.key === 'Enter') {
-      // In a prompt, Enter in the input (or anywhere) submits. For
-      // confirm/alert, Enter activates the focused confirm button.
+      // Let the browser activate a focused button, including Cancel.
+      // Preventing its default here and confirming would reverse that choice.
+      if (e.target instanceof Element && e.target.closest('button')) return;
+      // In a prompt, Enter in the input (or elsewhere) still submits.
       if (!e.repeat) {
         e.preventDefault();
         onConfirm();
