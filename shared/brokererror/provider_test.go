@@ -61,3 +61,26 @@ func TestRejectedRefreshGrant(t *testing.T) {
 		}
 	}
 }
+
+func TestRejectedRefreshAuth(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{401, `{"error":"invalid_client"}`, true},
+		{403, `{"error":{"type":"permission_error"}}`, true},
+		{403, `<html>edge block</html>`, false},
+		{401, `<html>edge block</html>`, false},
+		{403, ``, false},
+		{403, `{"message":"no error field"}`, false},
+		{403, `{"error":null}`, false},
+		{400, `{"error":"invalid_request"}`, false},
+		{429, `{"error":"rate_limited"}`, false},
+		{500, `{"error":"server_error"}`, false},
+	} {
+		if got := RejectedRefreshAuth(tc.status, []byte(tc.body)); got != tc.want {
+			t.Fatalf("status %d body %s got %t", tc.status, tc.body, got)
+		}
+	}
+}

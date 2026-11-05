@@ -1,0 +1,14 @@
+{
+ "cols": 66,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "idle",
+   "bytes": 2959
+  },
+  {
+   "name": "list_running",
+   "bytes": 9434
+  }
+ ]
+}

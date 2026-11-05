@@ -153,6 +153,11 @@ func main() {
 		os.Exit(runCapabilityCommand(os.Args[2:], os.Stdout))
 	}
 	// Offline diagnostics must run before logging or daemon initialization.
+	if len(os.Args) >= 2 && os.Args[1] == mcpBridgeCommand {
+		// Before logging starts: the bridge's stdout is the agent's MCP
+		// stream, and it writes nothing but forwarded lines there.
+		os.Exit(runMCPBridge(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "support-bundle" {
 		os.Exit(runSupportBundleCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
@@ -307,6 +312,7 @@ func main() {
 	shellPlatform := flag.String("shell-platform", "", "manifest platform key for the Tauri shell (e.g. windows-amd64). Empty = fall back to daemon's runtime platform.")
 	doClaim := flag.Bool("claim", false, "pair this machine with the cloud: prints a 6-char code, waits for you to accept it in the web UI, then writes ~/.solu/claim.json and exits")
 	flag.Parse()
+	setGitViewDir(*dataDir)
 	listenerAddresses, err := wslListenerAddresses(*addr, *wslAddr, *backendID)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
@@ -385,6 +391,10 @@ func main() {
 	// the umask at bind time; published once this process owns the data
 	// directory (below). Nothing registers it yet.
 	mcpSocket := prepareMCPSocket(*dataDir)
+	setMCPRegistrationDataDir(*dataDir)
+	if mcpSocket == nil {
+		setMCPSocketServing("")
+	}
 
 	// Non-claim path: if --relay is set and --relay-token isn't, fall back
 	// to the token stored by a previous --claim run.
@@ -413,6 +423,7 @@ func main() {
 	// user doesn't have to retype keys at every daemon restart. Shell env
 	// takes precedence, so one-off overrides still work.
 	loadEnvFile(*dataDir)
+	logBackgroundServiceRestartReason(*backendID)
 
 	// Write a tuned ~/.dircolors on first run (if the user doesn't have one
 	// yet) so GNU ls doesn't render other-writable dirs as blue-on-green.
@@ -1281,7 +1292,7 @@ func main() {
 	api.naming = newPaneNaming(*dataDir)
 	autoNamer := api.maybeAutoNamePane
 	paneAutoNamer.Store(&autoNamer)
-	workflowHandler := api.teamFeatureGate(mux)
+	workflowHandler := api.apiHandler(mux)
 	shinoqueTokens := &shinoqueTokenCache{}
 	api.shinoqueTokens = shinoqueTokens
 
@@ -1296,6 +1307,7 @@ func main() {
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	api.stopService = stop
 	boot.ctx = ctx
 	go api.entitlements.run(ctx)
 	if bootTeamSource != "env" {
@@ -1501,6 +1513,7 @@ func main() {
 	// if so, records it; setCloudIntegrationsToken records a rotated token so the
 	// supervisor's follow-up onCreds(newToken) is a no-op (the pusher/scanner are
 	// already live; only the in-memory token copies needed swapping).
+	var usageScanners usageScannerGroup
 	var cloudIntTokMu sync.Mutex
 	cloudIntegrationsToken := ""
 	// cloudIntCancel cancels the child context that owns the current wiring's
@@ -1562,6 +1575,7 @@ func main() {
 		cloudIntCancel = cancel
 		pusher := NewPusher(cloudBase, relayToken, mgr, ws, metrics)
 		pusher.private = func() bool { return api.trustedDevices.policy() == remoteAccessApproved }
+		pusher.alertsHandled = api.alertsLease().skipsFCM
 		cloudIntPusher = pusher
 		cloudIntTokMu.Unlock()
 		// Atomically publish base+token+pusher to the live cloud state read by
@@ -1591,10 +1605,10 @@ func main() {
 		go reportWatchdogRespawn(watchdogEvidence)
 		// Claude Code usage capture: scans transcript JSONL incrementally and
 		// POSTs billed turns to the cloud (HMAC-signed).
-		go startCCUsageScanner(cloudIntCtx, *dataDir, cloudBase, relayToken, ccLedger)
+		usageScanners.start(func() { startCCUsageScanner(cloudIntCtx, *dataDir, cloudBase, relayToken, ccLedger) })
 		// OpenAI Codex usage capture: same pipeline for Codex CLI rollouts
 		// (provider="codex" rows), labelled from the saved Codex logins.
-		go startCodexUsageScanner(cloudIntCtx, *dataDir, cloudBase, relayToken, ccLedger, api.codexLogin)
+		usageScanners.start(func() { startCodexUsageScanner(cloudIntCtx, *dataDir, cloudBase, relayToken, ccLedger, api.codexLogin) })
 		// A disconnect that landed while the creds above were being handed
 		// out cancelled cloudIntCtx; clear again so none of them survive it.
 		if cloudIntCtx.Err() != nil {
@@ -1725,9 +1739,11 @@ func main() {
 		if err := mcpSocket.activate(); err != nil {
 			log.Printf("mcp socket: endpoint disabled: %v", err)
 			mcpSocket.close()
+			setMCPSocketServing("")
 		} else {
 			log.Printf("mcp socket: listening on %s (not registered with agents)", mcpSocket.path)
 			go mcpSocket.serve(ctx, api)
+			setMCPSocketServing(mcpSocket.path)
 		}
 	}
 	ln := listeners[0]
@@ -1934,6 +1950,11 @@ func main() {
 		}
 	}
 	_ = srv.Shutdown(shutCtx)
+	// ctx is already cancelled. Let scanners finish their forced checkpoints
+	// after HTTP handlers stop, but never hold process exit on a stuck fsync.
+	if !usageScanners.join(usageShutdownTimeout) {
+		log.Print("usage: best-effort shutdown checkpoint timed out after 5 s; exiting")
+	}
 }
 
 func defaultDataDir() string {

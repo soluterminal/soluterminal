@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -157,9 +158,12 @@ func parseProcNetTCP(path, proto string) []tcpEntry {
 		return nil
 	}
 	defer f.Close()
+	return parseProcNetTCPFrom(f, proto)
+}
 
+func parseProcNetTCPFrom(r io.Reader, proto string) []tcpEntry {
 	var out []tcpEntry
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	first := true
 	for sc.Scan() {

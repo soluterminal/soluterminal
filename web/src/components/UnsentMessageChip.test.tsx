@@ -31,6 +31,17 @@ it('surfaces a refused clear and never falls back to raw keys', async () => {
   await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('text preserved'), { kind: 'warn' }));
 });
 
+it('reports a partial Clear once and keeps the guarded receipt visible', async () => {
+  const act = vi.spyOn(api, 'actOnUnsentMessage').mockResolvedValue({ outcome: 'partly_cleared' });
+  const toast = vi.fn();
+  useStore.setState({ toast, refreshPanes: vi.fn().mockResolvedValue(undefined) });
+  render(<UnsentMessageChip pane={{ ...pane, unsentMessage: { ...pane.unsentMessage!, putBack: true, edited: true } }} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('Partly cleared'), { kind: 'warn' }));
+  expect(act).toHaveBeenCalledExactlyOnceWith('p1', 'receipt', 'clear');
+  expect(screen.getByRole('status')).toHaveTextContent("Agents can't type");
+});
+
 it('renders nothing without a receipt', () => {
   const { container } = render(<UnsentMessageChip pane={{ id: 'p1' } as PaneInfo} />);
   expect(container.textContent).toBe('');

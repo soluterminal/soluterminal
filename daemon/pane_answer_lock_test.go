@@ -44,7 +44,7 @@ func TestAnswerLockNativeApprovals(t *testing.T) {
 		t.Fatal("approvals.go auto path answered")
 	}
 	a := &apiServer{mgr: testManagerWithPane(p)}
-	result := a.mcpToolAnswerPrompt(map[string]any{"pane_id": p.ID, "option": "allow"})
+	result, _ := a.mcpToolAnswerPrompt(map[string]any{"pane_id": p.ID, "option": "allow"})
 	text, isErr := mcpResultText(t, result)
 	if !isErr || !strings.Contains(text, "policy changed") {
 		t.Fatalf("native cross-pane answer: %q %v", text, isErr)

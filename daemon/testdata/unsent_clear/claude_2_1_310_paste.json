@@ -1,0 +1,39 @@
+{
+  "agent": "claude",
+  "version": "2.1.310",
+  "cols": 66,
+  "rows": 40,
+  "steps": [
+    {
+      "name": "real_pasted_placeholder",
+      "bytes": 1780
+    }
+  ],
+  "source": "Real Claude PTY, no submitted turn; bracketed paste of ten lines from /tmp/st11-paste-steps.jsonl",
+  "environment": {
+    "TERM": "xterm-256color",
+    "COLORTERM": "truecolor",
+    "FORCE_COLOR": "1",
+    "NO_COLOR": "unset"
+  },
+  "observed_style": "[Pasted text #1 +9 lines] is normal intensity (AttrFaint false); default foreground, following SGR 39, with no SGR 2 on the placeholder.",
+  "command": [
+    "claude",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "default",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--setting-sources",
+    "project"
+  ],
+  "inputs": [
+    {
+      "step": "real_pasted_placeholder",
+      "method": "one PTY write of bracketed paste, then 3 seconds observing",
+      "body": "ST11 paste line 0 sample text sample text sample text sample text sample text sample text sample text sample text \nST11 paste line 1 sample text sample text sample text sample text sample text sample text sample text sample text \nST11 paste line 2 sample text sample text sample text sample text sample text sample text sample text sample text \nST11 paste line 3 sample text sample text sample text sample text sample text sample text sample text sample text \nST11 paste line 4 sample text sample text sample text sample text sample text sample text sample text sample text \nST11 paste line 5 sample text sample text sample text sample text sample text sample text sample text sample text \nST11 paste line 6 sample text sample text sample text sample text sample text sample text sample text sample text \nST11 paste line 7 sample text sample text sample text sample text sample text sample text sample text sample text \nST11 paste line 8 sample text sample text sample text sample text sample text sample text sample text sample text \nST11 paste line 9 sample text sample text sample text sample text sample text sample text sample text sample text "
+    }
+  ]
+}

@@ -167,17 +167,18 @@ type workerSettingsPatch struct {
 	WorkerExpectedRunMinutes *int    `json:"workerExpectedRunMinutes"`
 	WorkerAutoArchive        *bool   `json:"workerAutoArchive"`
 	WorkerAccounts           *string `json:"workerAccounts"`
+	WorkerMergedGraceMinutes *int    `json:"workerMergedGraceMinutes"`
 }
 
 func (s workerSettings) valid() bool {
-	return workerAccountsRank(s.WorkerAccounts) >= 0 && s.MaxRunning >= 1 && s.MaxRunning <= 32 && s.FinishAfterMinutes >= 1 && s.FinishAfterMinutes <= 1440 && s.WorkerLeadReservePct >= 0 && s.WorkerLeadReservePct <= 100 && s.WorkerExpectedRunMinutes >= 1 && s.WorkerExpectedRunMinutes <= 1440
+	return workerAccountsRank(s.WorkerAccounts) >= 0 && s.MaxRunning >= 1 && s.MaxRunning <= 32 && s.FinishAfterMinutes >= 1 && s.FinishAfterMinutes <= 1440 && s.WorkerLeadReservePct >= 0 && s.WorkerLeadReservePct <= 100 && s.WorkerExpectedRunMinutes >= 1 && s.WorkerExpectedRunMinutes <= 1440 && s.WorkerMergedGraceMinutes >= 0 && s.WorkerMergedGraceMinutes <= 1440
 }
 func (p workerSettingsPatch) apply(s workerSettings) (workerSettings, bool) {
 	changed := false
 	for _, field := range []struct {
 		src *int
 		dst *int
-	}{{p.MaxRunning, &s.MaxRunning}, {p.FinishAfterMinutes, &s.FinishAfterMinutes}, {p.WorkerLeadReservePct, &s.WorkerLeadReservePct}, {p.WorkerExpectedRunMinutes, &s.WorkerExpectedRunMinutes}} {
+	}{{p.MaxRunning, &s.MaxRunning}, {p.FinishAfterMinutes, &s.FinishAfterMinutes}, {p.WorkerLeadReservePct, &s.WorkerLeadReservePct}, {p.WorkerExpectedRunMinutes, &s.WorkerExpectedRunMinutes}, {p.WorkerMergedGraceMinutes, &s.WorkerMergedGraceMinutes}} {
 		if field.src != nil {
 			*field.dst = *field.src
 			changed = true
@@ -208,6 +209,7 @@ func workerAccountsRank(scope string) int {
 
 // Enabling archive authorizes automatic removal and returns credential leases. A
 // pane may disable that automation, but only a person may enable it again.
+// A shorter merged-close grace closes workers sooner, like enabling archive.
 // Shorter finish delays admit workers sooner; longer delays retain running
 // credentials longer. Neither direction is a purely safer change.
 func (s workerSettings) widens(old workerSettings) bool {
@@ -216,5 +218,6 @@ func (s workerSettings) widens(old workerSettings) bool {
 		workerAccountsRank(s.WorkerAccounts) > workerAccountsRank(old.WorkerAccounts) ||
 		(s.WorkerAutoArchive && !old.WorkerAutoArchive) ||
 		s.FinishAfterMinutes != old.FinishAfterMinutes ||
-		s.WorkerExpectedRunMinutes > old.WorkerExpectedRunMinutes
+		s.WorkerExpectedRunMinutes > old.WorkerExpectedRunMinutes ||
+		s.WorkerMergedGraceMinutes < old.WorkerMergedGraceMinutes
 }

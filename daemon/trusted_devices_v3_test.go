@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,19 +114,27 @@ func TestDeviceCodeV3CommitLimitAndExpiry(t *testing.T) {
 	now = now.Add(time.Second)
 	for i := 0; i < devicePendingLimit; i++ {
 		d := newTestDevice(t)
-		if _, _, err := s.commitDeviceV3("phone", d.spki, deviceCommitV3(deviceID(d.spki), strings.Repeat("01", 32))); err != nil {
-			t.Fatal(err)
+		_, _, err := s.commitDeviceV3("phone", d.spki, deviceCommitV3(deviceID(d.spki), strings.Repeat("01", 32)))
+		if full := i == devicePendingLimit-1; full != errors.Is(err, errDevicePendingFull) || (!full && err != nil) {
+			t.Fatalf("commit %d: %v", i+1, err)
 		}
 	}
-	if len(s.record.Devices) != devicePendingLimit || s.find(deviceID(legacy.spki)) != nil {
-		t.Fatal("committed and pending records did not share the queue limit")
+	if len(s.record.Devices) != devicePendingLimit || s.find(deviceID(legacy.spki)) == nil {
+		t.Fatal("committed and pending records did not share the queue limit, or a waiting request was dropped")
 	}
 	now = now.Add(deviceCommitLifetime)
 	s.mu.Lock()
 	err := s.pruneCommittedV3Locked()
 	s.mu.Unlock()
+	if err != nil || len(s.record.Devices) != 1 {
+		t.Fatalf("commit expiry: %v, %d records", err, len(s.record.Devices))
+	}
+	now = now.Add(devicePendingLifetime)
+	s.mu.Lock()
+	err = s.pruneCommittedV3Locked()
+	s.mu.Unlock()
 	if err != nil || len(s.record.Devices) != 0 {
-		t.Fatalf("expiry: %v, %d records", err, len(s.record.Devices))
+		t.Fatalf("legacy expiry: %v, %d records", err, len(s.record.Devices))
 	}
 }
 

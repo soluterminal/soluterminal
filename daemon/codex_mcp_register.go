@@ -260,9 +260,29 @@ func ensureCodexMcpRegistration(listenAddr string) {
 	}
 	body, readErr := os.ReadFile(cfgPath)
 	haveCfg := readErr == nil
+	desired := claudeMcpDesiredURL(listenAddr)
 	existing := ""
+	hasTable := false
 	if haveCfg {
+		// Repair first: duplicate soluterminal tables an older daemon left,
+		// or a bridge entry this daemon can't serve. Then the URL policy
+		// below sees the result.
+		note := ""
+		changed, err := updateCodexConfig(cfgPath, func(b string) (string, bool) {
+			next, _, n, change := codexPlanRegistration(b, desired)
+			note = n
+			return next, change
+		})
+		if err != nil {
+			log.Printf("codex-mcp: %v", err)
+		} else if changed {
+			log.Printf("codex-mcp: %s in %s", note, cfgPath)
+		}
+		if b, err := os.ReadFile(cfgPath); err == nil {
+			body = b
+		}
 		existing = codexConfigMcpURL(string(body), "soluterminal")
+		hasTable = len(codexSoluterminalTables(strings.Split(string(body), "\n"))) > 0
 	}
 	codexBin, binErr := resolveCodexBin()
 	if !haveCfg && binErr != nil {
@@ -274,7 +294,11 @@ func ensureCodexMcpRegistration(listenAddr string) {
 	syncCodexAgentsMd(filepath.Join(filepath.Dir(cfgPath), "AGENTS.md"))
 
 	action := claudeMcpAction(existing) // same URL policy: add / fix / keep
-	desired := claudeMcpDesiredURL(listenAddr)
+	if existing == "" && hasTable {
+		// A soluterminal table with no url is a live bridge entry or one
+		// someone else wrote: never add a second table next to it.
+		action = "keep"
+	}
 	if action == "keep" && mcpTakeoverSiblingEntry(runtime.GOOS, existing, desired) {
 		log.Printf("codex-mcp: re-pointing soluterminal registration %q → %q (this Windows daemon's port changed with the backend mode)", existing, desired)
 		action = "fix"
@@ -373,95 +397,79 @@ func codexConfigEnsureDefaults(body string) (string, bool) {
 }
 
 func ensureCodexMcpDefaults(path, desired string) {
-	data, err := os.ReadFile(path)
+	changed, err := updateCodexConfig(path, func(body string) (string, bool) {
+		if existing := codexConfigMcpURL(body, "soluterminal"); !sameLocalMcpEndpoint(existing, desired) {
+			return body, false
+		}
+		return codexConfigEnsureDefaults(body)
+	})
 	if err != nil {
-		return
+		log.Printf("codex-mcp: %v", err)
+	} else if changed {
+		log.Printf("codex-mcp: pre-approved read-only soluterminal tools and set tool_timeout_sec in %s", path)
 	}
-	body := string(data)
-	if existing := codexConfigMcpURL(body, "soluterminal"); !sameLocalMcpEndpoint(existing, desired) {
-		return
-	}
-	next, changed := codexConfigEnsureDefaults(body)
-	if !changed {
-		return
-	}
-	tmp := path + ".solu-tmp"
-	if err := os.WriteFile(tmp, []byte(next), 0600); err != nil {
-		log.Printf("codex-mcp: could not write %s: %v", tmp, err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		log.Printf("codex-mcp: could not replace %s: %v", path, err)
-		return
-	}
-	log.Printf("codex-mcp: pre-approved read-only soluterminal tools and set tool_timeout_sec in %s", path)
 }
 
 func ensureCodexMcpPaneHeader(path, desired string) {
-	data, err := os.ReadFile(path)
+	changed, err := updateCodexConfig(path, func(body string) (string, bool) {
+		existing := codexConfigMcpURL(body, "soluterminal")
+		if claudeMcpAction(existing) != "keep" || !sameLocalMcpEndpoint(existing, desired) {
+			return body, false
+		}
+		switch codexConfigPaneHeaderState(body) {
+		case codexPaneHeaderOurs:
+			return body, false
+		case codexPaneHeaderForeign:
+			log.Printf("codex-mcp: soluterminal entry has an env_http_headers we did not write in %s (leaving as is)", path)
+			return body, false
+		}
+		return codexConfigInsertPaneHeader(body)
+	})
 	if err != nil {
-		return
+		log.Printf("codex-mcp: %v", err)
+	} else if changed {
+		log.Printf("codex-mcp: added per-pane env_http_headers attribution in %s", path)
 	}
-	body := string(data)
-	existing := codexConfigMcpURL(body, "soluterminal")
-	if claudeMcpAction(existing) != "keep" || !sameLocalMcpEndpoint(existing, desired) {
-		return
-	}
-	switch codexConfigPaneHeaderState(body) {
-	case codexPaneHeaderOurs:
-		return
-	case codexPaneHeaderForeign:
-		log.Printf("codex-mcp: soluterminal entry has an env_http_headers we did not write in %s (leaving as is)", path)
-		return
-	}
-	next, ok := codexConfigInsertPaneHeader(body)
-	if !ok {
-		return
-	}
-	tmp := path + ".solu-tmp"
-	if err := os.WriteFile(tmp, []byte(next), 0600); err != nil {
-		log.Printf("codex-mcp: could not write %s: %v", tmp, err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		log.Printf("codex-mcp: could not replace %s: %v", path, err)
-		return
-	}
-	log.Printf("codex-mcp: added per-pane env_http_headers attribution in %s", path)
 }
 
 // registerCodexMcpDirect is the no-CLI fallback: fix rewrites only the url
 // line of the existing section; add appends a fresh section at EOF. Atomic
 // replace either way.
-func registerCodexMcpDirect(path, body, desired, action, existing string) {
-	var next string
-	switch action {
-	case "fix":
-		fixed, ok := codexConfigFixMcpURL(body, "soluterminal", desired)
-		if !ok {
-			// Section exists in some shape we don't understand — leave it
-			// alone rather than risk mangling a hand-written config.
-			log.Printf("codex-mcp: entry %q not in a shape we can heal in %s (leaving as is)", existing, path)
-			return
+func registerCodexMcpDirect(path, _, desired, action, existing string) {
+	changed, err := updateCodexConfig(path, func(body string) (string, bool) {
+		// The caller decided from an earlier read. If the entry is no longer
+		// the one it saw (another program changed it meanwhile), write
+		// nothing; the next start decides again. (A second table is never
+		// added: see the default case.)
+		if codexConfigMcpURL(body, "soluterminal") != existing {
+			return body, false
 		}
-		next = fixed
-	default:
-		next = body
-		if next != "" && !strings.HasSuffix(next, "\n") {
-			next += "\n"
+		switch action {
+		case "fix":
+			fixed, ok := codexConfigFixMcpURL(body, "soluterminal", desired)
+			if !ok {
+				// Section exists in some shape we don't understand — leave
+				// it alone rather than risk mangling a hand-written config.
+				log.Printf("codex-mcp: entry %q not in a shape we can heal in %s (leaving as is)", existing, path)
+				return body, false
+			}
+			return fixed, true
+		default:
+			if len(codexSoluterminalTables(strings.Split(body, "\n"))) > 0 {
+				return body, false // never a second table
+			}
+			next := body
+			if next != "" && !strings.HasSuffix(next, "\n") {
+				next += "\n"
+			}
+			return next + "\n[mcp_servers.soluterminal]\nurl = \"" + desired + "\"\n" + codexMcpPaneHeaderLine + "\n", true
 		}
-		next += "\n[mcp_servers.soluterminal]\nurl = \"" + desired + "\"\n" + codexMcpPaneHeaderLine + "\n"
-	}
-	tmp := path + ".solu-tmp"
-	if err := os.WriteFile(tmp, []byte(next), 0600); err != nil {
-		log.Printf("codex-mcp: could not write %s: %v", tmp, err)
+	})
+	if err != nil {
+		log.Printf("codex-mcp: %v", err)
 		return
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		log.Printf("codex-mcp: could not replace %s: %v", path, err)
+	if !changed {
 		return
 	}
 	switch action {

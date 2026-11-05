@@ -18,7 +18,7 @@ vi.mock('../../lib/localProof', async (orig) => {
 import { api } from '../../api';
 import { approveThisBrowserFirst, askToApproveThisBrowser } from '../../lib/localProof';
 import { HumanProofBanner } from '../HumanProofBanner';
-import { HUMAN_PROOF_LABEL, HumanProofSetting, approvalProvenance } from './HumanProofSetting';
+import { HUMAN_PROOF_LABEL, HumanProofSetting, REQUIRE_NEEDS_FULL_DEVICE, approvalProvenance } from './HumanProofSetting';
 
 const base: LocalProofStatus = {
   mode: 'report', effective: 'report', target: 'local/dmn_t', serverTime: Date.now(), envOff: false,
@@ -33,7 +33,7 @@ describe('HumanProofSetting', () => {
     render(<HumanProofSetting />);
     fireEvent.click(await screen.findByRole('button', { name: 'Approve this browser' }));
     await waitFor(() => expect(approveThisBrowserFirst).toHaveBeenCalledWith(''));
-    expect(screen.getByText(/If you lose every approved device/)).toHaveTextContent("add SOLU_HUMAN_PROOF=off to .solu/env in your home folder (in Linux if SoluTerminal runs in WSL), then restart SoluTerminal's background service: if it runs in WSL, run wsl --shutdown in Windows and reopen SoluTerminal (this stops everything running in WSL); if it runs on Windows without WSL, quit SoluTerminal from the tray and reopen it; with a Linux command-line install, run systemctl --user restart soluterminal.");
+    expect(screen.getByText(/If you lose every approved device/)).toHaveTextContent("add SOLU_HUMAN_PROOF=off to ~/.solu/env (WSL, Linux or macOS) or %USERPROFILE%\\.solu\\env (Windows-native), then restart SoluTerminal's background service. If your desktop tray has Restart background service, choose it (on Windows it restarts only the WSL service; if it refuses, use the steps below). Otherwise: with WSL, quit SoluTerminal from the tray icon, run wsl --shutdown in Windows PowerShell (this stops everything running in WSL, including your agents) and reopen SoluTerminal; on Linux run systemctl --user restart soluterminal.service, or if you start it yourself, stop and start it again; on macOS run launchctl kickstart -k gui/$(id -u)/com.soluterminal.daemon, or if you start it yourself, stop and start it again; on Windows without WSL, quit SoluTerminal from the tray icon and reopen it. Then approve a device in Settings › Privacy & security, remove the SOLU_HUMAN_PROOF=off line, and restart the same way again. While that line is there, any browser or program on this computer can approve or remove devices.");
     const select = screen.getByRole('combobox', { name: HUMAN_PROOF_LABEL });
     expect((select.querySelector('option[value="require"]') as HTMLOptionElement).disabled).toBe(true);
   });
@@ -65,6 +65,36 @@ describe('HumanProofSetting', () => {
     expect(confirm.mock.calls[0][0]).toContain('Edge on Windows (asked at this computer, approved as the first device)');
   });
 
+  it('never lists an alerts-only device as one that can act for you', async () => {
+    status.current = { ...base, canBootstrap: false, approvedDevices: 1, device: 'approved' };
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [
+      { id: 'dev_a', name: 'Edge on Windows', status: 'approved', createdAt: '', approvedVia: 'first-device', surface: 'local' },
+      { id: 'dev_w', name: 'Desktop window', status: 'approved', scope: 'alerts', createdAt: '', approvedVia: 'device:dev_a', surface: 'local' },
+    ] });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const set = vi.spyOn(api, 'setHumanProofMode').mockResolvedValue({ ...base, mode: 'require', effective: 'require' });
+    render(<HumanProofSetting />);
+    fireEvent.change(await screen.findByRole('combobox', { name: HUMAN_PROOF_LABEL }), { target: { value: 'require' } });
+    await waitFor(() => expect(set).toHaveBeenCalledWith('require'));
+    expect(confirm.mock.calls[0][0]).toContain('Edge on Windows');
+    expect(confirm.mock.calls[0][0]).not.toContain('Desktop window');
+  });
+
+  it('refuses to require approved devices when the list shows only an alerts-only device', async () => {
+    // Defence in depth: the list read for the confirmation has no full device.
+    status.current = { ...base, canBootstrap: false, approvedDevices: 1, device: 'approved' };
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [
+      { id: 'dev_w', name: 'Desktop window', status: 'approved', scope: 'alerts', createdAt: '', surface: 'local' },
+    ] });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const set = vi.spyOn(api, 'setHumanProofMode');
+    render(<HumanProofSetting />);
+    fireEvent.change(await screen.findByRole('combobox', { name: HUMAN_PROOF_LABEL }), { target: { value: 'require' } });
+    expect(await screen.findByText(REQUIRE_NEEDS_FULL_DEVICE)).toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('reports actions accepted without an approved device', async () => {
     status.current = { ...base, unproven: { count: 3, at: new Date().toISOString(), action: 'answer an agent’s request' } };
     render(<HumanProofSetting />);
@@ -74,7 +104,7 @@ describe('HumanProofSetting', () => {
   it('says when the check is off at this computer', async () => {
     status.current = { ...base, envOff: true };
     render(<HumanProofSetting />);
-    expect(await screen.findByText(/Turned off at this computer/)).toHaveTextContent('Remove the line from ~/.solu/env and restart the background service the same way to use this setting.');
+    expect(await screen.findByText(/Turned off at this computer/)).toHaveTextContent('Remove the line from ~/.solu/env (WSL, Linux or macOS) or %USERPROFILE%\\.solu\\env (Windows-native) and restart the background service the same way to use this setting.');
     expect(screen.getByRole('combobox', { name: HUMAN_PROOF_LABEL })).toBeDisabled();
   });
 });

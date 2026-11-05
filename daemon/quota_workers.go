@@ -142,10 +142,14 @@ type workerSettings struct {
 	WorkerExpectedRunMinutes int    `json:"workerExpectedRunMinutes"`
 	WorkerAutoArchive        bool   `json:"workerAutoArchive"`
 	WorkerAccounts           string `json:"workerAccounts"`
+	// WorkerMergedGraceMinutes: a finished worker whose work has landed on
+	// the remote default branch closes this long after the merge is seen,
+	// without its lead's read receipt (worker_archives.go).
+	WorkerMergedGraceMinutes int `json:"workerMergedGraceMinutes"`
 }
 
 func defaultWorkerSettings() workerSettings {
-	return workerSettings{MaxRunning: 4, FinishAfterMinutes: 5, WorkerLeadReservePct: 15, WorkerExpectedRunMinutes: 45, WorkerAutoArchive: true, WorkerAccounts: "active"}
+	return workerSettings{MaxRunning: 4, FinishAfterMinutes: 5, WorkerLeadReservePct: 15, WorkerExpectedRunMinutes: 45, WorkerAutoArchive: true, WorkerAccounts: "active", WorkerMergedGraceMinutes: 10}
 }
 
 type workerRequest struct {
@@ -712,7 +716,7 @@ func init() {
 			a.loadWorkerSettingsLocked(q)
 			s, changed := patch.apply(q.settings)
 			if !changed || !s.valid() {
-				http.Error(w, "set maxRunning (1..32), finishAfterMinutes (1..1440), workerLeadReservePct (0..100), workerExpectedRunMinutes (1..1440), workerAutoArchive, or workerAccounts (active, saved, team)", 400)
+				http.Error(w, "set maxRunning (1..32), finishAfterMinutes (1..1440), workerLeadReservePct (0..100), workerExpectedRunMinutes (1..1440), workerMergedGraceMinutes (0..1440), workerAutoArchive, or workerAccounts (active, saved, team)", 400)
 				return
 			}
 			if s.widens(q.settings) && !a.requireHuman(w, r, "widen worker spending or automatic archiving") {

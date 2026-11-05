@@ -93,6 +93,9 @@ type trustedDevice struct {
 	// Surface is where the device enrolled from: "relay" or "local" (this
 	// computer). Empty on older records.
 	Surface string `json:"surface,omitempty"`
+	// Forwarded: requested through the cloud's /m/ route without device
+	// proof; counts toward forwardedPendingLimit while it waits.
+	Forwarded bool `json:"forwarded,omitempty"`
 	// ApprovedVia says how it was approved: "first-device", "device:<id>"
 	// (signed by an approved device), "relay-device:<id>" (an approved
 	// device over the relay), "traced" (a browser traced at this computer)
@@ -106,9 +109,47 @@ type trustedDevice struct {
 	// and on older records, which are taken as untainted.
 	ApprovedBy string   `json:"approvedBy,omitempty"`
 	Lineage    []string `json:"lineage,omitempty"`
+	// Scope is what the device asked to be at enrolment: "" for the person's
+	// own device, deviceScopeAlerts for one that may only take over push
+	// alerts. Set at enrolment (V3, at this computer only) and never changed;
+	// such a device is approved as deviceStatusApprovedAlerts.
+	Scope string `json:"scope,omitempty"`
 
 	key *ecdsa.PublicKey
 }
+
+// deviceScopeAlerts: a device that may only take or release the
+// notifications handler (notifications_handler.go).
+const deviceScopeAlerts = "alerts"
+
+// scope is the device's scope: deviceScopeAlerts for an approved alerts-only
+// device even when an older daemon saved the record without its scope.
+func (d *trustedDevice) scope() string {
+	if d.Status == deviceStatusApprovedAlerts {
+		return deviceScopeAlerts
+	}
+	return d.Scope
+}
+
+// errDeviceScopeMismatch: a key asked again under another scope. A key keeps
+// the scope it enrolled with; to change it, remove the device first.
+var errDeviceScopeMismatch = errors.New("this device enrolled with another scope: remove it in Settings → Privacy & security first")
+
+// errDeviceScopeNeedsProof: an alerts-only device is approved only from an
+// approved device, a browser traced at this computer or under env recovery,
+// never as the first device or on browser headers alone.
+var errDeviceScopeNeedsProof = errors.New("an alerts-only device needs an approved device to approve it")
+
+func writeDeviceScopeMismatch(w http.ResponseWriter) {
+	writeJSON(w, http.StatusConflict, map[string]any{"error": "scope_mismatch", "message": errDeviceScopeMismatch.Error()})
+}
+
+// deviceStatusApprovedAlerts is an approved alerts-only device. It is a
+// status of its own, not deviceStatusApproved with a scope, so that every
+// check for the person's devices (signatures, the private channel, the
+// first device, the last one kept, require mode) leaves it out, here and in
+// an older daemon that doesn't know scopes.
+const deviceStatusApprovedAlerts = "approved-alerts"
 
 const (
 	deviceSurfaceRelay = "relay"
@@ -144,6 +185,9 @@ type trustedDevices struct {
 	daemonKey func() *daemonIdentity
 	// now is replaced in tests.
 	now func() time.Time
+	// forwardedAttempts: when forwarded unsigned callers asked to enrol, in
+	// the last forwardedEnrolWindow. Guarded by mu.
+	forwardedAttempts []time.Time
 	// changed is closed (and replaced) whenever a device is removed or the
 	// record changes in a way that can withdraw access; see changes().
 	changed chan struct{}
@@ -193,12 +237,35 @@ func (s *trustedDevices) notifyLocked() {
 	s.changed = make(chan struct{})
 }
 
-// isApproved reports whether id is currently an approved device.
+// isApproved reports whether id is currently one of the person's approved
+// devices (an alerts-only device is not).
 func (s *trustedDevices) isApproved(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.find(id)
 	return d != nil && d.Status == deviceStatusApproved
+}
+
+// scopeOf is the scope id enrolled with, or "" (also for an unknown id).
+func (s *trustedDevices) scopeOf(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d := s.find(id); d != nil {
+		return d.scope()
+	}
+	return ""
+}
+
+// alertsDevice returns the name of id while it is approved, as the person's
+// device or an alerts-only one: either may hold the notifications handler.
+func (s *trustedDevices) alertsDevice(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.find(id)
+	if d == nil || (d.Status != deviceStatusApproved && d.Status != deviceStatusApprovedAlerts) {
+		return "", false
+	}
+	return d.Name, true
 }
 
 func newTrustedDevices(dataDir string) *trustedDevices {
@@ -372,6 +439,12 @@ func (s *trustedDevices) enroll(name, spkiB64 string, codeVersion ...int) (*trus
 // enrollReport is enroll, also reporting whether this call created the
 // record (decided under the lock, so concurrent requests agree).
 func (s *trustedDevices) enrollReport(name, spkiB64 string, codeVersion ...int) (*trustedDevice, bool, error) {
+	return s.enrollReportFrom(name, spkiB64, false, codeVersion...)
+}
+
+// enrollReportFrom is enrollReport; forwarded marks a request from a
+// forwarded unsigned caller (forwardedPendingLimit).
+func (s *trustedDevices) enrollReportFrom(name, spkiB64 string, forwarded bool, codeVersion ...int) (*trustedDevice, bool, error) {
 	key, err := parseDevicePublicKey(spkiB64)
 	if err != nil {
 		return nil, false, err
@@ -395,6 +468,9 @@ func (s *trustedDevices) enrollReport(name, spkiB64 string, codeVersion ...int) 
 	}
 	for _, d := range s.record.Devices {
 		if d.ID == id {
+			if d.scope() != "" {
+				return nil, false, errDeviceScopeMismatch
+			}
 			// A request still waiting under an older (V1) code moves to the
 			// V2 code the updated device now shows; approved records keep
 			// theirs (re-approval is the device's call).
@@ -407,31 +483,82 @@ func (s *trustedDevices) enrollReport(name, spkiB64 string, codeVersion ...int) 
 			return d, false, nil
 		}
 	}
-	// Keep the pending queue short so an unauthenticated caller cannot fill it.
-	var pending []int
-	for i, d := range s.record.Devices {
-		if d.Status != deviceStatusApproved {
-			pending = append(pending, i)
-		}
-	}
-	if len(pending) >= devicePendingLimit {
-		oldest := pending[0]
-		for _, i := range pending[1:] {
-			if s.record.Devices[i].CreatedAt.Before(s.record.Devices[oldest].CreatedAt) {
-				oldest = i
-			}
-		}
-		s.record.Devices = append(s.record.Devices[:oldest], s.record.Devices[oldest+1:]...)
+	if err := admitPendingLocked(s.record.Devices, forwarded); err != nil {
+		return nil, false, err
 	}
 	d := &trustedDevice{
 		ID: id, Name: name, PublicKey: strings.TrimSpace(spkiB64), Status: deviceStatusPending,
 		Code: deviceCode(spkiB64, daemonSPKIForCode), CodeVersion: codeVersionOf(daemonSPKIForCode), CreatedAt: s.now().UTC(), key: key,
+		Forwarded: forwarded,
 	}
 	s.record.Devices = append(s.record.Devices, d)
 	if err := s.saveLocked(); err != nil {
 		return nil, false, err
 	}
 	return d, true, nil
+}
+
+const (
+	// devicePendingLifetime: how long a V1/V2 request (its code shows at
+	// once) waits for approval: an hour, or a revealed V3 request's lifetime
+	// if that is shorter. A full list refuses new requests instead of
+	// dropping waiting ones, so it must clear by itself (an approved device
+	// can also remove them at once).
+	devicePendingLifetime = min(time.Hour, deviceRevealLifetime)
+	// Requests forwarded through the cloud's /m/ route without device proof
+	// (forwardedUnsigned) share one allowance: they all come through the
+	// same forwarding program, so no source can be told apart.
+	forwardedPendingLimit = 3
+	forwardedEnrolPerHour = 10
+	forwardedEnrolWindow  = time.Hour
+)
+
+// errDevicePendingFull: no more requests may wait now. Nothing waiting is
+// ever dropped for a new one: a flood blocks only itself, and requests
+// clear on their lifetimes (pruneCommittedV3Locked).
+var errDevicePendingFull = errors.New("too many devices are waiting for approval on this computer: approve or remove one in Settings → Privacy & security, or ask again later")
+
+// errDevicePendingKept: a request for this key already waits with its code
+// shown; it is never replaced, since a public key is no secret.
+var errDevicePendingKept = errors.New("a request for this device is already waiting with its code shown: approve or remove it first, or ask again once it expires")
+
+// admitPendingLocked reports whether one more request may wait among
+// devices: at most devicePendingLimit in all, and forwardedPendingLimit of
+// them from forwarded unsigned callers. Caller holds mu.
+func admitPendingLocked(devices []*trustedDevice, forwarded bool) error {
+	pending, fromForwarded := 0, 0
+	for _, d := range devices {
+		if d.Status != deviceStatusApproved && d.Status != deviceStatusApprovedAlerts {
+			pending++
+			if d.Forwarded {
+				fromForwarded++
+			}
+		}
+	}
+	if pending >= devicePendingLimit || (forwarded && fromForwarded >= forwardedPendingLimit) {
+		return errDevicePendingFull
+	}
+	return nil
+}
+
+// allowForwardedEnrolAttempt counts one enrolment attempt from a forwarded
+// unsigned caller, refusing it past forwardedEnrolPerHour in the window.
+func (s *trustedDevices) allowForwardedEnrolAttempt() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	kept := s.forwardedAttempts[:0]
+	for _, at := range s.forwardedAttempts {
+		if now.Sub(at) < forwardedEnrolWindow {
+			kept = append(kept, at)
+		}
+	}
+	s.forwardedAttempts = kept
+	if len(kept) >= forwardedEnrolPerHour {
+		return false
+	}
+	s.forwardedAttempts = append(s.forwardedAttempts, now)
+	return true
 }
 
 // pruneNoncesLocked forgets nonces past their replay window. Both request
@@ -493,6 +620,9 @@ func (s *trustedDevices) approveWith(id, enrolmentID string, onlyFirst bool, via
 		}
 		return nil, os.ErrNotExist
 	}
+	if d.Scope == deviceScopeAlerts && (onlyFirst || !alertsApprovalVia(via)) {
+		return nil, errDeviceScopeNeedsProof
+	}
 	if d.CodeVersion == 3 {
 		if d.Status != deviceStatusPending || d.EnrolmentID != enrolmentID || enrolmentID == "" || d.CodeIdentity != computer {
 			return nil, errDeviceEnrolment
@@ -504,6 +634,9 @@ func (s *trustedDevices) approveWith(id, enrolmentID string, onlyFirst bool, via
 			return nil, err
 		}
 		next.Status, next.ApprovedAt = deviceStatusApproved, &now
+		if d.Scope == deviceScopeAlerts {
+			next.Status = deviceStatusApprovedAlerts
+		}
 		next.V3Verified = proof
 		next.Commit, next.DaemonNonce, next.DeviceNonce = "", "", ""
 		s.recordApprovalLocked(&next, via)
@@ -512,7 +645,7 @@ func (s *trustedDevices) approveWith(id, enrolmentID string, onlyFirst bool, via
 		}
 		return &next, nil
 	}
-	if enrolmentID != "" {
+	if enrolmentID != "" || d.Scope != "" {
 		return nil, errDeviceEnrolment
 	}
 	now := s.now().UTC()
@@ -525,7 +658,9 @@ func (s *trustedDevices) approveWith(id, enrolmentID string, onlyFirst bool, via
 // approval itself: a device approved by another inherits its approver's
 // chain at once, so it can never act as untainted in between.
 func (s *trustedDevices) recordApprovalLocked(d *trustedDevice, via string) {
-	s.record.ApprovedEver = s.approvedEverLocked(d.ID) + 1
+	if d.Status == deviceStatusApproved {
+		s.record.ApprovedEver = s.approvedEverLocked(d.ID) + 1
+	}
 	if via == "" {
 		return
 	}
@@ -539,6 +674,13 @@ func (s *trustedDevices) recordApprovalLocked(d *trustedDevice, via string) {
 	if p := s.find(by); p != nil {
 		d.Lineage = append(append([]string(nil), p.Lineage...), by)
 	}
+}
+
+// alertsApprovalVia reports an approval that may approve an alerts-only
+// device: by an approved device (here or over the relay), a browser traced
+// at this computer, or under env recovery; "" is a direct store call (tests).
+func alertsApprovalVia(via string) bool {
+	return via == "" || via == "traced" || via == "env-recovery" || approverIn(via) != ""
 }
 
 // approverIn is the approving device an approvedVia names, or "".
@@ -589,6 +731,9 @@ func (s *trustedDevices) bootstrapLocal(name, spkiB64, surface string) (*trusted
 	id := deviceID(spkiB64)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if d := s.find(id); d != nil && d.scope() != "" {
+		return nil, errDeviceScopeMismatch
+	}
 	for _, d := range s.record.Devices {
 		if d.Status == deviceStatusApproved {
 			return nil, errDeviceAlreadyBootstrapped
@@ -793,6 +938,7 @@ func verifyDeviceSignature(key *ecdsa.PublicKey, msg []byte, sigB64 string) bool
 var (
 	errDeviceUnsigned    = errors.New("request is not signed by a device")
 	errDeviceUnknown     = errors.New("device is not approved on this computer")
+	errDeviceScoped      = errors.New("this device may only take over push alerts")
 	errDeviceStale       = errors.New("device signature is too old or from the future")
 	errDeviceReplay      = errors.New("device signature was already used")
 	errDeviceBadSig      = errors.New("device signature does not match")
@@ -824,6 +970,10 @@ type deviceSigCheck struct {
 	// possession verifies against this key instead of an approved device's:
 	// a device proving it holds the key it is enrolling.
 	possession *ecdsa.PublicKey
+	// allowScoped also accepts an alerts-only device
+	// (deviceStatusApprovedAlerts). Only localDeviceProof sets it, and it
+	// keeps such a device apart from the person's (localScopedDevice).
+	allowScoped bool
 }
 
 func (s *trustedDevices) verifySigned(r *http.Request, c deviceSigCheck) (*trustedDevice, error) {
@@ -877,7 +1027,10 @@ func (s *trustedDevices) verifySigned(r *http.Request, c deviceSigCheck) (*trust
 	key := c.possession
 	if key == nil {
 		d = s.find(f.id)
-		if d == nil || d.Status != deviceStatusApproved || d.key == nil {
+		if d != nil && d.Status == deviceStatusApprovedAlerts && !c.allowScoped {
+			return nil, errDeviceScoped
+		}
+		if d == nil || (d.Status != deviceStatusApproved && d.Status != deviceStatusApprovedAlerts) || d.key == nil {
 			return nil, errDeviceUnknown
 		}
 		key = d.key
@@ -1139,6 +1292,8 @@ type trustedDeviceView struct {
 	V3Verified     *deviceV3Verified    `json:"v3Verified,omitempty"`
 	Surface        string               `json:"surface,omitempty"`
 	ApprovedVia    string               `json:"approvedVia,omitempty"`
+	// Scope: "alerts" for a device that may only take over push alerts.
+	Scope string `json:"scope,omitempty"`
 }
 
 func viewOfDevice(d *trustedDevice) trustedDeviceView {
@@ -1155,10 +1310,15 @@ func viewOfDevice(d *trustedDevice) trustedDeviceView {
 	}
 	v.V3Verified = d.V3Verified
 	v.Surface, v.ApprovedVia = d.Surface, d.ApprovedVia
+	v.Scope = d.scope()
+	if d.Status == deviceStatusApprovedAlerts {
+		v.Status = deviceStatusApproved // the app reads Scope
+	}
 	return v
 }
 
-func (a *apiServer) handleListRemoteDevices(w http.ResponseWriter, _ *http.Request) {
+func (a *apiServer) handleListRemoteDevices(w http.ResponseWriter, r *http.Request) {
+	canManage := a.canApproveDevices(r)
 	s := a.trustedDevices
 	s.mu.Lock()
 	if err := s.pruneCommittedV3Locked(); err != nil {
@@ -1169,7 +1329,10 @@ func (a *apiServer) handleListRemoteDevices(w http.ResponseWriter, _ *http.Reque
 	out := struct {
 		Policy  string              `json:"policy"`
 		Devices []trustedDeviceView `json:"devices"`
-	}{Policy: s.record.Policy, Devices: []trustedDeviceView{}}
+		// CanManageDevices: this caller's approval would pass the checks
+		// (canApproveDevices). The screen shows Approve only then.
+		CanManageDevices bool `json:"canManageDevices"`
+	}{Policy: s.record.Policy, Devices: []trustedDeviceView{}, CanManageDevices: canManage}
 	for _, d := range s.record.Devices {
 		out.Devices = append(out.Devices, viewOfDevice(d))
 	}
@@ -1195,6 +1358,9 @@ func (a *apiServer) handleEnrollRemoteDevice(w http.ResponseWriter, r *http.Requ
 		// keys and pins daemonIdentity (private relay channel).
 		CodeVersion int    `json:"codeVersion"`
 		Commit      string `json:"commit"`
+		// Scope "alerts" enrols a device that may only take over push
+		// alerts (notifications_handler.go): V3 only, at this computer only.
+		Scope string `json:"scope"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, deviceEnrollMaxBody))
 	if err := dec.Decode(&body); err != nil {
@@ -1211,13 +1377,48 @@ func (a *apiServer) handleEnrollRemoteDevice(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	if body.Scope != "" {
+		switch {
+		case body.Scope != deviceScopeAlerts:
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported_scope", "message": "The only device scope is \"alerts\"."})
+			return
+		case body.CodeVersion != 3:
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "scope_needs_v3", "message": "An alerts-only device enrols with codeVersion 3 (commit and reveal)."})
+			return
+		case !atThisComputer(r):
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "scope_local_only", "message": "An alerts-only device enrols at the computer itself."})
+			return
+		}
+	}
+	// A view-only caller may ask (forwardedViewOnlyExempt), within one
+	// allowance shared by everything forwarded through the cloud's /m/ route.
+	forwarded := isCloudForwardedPrefix(r.Header.Get("X-Forwarded-Prefix")) && a.forwardedUnsigned(a.identifyCaller(r))
+	if forwarded && !a.trustedDevices.allowForwardedEnrolAttempt() {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":   "too_many_enrolments",
+			"message": "Too many requests to approve a device came through this connection. Try again in an hour, or ask at the computer.",
+		})
+		return
+	}
 	var d *trustedDevice
 	var created bool
 	var err error
 	if body.CodeVersion == 3 {
-		d, created, err = a.trustedDevices.commitDeviceV3(body.Name, body.PublicKey, body.Commit)
+		d, created, err = a.trustedDevices.commitDeviceV3Scoped(body.Name, body.PublicKey, body.Commit, forwarded, body.Scope)
 	} else {
-		d, created, err = a.trustedDevices.enrollReport(body.Name, body.PublicKey, body.CodeVersion)
+		d, created, err = a.trustedDevices.enrollReportFrom(body.Name, body.PublicKey, forwarded, body.CodeVersion)
+	}
+	if errors.Is(err, errDevicePendingFull) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too_many_pending", "message": errDevicePendingFull.Error()})
+		return
+	}
+	if errors.Is(err, errDevicePendingKept) {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "request_waiting", "message": errDevicePendingKept.Error()})
+		return
+	}
+	if errors.Is(err, errDeviceScopeMismatch) {
+		writeDeviceScopeMismatch(w)
+		return
 	}
 	if err != nil {
 		if body.CodeVersion == 3 {
@@ -1237,7 +1438,7 @@ func (a *apiServer) handleEnrollRemoteDevice(w http.ResponseWriter, r *http.Requ
 	// A new request is announced on this computer, where it is approved; a
 	// device asking again while it waits is not.
 	if created && a.uiBus != nil && a.trustedDevices.announceNewRequest(time.Now()) {
-		a.uiBus.publish(uiEvent{Type: "remote-device.pending", Text: d.Name})
+		a.uiBus.publish(uiEvent{Type: "remote-device.pending", Text: d.Name, Hint: d.Scope})
 	}
 	a.trustedDevices.mu.Lock()
 	v := viewOfDevice(d)
@@ -1301,16 +1502,50 @@ func deviceManagementProven(r *http.Request, caller callerIdentity, require bool
 // browser can't lock them out of approving a new one; that is logged, and
 // an approval made that way is announced until acknowledged.
 func (a *apiServer) requireDeviceManagementProof(w http.ResponseWriter, r *http.Request, caller callerIdentity, action string) (ok, envRecovery bool) {
-	if a.approvedDeviceCount() == 0 || deviceManagementProven(r, caller, a.humanProofMode() == humanProofRequire) {
-		return true, false
-	}
-	if a.humanProof != nil && a.humanProof.envOff && caller.Kind == callerHuman {
+	ok, envRecovery = a.deviceManagementAllowed(r, caller)
+	if envRecovery {
 		log.Printf("remote-devices: %s on browser headers under %s=off (env-recovery, pid %d)", action, humanProofEnv, caller.PID)
-		return true, true
+	}
+	if ok {
+		return true, envRecovery
 	}
 	log.Printf("remote-devices: refused %s without device proof (pid %d)", action, caller.PID)
 	writeDeviceProofRequired(w, action)
 	return false, false
+}
+
+// deviceManagementAllowed is requireDeviceManagementProof's decision without
+// its refusal or log: the rule itself, which the device list reports as a
+// hint (canManageDevices).
+func (a *apiServer) deviceManagementAllowed(r *http.Request, caller callerIdentity) (ok, envRecovery bool) {
+	if a.approvedDeviceCount() == 0 || deviceManagementProven(r, caller, a.humanProofMode() == humanProofRequire) {
+		return true, false
+	}
+	if a.humanProof != nil && a.humanProof.envOff && caller.Kind == callerHuman {
+		return true, true
+	}
+	return false, false
+}
+
+// approvalRefusedViaRelay: over the relay only an approved device (signed,
+// or on its private channel) approves another.
+func approvalRefusedViaRelay(r *http.Request) bool {
+	return requestViaRelay(r) && remoteVerifiedDevice(r) == ""
+}
+
+// canApproveDevices reports whether handleApproveRemoteDevice's caller checks
+// would let r through, for the device list to show Approve only where it
+// works. A hint: the approval itself decides.
+func (a *apiServer) canApproveDevices(r *http.Request) bool {
+	if approvalRefusedViaRelay(r) {
+		return false
+	}
+	caller := a.identifyCallerQuietly(r)
+	if caller.Kind != callerHuman {
+		return false
+	}
+	ok, _ := a.deviceManagementAllowed(r, caller)
+	return ok
 }
 
 func writeDeviceProofRequired(w http.ResponseWriter, action string) {
@@ -1324,7 +1559,7 @@ func writeDeviceProofRequired(w http.ResponseWriter, action string) {
 // from a browser or app the person already approved.
 func (a *apiServer) handleApproveRemoteDevice(w http.ResponseWriter, r *http.Request) {
 	relayDevice := remoteVerifiedDevice(r)
-	if requestViaRelay(r) && relayDevice == "" {
+	if approvalRefusedViaRelay(r) {
 		http.Error(w, "devices can only be approved at the computer itself or from an approved device", http.StatusForbidden)
 		return
 	}
@@ -1349,6 +1584,18 @@ func (a *apiServer) handleApproveRemoteDevice(w http.ResponseWriter, r *http.Req
 	// atomically by approveWith) or, under the env recovery, any device;
 	// both are announced until an approved device acknowledges them.
 	onlyFirst := false
+	if via == "headers" && a.trustedDevices.scopeOf(r.PathValue("id")) == deviceScopeAlerts {
+		// Never the first device and never on headers alone, even with no
+		// device approved: an agent could otherwise enrol a key of its own
+		// and approve it. Env recovery is the person at the computer.
+		if a.humanProof == nil || !a.humanProof.envOff || caller.Kind != callerHuman {
+			log.Printf("remote-devices: refused approving alerts-only device %s without device proof (pid %d)", r.PathValue("id"), caller.PID)
+			writeDeviceProofRequired(w, "approve an alerts-only device")
+			return
+		}
+		log.Printf("remote-devices: approve alerts-only device on browser headers under %s=off (env-recovery, pid %d)", humanProofEnv, caller.PID)
+		via = "env-recovery"
+	}
 	if via == "headers" {
 		ok, envRecovery := a.requireDeviceManagementProof(w, r, caller, "approve a device")
 		if !ok {
@@ -1390,11 +1637,15 @@ func (a *apiServer) handleApproveRemoteDevice(w http.ResponseWriter, r *http.Req
 	d, err := a.trustedDevices.approveWith(r.PathValue("id"), body.EnrolmentID, onlyFirst, via)
 	// Withdrawn only if the device didn't become approved: a failed save
 	// can leave it approved in memory, and then the notice stays.
-	if noticed && (approvalNotMade(err) || (err != nil && !a.trustedDevices.isApproved(r.PathValue("id")))) {
+	if noticed && a.approvalNoticeDropped(r.PathValue("id"), err) {
 		a.humanProof.dropNotice(r.PathValue("id"), noticeAt)
 	}
 	if errors.Is(err, errDeviceAlreadyBootstrapped) {
 		writeDeviceProofRequired(w, "approve a device")
+		return
+	}
+	if errors.Is(err, errDeviceScopeNeedsProof) {
+		writeDeviceProofRequired(w, "approve an alerts-only device")
 		return
 	}
 	if errors.Is(err, errApproverGone) {
@@ -1421,6 +1672,21 @@ func (a *apiServer) handleApproveRemoteDevice(w http.ResponseWriter, r *http.Req
 	v := viewOfDevice(d)
 	a.trustedDevices.mu.Unlock()
 	writeJSON(w, http.StatusOK, v)
+}
+
+// approvalNoticeDropped reports whether the notice written before an
+// approval is withdrawn: only when the device didn't become approved. A
+// failed save can leave it approved in memory, as the person's device or an
+// alerts-only one, and then the notice stays.
+func (a *apiServer) approvalNoticeDropped(id string, err error) bool {
+	if approvalNotMade(err) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	_, approved := a.trustedDevices.alertsDevice(id)
+	return !approved
 }
 
 // handleRemoveRemoteDevice revokes a device: from an approved device (here

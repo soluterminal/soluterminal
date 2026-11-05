@@ -621,8 +621,10 @@ func TestMCPSocketPeerGoneBeforeDispatchOrReply(t *testing.T) {
 func TestMCPSocketRefusesDaemonChildClaimingAPane(t *testing.T) {
 	a := confirmTestServer(t)
 	child := startSleeper(t, "SOLU_PANE_ID=lead")
-	if id, known := a.classifyPeerProcess(child.Process.Pid); !known || id.Kind != callerPane || !id.FromEnv {
-		t.Fatalf("fixture: shared classifier gave %+v (known %t), want an env claim", id, known)
+	// The shared classifier labels the daemon's child a worker before it
+	// reads SOLU_PANE_ID (ST-10 A2).
+	if id, known := a.classifyPeerProcess(child.Process.Pid); !known || id.Kind != callerWorker {
+		t.Fatalf("shared classifier gave %+v (known %t), want the daemon's worker", id, known)
 	}
 	if id := a.classifyMCPSocketPeer(child.Process.Pid); id.Kind != callerWorker {
 		t.Fatalf("socket classified %+v, want the daemon's worker", id)
@@ -635,4 +637,21 @@ func TestMCPSocketRefusesDaemonChildClaimingAPane(t *testing.T) {
 		t.Fatalf("daemon child got a reply: %v", m)
 	}
 	<-done
+}
+
+// A data directory others can write to could have its run directory swapped
+// out from under the socket: no endpoint.
+func TestMCPSocketRefusesAWritableDataDir(t *testing.T) {
+	for _, mode := range []fs.FileMode{0o770, 0o757} {
+		data := shortSocketDir(t)
+		if err := os.Chmod(data, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bindMCPSocket(data); err == nil || !strings.Contains(err.Error(), "writable by group or others") {
+			t.Fatalf("mode %v: bind = %v", mode, err)
+		}
+		if _, err := os.Lstat(filepath.Join(data, mcpSocketDirName)); err == nil {
+			t.Fatalf("mode %v: run directory created", mode)
+		}
+	}
 }

@@ -53,6 +53,9 @@ func menuScreenPane(t *testing.T, s menuScreenSession, raw []byte, agent string)
 }
 
 func TestRealMenuScreens(t *testing.T) {
+	// With prompt-echo blanking on for the recorded versions: every live
+	// menu must still be detected (prompt_echo.go).
+	setDetectedAgentVersions(t, "2.1.310 (Claude Code)", "codex-cli 0.166.0")
 	// Which recorded steps show a live menu. Everything else is an idle or
 	// answered screen whose transcript still holds a "❯ 1." / "› 1." row:
 	// the "1. yes it works in desktop" prompt echo under a reply that ends
@@ -162,6 +165,7 @@ func TestRealMenuScreens(t *testing.T) {
 // recorded, on Claude (whose input box returns) and on Codex (whose stale
 // raw-tail header is acked by the Esc input).
 func TestRealMenuScreensAnswered(t *testing.T) {
+	setDetectedAgentVersions(t, "2.1.310 (Claude Code)", "codex-cli 0.166.0")
 	cases := []struct {
 		session, menu, answered, agent string
 		codex                          bool

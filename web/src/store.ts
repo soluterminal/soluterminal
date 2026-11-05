@@ -1,4 +1,5 @@
 import { createWorkspacePaneTreeSelector } from './lib/workspacePaneTree';
+import { reportClaimRefused } from './lib/claimFeedback';
 import { workspaceViewLayout, effectiveWorkspaceView, graftHiddenWorkspaceLeaves, isDerivedWorkspaceLayout, workspaceViewForPane, workspaceRootOf, workspaceViewHasSelection, isFilteredWorkspaceOverview, isTemporaryWorkspaceView, readWorkspaceAllPanes, saveWorkspaceAllPanes, workspaceViewKey, type WorkspaceView } from './lib/workspaceView';
 import { appendAutoPane, balancedLayout, DEFAULT_LAYOUT_ASPECT, DEFAULT_LAYOUT_COLUMNS, MAX_LAYOUT_COLUMNS, MIN_AUTO_PANE_WIDTH, removeCustomPane, resizedGridConfig, splitLargestPane } from './lib/autoLayout';
 import { createWorkspaceSaveQueue } from './lib/workspaceSaveQueue';
@@ -4097,10 +4098,15 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     // on screen. Parked panes re-claim lazily on re-adoption via
     // claimIntent if the user actually returns to them.
     const visible = new Set(effectiveVisiblePaneIds(s).map(id => terminalSessionKey(currentRoutingScope(), id)));
+    let fired = 0;
     for (const [id, fn] of Object.entries(s.claimers)) {
       if (!visible.has(id)) continue;
-      try { fn(); } catch { /* ignore — best effort */ }
+      fired++;
+      try { fn(); } catch { reportClaimRefused('unreachable'); }
     }
+    // No on-screen pane has a socket to claim on: the click can't reach the
+    // daemon, so the chip says so instead of doing nothing.
+    if (fired === 0) reportClaimRefused('unreachable');
   },
 
   registerRedrawer: (id, fn) => {

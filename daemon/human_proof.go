@@ -269,7 +269,8 @@ func (h *humanProof) dropNotice(id string, at time.Time) {
 // the notice written ahead of it is withdrawn. After a failed save the
 // device may be approved in memory, so the caller checks that instead.
 func approvalNotMade(err error) bool {
-	return errors.Is(err, errDeviceAlreadyBootstrapped) || errors.Is(err, errDeviceEnrolment) || errors.Is(err, os.ErrNotExist) || errors.Is(err, errApproverGone)
+	return errors.Is(err, errDeviceAlreadyBootstrapped) || errors.Is(err, errDeviceEnrolment) || errors.Is(err, os.ErrNotExist) || errors.Is(err, errApproverGone) ||
+		errors.Is(err, errDeviceScopeMismatch) || errors.Is(err, errDeviceScopeNeedsProof)
 }
 
 // deviceFlaggedLocked reports whether device has a notice of its own or was
@@ -403,6 +404,26 @@ func (s *trustedDevices) localTargetCheck() func(string) bool {
 
 type localVerifiedDeviceKey struct{}
 
+type localScopedDeviceKey struct{}
+
+// atThisComputer is the one "this computer" test for device enrolment and
+// the device check: the human-proof view and the first-device bootstrap,
+// where a device enrolled (deviceSurface), and alerts-only enrolment. It is
+// the transport, not the source address: a request read from the relay
+// tunnel or marked as forwarded through the cloud's /m/ route is not, while
+// loopback through WSL's forwarding (NAT or mirrored) from a Windows app is.
+func atThisComputer(r *http.Request) bool {
+	return !requestViaRelay(r)
+}
+
+// localScopedDevice is the alerts-only device (deviceStatusApprovedAlerts)
+// whose local signature localDeviceProof verified on this request, or "". It
+// is never the person: only the notifications handler reads it.
+func localScopedDevice(r *http.Request) string {
+	v, _ := r.Context().Value(localScopedDeviceKey{}).(string)
+	return v
+}
+
 // localVerifiedDevice is the approved device whose local signature
 // localDeviceProof verified on this request, or "".
 func localVerifiedDevice(r *http.Request) string {
@@ -427,10 +448,15 @@ func (a *apiServer) localDeviceProof(next http.Handler) http.Handler {
 			targetOK:     a.trustedDevices.localTargetCheck(),
 			maxBody:      humanProofMaxBody,
 			keepOversize: true,
+			allowScoped:  true,
 		})
 		if err != nil {
 			w.Header().Set(humanProofHeader, humanProofFailure(err))
 			next.ServeHTTP(w, r)
+			return
+		}
+		if d.Status == deviceStatusApprovedAlerts {
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), localScopedDeviceKey{}, d.ID)))
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), localVerifiedDeviceKey{}, d.ID)))
@@ -445,6 +471,8 @@ func humanProofFailure(err error) string {
 		return "stale"
 	case errors.Is(err, errDeviceUnknown):
 		return "not-approved"
+	case errors.Is(err, errDeviceScoped):
+		return "scoped"
 	case errors.Is(err, errDeviceReplay):
 		return "replay"
 	case errors.Is(err, errDeviceWrongTarget):
@@ -467,7 +495,7 @@ func (a *apiServer) tracedBrowserCaller(r *http.Request, pid int) callerIdentity
 	}
 	automation := peerIsAutomationBrowser(pid)
 	if a.humanProofMode() == humanProofRequire {
-		log.Printf("authority: refused unsigned browser %s %s from %s (pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+		callerLogf(r, "authority: refused unsigned browser %s %s from %s (pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
 		return callerIdentity{Kind: callerUnverified, PID: pid, Unproven: true, Automation: automation}
 	}
 	if automation {
@@ -581,7 +609,7 @@ func (a *apiServer) handleGetHumanProof(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "device check is unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if requestViaRelay(r) {
+	if !atThisComputer(r) {
 		http.Error(w, "the device check is only shown at the computer itself", http.StatusForbidden)
 		return
 	}
@@ -632,7 +660,7 @@ func (a *apiServer) handlePutHumanProof(w http.ResponseWriter, r *http.Request) 
 	case humanProofRank(body.Mode) < humanProofRank(current) && id.Device == "" && (id.Unproven || id.PID == 0 || current == humanProofRequire):
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error":   "device_required",
-			"message": "Lower the device check from an approved browser or app. If none is left, add SOLU_HUMAN_PROOF=off to .solu/env in your home folder (in Linux if SoluTerminal runs in WSL), then restart SoluTerminal's background service: if it runs in WSL, run wsl --shutdown in Windows and reopen SoluTerminal (this stops everything running in WSL); if it runs on Windows without WSL, quit SoluTerminal from the tray and reopen it; with a Linux command-line install, run systemctl --user restart soluterminal.",
+			"message": "Lower the device check from an approved browser or app. If none is left, add SOLU_HUMAN_PROOF=off to ~/.solu/env (WSL, Linux or macOS) or %USERPROFILE%\\.solu\\env (Windows-native), then restart SoluTerminal's background service. If your desktop tray has Restart background service, choose it (on Windows it restarts only the WSL service; if it refuses, use the steps below). Otherwise: with WSL, quit SoluTerminal from the tray icon, run wsl --shutdown in Windows PowerShell (this stops everything running in WSL, including your agents) and reopen SoluTerminal; on Linux run systemctl --user restart soluterminal.service, or if you start it yourself, stop and start it again; on macOS run launchctl kickstart -k gui/$(id -u)/com.soluterminal.daemon, or if you start it yourself, stop and start it again; on Windows without WSL, quit SoluTerminal from the tray icon and reopen it. Then approve a device in Settings › Privacy & security, remove the SOLU_HUMAN_PROOF=off line, and restart the same way again. While that line is there, any browser or program on this computer can approve or remove devices.",
 		})
 		return
 	}
@@ -653,7 +681,7 @@ func (a *apiServer) handleBootstrapHumanProof(w http.ResponseWriter, r *http.Req
 		http.Error(w, "device check is unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if requestViaRelay(r) {
+	if !atThisComputer(r) {
 		http.Error(w, "the first device is approved at the computer itself", http.StatusForbidden)
 		return
 	}
@@ -720,6 +748,10 @@ func (a *apiServer) handleBootstrapHumanProof(w http.ResponseWriter, r *http.Req
 	}
 	if errors.Is(err, errDeviceAlreadyBootstrapped) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "already_bootstrapped", "message": "A device is already approved here."})
+		return
+	}
+	if errors.Is(err, errDeviceScopeMismatch) {
+		writeDeviceScopeMismatch(w)
 		return
 	}
 	if err != nil {
@@ -802,7 +834,7 @@ func readLimitedBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byt
 // deviceSurface says where a device enrolled from: over the relay or at this
 // computer.
 func deviceSurface(r *http.Request) string {
-	if requestViaRelay(r) {
+	if !atThisComputer(r) {
 		return deviceSurfaceRelay
 	}
 	return deviceSurfaceLocal

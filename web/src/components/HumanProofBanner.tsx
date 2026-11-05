@@ -31,7 +31,7 @@ export function HumanProofBanner() {
         ))}
         {status.envOff && (
           <span>
-            Approved devices aren’t checked at this computer (SOLU_HUMAN_PROOF=off in ~/.solu/env), and any
+            Approved devices aren’t checked at this computer (SOLU_HUMAN_PROOF=off in {'~/.solu/env (WSL, Linux or macOS) or %USERPROFILE%\\.solu\\env (Windows-native)'}), and any
             browser here can approve or remove devices. When you’re done, remove the line and restart the background service (see Settings → Privacy &amp; security).{' '}
           </span>
         )}

@@ -18,7 +18,9 @@ import {
   forgetComputer,
   markDeviceEnrolled,
   signDeviceRequest,
+  type DeviceEnrolmentReply,
 } from './deviceIdentity';
+import { beginDeviceEnrolmentV3 } from './deviceEnrolment';
 import { isEmbedded } from '../embed';
 import { isTauri } from '../voice';
 
@@ -201,17 +203,25 @@ export async function approveThisBrowserFirst(backendPrefix: string): Promise<vo
 }
 
 /**
- * Ask to approve this browser from a device that already is. Returns the
- * code both screens show.
+ * Ask to approve this browser from a device that already is: enrol with this
+ * browser's key, then V3 commit/reveal. Returns the V3 code this browser
+ * computed itself (never one the daemon sent), or '' when it was already
+ * approved.
  */
 export async function askToApproveThisBrowser(backendPrefix: string): Promise<string> {
   const me = await deviceIdentity();
-  const res = await postJSON(`${backendPrefix}/api/remote-devices/enroll`,
-    JSON.stringify({ name: thisDeviceName(), publicKey: me.spki, codeVersion: 2 }));
-  if (!res.ok) throw new Error(await errorText(res));
-  const reply = (await res.json()) as { code?: string };
+  const send = async (path: string, body: unknown): Promise<DeviceEnrolmentReply> => {
+    const res = await postJSON(backendPrefix + path, JSON.stringify(body));
+    if (!res.ok) throw new Error(await errorText(res));
+    return (await res.json()) as DeviceEnrolmentReply;
+  };
+  const comparison = await beginDeviceEnrolmentV3(me,
+    (commit) => send('/api/remote-devices/enroll', { name: thisDeviceName(), publicKey: me.spki, codeVersion: 3, commit }),
+    (id, enrolmentId, nonce) => send('/api/remote-devices/enroll/reveal', { id, enrolmentId, nonce }));
   await refreshLocalProof(backendPrefix);
-  return reply.code ?? '';
+  if (comparison.device.status === 'approved') return '';
+  if (comparison.codeVersion !== 3) throw new Error('This computer did not offer a V3 code to compare.');
+  return comparison.code;
 }
 
 /** Whether a URL is a pane terminal socket: the one stream whose caller matters. */

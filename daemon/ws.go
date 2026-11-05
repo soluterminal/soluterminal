@@ -83,6 +83,14 @@ type wsInputPolicy struct {
 	human bool
 	// kind names the caller class for logs ("human", "pane", ...).
 	kind string
+	// promptCheck is the prompt gate again at write time, under the writer
+	// lock (apiServer.promptWriteCheck); nil, or a nil result, lets b pass.
+	promptCheck func(p *Pane, b []byte) func() error
+	// viewOnly, when set, reports at each frame whether the socket may only
+	// view (apiServer.forwardedUnsigned), logging the refusal of what (none
+	// for ""): its keys, claims, resizes and redraws are then dropped, and it
+	// never votes on the pane's size.
+	viewOnly func(p *Pane, what string) bool
 }
 
 // wsDropLogInterval and wsDropAckInterval rate-limit, per socket, the log
@@ -150,6 +158,22 @@ func wsDeviceID(device string, human bool) string {
 	return truncateString(device, 64)
 }
 
+// bothChecks runs write preconditions in order; nil ones are skipped.
+func bothChecks(first, second func() error) func() error {
+	switch {
+	case first == nil:
+		return second
+	case second == nil:
+		return first
+	}
+	return func() error {
+		if err := first(); err != nil {
+			return err
+		}
+		return second()
+	}
+}
+
 // handleWS serves a pane's terminal stream. policy, when given, classifies
 // each connection (see wsInputPolicy); without it the socket is treated as a
 // non-human viewer whose input is never held by a prompt gate.
@@ -172,40 +196,58 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 		if inPolicy.kind == "" {
 			inPolicy.kind = "unclassified"
 		}
-		writeInput := p.Write
+		promptCheck := func(b []byte) func() error {
+			if inPolicy.promptCheck == nil {
+				return nil
+			}
+			return inPolicy.promptCheck(p, b)
+		}
+		// Keys refused at write time (a held caller at a prompt, an agent's at
+		// a put-back message) are dropped; the socket stays open.
+		var lastRefusedLog time.Time
+		refused := func(err error) bool {
+			if !errors.Is(err, errPutBackInBox) && !errors.Is(err, errPromptHeld) {
+				return false
+			}
+			if now := time.Now(); now.Sub(lastRefusedLog) >= wsDropLogInterval {
+				lastRefusedLog = now
+				log.Printf("input: dropped keystrokes on pane %s from %s socket: %v", p.ID, inPolicy.kind, err)
+			}
+			return true
+		}
+		writeInput := func(b []byte) (int, error) {
+			n, err := p.writeWithPrecondition(b, true, false, promptCheck(b))
+			if refused(err) {
+				return 0, nil
+			}
+			return n, err
+		}
 		if !inPolicy.human {
 			// Nor may an agent's socket, once it owns the pane, send or clear
 			// a put-back message in the input box (Enter, Ctrl+A Ctrl+K),
 			// except with keys that answer a live menu: as /inject.
-			var lastPutBackLog time.Time
 			writeInput = func(b []byte) (int, error) {
-				var check func() error
+				var putBack func() error
 				if !isTerminalReplyOnly(b) {
-					check = p.putBackKeysCheck()
+					putBack = p.putBackKeysCheck()
 				}
 				policy := p.autoModePolicy()
-				n, err := p.writeWithFleetAdmissionPolicy(b, true, false, &policy, time.Now().Add(ariaJevTimeout), check)
-				if errors.Is(err, errPutBackInBox) {
-					if now := time.Now(); now.Sub(lastPutBackLog) >= wsDropLogInterval {
-						lastPutBackLog = now
-						log.Printf("input: dropped keystrokes on pane %s from %s socket: %v", p.ID, inPolicy.kind, err)
-					}
+				n, err := p.writeWithFleetAdmissionPolicy(b, true, false, &policy, time.Now().Add(ariaJevTimeout), bothChecks(promptCheck(b), putBack))
+				if refused(err) {
 					return 0, nil
 				}
 				return n, err
 			}
 		}
-		heldInput := false
-		holdInput := func() bool {
-			if inputAllowed(p) {
-				return false
-			}
-			if !heldInput {
-				heldInput = true
-				log.Printf("authority: held an agent's keystrokes for pane %s: it is showing a permission prompt", id)
-			}
-			return true
+		viewOnly := func(what string) bool {
+			return inPolicy.viewOnly != nil && inPolicy.viewOnly(p, what)
 		}
+		var viewOnlyQuiet func() bool
+		if inPolicy.viewOnly != nil {
+			viewOnlyQuiet = func() bool { return inPolicy.viewOnly(p, "") }
+		}
+		// The gate logs a refusal once per pane, caller and prompt.
+		holdInput := func() bool { return !inputAllowed(p) }
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -272,6 +314,8 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 			// Driven browsers (navigator.webdriver) self-identify so they
 			// never vote on PTY sizing (see subEntry.automation).
 			automation: q.Get("automation") == "1",
+			// A view-only socket changes nothing, the terminal's size included.
+			viewOnly: viewOnlyQuiet,
 			termCols:   termCols,
 			termRows:   termRows,
 		})
@@ -461,7 +505,7 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 				p.ownerViewerClosing(subID, false)
 				// Raw keystrokes in binary. Only the owner can write
 				// to the PTY (see ownsInput).
-				if !ownsInput(data) || holdInput() {
+				if viewOnly("keys") || !ownsInput(data) || holdInput() {
 					continue
 				}
 				// Real user presence, for claim arbitration. Multi-byte
@@ -492,7 +536,7 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 				case "owner-retirement-ack":
 					p.acknowledgeOwnerRetirement(subID, msg.Token, msg.Ready, msg.Reason)
 				case "input":
-					if !ownsInput([]byte(msg.Data)) || holdInput() {
+					if viewOnly("keys") || !ownsInput([]byte(msg.Data)) || holdInput() {
 						continue
 					}
 					if isUserKeypress([]byte(msg.Data)) {
@@ -509,6 +553,9 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 					// All subs tell us their cols; only the owner's
 					// feed recomputeSize. updateSize tracks per-sub
 					// size for when/if they become owner.
+					if viewOnly("resize") {
+						continue
+					}
 					if cols, rows, ok := saneTerminalDimensions(int(msg.Cols), int(msg.Rows)); ok {
 						updateSize(cols, rows)
 					}
@@ -517,6 +564,11 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 						updateVisibility(*msg.Visible)
 					}
 				case "claim":
+					// A view-only socket never owns the pane: it is told so.
+					if viewOnly("claim") {
+						p.sendOwnershipDenied(subID, claimDeniedViewOnly)
+						continue
+					}
 					// Transfer input ownership to this sub. Broadcasts
 					// ownership-change messages to every other sub
 					// so their UIs swap between overlay and normal.
@@ -553,6 +605,9 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 					// other client's screen. No-op for alt-screen panes.
 					p.RepaintGridFor(subID)
 				case "redraw":
+					if viewOnly("redraw") {
+						continue
+					}
 					// User-triggered "force redraw". Fires only when
 					// the user clicks the pane-header button or hits
 					// the keybinding — never automatic. Ratatui-based

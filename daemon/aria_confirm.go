@@ -84,10 +84,12 @@ func (a *Aria) awaitConfirmDecision(
 		return confirmID, true, true, false, false
 	}
 
+	paneID, _ := opts.Extra["pane_id"].(string)
 	pc := &ariaPendingConfirm{
 		ch:             make(chan bool, 1),
 		turnApproveAll: opts.TurnApproveAll,
 		autoConfirm:    opts.AutoConfirm,
+		paneID:         paneID,
 	}
 	a.mu.Lock()
 	a.confirms[confirmID] = pc

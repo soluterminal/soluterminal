@@ -698,7 +698,7 @@ func TestFirstOpenDeniedAgainstLiveVisibleOwner(t *testing.T) {
 	if !owner.isOwner() || intruder.isOwner() {
 		t.Fatalf("ownership must be unchanged after a denied first-open")
 	}
-	if got := recvCtrl(t, intruder.ctrl); got != `{"type":"ownership","owned":false,"owner":"other"}` {
+	if got := recvCtrl(t, intruder.ctrl); got != `{"type":"ownership","owned":false,"owner":"other","denied":"owner-active"}` {
 		t.Fatalf("denial ack = %s, want owner:other", got)
 	}
 }
@@ -988,7 +988,7 @@ func TestAdoptIfUnownedDeniedWhenOwned(t *testing.T) {
 	if !owner.isOwner() || late.isOwner() {
 		t.Fatalf("ownership must be unchanged after a denied adopt")
 	}
-	if got := recvCtrl(t, late.ctrl); got != `{"type":"ownership","owned":false,"owner":"other"}` {
+	if got := recvCtrl(t, late.ctrl); got != `{"type":"ownership","owned":false,"owner":"other","denied":"owner-active"}` {
 		t.Fatalf("denial ack = %s, want owner:other", got)
 	}
 }

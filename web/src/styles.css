@@ -4424,6 +4424,18 @@ button.cloud-gate-inline-link {
 .pane-unsent-message button { flex-shrink: 0; padding: 0 2px; font-size: inherit; color: inherit; }
 /* Asks wait on the person: accent, not the warn colour of a stuck message. */
 .pane-asks-chip { border-color: var(--accent); color: var(--accent); max-width: 40ch; }
+.pane-unsent-message .pane-asks-chip-toggle { flex-shrink: 1; min-width: 0; padding: 0; background: none; border: 0; cursor: pointer; text-align: left; white-space: nowrap; }
+.pane-asks-chip-toggle:focus-visible, .pane-needs-you:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 1px; }
+.pane-ask-list { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 8px; max-height: 50vh; overflow-y: auto; }
+.pane-ask-meta { font-size: 11px; opacity: .75; }
+.pane-ask-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 2px 0 4px; }
+.pane-ask-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.pane-ask-actions button { font-size: 12px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--fg); cursor: pointer; }
+.pane-needs-you-wrap { display: inline-flex; }
+.pane-needs-you-card { width: min(420px, 90vw); }
+.pane-needs-you-source { margin: 0 0 6px; opacity: .8; }
+.pane-needs-you-lines { margin: 0 0 4px; padding: 6px 8px; max-height: 40vh; overflow: auto; font: 11px/1.4 var(--font-mono, monospace); background: color-mix(in srgb, var(--fg) 6%, transparent); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pane-needs-you-captured { font-size: 11px; opacity: .65; margin-bottom: 8px; }
 /* Lead housekeeping is quiet information, outside the attention group. */
 .pane-worker-notices { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 40ch; color: var(--fg-dim); font-size: 11px; }
 .pane-worker-notices-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -16126,7 +16138,7 @@ span.tree-chevron { cursor: inherit; }
 /* The class follows isMobileViewport, including narrow Tauri windows. */
 .pane-header-managed { min-height: 28px; padding: 4px 8px; gap: 8px; }
 .pane-header-managed .pane-actions .iconbtn { min-width: 0; min-height: 0; padding: 2px 6px; }
-.pane-needs-you { color: var(--warn); white-space: nowrap; }
+.pane-needs-you { color: var(--warn); white-space: nowrap; background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
 .pane-header.pane-header-managed .pane-title { flex: 1 1 auto; min-width: 10ch; max-width: none; }
 .pane-header.pane-header-managed [data-pane-detail] :is(.pane-identity-chip, .pane-origin, .pane-origin-btn, .pane-message-chip, .pane-review-chip, .pane-account-chip, .pane-role-badge, .pane-pack-badge, .pane-resume-badge, .pane-schedule-chip, .pane-automode-badge, .pane-mem-chip, .pane-zoom-btn) {
   display: inline-flex; flex-shrink: 0; min-width: max-content; max-width: none; overflow: visible; text-overflow: clip;

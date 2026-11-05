@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // cc-usage incremental-scan cursors.
@@ -63,9 +64,11 @@ type scanCursor struct {
 // cursors. The scanner goroutine and (potentially) other callers touch it
 // concurrently, so every method takes the mutex.
 type cursorStore struct {
-	path string
-	mu   sync.Mutex
-	m    map[string]scanCursor
+	path          string
+	mu            sync.Mutex
+	m             map[string]scanCursor
+	checkpoint    usageCheckpoint[scanCursor]
+	uploadAllowed func() bool
 }
 
 // newCursorStore constructs an empty store backed by
@@ -73,8 +76,9 @@ type cursorStore struct {
 // once at startup.
 func newCursorStore(dataDir string) *cursorStore {
 	return &cursorStore{
-		path: filepath.Join(dataDir, "cc-usage-cursors.json"),
-		m:    make(map[string]scanCursor),
+		path:       filepath.Join(dataDir, "cc-usage-cursors.json"),
+		m:          make(map[string]scanCursor),
+		checkpoint: usageCheckpoint[scanCursor]{lastSave: time.Now()},
 	}
 }
 
@@ -108,6 +112,7 @@ func (s *cursorStore) Load() error {
 		m = make(map[string]scanCursor)
 	}
 	s.m = m
+	s.checkpoint.lastSave = s.checkpoint.clock()
 	return nil
 }
 
@@ -187,22 +192,48 @@ func (s *cursorStore) SetState(path string, offset, size, modNano int64, lastBil
 func (s *cursorStore) SetBilledState(path string, offset, size, modNano int64, lastBilledTurnTS, lastBilledMessageID, lastBilledRequestID, workflowAttributionKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.m[path] = scanCursor{
+	s.checkpoint.set(s.m, path, scanCursor{
 		Offset: offset, Size: size, ModTimeUnixNano: modNano,
 		LastBilledTurnTS: lastBilledTurnTS, LastBilledMessageID: lastBilledMessageID,
 		LastBilledRequestID: lastBilledRequestID, WorkflowAttributionKey: workflowAttributionKey,
-	}
+	})
 }
 
 // Save writes the cursor map to disk atomically (tempfile + fsync + rename),
 // the same durability path PaneStore uses, so a crash mid-write can never
 // leave a torn cursors.json.
-func (s *cursorStore) Save() error {
+func (s *cursorStore) Save() error { return s.save(true) }
+
+func (s *cursorStore) save(force bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b, err := json.MarshalIndent(s.m, "", "  ")
-	if err != nil {
-		return err
+	return s.checkpoint.save(s.path, s.m, force)
+}
+
+func (s *cursorStore) commitSkipped(updates map[string]scanCursor) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkpoint.skip(s.m, updates)
+	return s.checkpoint.save(s.path, s.m, true)
+}
+
+func (s *cursorStore) flushSkipped() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.checkpoint.pending) == 0 {
+		return nil
 	}
-	return writeFileAtomicSynced(s.path, b, 0o600)
+	return s.checkpoint.save(s.path, s.m, true)
+}
+
+func (s *cursorStore) revision() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkpoint.revision
+}
+
+func (s *cursorStore) nextCheckpoint() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkpoint.nextDelay()
 }

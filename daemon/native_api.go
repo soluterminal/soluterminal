@@ -409,7 +409,7 @@ func (a *apiServer) paneNativeAllowlistPost(w http.ResponseWriter, r *http.Reque
 		}
 		// An allowlist entry approves every future matching request without
 		// the person, so adding one is the same act as turning on auto-approve.
-		if !a.requireHumanOrDelegated(w, r, "add an auto-allow rule") {
+		if !a.requirePromptAnswer(w, r, p, "add an auto-allow rule", "") {
 			return
 		}
 		tools = p.allowlistAddTool(tool)

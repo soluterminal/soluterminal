@@ -9,6 +9,7 @@ import { PaneHeaderOverflow, PaneDetail, usePaneDetailVisible, DETAIL_PRIORITY }
 import { PaneHeaderBadges } from './PaneHeaderBadges';
 import { UnsentMessageChip } from './UnsentMessageChip';
 import { PaneAsksChip } from './PaneAsksChip';
+import { PaneNeedsYouChip } from './PaneNeedsYouChip';
 import { WorkerNoticesChip } from './WorkerNoticesChip';
 import { PaneOriginButton } from './PaneOriginButton';
 import { messageSharesOrigin } from '../lib/paneHeaderDetails';
@@ -240,7 +241,7 @@ export function PaneHeader({
       <HeaderAttention enabled={!isMobileView}>
       {warningReview && <PaneReviewChip pane={pane} />}
       {!isMobileView && <PaneHeaderBadges pane={pane} paneIndex={paneIndex} section="attention" showAutoMode={isAutoApproveCapable(pane)} />}
-      {!isMobileView && pane.attention === 'needs-user' && <span className="pane-needs-you">needs you</span>}
+      {!isMobileView && <PaneNeedsYouChip pane={pane} />}
       {/* Status chip only when it carries SIGNAL — exited / (re)connecting.
           The steady-state "running" was permanent header noise (and Focus
           panes never had it), so the healthy state now shows nothing. */}

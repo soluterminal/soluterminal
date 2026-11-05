@@ -71,7 +71,7 @@ function ReceiptChip({ pane, actionGuard }: { pane: PaneInfo; actionGuard?: () =
       const result = await api.actOnUnsentMessage(pane.id, msg.id, action);
       await useStore.getState().refreshPanes();
       if (result.outcome !== 'submitted' && result.outcome !== 'cleared' && result.outcome !== 'kept') {
-        useStore.getState().toast(result.outcome === 'left_in_composer' ? 'The message is still in the input box.' : 'Could not confirm the input box changed.', { kind: 'warn' });
+        useStore.getState().toast(result.outcome === 'partly_cleared' ? 'Partly cleared: text may remain in the input box. Agents are still blocked; check the pane before acting again.' : result.outcome === 'left_in_composer' ? 'The message is still in the input box.' : 'Could not confirm the input box changed.', { kind: 'warn' });
       }
     } catch (err) {
       useStore.getState().toast(String(err), { kind: 'warn' });
@@ -79,11 +79,11 @@ function ReceiptChip({ pane, actionGuard }: { pane: PaneInfo; actionGuard?: () =
   };
   // An agent's message put back in the box blocks agents until it is gone;
   // once the person edits it, Send would send their edit too, so they Clear
-  // it (a single line) or keep it as their own draft.
+  // it or keep it as their own draft.
   if (msg.putBack && msg.edited) {
     return <span className="pane-unsent-message" role="status" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
       <span className="pane-unsent-message-label">{`${msg.sender}'s unsent message is still in the input box after your edit. Agents can't type into this pane until it's gone`} —{' '}</span>
-      <button type="button" disabled={pending} title="Empties the input box, your edit too. Only a single line can be cleared this way; remove a longer one in the pane yourself." onClick={() => void act('clear')}>Clear</button>{' / '}
+      <button type="button" disabled={pending} title="Clear the visible input, your edit too. Wrapped and multi-line text requires a supported agent version and a completely readable box. Any remainder stays guarded." onClick={() => void act('clear')}>Clear</button>{' / '}
       <button type="button" disabled={pending} title="Hide this and use your own message box again. Agents still can't type into this pane until the text is gone." onClick={() => void act('keep')}>Keep as my draft</button>
     </span>;
   }

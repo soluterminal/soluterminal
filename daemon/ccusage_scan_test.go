@@ -654,6 +654,9 @@ func TestScanOnce_LateWorkflowAttributionReplaysAcknowledgedTurns(t *testing.T) 
 		t.Fatalf("pre-observer scan = calls %d records %#v", calls, recs)
 	}
 
+	if err := cursors.Save(); err != nil {
+		t.Fatal(err)
+	}
 	// Simulate a daemon restart as well as the late observer: the replay
 	// decision must be durable in cursor state, not only process memory.
 	reloaded := newCursorStore(dataDir)
@@ -899,7 +902,10 @@ func TestScanOnce_NonUsageFileAdvancesCursor(t *testing.T) {
 		t.Fatalf("cursor=%d want=%d (whole non-usage file should be consumed)", off, fi.Size())
 	}
 
-	// And the cursor must persist across a reload (it was Saved).
+	if err := cursors.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// A forced shutdown checkpoint must persist across a reload.
 	cursors2 := newCursorStore(dataDir)
 	if err := cursors2.Load(); err != nil {
 		t.Fatal(err)

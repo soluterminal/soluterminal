@@ -9,8 +9,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -679,47 +679,17 @@ type gitTurnSnapshotter struct{}
 
 var errTurnSparse = errors.New("sparse checkout — turn snapshots disabled")
 
-// turnGitSafeConfig switches off every repository-configurable program git
-// could launch on the commands below. The snapshot runs as the DAEMON, outside
-// any agent sandbox, so a repository (or an agent able to edit .git/config or
-// .gitattributes) must never be able to make it execute something. Clean /
-// smudge filters and textconv are avoided by construction (no `git add`, no
-// worktree reads by git, --no-filters, --no-textconv); these flags cover the
-// rest: the fsmonitor hook, the untracked-cache, and hooks.
-var turnGitSafeConfig = []string{
-	"-c", "core.fsmonitor=false",
-	"-c", "core.untrackedCache=false",
-	"-c", "core.hooksPath=" + os.DevNull,
-	"-c", "core.pager=cat",
-	// diff.submodule=diff would run a nested `git diff` inside a submodule,
-	// which reads THAT repo's config (diff.external …) without our flags.
-	"-c", "diff.submodule=short",
-	// No transport may run: a partial clone would otherwise lazily fetch a
-	// missing object through whatever remote/program .git/config names.
-	"-c", "protocol.allow=never",
-	// log.showSignature makes `git log` verify signed commits by running
-	// gpg.program / gpg.ssh.program — any program the repository names.
-	"-c", "log.showSignature=false",
-}
+// Every turn git runs through hardenedGitCommand (git_env.go). The snapshot
+// runs as the DAEMON, outside any agent sandbox, so a repository (or an agent
+// able to edit .git/config or .gitattributes) must never be able to make it
+// execute something. Clean / smudge filters and textconv are avoided by
+// construction (no `git add`, no worktree reads by git, --no-filters,
+// --no-textconv); the shared options cover the rest: the fsmonitor hook, the
+// untracked-cache, hooks, signature verification and transports.
 
-// turnGitEnv is the daemon's environment WITHOUT any inherited GIT_* variable
-// (GIT_DIR, GIT_CONFIG_*, GIT_EXEC_PATH, … must not redirect these commands)
-// plus the fixed settings below.
-func turnGitEnv(extra []string) []string {
-	env := make([]string, 0, len(os.Environ())+8)
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "GIT_") {
-			env = append(env, kv)
-		}
-	}
-	// GIT_ALLOW_PROTOCOL=none forbids every transport and remote helper, and,
-	// unlike `-c protocol.allow`, repo config (protocol.<name>.allow) cannot
-	// override it and it reaches the lazy-fetch child git. GIT_NO_LAZY_FETCH
-	// (git ≥ 2.44) additionally stops the fetch from being attempted at all.
-	env = append(env, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1",
-		"GIT_ALLOW_PROTOCOL=none", "GIT_PAGER=cat", "LC_ALL=C")
-	return append(env, extra...)
-}
+// turnGitEnv is the fixed environment turn git adds to
+// hardenedGitCommandWithExcludes'.
+var turnGitEnv = []string{"GIT_PAGER=cat", "LC_ALL=C"}
 
 // turnSafeRel accepts only structurally plain repo-relative paths: no
 // absolute paths and no "", "." or ".." components (update-index would reject
@@ -838,6 +808,9 @@ func acquireDiffEndpointSlot(ctx context.Context) (func(), error) {
 func turnResolveRepo(ctx context.Context, dir string) (string, error) {
 	top, err := turnGit(ctx, dir, nil, nil, "rev-parse", "--show-toplevel")
 	repo := strings.TrimSpace(top)
+	if err != nil && !strings.Contains(err.Error(), "not a git repository") {
+		return "", err // git's own reason, e.g. a repository owned by another user
+	}
 	if err != nil || repo == "" {
 		return "", errors.New("not a git repository")
 	}
@@ -866,13 +839,11 @@ func turnGit(ctx context.Context, dir string, env []string, stdin io.Reader, arg
 // stdout; overflow reports that output was cut (the error is then nil when
 // the cut was the only problem, so callers may show a truncated diff).
 func turnGitLimited(ctx context.Context, dir string, env []string, stdin io.Reader, limit int, args ...string) (string, bool, error) {
-	argv := append(append([]string{"-C", dir}, turnGitSafeConfig...), args...)
-	cmd := exec.CommandContext(ctx, "git", argv...)
 	// Update successors run detached on Windows, with no console for Git to
-	// inherit. Pipes alone do not prevent Windows from opening a new console
-	// (or delegating it to Windows Terminal) for each background probe.
-	applyNoWindow(cmd)
-	cmd.Env = turnGitEnv(env)
+	// inherit: the builder applies applyNoWindow, as pipes alone do not prevent
+	// Windows from opening a new console for each background probe.
+	cmd := hardenedGitCommandWithExcludes(ctx, dir, args...)
+	cmd.Env = slices.Concat(cmd.Env, turnGitEnv, env)
 	cmd.Stdin = stdin
 	out := &cappedBuffer{limit: limit}
 	errb := &cappedBuffer{limit: 64 << 10}
@@ -884,11 +855,7 @@ func turnGitLimited(ctx context.Context, dir string, env []string, stdin io.Read
 		if out.overflow {
 			return out.String(), true, nil
 		}
-		msg := strings.TrimSpace(errb.String())
-		if len(msg) > 200 {
-			msg = msg[:200]
-		}
-		return "", false, fmt.Errorf("git %s: %s", args[0], msg)
+		return "", false, fmt.Errorf("git %s: %s", args[0], gitFailureReason(errb.String()))
 	}
 	return out.String(), out.overflow, nil
 }

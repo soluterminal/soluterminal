@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -71,6 +72,9 @@ func workerUnpublishedReason(text string) bool {
 // Failure to inspect work cannot retract earlier publication evidence. It
 // cannot start or promote an escalation either; that still needs fresh proof.
 func workerPublicationUncertain(text string) bool {
+	if strings.HasPrefix(text, workerGitUnreadable) {
+		return true
+	}
 	for _, reason := range []string{"work has no pushed upstream", "worktree list cannot be verified", "worktree paths cannot be verified", "worktree index cannot be verified", "worktree status cannot be verified", "submodule work requires manual review"} {
 		if text == reason || strings.HasPrefix(text, reason+" (") || strings.HasPrefix(text, reason+";") {
 			return true
@@ -91,9 +95,11 @@ type workerArchiveState struct {
 	reads            map[string]workerReadReceipt
 	checked          map[string]time.Time
 	flagged          map[string]string // pane id → the retention already flagged to its lead
-	beforeCommit     func()            // test-only race seam; nil in production
-	beforeGitRecheck func()            // test-only slow-proof seam; nil in production
-	teardown         func(*Pane) error // test-only failure seam; nil in production
+	merged           map[string]workerMergedSeen
+	beforeCommit     func()             // test-only race seam; nil in production
+	beforeGitRecheck func()             // test-only slow-proof seam; nil in production
+	teardown         func(*Pane) error  // test-only failure seam; nil in production
+	liveCwd          func(*Pane) string // test-only process-cwd seam; nil in production
 	context          context.Context
 }
 
@@ -116,6 +122,7 @@ func (a *apiServer) loadWorkerArchivesLocked(s *workerArchiveState) {
 	s.reads = map[string]workerReadReceipt{}
 	s.checked = map[string]time.Time{}
 	s.flagged = map[string]string{}
+	s.merged = map[string]workerMergedSeen{}
 	if a.dataDir == "" {
 		s.err = errors.New("archive storage unavailable")
 		return
@@ -183,6 +190,143 @@ func (a *apiServer) noteWorkerReplyRead(caller string, p *Pane, reply paneReply)
 	defer s.mu.Unlock()
 	a.loadWorkerArchivesLocked(s)
 	s.reads[p.ID] = workerReadReceipt{Pane: p, Turn: key, Input: p.inputRevision.Load(), At: time.Now()}
+}
+
+// workerMergedSeen is when a worker's final reply and Git proof were first
+// seen merged. A changed reply or proof restarts the grace; so does a restart.
+type workerMergedSeen struct {
+	Mark  string
+	Since time.Time
+}
+
+func (a *apiServer) workerMergedDue(id, mark string, landed bool, grace time.Duration, now time.Time) bool {
+	s := a.workerArchives()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a.loadWorkerArchivesLocked(s)
+	if !landed {
+		delete(s.merged, id)
+		return false
+	}
+	seen, ok := s.merged[id]
+	if !ok || seen.Mark != mark {
+		seen = workerMergedSeen{Mark: mark, Since: now}
+		s.merged[id] = seen
+	}
+	return now.Sub(seen.Since) >= grace
+}
+
+func (a *apiServer) workerLiveCwd(p *Pane) string {
+	if s := a.workerArchives(); s.liveCwd != nil {
+		return s.liveCwd(p)
+	}
+	return liveCwdOfPane(p)
+}
+
+// workerOwnWorktree is the linked worktree a merged worker was working in
+// (its transcript's cwd, else its process cwd), with the commit it started
+// at, when it is part of the archive proof and the worker provably created
+// it (workerCreatedWorktree). Anything else is kept.
+func workerOwnWorktree(ctx context.Context, snap PaneSnapshot, cwd, checkouts string, calls []workerToolCall) (string, string) {
+	if cwd == "" {
+		return "", ""
+	}
+	root := workerGitRoot(ctx, cwd)
+	var proofs map[string]workerGitProof
+	if root == "" || json.Unmarshal([]byte(checkouts), &proofs) != nil {
+		return "", ""
+	}
+	if _, ok := proofs[root]; !ok {
+		return "", ""
+	}
+	base := workerCreatedWorktree(ctx, snap, root, calls)
+	if base == "" {
+		return "", ""
+	}
+	return root, base
+}
+
+// transcriptCwd is the directory an agent session last worked in, as its own
+// transcript records it: Claude stamps the session's current directory on
+// every entry and Codex on each turn_context. Process cwds are a weak signal
+// for agents that run each command in a short-lived shell.
+func transcriptCwd(path string) string {
+	if path == "" {
+		return ""
+	}
+	buf, err := tailReadBounded(path, paneReplyTailBytes)
+	if err != nil {
+		return ""
+	}
+	lines := bytes.Split(buf, []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		var e struct {
+			Type, Cwd string
+			Payload   struct{ Cwd string } `json:"payload"`
+		}
+		if json.Unmarshal(lines[i], &e) != nil {
+			continue
+		}
+		if e.Cwd != "" && filepath.IsAbs(e.Cwd) {
+			return filepath.Clean(e.Cwd)
+		}
+		if e.Type == "turn_context" && filepath.IsAbs(e.Payload.Cwd) {
+			return filepath.Clean(e.Payload.Cwd)
+		}
+	}
+	return ""
+}
+
+func (a *apiServer) paneTranscriptCwd(p *Pane) string {
+	snap := p.Snapshot()
+	switch paneSummaryAgent(p, snap) {
+	case agentClaude:
+		if path := a.transcriptForPane(p); path != "" && claudeTranscriptBelongsToPane(path, snap) {
+			return transcriptCwd(path)
+		}
+	case agentCodex:
+		return transcriptCwd(codexRolloutPath(snap.CodexThreadID))
+	}
+	return ""
+}
+
+// removeArchivedWorktree runs after the worker's process is gone. Failure
+// keeps the folder: the archive stands and the folder stays for a person.
+func (a *apiServer) removeArchivedWorktree(ctx context.Context, worker, path string) {
+	if path == "" {
+		return
+	}
+	for _, other := range a.mgr.List() {
+		if other.ID == worker {
+			continue
+		}
+		for _, cwd := range []string{other.Snapshot().Cwd, a.workerLiveCwd(other), a.paneTranscriptCwd(other)} {
+			if workerPathInside(path, cwd) {
+				log.Printf("worker archive %s: kept worktree %s: pane %s is using it", worker, path, other.ID)
+				return
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := workerGitRemoveWorktree(ctx, path); err != nil {
+		log.Printf("worker archive %s: kept worktree: %v", worker, err)
+	}
+}
+
+// workerPathInside reports whether cwd is root or below it, comparing the
+// resolved paths when they exist (a symlinked pane cwd still counts).
+func workerPathInside(root, cwd string) bool {
+	if cwd == "" || !filepath.IsAbs(cwd) {
+		return false
+	}
+	for _, p := range []*string{&root, &cwd} {
+		if real, err := filepath.EvalSymlinks(*p); err == nil {
+			*p = real
+		}
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(cwd))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 func workerArchiveAllowed(finished, final, read, noInput, cleanPushed bool) (bool, bool) {
@@ -667,6 +811,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	q.mu.Lock()
 	a.loadWorkerSettingsLocked(q)
 	enabled := q.settings.WorkerAutoArchive
+	grace := time.Duration(q.settings.WorkerMergedGraceMinutes) * time.Minute
 	started := q.startedAt
 	q.mu.Unlock()
 	// Restored panes need a newly observed final turn. Input before a daemon
@@ -704,8 +849,9 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	if baseContext.Err() != nil {
 		return
 	}
-	read := receipt.Pane == p && receipt.Turn == key && receipt.Input == p.inputRevision.Load() && !receipt.At.Before(reply.CompletedAt)
-	live := liveCwdOfPane(p)
+	inputRev := p.inputRevision.Load()
+	read := receipt.Pane == p && receipt.Turn == key && receipt.Input == inputRev && !receipt.At.Before(reply.CompletedAt)
+	live := a.workerLiveCwd(p)
 	ctx, cancel := context.WithTimeout(baseContext, 4*time.Second)
 	proof, reason := workerGitForArchive(ctx, snap, live)
 	cancel()
@@ -715,6 +861,32 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			a.clearWorkerRetention(p.ID)
 		}
 		return // observe risk, but do not change the existing archive gate
+	}
+	// Merged = done: once every owned checkout is clean and has landed on the
+	// remote default branch, the worker closes after a grace without a read
+	// receipt. Its reply stays readable from the archive. Like the read
+	// rule, it needs a reply finished since the daemon started: input or a
+	// draft typed before a restart cannot be seen. It needs no publication
+	// proof: a squash-merged branch whose remote ref was pruned has no
+	// containing ref, yet its content is on the branch.
+	merged, ownWorktree, checkouts := false, "", ""
+	var calls []workerToolCall // the worker's own tool calls, read once per check
+	worked := transcriptCwd(reply.Path)
+	if snap.Origin.WorkerGit != nil && final {
+		ctx, cancel := context.WithTimeout(baseContext, 8*time.Second)
+		calls = workerTranscriptCalls(ctx, reply.Path)
+		checkouts = workerGitCheckouts(ctx, snap, calls, live, worked)
+		landed := checkouts != "" && workerGitMerged(ctx, snap, checkouts, calls, worked, live)
+		if landed {
+			ownWorktree, _ = workerOwnWorktree(ctx, snap, worked, checkouts, calls)
+			if ownWorktree == "" {
+				ownWorktree, _ = workerOwnWorktree(ctx, snap, live, checkouts, calls)
+			}
+		}
+		cancel()
+		merged = a.workerMergedDue(p.ID, key+"\x00"+checkouts, landed, grace, now)
+	} else {
+		a.workerMergedDue(p.ID, "", false, grace, now)
 	}
 	if !final {
 		// Losing ephemeral read receipts at restart is not evidence of a new
@@ -733,7 +905,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		a.flagWorkerLead(a.workerNoticeLead(snap.ID, snap.Origin), p.ID, reason)
 		return
 	}
-	allowed, flag := workerArchiveAllowed(true, key != "", read, noInput, reason == "")
+	allowed, flag := workerArchiveAllowed(true, key != "", read || merged, noInput, reason == "" || merged)
 	if !allowed {
 		if flag {
 			if !read {
@@ -800,11 +972,20 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	if s.beforeGitRecheck != nil {
 		s.beforeGitRecheck()
 	}
-	ctx, cancel = context.WithTimeout(baseContext, 4*time.Second)
-	fresh, why := workerGitForArchive(ctx, p.Snapshot(), liveCwdOfPane(p))
-	cancel()
-	if why != "" || fresh != proof {
-		return
+	if merged {
+		ctx, cancel = context.WithTimeout(baseContext, 8*time.Second)
+		fresh := workerGitCheckouts(ctx, p.Snapshot(), calls, a.workerLiveCwd(p), transcriptCwd(reply.Path))
+		cancel()
+		if fresh == "" || fresh != checkouts {
+			return
+		}
+	} else {
+		ctx, cancel = context.WithTimeout(baseContext, 4*time.Second)
+		fresh, why := workerGitForArchive(ctx, p.Snapshot(), a.workerLiveCwd(p))
+		cancel()
+		if why != "" || fresh != proof {
+			return
+		}
 	}
 	var entry workerArchiveEntry
 	committed := false
@@ -813,7 +994,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	a.mgr.withCurrentPane(p, func() {
 		p.agentWriteMu.Lock()
 		defer p.agentWriteMu.Unlock()
-		if baseContext.Err() != nil || p.workerArchiving.Load() || p.inputRevision.Load() != receipt.Input || (atomic.LoadInt64(&p.LastInputMs) > 0 && atomic.LoadInt64(&p.LastInputMs) >= reply.CompletedAt.UnixMilli()) {
+		if baseContext.Err() != nil || p.workerArchiving.Load() || p.inputRevision.Load() != inputRev || (atomic.LoadInt64(&p.LastInputMs) > 0 && atomic.LoadInt64(&p.LastInputMs) >= reply.CompletedAt.UnixMilli()) {
 			return
 		}
 		latest := workerReplyFromFile(reply.Path, reply.Agent)
@@ -914,6 +1095,12 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	}
 
 	a.clearWorkerRetention(p.ID)
+	s.mu.Lock()
+	delete(s.merged, p.ID)
+	s.mu.Unlock()
+	if merged {
+		a.removeArchivedWorktree(baseContext, p.ID, ownWorktree)
+	}
 	if a.uiBus != nil {
 		a.uiBus.publish(uiEvent{Type: "pane.archived", PaneID: p.ID, Workspace: entry.Workspace, Text: "Worker archived; reopen from its lead"})
 	}

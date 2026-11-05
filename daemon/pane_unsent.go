@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"regexp"
@@ -23,7 +24,7 @@ type unsentPaneMessage struct {
 	// PutBack: a queued message the agent put back into its input box,
 	// usually after the person stopped the turn. Only the person sends or
 	// clears it.
-	PutBack    bool   `json:"putBack,omitempty"`
+	PutBack bool `json:"putBack,omitempty"`
 	// Edited: the person typed in the box since it was put back, and part of
 	// it still shows. It is still not theirs alone: agents stay refused.
 	Edited bool `json:"edited,omitempty"`
@@ -31,11 +32,13 @@ type unsentPaneMessage struct {
 	// message box may type again; agents, schedules and ARIA stay refused
 	// while any part of the message shows (putBackInputCheck).
 	kept bool
-	Text       string `json:"text,omitempty"`
-	body       string
-	claude     bool
-	revision   uint64
-	connection net.Conn
+	// After Clear, even a remnant too short to match body keeps the guard.
+	clearPending bool
+	Text         string `json:"text,omitempty"`
+	body         string
+	claude       bool
+	revision     uint64
+	connection   net.Conn
 }
 
 var errUnsentChanged = errors.New("input changed or cannot be verified; the pane text was preserved")
@@ -115,6 +118,178 @@ const putBackKeepAction = "keep a put-back message you edited as your own draft"
 // errPutBackMultiLine: Clear's keys clear one line; the box has more.
 var errPutBackMultiLine = errors.New("Nothing was cleared: the input box has more than one line, and Clear can only empty a single line. Remove the message in the pane yourself, or choose Keep as my draft")
 
+// No scrollback fallback: Clear must read the entire current visible box.
+var putBackClearScreen = paneScreenFaintBlanked
+
+var putBackClearCodexFooter = regexp.MustCompile(`^  Context (?:100|[0-9]{1,2})% used · [^·]+ · .+$`)
+
+// readPutBackClearBox implements ST-11/A1's complete-box bounds. It preserves
+// the read rows for the write-time comparison; only equality with an unedited
+// receipt ignores whitespace (A2). These readers provide no input primitive.
+func readPutBackClearBox(screen string, codex bool) (text string, rows int, ok bool) {
+	lines := strings.Split(screen, "\n")
+	start, end := -1, -1
+	if codex {
+		footer := len(lines) - 1
+		for footer >= 0 && strings.TrimSpace(lines[footer]) == "" {
+			footer--
+		}
+		if footer < 3 || !putBackClearCodexFooter.MatchString(lines[footer]) || strings.TrimSpace(lines[footer-1]) != "" || strings.TrimSpace(lines[footer-2]) == "" {
+			return "", 0, false
+		}
+		end = footer - 1
+		for i := end - 1; i >= 0; i-- {
+			if codexQueueHintRE.MatchString(lines[i]) || codexHeldEditHintRE.MatchString(lines[i]) {
+				return "", 0, false
+			}
+			if lines[i] == "›" || strings.HasPrefix(lines[i], "› ") {
+				start = i
+				break
+			}
+			if lines[i] != "" && !strings.HasPrefix(lines[i], "  ") {
+				return "", 0, false
+			}
+		}
+		if start <= 0 || strings.TrimSpace(lines[start-1]) != "" {
+			return "", 0, false
+		}
+	} else {
+		if _, known := claudePlainComposer(screen); !known {
+			return "", 0, false
+		}
+		for i, line := range lines {
+			if line == "❯" || strings.HasPrefix(line, "❯ ") || strings.HasPrefix(line, "❯\u00a0") {
+				start = i
+			}
+		}
+		if start <= 0 || !claudeBoxRule(lines[start-1]) {
+			return "", 0, false
+		}
+		for i := start + 1; i < len(lines); i++ {
+			if claudeBoxRule(lines[i]) {
+				end = i
+				break
+			}
+		}
+		if end < 0 {
+			return "", 0, false
+		}
+	}
+	parts := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		line := lines[i]
+		if i == start {
+			_, size := utf8.DecodeRuneInString(line)
+			line = strings.TrimPrefix(strings.TrimPrefix(line[size:], " "), "\u00a0")
+		} else if line != "" {
+			if !strings.HasPrefix(line, "  ") {
+				return "", 0, false
+			}
+			line = line[2:]
+		}
+		if strings.Contains(line, "[Pasted") {
+			return "", 0, false
+		}
+		parts = append(parts, line)
+	}
+	text = strings.Join(parts, "\n")
+	// A marker can itself wrap between rows (or contain terminal padding).
+	// It must not evade the per-row refusal by splitting "[Pasted".
+	compact := conditionalDraftText(text)
+	if strings.Contains(compact, "[Pasted") {
+		return "", 0, false
+	}
+	return text, len(parts), true
+}
+
+// Both views come from the same frame. Faint is a rendering attribute, not
+// proof that a cell is only a suggestion: refusal, counts and equality use
+// the unblanked text. Only a wholly faint, one-row recorded suggestion form
+// can stand in for empty. Arbitrary faint content remains guarded.
+type putBackClearRead struct {
+	raw, typed string
+	rows       int
+	empty      bool
+}
+
+// Recorded suggestion forms are pinned just like the handler's DEL keys.
+// A matching shape at any other running version is still composer content.
+var putBackClearSuggestions = []struct {
+	agent, version string
+	shape          *regexp.Regexp
+}{
+	{agentClaude, "2.1.310", regexp.MustCompile(`^Try "[^"\r\n]+"$`)},
+	{agentCodex, "0.166.0", regexp.MustCompile(`^Ask Codex to do anything$`)},
+}
+
+func readPutBackClearViews(screen, blanked string, codex bool, version string) (read putBackClearRead, ok bool) {
+	return readPutBackClearViewsForBody(screen, blanked, codex, version, "")
+}
+
+// A3: only an unedited receipt's exact raw/body equality can prove that an
+// ellipsis belongs to its text. Observers and edited multi-row reads keep the
+// strict truncation refusal by supplying no body.
+func readPutBackClearViewsForBody(screen, blanked string, codex bool, version, body string) (read putBackClearRead, ok bool) {
+	read.raw, read.rows, ok = readPutBackClearBox(screen, codex)
+	if !ok {
+		return read, false // Includes unblanked pasted content.
+	}
+	ellipsis := strings.Contains(read.raw, "…") || strings.Contains(conditionalDraftText(read.raw), "...")
+	if ellipsis && (body == "" || conditionalDraftText(read.raw) != conditionalDraftText(body)) {
+		return read, false
+	}
+	var rows int
+	read.typed, rows, ok = readPutBackClearBox(typedComposerScreen(screen, blanked, codex), codex)
+	if !ok || rows != read.rows {
+		return read, false
+	}
+	read.empty = strings.TrimSpace(read.raw) == ""
+	if !ellipsis && !read.empty && strings.TrimSpace(read.typed) == "" && read.rows == 1 {
+		agent := agentClaude
+		if codex {
+			agent = agentCodex
+		}
+		for _, suggestion := range putBackClearSuggestions {
+			if suggestion.agent == agent && suggestion.version == version {
+				read.empty = suggestion.shape.MatchString(read.raw)
+				break
+			}
+		}
+	}
+	return read, true
+}
+
+// Receipt guards and the post-write read need the version running now, not a
+// version saved by an earlier Clear. Only a possible hint pays for the procfs
+// probe; literal empty boxes and visible remnants need no exemption.
+func (p *Pane) readPutBackClearViews(screen, blanked string, codex bool) (putBackClearRead, bool) {
+	read, complete := readPutBackClearViews(screen, blanked, codex, "")
+	if !complete || read.empty || read.rows != 1 || strings.TrimSpace(read.typed) != "" {
+		return read, complete
+	}
+	agent := agentClaude
+	if codex {
+		agent = agentCodex
+	}
+	return readPutBackClearViews(screen, blanked, codex, runningAgentVersion(p, agent))
+}
+
+func (msg *unsentPaneMessage) shownInBox(screen string) (bool, bool) {
+	if msg.clearPending {
+		text, _, complete := readPutBackClearBox(screen, !msg.claude)
+		return strings.TrimSpace(text) != "", complete
+	}
+	return putBackShown(screen, !msg.claude, msg.body)
+}
+
+func (p *Pane) putBackShownInTypedBox(msg *unsentPaneMessage, screen, typed string) (bool, bool) {
+	if msg.clearPending {
+		read, complete := p.readPutBackClearViews(screen, typed, !msg.claude)
+		return !read.empty, complete
+	}
+	return msg.shownInBox(typed)
+}
+
 // errPutBackEditedSend: Enter would send the person's edit with it.
 var errPutBackEditedSend = errors.New("Nothing was sent: you edited that message in the input box. Press Enter in the pane to send it as it is now, or Clear it")
 
@@ -135,7 +310,8 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id and send/clear/keep action required", http.StatusBadRequest)
 		return
 	}
-	if !a.promptInputGate(r)(p) {
+	caller := a.identifyCaller(r)
+	if !a.promptInputGateFor(caller)(p) {
 		http.Error(w, "human_required", http.StatusForbidden)
 		return
 	}
@@ -166,6 +342,14 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	// The provider check can scan the process tree, so it runs before the
 	// delivery and writer locks.
 	agent, claude := paneAgentProvider(p)
+	clearVersion := ""
+	if req.Action == "clear" && agent {
+		provider := agentCodex
+		if claude {
+			provider = agentClaude
+		}
+		clearVersion = runningAgentVersion(p, provider)
+	}
 	p.deliveryMu.Lock()
 	defer p.deliveryMu.Unlock()
 	msg := p.Snapshot().UnsentMessage
@@ -206,8 +390,40 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keys := "\r"
+	fullClear := false
+	var clearRead putBackClearRead
+	exactBody := ""
+	if !msg.Edited && !msg.clearPending {
+		exactBody = msg.body
+	}
 	if req.Action == "clear" {
 		keys = "\x01\x0b"
+		// Only this human handler owns these recorded per-version keys.
+		// DEL is Backspace in both captures: no-op at the start/empty box,
+		// including 4096 excess bytes. A cursor before the end can leave a
+		// suffix; the re-read keeps that receipt and never writes again.
+		// A3 keeps main's existing edited single-line path, including its
+		// composerOneLine/[Pasted checks, keys and receipt handling below.
+		line, one := "", false
+		if msg.Edited {
+			line, one = composerOneLine(deliveryScreenText(p), !claude)
+		}
+		editedSingleLine := msg.Edited && !msg.clearPending && one && line != "" && !strings.Contains(line, "[Pasted")
+		if msg.PutBack && !editedSingleLine && (claude && clearVersion == "2.1.310" || !claude && clearVersion == "0.166.0") {
+			screen, blanked, readable := putBackClearScreen(p)
+			var complete bool
+			clearRead, complete = readPutBackClearViewsForBody(screen, blanked, !claude, clearVersion, exactBody)
+			if !readable || !complete {
+				http.Error(w, errUnsentChanged.Error(), http.StatusConflict)
+				return
+			}
+			count := utf8.RuneCountInString(msg.body) + strings.Count(msg.body, "\n")
+			if msg.Edited || msg.clearPending {
+				count = utf8.RuneCountInString(clearRead.raw) + clearRead.rows
+			}
+			keys = strings.Repeat("\x7f", min(count+64, 4096))
+			fullClear = true
+		}
 	} // start of line, kill to end
 	revision := msg.revision + 1
 	// The screen and receipt are rechecked under the writer lock.
@@ -216,19 +432,47 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Clear's control bytes are not a prompt; keep them out of prompt history.
-	_, err := p.writeWithPrecondition([]byte(keys), req.Action == "send", false, func() error {
+	// The prompt gate again at write time, under the writer lock.
+	_, err := p.writeWithPrecondition([]byte(keys), req.Action == "send", false, bothChecks(a.promptWriteCheck(caller, p, []byte(keys), "rest-unsent"), func() error {
 		snap := p.Snapshot()
 		if snap.Status != PaneRunning || snap.Kind == "native" || snap.UnsentMessage != msg || p.inputRevision.Load() != msg.revision {
 			return errUnsentChanged
 		}
 		screen := deliveryScreenText(p)
-		if isGridChoicePromptText(screen, !msg.claude) {
+		if isGridChoicePromptText(deliveryMenuText(p, !msg.claude), !msg.claude) {
 			return errUnsentChanged
+		}
+		if fullClear {
+			screen, blanked, readable := putBackClearScreen(p)
+			box, complete := readPutBackClearViewsForBody(screen, blanked, !msg.claude, clearVersion, exactBody)
+			if !readable || !complete || box != clearRead || p.inputRevision.Load() != msg.revision {
+				return errUnsentChanged
+			}
+			if box.empty {
+				return errPutBackGone
+			}
+			if !msg.Edited && !msg.clearPending && conditionalDraftText(box.raw) != conditionalDraftText(msg.body) {
+				return errUnsentChanged
+			}
+			// Install the conservative remnant guard before any keys leave.
+			// Readers of receipts use immutable copies, including on errors.
+			p.mu.Lock()
+			if p.unsentMessage != msg || p.inputRevision.Load() != msg.revision {
+				p.mu.Unlock()
+				return errUnsentChanged
+			}
+			next := *msg
+			next.clearPending = true
+			next.Edited = true
+			p.unsentMessage = &next
+			msg = &next
+			p.mu.Unlock()
+			return nil
 		}
 		if msg.PutBack {
 			// Gone only when no part of it shows: dropping the receipt
 			// lifts the guard on agents' keys.
-			if shown, known := putBackShown(screen, !msg.claude, msg.body); known && !shown {
+			if shown, known := msg.shownInBox(screen); known && !shown {
 				return errPutBackGone
 			}
 		}
@@ -249,7 +493,7 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 			return errUnsentChanged
 		}
 		return nil
-	})
+	}))
 	if errors.Is(err, errPutBackGone) {
 		// Sent, cleared or edited with no input SoluTerminal saw: the receipt
 		// is stale. Drop it, so it blocks nothing and its chip goes; Clear
@@ -261,6 +505,10 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if errors.Is(err, errPromptHeld) {
+		http.Error(w, "human_required", http.StatusForbidden)
+		return
+	}
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, errUnsentChanged) || errors.Is(err, errPutBackMultiLine) {
@@ -270,7 +518,19 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var holds, known bool
-	if msg.PutBack {
+	if fullClear {
+		// Observe only: redraws may take a moment, but there is one write.
+		deadline := time.Now().Add(deliveryRetryAfter)
+		for {
+			screen, blanked, readable := putBackClearScreen(p)
+			box, complete := p.readPutBackClearViews(screen, blanked, !msg.claude)
+			known, holds = readable && complete, !box.empty
+			if known && !holds || !time.Now().Before(deadline) {
+				break
+			}
+			deliverySleep(deliveryPollInterval)
+		}
+	} else if msg.PutBack {
 		// Resolved only when no part of it shows: the receipt keeps the
 		// guard on agents' keys until then.
 		holds, known = waitPutBackGone(p, msg, deliveryRetryAfter)
@@ -293,6 +553,12 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 				outcome = "cleared"
 			}
 		}
+	}
+	if fullClear {
+		if !known || holds {
+			outcome = "partly_cleared"
+		}
+		slog.Info("put-back clear", "pane", p.ID, "agent", p.Agent, "version", clearVersion, "keys", len(keys), "outcome", outcome)
 	}
 	p.mu.Lock()
 	if p.unsentMessage == msg {

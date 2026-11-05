@@ -283,5 +283,7 @@ func (a *apiServer) mcpSocketDispatch(msg []byte, id callerIdentity) (resp rpcRe
 			callerPane = mcpClaimedCallerPrefix + id.PaneID
 		}
 	}
-	return a.mcpDispatchTransport(req, nil, callerPane), true
+	// A Unix socket carries no /m/ marker: never forwarded (id.Forwarded).
+	meta := mcpCallMeta{id: id, transport: "unix"}
+	return a.mcpDispatchTransport(req, nil, callerPane, meta), true
 }

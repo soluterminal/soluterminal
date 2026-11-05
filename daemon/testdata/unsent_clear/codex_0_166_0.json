@@ -1,0 +1,94 @@
+{
+  "agent": "codex",
+  "version": "0.166.0",
+  "cols": 66,
+  "rows": 40,
+  "steps": [
+    {
+      "name": "boot",
+      "bytes": 2955
+    },
+    {
+      "name": "wrapped",
+      "bytes": 7888
+    },
+    {
+      "name": "wrapped_clear",
+      "bytes": 8251
+    },
+    {
+      "name": "empty_noop",
+      "bytes": 8539
+    },
+    {
+      "name": "line1",
+      "bytes": 9385
+    },
+    {
+      "name": "newline",
+      "bytes": 9664
+    },
+    {
+      "name": "multiline",
+      "bytes": 10406
+    },
+    {
+      "name": "edited_multiline",
+      "bytes": 11565
+    },
+    {
+      "name": "multiline_clear",
+      "bytes": 11894
+    }
+  ],
+  "command": [
+    "codex",
+    "--no-alt-screen",
+    "--no-daemon",
+    "-s",
+    "read-only",
+    "-a",
+    "on-request",
+    "-c",
+    "mcp_servers={}"
+  ],
+  "inputs": [
+    {
+      "step": "wrapped",
+      "typed": "ST11 alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau.",
+      "paced_seconds": 0.04
+    },
+    {
+      "step": "wrapped_clear",
+      "one_write_hex_byte": "7f",
+      "count": 167
+    },
+    {
+      "step": "empty_noop",
+      "one_write_hex_byte": "7f",
+      "count": 4096
+    },
+    {
+      "step": "line1",
+      "typed": "ST11 first line"
+    },
+    {
+      "step": "newline",
+      "hex": "1b5b31333b3275"
+    },
+    {
+      "step": "multiline",
+      "typed": "ST11 second line"
+    },
+    {
+      "step": "edited_multiline",
+      "hex": "1b5b31333b3275",
+      "typed": "person edited line"
+    },
+    {
+      "step": "multiline_clear",
+      "one_write_hex_byte": "7f",
+      "count": 150
+    }
+  ]
+}

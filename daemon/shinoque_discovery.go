@@ -4,6 +4,8 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type shinoqueRelayConfig struct {
@@ -23,16 +25,82 @@ func (c shinoqueRelayConfig) supportsPrivateDeviceProof() bool { return c.privat
 type shinoqueDiscoveryCache struct {
 	mu         sync.Mutex
 	path       string
+	identity   shinoqueFileIdentity
 	content    []byte
+	homeID     shinoqueFileIdentity
 	config     shinoqueRelayConfig
 	source     string
 	lastConfig shinoqueRelayConfig
 	rejection  string
+
+	// generation changes whenever the discovery file, its home, the token file
+	// or a forwarded connection gives reason to distrust the cached solud verdict.
+	generation atomic.Uint64
+	solud      shinoqueSoludVerdict
+	// Test seams; nil uses the real /proc scan and clock.
+	scanSolud func(sockets map[string]bool) (bool, error)
+	now       func() time.Time
+}
+
+type shinoqueFileIdentity struct {
+	dev, ino    uint64
+	mtime, size int64
+}
+
+// The cached solud verdict for one set of listening sockets; see soludRejection.
+type shinoqueSoludVerdict struct {
+	mu         sync.Mutex
+	key        string
+	generation uint64
+	expires    time.Time
+	inflight   map[string]*shinoqueSoludScan
+}
+
+type shinoqueSoludScan struct {
+	done   chan struct{}
+	reason string
+}
+
+// invalidate drops the cached solud verdict. The next relay request rescans.
+func (c *shinoqueDiscoveryCache) invalidate() { c.generation.Add(1) }
+
+// shinoqueProcTables memoizes the kernel socket tables for one relay request,
+// so a cache hit reads them once for both the solud verdict key and the
+// listener check. A nil value reads the files directly.
+type shinoqueProcTables struct {
+	data map[string][]byte
+	errs map[string]error
+}
+
+func (t *shinoqueProcTables) read(path string) ([]byte, error) {
+	if t == nil {
+		return os.ReadFile(path)
+	}
+	if data, ok := t.data[path]; ok {
+		return data, t.errs[path]
+	}
+	data, err := os.ReadFile(path)
+	if t.data == nil {
+		t.data, t.errs = make(map[string][]byte), make(map[string]error)
+	}
+	t.data[path], t.errs[path] = data, err
+	return data, err
+}
+
+// reset discards the snapshot after a scan, so the listener check rereads
+// the tables just before the request is forwarded.
+func (t *shinoqueProcTables) reset() {
+	if t != nil {
+		t.data, t.errs = nil, nil
+	}
 }
 
 func (c *shinoqueDiscoveryCache) resolve() (shinoqueRelayConfig, bool) {
+	return c.resolveWith(nil)
+}
+
+func (c *shinoqueDiscoveryCache) resolveWith(tables *shinoqueProcTables) (shinoqueRelayConfig, bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	config := shinoqueRelayConfig{port: shinoquePort()}
 	config.home = shinoqueTokenHome()
 	source, reason := "default", ""
@@ -48,6 +116,17 @@ func (c *shinoqueDiscoveryCache) resolve() (shinoqueRelayConfig, bool) {
 			source, config = "file", discovered
 		}
 	}
+	generation := c.generation.Load()
+	c.mu.Unlock()
+	// Every source is checked: an env or default port is no more trusted than
+	// a discovered one. The scan walks every process, so it runs outside c.mu.
+	if reason == "" {
+		if reason = c.soludRejection(config.port, generation, tables); reason != "" {
+			config = shinoqueRelayConfig{}
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if source != c.source || config != c.lastConfig {
 		log.Printf("shinoque relay: source=%s", source)
 	}

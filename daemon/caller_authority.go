@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -73,6 +74,18 @@ type callerIdentity struct {
 	// Automation: a traced browser that a program drives (solubrowse,
 	// Playwright).
 	Automation bool
+	// Forwarded: the request came through the cloud's /m/<machine> route for
+	// a remote device (the marker), whatever the transport. Set once, in
+	// identifyCaller; gates read it, never the header (forwardedUnsigned).
+	Forwarded bool
+	// PrivateDevice is the approved device whose private relay channel the
+	// request arrived on, or "".
+	PrivateDevice string
+	// ScopedDevice is an approved alerts-only device
+	// (deviceStatusApprovedAlerts) that signed this request at this
+	// computer. It is never Device and never makes the caller the person:
+	// only the notifications handler reads it. Not set for panes and workers.
+	ScopedDevice string
 }
 
 // tracedPane excludes detached environment/header claims from operations that
@@ -190,6 +203,35 @@ func (a *apiServer) identifyCaller(r *http.Request) callerIdentity {
 	if identifyCallerHook != nil {
 		return identifyCallerHook(r)
 	}
+	id := a.classifyCaller(r)
+	id.Forwarded = isCloudForwardedPrefix(r.Header.Get("X-Forwarded-Prefix"))
+	if id.Relay {
+		id.PrivateDevice = privateRelayDevice(r)
+	}
+	if id.Kind != callerPane && id.Kind != callerWorker {
+		id.ScopedDevice = localScopedDevice(r)
+	}
+	return id
+}
+
+type quietCallerKey struct{}
+
+// identifyCallerQuietly is identifyCaller for a read that only reports what
+// the caller may do (the device list's canManageDevices): the same answer,
+// without the classification log lines, which are for acts.
+func (a *apiServer) identifyCallerQuietly(r *http.Request) callerIdentity {
+	return a.identifyCaller(r.WithContext(context.WithValue(r.Context(), quietCallerKey{}, true)))
+}
+
+// callerLogf logs a caller classification unless r is a quiet read.
+func callerLogf(r *http.Request, format string, args ...any) {
+	if quiet, _ := r.Context().Value(quietCallerKey{}).(bool); !quiet {
+		log.Printf(format, args...)
+	}
+}
+
+// classifyCaller is identifyCaller without the transport facts it adds.
+func (a *apiServer) classifyCaller(r *http.Request) callerIdentity {
 	if relayTransport(r) {
 		return callerIdentity{Kind: callerHuman, Relay: true}
 	}
@@ -214,7 +256,7 @@ func (a *apiServer) identifyCaller(r *http.Request) callerIdentity {
 		// connection that can't be traced.
 		if tracedOutsiderJudgedUntraced {
 			if browserOriginated(r) && localVerifiedDevice(r) == "" {
-				log.Printf("authority: traced pid %d (%s) is no known browser; judging it as untraced", pid, readComm(pid))
+				callerLogf(r, "authority: traced pid %d (%s) is no known browser; judging it as untraced", pid, readComm(pid))
 			}
 			return a.untracedCaller(r, pid)
 		}
@@ -248,17 +290,17 @@ func (a *apiServer) untracedCaller(r *http.Request, pid int) callerIdentity {
 		return callerIdentity{Kind: callerUnverified, PID: pid}
 	}
 	if isCloudForwardedPrefix(r.Header.Get("X-Forwarded-Prefix")) {
-		log.Printf("authority: forwarded request isn't the person on headers %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+		callerLogf(r, "authority: forwarded request isn't the person on headers %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
 		return callerIdentity{Kind: callerUnverified, PID: pid, Unproven: true}
 	}
 	mode := a.humanProofMode()
 	if mode == humanProofRequire {
-		log.Printf("authority: refused unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+		callerLogf(r, "authority: refused unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
 		return callerIdentity{Kind: callerUnverified, PID: pid, Unproven: true}
 	}
-	log.Printf("authority: unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+	callerLogf(r, "authority: unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
 	if mode == humanProofReport {
-		log.Printf("authority: would refuse unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
+		callerLogf(r, "authority: would refuse unproven person %s %s from %s (proxy pid %d)", r.Method, r.URL.Path, r.RemoteAddr, pid)
 	}
 	return callerIdentity{Kind: callerHuman, PID: pid, Unproven: true}
 }
@@ -306,6 +348,12 @@ func (a *apiServer) classifyPeerProcess(pid int) (callerIdentity, bool) {
 		}
 		cur = next
 	}
+	// What the daemon started is the daemon's, whatever its environment
+	// says: a worker is labelled before any SOLU_PANE_ID is read (ST-10 A2),
+	// so `env SOLU_PANE_ID=<pane> …` run by a worker claims nothing.
+	if spawnedBySelf {
+		return callerIdentity{Kind: callerWorker, PID: pid}, true
+	}
 	// A pane process that detached keeps the pane id the daemon put in its
 	// environment. Ancestors count too: a browser an agent launches starts
 	// with a clean environment, but its launcher does not.
@@ -315,9 +363,6 @@ func (a *apiServer) classifyPeerProcess(pid int) (callerIdentity, bool) {
 				return callerIdentity{Kind: callerPane, PaneID: id, PID: pid, FromEnv: true}, true
 			}
 		}
-	}
-	if spawnedBySelf {
-		return callerIdentity{Kind: callerWorker, PID: pid}, true
 	}
 	return callerIdentity{}, false
 }
@@ -453,7 +498,8 @@ func (a *apiServer) requireHumanOrDelegated(w http.ResponseWriter, r *http.Reque
 		a.logPersonAct(id, action)
 		return true
 	case callerPane:
-		if a.agentAuthority.active(time.Now()) {
+		// A request forwarded for a remote device never gets the grant.
+		if !id.Forwarded && a.agentAuthority.active(time.Now()) {
 			log.Printf("authority: pane %s (pid %d) may %s: agent authority is on", id.PaneID, id.PID, action)
 			return true
 		}
@@ -635,31 +681,147 @@ func (a *apiServer) promptInputGate(r *http.Request) func(*Pane) bool {
 	return a.promptInputGateFor(a.identifyCaller(r))
 }
 
+// promptTakesKeys is what every text-delivery route means by a pane being at a
+// prompt: keys would land in a live menu or in a dialog still drawn after input
+// (menuInputDrawn), which computeState already counts as answered.
+func promptTakesKeys(p *Pane) bool {
+	return p.menuInputState() != menuInputNone
+}
+
 func (a *apiServer) promptInputGateFor(id callerIdentity) func(*Pane) bool {
-	agent := id.Kind == callerPane || id.Kind == callerWorker
-	// An unverified caller, or one taken for the person from browser headers
-	// alone, is held back like an agent while approved devices are required:
-	// the person's own untraceable sockets are then signed. A socket lives
-	// long, so this is decided on each input, not when the socket opened.
-	unproven := id.Kind == callerUnverified || (id.Kind == callerHuman && id.Unproven)
-	// A socket signed by a device keeps that standing only while the device
-	// stays approved: removing it withdraws the socket's say at prompts too.
-	signed := id.Kind == callerHuman && id.Device != ""
-	if !agent && !unproven && !signed {
+	hold := a.promptHoldFor(id)
+	ownPossible := id.Kind == callerPane && id.PaneID != ""
+	if hold == nil && !ownPossible {
 		return func(*Pane) bool { return true }
 	}
 	return func(p *Pane) bool {
-		if p == nil || p.computeStateCached() != StateChoicePrompt {
+		if p == nil || !promptInOwnPane(id, p) && (hold == nil || !hold()) {
 			return true
 		}
-		if signed && a.trustedDevices != nil && a.trustedDevices.isApproved(id.Device) {
+		if !promptTakesKeys(p) {
+			return true
+		}
+		notePromptHeld(id, p)
+		return false
+	}
+}
+
+// promptHoldFor reports, at each input, whether the caller's keys are held
+// back at a permission prompt; nil when they never are.
+func (a *apiServer) promptHoldFor(id callerIdentity) func() bool {
+	agent := id.Kind == callerPane || id.Kind == callerWorker
+	// An unverified caller (untraced, and no browser headers either) is
+	// never the person's keys at a prompt, in any mode: it is a program.
+	unverified := id.Kind == callerUnverified
+	// One taken for the person from browser headers alone (the person's own
+	// untraceable desktop, for one) is held back like an agent only while
+	// approved devices are required: their sockets are then signed. A socket
+	// lives long, so this is decided on each input, not when it opened.
+	unproven := id.Kind == callerHuman && id.Unproven
+	// A socket signed by a device keeps that standing only while the device
+	// stays approved: removing it withdraws the socket's say at prompts too.
+	signed := id.Kind == callerHuman && id.Device != ""
+	if !agent && !unverified && !unproven && !signed {
+		return nil
+	}
+	return func() bool {
+		if signed && a.deviceApproved(id.Device) {
+			return false
+		}
+		if unverified {
 			return true
 		}
 		if !agent {
-			return a.humanProofMode() != humanProofRequire
+			return a.humanProofMode() == humanProofRequire
 		}
-		return id.Kind == callerPane && a.agentAuthority.active(time.Now())
+		// The same decision as answer_prompt (ST-10). Its own pane's prompts
+		// a pane never answers (promptInOwnPane).
+		return !a.decidePromptAnswer(mcpCallMeta{id: id}, false, nil).allowed
 	}
+}
+
+// errPromptHeld: a held caller's keys at a permission prompt.
+var errPromptHeld = errors.New("the pane is showing a permission prompt; only the person can answer it")
+
+// promptWriteCheck is the prompt gate at write time, run under the writer
+// lock with the write: a menu may have opened since the gate. A dialog still
+// drawn after its first answer counts too (promptTakesKeys), where the next key
+// answers its next step. Nil when b can pass: the caller is never held, or b
+// is only the terminal's own replies.
+func (a *apiServer) promptWriteCheck(id callerIdentity, p *Pane, b []byte, via string) func() error {
+	hold := a.promptHoldFor(id)
+	own := promptInOwnPane(id, p)
+	if hold == nil && !own || isTerminalReplyOnly(b) {
+		return nil
+	}
+	return func() error {
+		if !promptTakesKeys(p) {
+			return nil
+		}
+		if own || hold() {
+			notePromptHeld(id, p)
+			return errPromptHeld
+		}
+		notePromptAnsweredBy(id, p, via)
+		return nil
+	}
+}
+
+// promptInOwnPane: the caller is a pane's process writing to its own pane.
+// A pane never answers its own prompt, traced or not, with or without the
+// grant (ST-10 rule 4).
+func promptInOwnPane(id callerIdentity, p *Pane) bool {
+	return p != nil && id.Kind == callerPane && id.PaneID != "" && id.PaneID == p.ID
+}
+
+// promptAnswers rate-limits the log of an agent's keys answering a prompt
+// to one line per pane, caller and prompt.
+var promptAnswers = struct {
+	sync.Mutex
+	seen map[string]bool
+}{seen: map[string]bool{}}
+
+// notePromptAnsweredBy logs an agent's keys passing at a prompt under the
+// grant (ST-10 rule 7): caller kind, transport, pane, target and prompt.
+func notePromptAnsweredBy(id callerIdentity, p *Pane, via string) {
+	if id.Kind != callerPane {
+		return
+	}
+	key := fmt.Sprintf("%s|%s|%d", p.ID, id.PaneID, p.inputRevision.Load())
+	promptAnswers.Lock()
+	if promptAnswers.seen[key] {
+		promptAnswers.Unlock()
+		return
+	}
+	if len(promptAnswers.seen) >= forwardedRefusalsMax {
+		promptAnswers.seen = map[string]bool{}
+	}
+	promptAnswers.seen[key] = true
+	promptAnswers.Unlock()
+	logPromptAct(id.Kind, via, id.PaneID, p.ID, promptRevID(p), "keys at a prompt")
+}
+
+// promptHelds rate-limits the log of keys held at a prompt to one line per
+// pane, caller and prompt: a refused key leaves the input revision as it
+// was, and answering the prompt moves it on.
+var promptHelds = struct {
+	sync.Mutex
+	seen map[string]bool
+}{seen: map[string]bool{}}
+
+func notePromptHeld(id callerIdentity, p *Pane) {
+	key := fmt.Sprintf("%s|%s|%d|%d", p.ID, id.Kind, id.PID, p.inputRevision.Load())
+	promptHelds.Lock()
+	if promptHelds.seen[key] {
+		promptHelds.Unlock()
+		return
+	}
+	if len(promptHelds.seen) >= forwardedRefusalsMax {
+		promptHelds.seen = map[string]bool{}
+	}
+	promptHelds.seen[key] = true
+	promptHelds.Unlock()
+	log.Printf("authority: refused %s input at a permission prompt on pane %s (pid %d, pane caller %q)", id.Kind, p.ID, id.PID, id.PaneID)
 }
 
 // paneSocketInputPolicy classifies a pane terminal socket once, at upgrade.
@@ -667,10 +829,138 @@ func (a *apiServer) promptInputGateFor(id callerIdentity) func(*Pane) bool {
 // is what lets a visible viewer adopt an unowned pane by typing (handleWS).
 // Panes, workers and unverified local programs never adopt.
 func (a *apiServer) paneSocketInputPolicy(r *http.Request) wsInputPolicy {
-	id := a.identifyCaller(r)
-	return wsInputPolicy{
+	return a.socketInputPolicyFor(a.identifyCaller(r))
+}
+
+// socketInputPolicyFor is a socket's policy from its caller, classified once
+// from the upgrade request. What can change while it is open (the mode, a
+// device's approval, the agent grant) is read again at each frame.
+func (a *apiServer) socketInputPolicyFor(id callerIdentity) wsInputPolicy {
+	policy := wsInputPolicy{
 		allowed: a.promptInputGateFor(id),
 		human:   id.Kind == callerHuman,
 		kind:    string(id.Kind),
+		promptCheck: func(p *Pane, b []byte) func() error {
+			return a.promptWriteCheck(id, p, b, "pane-socket")
+		},
 	}
+	if id.Forwarded {
+		policy.viewOnly = func(p *Pane, what string) bool {
+			if !a.forwardedUnsigned(id) {
+				return false
+			}
+			if what != "" { // "" is the sizing check: nothing was refused
+				noteForwardedRefusal(id, "pane "+p.ID, what)
+			}
+			return true
+		}
+	}
+	return policy
+}
+
+// forwardedUnsigned reports a caller that may only view: its request came
+// through the cloud's /m/ route for a remote device (Forwarded) with no
+// device proof that is still approved now. Such a caller reads panes but
+// never writes to one or changes anything (forwardedViewOnly, the pane
+// socket, the MCP writing tools). A private relay channel's device and a
+// local device signature are proof while the device stays approved, checked
+// at each write; the phone app over the relay is the remote-access policy's
+// to govern, as before.
+func (a *apiServer) forwardedUnsigned(id callerIdentity) bool {
+	switch {
+	case !id.Forwarded:
+		return false
+	case id.PrivateDevice != "":
+		return !a.deviceApproved(id.PrivateDevice)
+	case id.Relay:
+		return false
+	case id.Device != "":
+		return !a.deviceApproved(id.Device)
+	}
+	return true
+}
+
+func (a *apiServer) deviceApproved(device string) bool {
+	return a.trustedDevices != nil && a.trustedDevices.isApproved(device)
+}
+
+// forwardedViewOnlyMessage is what a view-only caller is told.
+const forwardedViewOnlyMessage = "This device can only view this computer's panes. Typing and changes need the computer itself, or a device approved in Settings → Privacy & security."
+
+// forwardedViewOnlyExempt: starting to enrol as a device (the request, and
+// V3's commit reveal) only creates a pending request that an approved device
+// must approve, so a view-only device may make it and so become signing.
+// Approving or confirming one stays refused.
+func forwardedViewOnlyExempt(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	return r.URL.Path == "/api/remote-devices/enroll" || r.URL.Path == "/api/remote-devices/enroll/reveal"
+}
+
+// forwardedViewOnlyAll: routes refused to a view-only caller whatever the
+// method. /mcp is the agents' tools, reading ones included, and those read
+// files with no relay confinement: a view-only phone has no use for them.
+func forwardedViewOnlyAll(path string) bool {
+	return path == "/mcp"
+}
+
+// forwardedViewOnly refuses every mutating request from a view-only caller
+// (forwardedUnsigned), and every request to /mcp: default-deny, so a new
+// route is covered without being listed. A request without the marker can't
+// be Forwarded, so only a marked one pays for classifying the caller.
+func (a *apiServer) forwardedViewOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			if !forwardedViewOnlyAll(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		if forwardedViewOnlyExempt(r) || !isCloudForwardedPrefix(r.Header.Get("X-Forwarded-Prefix")) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if id := a.identifyCaller(r); a.forwardedUnsigned(id) {
+			noteForwardedRefusal(id, forwardedRefusalTarget(r.URL.Path), r.Method+" "+r.URL.Path)
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "view_only", "message": forwardedViewOnlyMessage})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// forwardedRefusalTarget is the pane a path acts on, or the path.
+func forwardedRefusalTarget(path string) string {
+	if rest, ok := strings.CutPrefix(path, "/api/panes/"); ok {
+		if id, _, _ := strings.Cut(rest, "/"); id != "" {
+			return "pane " + id
+		}
+	}
+	return path
+}
+
+// forwardedRefusals rate-limits the refusal log to one line per caller and
+// pane (or path): a view-only phone typing would otherwise log every key.
+var forwardedRefusals = struct {
+	sync.Mutex
+	seen map[string]bool
+}{seen: map[string]bool{}}
+
+const forwardedRefusalsMax = 4096
+
+func noteForwardedRefusal(id callerIdentity, target, what string) {
+	key := fmt.Sprintf("%d|%s|%s|%s", id.PID, id.Device, id.PrivateDevice, target)
+	forwardedRefusals.Lock()
+	if forwardedRefusals.seen[key] {
+		forwardedRefusals.Unlock()
+		return
+	}
+	if len(forwardedRefusals.seen) >= forwardedRefusalsMax {
+		forwardedRefusals.seen = map[string]bool{}
+	}
+	forwardedRefusals.seen[key] = true
+	forwardedRefusals.Unlock()
+	log.Printf("authority: refused %s on %s: a forwarded request without device proof is view-only (pid %d, device %q, private %q)", what, target, id.PID, id.Device, id.PrivateDevice)
 }

@@ -98,7 +98,7 @@ func TestAnswerPromptTerminalSelectsValidOption(t *testing.T) {
 	drainConn(t, p) // so the PTY write completes
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus(), agentAuthority: grantedAgentAuthority(t)}
 
-	text, isErr := mcpResultText(t, scopedCallForTest(t, a, nil, "answer_prompt",
+	text, isErr := mcpResultText(t, answerAsPaneForTest(t, a,
 		map[string]any{"pane_id": p.ID, "option": "2"}))
 	if isErr {
 		t.Fatalf("valid option refused: %q", text)
@@ -113,7 +113,7 @@ func TestAnswerPromptTerminalRejectsAbsentOption(t *testing.T) {
 	p := choicePromptPane(t, "pane_ap2")
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus(), agentAuthority: grantedAgentAuthority(t)}
 
-	text, isErr := mcpResultText(t, scopedCallForTest(t, a, nil, "answer_prompt",
+	text, isErr := mcpResultText(t, answerAsPaneForTest(t, a,
 		map[string]any{"pane_id": p.ID, "option": "9"}))
 	if !isErr {
 		t.Fatalf("absent option 9 was accepted: %q", text)
@@ -129,7 +129,7 @@ func TestAnswerPromptRefusesNonPromptPane(t *testing.T) {
 	p := testPaneWithTail(t, "pane_ap3", "worker", "$ ls\nfile.txt\n$ ")
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus(), agentAuthority: grantedAgentAuthority(t)}
 
-	text, isErr := mcpResultText(t, scopedCallForTest(t, a, nil, "answer_prompt",
+	text, isErr := mcpResultText(t, answerAsPaneForTest(t, a,
 		map[string]any{"pane_id": p.ID, "option": "1"}))
 	if !isErr {
 		t.Fatalf("answer_prompt acted on a non-prompt pane: %q", text)
@@ -145,7 +145,7 @@ func TestAnswerPromptExitedPane(t *testing.T) {
 	p.Status = PaneExited
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus(), agentAuthority: grantedAgentAuthority(t)}
 
-	text, isErr := mcpResultText(t, scopedCallForTest(t, a, nil, "answer_prompt",
+	text, isErr := mcpResultText(t, answerAsPaneForTest(t, a,
 		map[string]any{"pane_id": p.ID, "option": "1"}))
 	if !isErr || !strings.Contains(text, "has exited") {
 		t.Fatalf("exited pane answer = (%q, err=%v), want exited refusal", text, isErr)
@@ -165,14 +165,14 @@ func TestAnswerPromptNativeValidatesOptionAndPending(t *testing.T) {
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus(), agentAuthority: grantedAgentAuthority(t)}
 
 	// A native pane only takes allow/deny — a menu number is a category error.
-	text, isErr := mcpResultText(t, scopedCallForTest(t, a, nil, "answer_prompt",
+	text, isErr := mcpResultText(t, answerAsPaneForTest(t, a,
 		map[string]any{"pane_id": p.ID, "option": "2"}))
 	if !isErr || !strings.Contains(text, `must be "allow" or "deny"`) {
 		t.Fatalf("native numeric option = (%q, err=%v), want allow/deny guidance", text, isErr)
 	}
 
 	// Valid option but nothing pending → clear refusal, not a silent no-op.
-	text, isErr = mcpResultText(t, scopedCallForTest(t, a, nil, "answer_prompt",
+	text, isErr = mcpResultText(t, answerAsPaneForTest(t, a,
 		map[string]any{"pane_id": p.ID, "option": "allow"}))
 	if !isErr || !strings.Contains(text, "no pending approval") {
 		t.Fatalf("native no-pending answer = (%q, err=%v), want no-pending refusal", text, isErr)

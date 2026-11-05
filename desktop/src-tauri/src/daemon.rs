@@ -4276,7 +4276,7 @@ pub(crate) fn stop_wsl_daemon(supervisor: Option<u32>, daemon: Option<u32>) -> R
 /// run_wsl_bounded, optionally feeding `stdin` to the child. The deadline
 /// covers the stdin write too: a hung VM that never reads must not block us.
 #[cfg(windows)]
-fn run_wsl_bounded_with_stdin(
+pub(crate) fn run_wsl_bounded_with_stdin(
     args: &[&str],
     stdin: Option<&[u8]>,
     timeout: Duration,

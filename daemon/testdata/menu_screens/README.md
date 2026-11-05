@@ -19,6 +19,15 @@ Recorded 2026-11-03 with `scripts/capture-tui-screens.py` in a fresh git repo:
 - `codex_0166_100x40`: Codex 0.166.0,
   `codex --no-alt-screen --no-daemon -s read-only -a on-request`.
 
+Recorded 2026-11-04 for ST-18 (prompt echoes read as menus, `prompt_echo.go`):
+
+- `claude_2_1_310_66x40`: Claude Code 2.1.310, `claude --model haiku
+  --permission-mode default --strict-mcp-config --setting-sources project`
+  (no MCP servers or user hooks, so nothing reached a live daemon). The turn
+  is still running at `list_running`: a `❯ 1.06 …` echo on Claude's band,
+  the reply's `1. Yes` / `2. No` list, then the idle input box. The text
+  alone reads as a menu; only the band tells it apart.
+
 Step scripts (stdin of the recorder):
 
 ```
@@ -104,4 +113,17 @@ save approval
 key esc
 settle 6
 save approval_cancelled
+
+# Claude, 66x40 (claude_2_1_310_66x40)
+settle 4
+key down
+settle 1
+key enter
+settle 4
+save idle
+send 1.06 refers to mobile soluterminal? Use no tools. First reply with exactly a two item markdown numbered list: Yes, then No. Then write the word PLUM two hundred times, separated by spaces.
+settle 1
+key enter
+wait PLUM PLUM
+save list_running
 ```

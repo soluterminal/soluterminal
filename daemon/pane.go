@@ -977,6 +977,9 @@ type Pane struct {
 	// Self-guarded by its own mutex.
 	stateCacheData stateCache
 	stateTailCache stateTailCache
+	// promptEchoLogged: the first menu verdict a prompt echo turned (see
+	// prompt_echo.go) was logged; later ones are not.
+	promptEchoLogged atomic.Bool
 
 	// aiTitleCache holds the last-known Claude-generated conversation title
 	// (the type:"ai-title" line in the transcript — the same value the Activity

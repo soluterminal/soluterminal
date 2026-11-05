@@ -109,6 +109,23 @@ func RejectedRefreshGrant(status int, data []byte) bool {
 	return false
 }
 
+// RejectedRefreshAuth reports a structured 401 or 403 from the token endpoint
+// that RejectedRefreshGrant doesn't claim. The token endpoint or something in
+// front of it answered, but not about this grant, so callers treat it as
+// temporary and back off. A bare status or an HTML page isn't an answer at all.
+func RejectedRefreshAuth(status int, data []byte) bool {
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return false
+	}
+	var payload struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if len(data) > 64<<10 || json.Unmarshal(data, &payload) != nil {
+		return false
+	}
+	return len(payload.Error) > 0 && string(payload.Error) != "null"
+}
+
 // AccountFailureStatus maps only supported account-scoped classes to the
 // existing reactive recovery categories. Permission, billing, and transport
 // failures require diagnostics: switching accounts cannot establish their scope.

@@ -38,9 +38,12 @@ type privacySettingsRecord struct {
 }
 
 type privacySettings struct {
-	mu     sync.Mutex
-	path   string
-	record privacySettingsRecord
+	mu                sync.Mutex
+	toggleMu          sync.Mutex
+	usageMu           sync.Mutex
+	usageParticipants map[*usagePrivacyParticipant]struct{}
+	path              string
+	record            privacySettingsRecord
 	// team reports whether this install has team features. It decides the
 	// usage default and whether crash reports carry the recent log tail.
 	team func() bool
@@ -97,8 +100,16 @@ func (p *privacySettings) crashReportsAllowed() bool {
 }
 
 func (p *privacySettings) update(usage, crash *bool) error {
+	if usage == nil {
+		return p.persistUpdate(usage, crash)
+	}
+	return p.updateUsage(usage, crash)
+}
+
+func (p *privacySettings) persistUpdate(usage, crash *bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	previous := p.record
 	if usage != nil {
 		v := *usage
 		p.record.UsageUpload = &v
@@ -111,7 +122,11 @@ func (p *privacySettings) update(usage, crash *bool) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomicSynced(p.path, b, 0o600)
+	if err := writeFileAtomicSynced(p.path, b, 0o600); err != nil {
+		p.record = previous
+		return err
+	}
+	return nil
 }
 
 // activePrivacy is read by the crash sink and the usage scanners, which run

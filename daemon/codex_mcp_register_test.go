@@ -141,6 +141,7 @@ func TestCodexServerTableName(t *testing.T) {
 }
 
 func TestRegisterCodexMcpDirect(t *testing.T) {
+	useMCPRegistration(t, "", "")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte(codexCfgSample), 0644); err != nil {
@@ -181,6 +182,7 @@ func TestRegisterCodexMcpDirect(t *testing.T) {
 }
 
 func TestEnsureCodexMcpPaneHeader(t *testing.T) {
+	useMCPRegistration(t, "", "")
 	desired := "http://127.0.0.1:8787/mcp"
 	base := "[mcp_servers.soluterminal]\nurl = \"" + desired + "\"\n"
 	tests := []struct {

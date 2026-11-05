@@ -149,6 +149,11 @@ type subEntry struct {
 	// the terminal a human is using. Their claims still go through the normal
 	// arbitration guard like everyone else's.
 	automation bool
+	// viewOnly, when set, reports whether the sub may only view
+	// (apiServer.forwardedUnsigned): it never votes on the shared PTY size
+	// either, read at each sizing so a device removed mid-session stops
+	// voting too.
+	viewOnly func() bool
 }
 
 // deviceLastInput maps deviceID → last time ANY pane received real user
@@ -292,6 +297,8 @@ type subOptions struct {
 	// automation: client self-identified as a driven browser (see
 	// subEntry.automation).
 	automation bool
+	// viewOnly: see subEntry.viewOnly.
+	viewOnly func() bool
 	// termCols/termRows: the size of the client's terminal when the replay
 	// arrives. It can differ from the cols/rows the client seeds the PTY
 	// with (the daemon's own size, to keep attach a sizing no-op). Zero when
@@ -369,6 +376,7 @@ func (p *Pane) subscribeStream(cols, rows uint16, mode subMode, since int64, opt
 		deviceID:           opts.deviceID,
 		retirementViewerID: opts.retirementViewerID,
 		automation:         opts.automation,
+		viewOnly:           opts.viewOnly,
 	}
 	ownerViewerNeedsPersist := p.Role == paneRoleTaskOwner
 	if ownerViewerNeedsPersist {
@@ -930,7 +938,14 @@ func (p *Pane) ClaimWithReason(subID int64, restampSize bool, reason string) boo
 			log.Printf("ownership: pane=%s claim reason=%q DENIED sub=%d device=%q — live owner sub=%d device=%q visible=%v seen=%s ago",
 				p.ID, reason, subID, claimer.deviceID, previousOwner, owner.deviceID,
 				owner.visible, time.Since(owner.lastSeenAt).Round(time.Millisecond))
-			p.sendOwnership(subID, false) // truthful denial ack (owner:"other")
+			// The ack says why, so the claimer's screen can tell its person.
+			// An "agent" claim is an explicit one rewritten because the socket
+			// isn't the person's (handleWS): it is refused for that reason.
+			denied := claimDeniedOwnerActive
+			if reason == "agent" {
+				denied = claimDeniedNotPerson
+			}
+			p.sendOwnershipDenied(subID, denied) // truthful denial ack (owner:"other")
 			return false
 		}
 	}
@@ -988,6 +1003,30 @@ func (p *Pane) ClaimWithReason(subID int64, restampSize bool, reason string) boo
 // the (non-blocking) send: a departing sub's cancel closes e.ctrl under the
 // write lock, so sending after releasing it raced that close.
 func (p *Pane) sendOwnership(subID int64, owned bool) {
+	p.sendOwnershipFrame(subID, owned, "")
+}
+
+// Why a claim was refused, sent as "denied" on the refused sub's ack so its
+// screen can show the reason and the next step instead of nothing. They only
+// describe the decision; nothing reads them back.
+const (
+	// claimDeniedOwnerActive: an automatic or conditional claim met a live
+	// owner on another device whose user is there.
+	claimDeniedOwnerActive = "owner-active"
+	// claimDeniedNotPerson: the socket isn't the person's (an unapproved
+	// screen, or a program), so its claim can't take the pane from them.
+	claimDeniedNotPerson = "not-person"
+	// claimDeniedViewOnly: the socket may only view (forwardedUnsigned).
+	claimDeniedViewOnly = "view-only"
+)
+
+// sendOwnershipDenied is the owned:false ack to a refused claim, carrying
+// the reason.
+func (p *Pane) sendOwnershipDenied(subID int64, denied string) {
+	p.sendOwnershipFrame(subID, false, denied)
+}
+
+func (p *Pane) sendOwnershipFrame(subID int64, owned bool, denied string) {
 	p.subsMu.RLock()
 	defer p.subsMu.RUnlock()
 	e, ok := p.subs[subID]
@@ -1000,9 +1039,15 @@ func (p *Pane) sendOwnership(subID int64, owned bool) {
 	case owned:
 		payload = []byte(`{"type":"ownership","owned":true,"owner":"you"}`)
 	case hasOwner:
-		payload = []byte(`{"type":"ownership","owned":false,"owner":"other"}`)
+		payload = []byte(`{"type":"ownership","owned":false,"owner":"other"`)
 	default:
-		payload = []byte(`{"type":"ownership","owned":false,"owner":"none"}`)
+		payload = []byte(`{"type":"ownership","owned":false,"owner":"none"`)
+	}
+	if !owned {
+		if denied != "" {
+			payload = append(payload, `,"denied":"`+denied+`"`...)
+		}
+		payload = append(payload, '}')
 	}
 	select {
 	case e.ctrl <- payload:
@@ -1078,7 +1123,7 @@ func (p *Pane) AdoptIfUnowned(subID int64) bool {
 			log.Printf("ownership: pane=%s adopt DENIED sub=%d device=%q — live owner sub=%d device=%q seen=%s ago",
 				p.ID, subID, requester.deviceID, previousOwner, owner.deviceID,
 				time.Since(owner.lastSeenAt).Round(time.Millisecond))
-			p.sendOwnership(subID, false) // denial ack (owner:"other")
+			p.sendOwnershipDenied(subID, claimDeniedOwnerActive) // denial ack (owner:"other")
 			return false
 		}
 	}
@@ -1184,7 +1229,7 @@ func (p *Pane) desiredSizeLocked() (uint16, uint16) {
 		// Driven browsers (Playwright/E2E, navigator.webdriver clients) never
 		// vote on the shared PTY size: a default 1280×720 test viewport must
 		// not shrink the terminal a human is looking at.
-		if e.automation {
+		if e.automation || (e.viewOnly != nil && e.viewOnly()) {
 			continue
 		}
 		if e.visible {

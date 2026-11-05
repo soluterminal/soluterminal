@@ -412,7 +412,7 @@ func (a *apiServer) mcpSetPaneTeam(args map[string]any, c paneCaller, p *Pane) a
 		if kind == paneTeamLead {
 			return toolOK(name + " is now a lead (role “" + role + "”). It is never closed automatically.")
 		}
-		return toolOK(name + " is now a worker. It is archived automatically once it has finished, its lead has read its result, and its work is committed and pushed.")
+		return toolOK(name + " is now a worker. It is archived automatically once it has finished, its lead has read its result, and its work is committed and pushed, or once its work has merged into the default branch and its worktree is clean.")
 	}
 	switch decision {
 	case paneAgentRefused:

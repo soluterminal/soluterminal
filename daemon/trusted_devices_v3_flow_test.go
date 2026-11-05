@@ -127,8 +127,26 @@ func TestDeviceCodeV3ExpiryAndLegacyPending(t *testing.T) {
 	if s.find(revealed.ID) != nil {
 		t.Fatal("expired reveal retained")
 	}
-	if _, err := s.approve(legacy.ID); err != nil {
-		t.Fatalf("V2 pending expired: %v", err)
+	// The legacy (V2) request has waited longer than devicePendingLifetime by
+	// now: gone too, like the V3 ones.
+	if _, err := s.approve(legacy.ID); err == nil || s.find(legacy.ID) != nil {
+		t.Fatalf("V2 pending past its lifetime approved or retained: %v", err)
+	}
+	late, _ := s.enroll("late", newTestDevice(t).spki, 2)
+	now = now.Add(devicePendingLifetime - time.Second)
+	s.mu.Lock()
+	_ = s.pruneCommittedV3Locked()
+	s.mu.Unlock()
+	if s.find(late.ID) == nil {
+		t.Fatal("V2 pending expired before its lifetime")
+	}
+	now = now.Add(time.Second)
+	now = now.Add(devicePendingLifetime)
+	s.mu.Lock()
+	err := s.pruneCommittedV3Locked()
+	s.mu.Unlock()
+	if err != nil || s.find(late.ID) != nil {
+		t.Fatalf("V2 pending past its lifetime retained: %v", err)
 	}
 }
 
@@ -211,6 +229,9 @@ func TestDeviceCodeV3ConcurrentRefreshAndReveal(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			rec, _, err := a.trustedDevices.commitDeviceV3("phone", d.spki, deviceCommitV3(dID(d), nonce))
+			if errors.Is(err, errDevicePendingKept) {
+				return // another refresh already revealed it: it waits as it is
+			}
 			if err != nil {
 				t.Error(err)
 				return

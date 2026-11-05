@@ -624,10 +624,10 @@ func (p *Pane) resolveApprovalWithPolicy(reqID string, allow bool, denyReason st
 // and computeState stops reporting StateChoicePrompt), then the interrupt frame
 // is written. The agent acks with control_cancel_request, which pane_native.go
 // already clears the pending pointer for (belt-and-suspenders with the deny here).
-func (p *Pane) interruptNative() error {
+func (p *Pane) interruptNative() (denied []string, err error) {
 	adapter, ok := p.NativeAdapterRef()
 	if !ok {
-		return errors.New("pane is not native")
+		return nil, errors.New("pane is not native")
 	}
 	// Deny EVERY open approval first (parallel tool calls can leave several),
 	// then interrupt the turn. A single drain so none is left orphaned.
@@ -648,6 +648,7 @@ func (p *Pane) interruptNative() error {
 		if committer, ok := adapter.(interface{ CommitApproval(string) }); ok {
 			committer.CommitApproval(ap.RequestID)
 		}
+		denied = append(denied, ap.RequestID)
 		p.emitNativeEvent(NativeEvent{
 			Type: EvPermissionResolved, RequestID: ap.RequestID,
 			CallID: ap.ToolUseID, ToolName: ap.ToolName,
@@ -656,14 +657,14 @@ func (p *Pane) interruptNative() error {
 	frame := adapter.EncodeInterrupt()
 	if len(frame) == 0 {
 		if p.IsAgentWorking() {
-			return errors.New("native agent cannot correlate the active turn")
+			return denied, errors.New("native agent cannot correlate the active turn")
 		}
-		return approvalWriteErr
+		return denied, approvalWriteErr
 	}
 	if _, err := p.WriteNoPromptRecord(frame); err != nil {
-		return err
+		return denied, err
 	}
-	return approvalWriteErr
+	return denied, approvalWriteErr
 }
 
 // nativeAutoResolve is a self-contained autonomous (ARIA) approval helper for a
@@ -761,7 +762,14 @@ func (a *apiServer) handlePaneApprovalResolve(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	if req.Allow && !a.requireHumanOrDelegated(w, r, "allow a pane's permission request") {
+	// Allowing or denying both answer the pane's permission request: the
+	// person, or an agent under the prompt rules (requirePromptAnswer).
+	action := "deny a pane's permission request"
+	if req.Allow {
+		action = "allow a pane's permission request"
+	}
+	note, ok := a.admitPromptAnswer(w, r, p, action)
+	if !ok {
 		return
 	}
 	// A delegated API caller is still a machine answer. Only the person's
@@ -784,6 +792,9 @@ func (a *apiServer) handlePaneApprovalResolve(w http.ResponseWriter, r *http.Req
 		}
 		http.Error(w, "resolve failed: "+err.Error(), 500)
 		return
+	}
+	if pending != nil {
+		note(approvalPromptID(pending.RequestID))
 	}
 	// If this approval is bridged into ARIA's confirm registry, resolve that
 	// entry too so the in-app ConfirmCard path and the lock-screen path
@@ -808,7 +819,20 @@ func (a *apiServer) handlePaneNativeInterrupt(w http.ResponseWriter, r *http.Req
 		http.Error(w, "pane is not native", 409)
 		return
 	}
-	if err := p.interruptNative(); err != nil {
+	// Interrupting denies every pending approval: that answers the pane's
+	// permission request, gated exactly like the REST deny.
+	note := func(string) {}
+	if p.peekNativePending("") != nil {
+		var ok bool
+		if note, ok = a.admitPromptAnswer(w, r, p, "deny a pane's permission request"); !ok {
+			return
+		}
+	}
+	denied, err := p.interruptNative()
+	if len(denied) > 0 {
+		note(approvalsPromptID(denied))
+	}
+	if err != nil {
 		http.Error(w, "interrupt failed: "+err.Error(), 500)
 		return
 	}

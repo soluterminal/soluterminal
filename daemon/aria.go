@@ -1056,6 +1056,19 @@ type ariaPendingConfirm struct {
 	// Set before sending ch; distinguishes caller cancellation from a daemon
 	// pause/cap refusal. It does not attest a human identity.
 	explicitReject bool
+	// paneID is the pane the confirmation acts on, if any.
+	paneID string
+}
+
+// confirmPane is the pane a pending confirmation acts on ("" if none or
+// unknown).
+func (a *Aria) confirmPane(id string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if pc, ok := a.confirms[id]; ok {
+		return pc.paneID
+	}
+	return ""
 }
 
 // ariaMessage mirrors the Anthropic Messages API message shape. Role

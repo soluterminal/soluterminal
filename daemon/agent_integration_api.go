@@ -112,7 +112,9 @@ func (a *apiServer) handleSetAgentIntegration(w http.ResponseWriter, r *http.Req
 		resp.Cleanup = removeAgentIntegrationFor(agentIntegrationBackupDir(a.dataDir), agentIntegrationOwner{
 			MCPURL:  claudeMcpDesiredURL(a.addr),
 			HookURL: claudeHookURL(a.addr),
-			GOOS:    runtime.GOOS,
+			// A bridge entry has no URL; it names this daemon's socket.
+			MCPSocket: filepath.Join(a.dataDir, mcpSocketDirName, mcpSocketName),
+			GOOS:      runtime.GOOS,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)

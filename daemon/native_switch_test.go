@@ -954,6 +954,9 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(generatedCacheRoot)
 		os.Exit(2)
 	}
+	// Git status views and the daemon-written global git config files stay
+	// in this test process, never the real daemon's data directory.
+	setGitViewDir(filepath.Join(generatedCacheRoot, "data"))
 	// Fixtures can enable browser acceptance and construct an engine, which
 	// launches boot cleanup. Never let ordinary verification discover/delete
 	// the real daemon's live acceptance sandboxes. Tests supply fake endpoints;

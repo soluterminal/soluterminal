@@ -219,12 +219,22 @@ func (a *apiServer) handleAriaConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	// Approving answers a pane's prompt (and "approve rest" skips the rest
 	// of the turn's dialogs); cancelling stays open to anyone.
-	if req.Approve && !a.requireHumanOrDelegated(w, r, "approve an Aria confirmation") {
-		return
+	// The confirmation's pane: an agent never approves its own.
+	note := func(string) {}
+	if req.Approve {
+		var target *Pane
+		if paneID := a.aria.confirmPane(req.ID); paneID != "" {
+			target, _ = a.mgr.Get(paneID)
+		}
+		var ok bool
+		if note, ok = a.admitPromptAnswer(w, r, target, "approve an Aria confirmation"); !ok {
+			return
+		}
 	}
 	if !a.aria.signalConfirm(req.ID, req.Approve, req.ApproveRest) {
 		http.Error(w, "unknown or expired confirm id", http.StatusNotFound)
 		return
 	}
+	note("aria-confirm:" + req.ID)
 	w.WriteHeader(http.StatusNoContent)
 }

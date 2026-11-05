@@ -69,12 +69,40 @@ func bindMCPSocket(dataDir string) (*mcpSocketEndpoint, error) {
 	return e, nil
 }
 
-// ensureMCPSocketDir creates dir 0700 and accepts it only as a real
-// directory owned by this user with mode exactly 0700, on a local filesystem.
-// It never changes the mode or owner of a directory that fails the check.
+// ensureMCPSocketDir creates dir 0700 and accepts it only as checkMCPSocketDir
+// allows. It never changes the mode or owner of a directory that fails.
 func ensureMCPSocketDir(dir string) error {
+	if err := checkMCPDataDir(filepath.Dir(dir)); err != nil {
+		return err
+	}
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	return checkMCPSocketDir(dir)
+}
+
+// checkMCPDataDir refuses a data directory other users can write to: they
+// could swap the run directory out from under the socket.
+func checkMCPDataDir(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is writable by group or others (mode %v)", dir, fi.Mode().Perm())
+	}
+	return nil
+}
+
+// checkMCPSocketDir accepts dir only as a real directory owned by this user
+// with mode exactly 0700, inside a data directory only this user can write,
+// on a local filesystem. It changes nothing.
+func checkMCPSocketDir(dir string) error {
+	if err := checkMCPDataDir(filepath.Dir(dir)); err != nil {
+		return err
 	}
 	fi, err := os.Lstat(dir)
 	if err != nil {
@@ -210,4 +238,25 @@ func (e *mcpSocketEndpoint) sweepStaleTemps() {
 			_ = os.Remove(path)
 		}
 	}
+}
+
+// mcpBridgeCheckSocket runs before every dial the bridge makes: the socket's
+// directory must pass checkMCPSocketDir, and the socket, if present, must be
+// a socket owned by this user. A missing socket (the daemon restarting) is
+// errMCPSocketMissing, worth waiting for; anything else refuses.
+func mcpBridgeCheckSocket(path string) error {
+	if err := checkMCPSocketDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return errMCPSocketMissing
+	}
+	if err != nil {
+		return err
+	}
+	if !isOwnSocket(fi) {
+		return fmt.Errorf("%s is not a socket owned by uid %d", path, mcpSocketEUID())
+	}
+	return nil
 }

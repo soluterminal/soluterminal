@@ -115,6 +115,7 @@ func TestClaudeMcpDesiredURL(t *testing.T) {
 }
 
 func TestRegisterClaudeMcpDirect(t *testing.T) {
+	useMCPRegistration(t, "", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, ".claude.json")

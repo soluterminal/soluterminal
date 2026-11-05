@@ -167,6 +167,12 @@ func TestQuotaWorkerPolicySettingsMigrationAndPatch(t *testing.T) {
 	if s.MaxRunning != 3 || s.FinishAfterMinutes != 8 || s.WorkerLeadReservePct != 15 || s.WorkerExpectedRunMinutes != 45 || s.WorkerAccounts != "active" {
 		t.Fatalf("migration lost defaults/settings: %+v", s)
 	}
+	if s.WorkerMergedGraceMinutes != 10 {
+		t.Fatalf("merged-close grace default lost: %+v", s)
+	}
+	if shorter := (workerSettings{WorkerMergedGraceMinutes: 5}); !shorter.widens(workerSettings{WorkerMergedGraceMinutes: 10}) {
+		t.Fatal("a shorter merged-close grace must need the person")
+	}
 	reserve, minutes := 0, 90
 	changed, ok := (workerSettingsPatch{WorkerLeadReservePct: &reserve, WorkerExpectedRunMinutes: &minutes}).apply(s)
 	if !ok || !changed.valid() || changed.MaxRunning != 3 || changed.FinishAfterMinutes != 8 || changed.WorkerLeadReservePct != 0 || changed.WorkerExpectedRunMinutes != 90 {

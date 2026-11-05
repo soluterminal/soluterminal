@@ -145,6 +145,9 @@ type uiEvent struct {
 	Policy    string `json:"policy,omitempty"`
 	FromPct5h int    `json:"fromPct5h,omitempty"`
 	Trigger   string `json:"trigger,omitempty"`
+
+	// Lease is set on "alerts-handler" events only (notifications_handler.go).
+	Lease *alertsLeaseEvent `json:"lease,omitempty"`
 }
 
 func newUIBus() *uiBus {

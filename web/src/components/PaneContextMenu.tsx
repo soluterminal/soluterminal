@@ -297,7 +297,7 @@ export function PaneContextMenu({
             title="A long-lived role pane (security, CMO…). Shown with the lead pill; never closed automatically">Make lead…</button>}
           {kind === 'lead' && <button role="menuitem" onClick={() => onSetTeamKind('lead')} title="Change this lead's role name">Rename lead role…</button>}
           {agentStarted && kind !== 'worker' && <button role="menuitem" onClick={() => onSetTeamKind('worker')}
-            title="A task for its lead: archived automatically once finished, read by its lead, and committed and pushed">Make worker</button>}
+            title="A task for its lead: archived automatically once finished, read by its lead, and committed and pushed, or once its work has merged">Make worker</button>}
           {!agentStarted && kind === 'lead' && <button role="menuitem" onClick={() => onSetTeamKind('none')}
             title="Back to a plain pane of yours">Remove lead</button>}
         </>;

@@ -3,6 +3,8 @@
 export const SITE_PRIVACY_URL = 'https://soluterminal.com/privacy/';
 // The help pages, opened from the top-bar "?" menu.
 export const SITE_HELP_URL = 'https://soluterminal.com/help/';
+// The recovery steps for a person who lost every approved browser or app.
+export const SITE_HELP_LOST_DEVICES_URL = 'https://soluterminal.com/help/fix-a-problem/#lost-devices';
 // The download page: installer, checksum and install steps. Download links
 // in the app point here rather than at a release host.
 export const SITE_DOWNLOAD_URL = 'https://soluterminal.com/download/';

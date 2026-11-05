@@ -148,6 +148,9 @@ func legacyAgentRegistrationPresent() bool {
 	if url, _, _ := currentClaudeMcpURL(); strings.TrimSpace(url) != "" {
 		return true
 	}
+	if _, data, ok := readClaudeConfig(); ok && claudeEntryIsOurBridge(data) {
+		return true
+	}
 	if cfgPath, err := codexConfigPath(); err == nil {
 		if body, err := os.ReadFile(cfgPath); err == nil && codexConfigMcpURL(string(body), "soluterminal") != "" {
 			return true

@@ -9,11 +9,16 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type apiServer struct {
-	uiPrefs *uiPrefsStore
+	runServiceCommand  func(...string) (string, error)
+	serviceRestartGate *atomic.Bool
+	stopService        func()
+	inspectService     func() (serviceRestartProof, error)
+	uiPrefs            *uiPrefsStore
 	// queuedAsks keeps a timed-out queued ask_pane's baseline for the
 	// caller's wait_for_pane (mcp_collab_ask.go).
 	queuedAsks queuedAskBaselines
@@ -193,6 +198,10 @@ type apiServer struct {
 	trustedDevices *trustedDevices
 	// humanProof: device proof for untraceable callers (human_proof.go).
 	humanProof *humanProof
+	// alertsLeaseV: who handles Code alerts instead of FCM, made on first
+	// use (notifications_handler.go alertsLease).
+	alertsLeaseOnce sync.Once
+	alertsLeaseV    *alertsLeaseStore
 	// noticeMu serialises approving and removing devices with acknowledging
 	// approval notices, so an acknowledgement never sees a notice whose
 	// approval is still under way (human_proof.go acknowledgeNoticesAs).
@@ -436,6 +445,13 @@ func (a *apiServer) getPusher() *Pusher {
 	return a.pusher
 }
 
+// apiHandler wraps the routes for every transport (local, relay, private
+// channel): team features gated, and a view-only caller refused every change
+// (forwardedViewOnly).
+func (a *apiServer) apiHandler(mux http.Handler) http.Handler {
+	return a.forwardedViewOnly(a.teamFeatureGate(mux))
+}
+
 func (a *apiServer) routes(mux *http.ServeMux) {
 
 	a.registerHarnessRoutes(mux)
@@ -472,6 +488,8 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 		a.jevBridge.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("GET /api/health", a.health)
+	mux.HandleFunc("GET /api/service/restart", a.serviceCapability)
+	mux.HandleFunc("POST /api/service/restart", a.restartService)
 
 	mux.HandleFunc("GET /api/system/status", a.systemStatus)
 	mux.HandleFunc("GET /api/system/activity", a.systemActivity)
@@ -792,6 +810,12 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/remote-devices/{id}/approve", a.handleApproveRemoteDevice)
 	mux.HandleFunc("DELETE /api/remote-devices/{id}", a.handleRemoveRemoteDevice)
 	mux.HandleFunc("PUT /api/remote-devices/policy", a.handlePutRemoteAccessPolicy)
+	// Notifications handler (notifications_handler.go): an approved device
+	// takes over Code alerts; GET is open locally, PUT needs an approved
+	// device, DELETE the holder or the person at this computer.
+	mux.HandleFunc("GET /api/notifications/handler", a.handleGetNotificationsHandler)
+	mux.HandleFunc("PUT /api/notifications/handler", a.handlePutNotificationsHandler)
+	mux.HandleFunc("DELETE /api/notifications/handler", a.handleDeleteNotificationsHandler)
 	mux.HandleFunc("GET /api/human-proof", a.handleGetHumanProof)
 	mux.HandleFunc("PUT /api/human-proof", a.handlePutHumanProof)
 	mux.HandleFunc("POST /api/human-proof/bootstrap", a.handleBootstrapHumanProof)
@@ -1014,6 +1038,9 @@ func (a *apiServer) liveHealthIdentity() map[string]any {
 		"version":   a.ver,
 		"pid":       os.Getpid(),
 		"backendID": a.backendID,
+	}
+	if identity := a.serviceDaemonIdentity(); identity != "" {
+		body["daemonIdentity"] = identity
 	}
 	// A rollback hold naming the bundled version makes an older daemon
 	// intentional rather than stale to the Windows shell.
@@ -1779,6 +1806,11 @@ func createPaneOrigin(req createPaneReq, workspace string, now time.Time) (*Pane
 }
 
 func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
+	// Opening a pane runs a command: the REST route is the person's, like
+	// the app's other pane changes. Agents use spawn_pane.
+	if !a.requireHuman(w, r, "open a pane", "spawn_pane") {
+		return
+	}
 	var req createPaneReq
 	// Cap decode memory at 1MB; oversize folds into the same "invalid json" 400
 	// that the global 32MB request-body middleware already yields.
@@ -2157,8 +2189,12 @@ func (a *apiServer) setPaneAutoMode(w http.ResponseWriter, r *http.Request) {
 	}
 	// Turning auto-approve on lets the pane's prompts be answered without the
 	// person; turning it off is open to anyone.
-	if req.AutoMode != "" && !a.requireHumanOrDelegated(w, r, "turn on auto-approve") {
-		return
+	note := func(string) {}
+	if req.AutoMode != "" {
+		var ok bool
+		if note, ok = a.admitPromptAnswer(w, r, p, "turn on auto-approve"); !ok {
+			return
+		}
 	}
 	if !a.acquirePaneSettings(w, p) {
 		return
@@ -2177,6 +2213,7 @@ func (a *apiServer) setPaneAutoMode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	note("")
 	if prev.AutoMode != req.AutoMode && a.aria != nil {
 		a.aria.resetAutoModeEvaluation(p)
 	}

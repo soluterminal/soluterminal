@@ -232,7 +232,7 @@ func waitComposer(p *Pane, codex bool, body string, want bool, timeout time.Dura
 func waitPutBackGone(p *Pane, msg *unsentPaneMessage, timeout time.Duration) (shown, known bool) {
 	deadline := time.Now().Add(timeout)
 	for {
-		shown, known = putBackShown(deliveryScreenText(p), !msg.claude, msg.body)
+		shown, known = msg.shownInBox(deliveryScreenText(p))
 		if !known || !shown || !time.Now().Before(deadline) {
 			return shown, known
 		}
@@ -342,7 +342,7 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 	// current screen after acquiring the delivery lock, before typing anything.
 	// The pane state confirms the menu is live: an answered menu can stay on
 	// screen, and computeState tracks which ones were answered.
-	if isGridChoicePromptText(deliveryScreenText(p), !hasClaude) && deliveryMenuLive(p) {
+	if isGridChoicePromptText(deliveryMenuText(p, !hasClaude), !hasClaude) && deliveryMenuLive(p) {
 		return 0, "", errDeliveryChoicePrompt
 	}
 	body = strings.TrimRight(body, "\r\n")
@@ -370,7 +370,14 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 	var rev uint64
 	keyWrite := p.Write
 	if check == draftBoxOnly || check == draftBoxAndTyping {
+		// An agent's message never goes into a menu, nor its Enter: keys
+		// there answer it. Read under the writer lock with each write, a
+		// dialog still drawn after its first answer included.
+		menuTakesKeys := func() bool { return mode == deliveryNoSteer && promptTakesKeys(p) }
 		wrote, err = p.writeWithPrecondition(first, true, false, func() error {
+			if menuTakesKeys() {
+				return errDeliveryChoicePrompt
+			}
 			if p.draftGuardReason(codex, check == draftBoxAndTyping, time.Now(), p.promptRec.humanDraft) != "" {
 				return errDraftGuardHeld
 			}
@@ -378,7 +385,7 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 			p.agentDeliveryWrite = true
 			return nil
 		})
-		if errors.Is(err, errDraftGuardHeld) {
+		if errors.Is(err, errDraftGuardHeld) || errors.Is(err, errDeliveryChoicePrompt) {
 			return 0, "", err
 		}
 		keyWrite = func(key []byte) (int, error) {
@@ -387,6 +394,9 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 			return p.writeWithPrecondition(key, true, false, func() error {
 				if p.inputRevision.Load() != want {
 					return errDraftGuardTypedAfterPaste
+				}
+				if menuTakesKeys() {
+					return errDeliveryChoicePrompt
 				}
 				p.agentDeliveryWrite = true
 				return nil
@@ -421,6 +431,12 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 	wrote += n
 	if errors.Is(err, errDraftGuardTypedAfterPaste) {
 		revision = rev
+		return wrote, deliveryLeftInComposer, nil
+	}
+	if errors.Is(err, errDeliveryChoicePrompt) {
+		// A menu opened over the pasted message: no Enter. It waits in the
+		// box for the person; nothing was typed since the paste.
+		revision = p.inputRevision.Load()
 		return wrote, deliveryLeftInComposer, nil
 	}
 	if err != nil {
@@ -527,7 +543,7 @@ func (p *Pane) stopAfterPaste(stop error, seen bool, sender, body string, claude
 // menuBeforeKey reports a live choice menu on screen just before a submit
 // key is written.
 func menuBeforeKey(p *Pane, codex bool) bool {
-	return isGridChoicePromptText(deliveryScreenText(p), codex) && deliveryMenuLive(p)
+	return isGridChoicePromptText(deliveryMenuText(p, codex), codex) && deliveryMenuLive(p)
 }
 
 // deliverySubmitKey is Enter, or the queue key for a Codex pane whose footer
@@ -571,6 +587,12 @@ func (p *Pane) leftComposerOutcome(codex, queue bool, body string, senders ...st
 // usually because the person stopped the turn: Send and Clear are theirs.
 func (p *Pane) recordPutBackMessage(sender, body string, claude bool, revision uint64) {
 	p.mu.Lock()
+	if cur := p.unsentMessage; cur != nil && cur.clearPending && cur.connection == p.agentConn {
+		// A delayed queue watch cannot replace a partly-cleared receipt
+		// and thereby release the guard on even a one-character remnant.
+		p.mu.Unlock()
+		return
+	}
 	p.unsentMessage = &unsentPaneMessage{ID: fmt.Sprintf("%d", time.Now().UnixNano()), Sender: sender, PutBack: true, body: body, claude: claude, revision: revision, connection: p.agentConn}
 	start := !p.putBackWatching
 	p.putBackWatching = true
@@ -630,14 +652,14 @@ func (p *Pane) watchQueuedMessage(body, by string, codex bool) {
 		}
 		screen := deliveryScreenText(p)
 		// An approval modal covers the queue and the input box.
-		if agentQueueHolds(screen, codex, body) || isGridChoicePromptText(screen, codex) {
+		if agentQueueHolds(screen, codex, body) || isGridChoicePromptText(deliveryMenuText(p, codex), codex) {
 			continue
 		}
 		p.deliveryMu.Lock()
 		screen = deliveryScreenText(p)
 		holds, known := composerHolds(screen, codex, body)
 		switch {
-		case agentQueueHolds(screen, codex, body) || isGridChoicePromptText(screen, codex) || !known:
+		case agentQueueHolds(screen, codex, body) || isGridChoicePromptText(deliveryMenuText(p, codex), codex) || !known:
 			p.deliveryMu.Unlock()
 			continue
 		case holds:

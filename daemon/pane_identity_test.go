@@ -121,7 +121,7 @@ func TestPaneRefsAcceptHandles(t *testing.T) {
 		}
 	}
 	// Every pane tool sees the id: the transport rewrites pane_id first.
-	res := a.mcpCallToolTransport(json.RawMessage(`{"name":"get_pane_state","arguments":{"pane_id":"@api-fix"}}`), nil, "lead")
+	res := a.mcpCallToolTransport(json.RawMessage(`{"name":"get_pane_state","arguments":{"pane_id":"@api-fix"}}`), nil, "lead", mcpMetaFromCallerPane("lead"))
 	if text, failed := mcpResultText(t, res); failed || strings.Contains(text, "no pane") {
 		t.Fatalf("get_pane_state by handle: %q", text)
 	}

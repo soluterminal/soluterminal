@@ -426,11 +426,14 @@ func TestShinoqueDiscoveryRejectsSoludListener(t *testing.T) {
 			port := listener.Addr().(*net.TCPAddr).Port
 			writeShinoqueDiscovery(t, path, home, port)
 			tokens := &shinoqueTokenCache{}
+			clock := time.Now()
+			tokens.discovery.now = func() time.Time { return clock }
 			if _, ok := tokens.discovery.resolve(); !ok {
 				t.Fatal("ordinary listener rejected")
 			}
 			// Inherit a real listening socket into a process named solud. The
-			// discovery is already cached: listener ownership must be rechecked.
+			// socket inode is unchanged, so the cached verdict covers it until
+			// it expires (the documented residual); then ownership is rechecked.
 			sleep, err := exec.LookPath("sleep")
 			if err != nil {
 				t.Fatal(err)
@@ -457,6 +460,10 @@ func TestShinoqueDiscoveryRejectsSoludListener(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond)
 			}
+			if _, ok := tokens.discovery.resolve(); !ok {
+				t.Fatalf("verdict expired early: %q", tokens.discovery.rejection)
+			}
+			clock = clock.Add(shinoqueSoludVerdictTTL)
 			if _, ok := tokens.discovery.resolve(); ok || tokens.discovery.rejection != "discovery port belongs to solud" {
 				t.Fatalf("solud listener accepted: %q", tokens.discovery.rejection)
 			}

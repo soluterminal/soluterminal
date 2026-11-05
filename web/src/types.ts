@@ -93,6 +93,7 @@ export interface WorkerSettings {
   workerExpectedRunMinutes: number;
   workerAutoArchive: boolean;
   workerAccounts: 'active' | 'saved' | 'team';
+  workerMergedGraceMinutes?: number;
 }
 
 export interface PaneOrigin {

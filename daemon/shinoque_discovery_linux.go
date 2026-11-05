@@ -10,14 +10,20 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
 const shinoqueDiscoveryLimit = 4096
+
+// A "not solud" verdict is reused for this long while the port, its listening
+// socket inodes and the discovery generation are unchanged.
+const shinoqueSoludVerdictTTL = 2 * time.Second
 
 func shinoqueDiscoveryPath() string {
 	state := os.Getenv("XDG_STATE_HOME")
@@ -48,22 +54,53 @@ func shinoqueDiscoveryMetadata(info os.FileInfo) (uint64, string) {
 	return stat.Ino, ""
 }
 
-func shinoqueDiscoveryHome(home string) string {
+func shinoqueFileIdentityOf(info os.FileInfo) shinoqueFileIdentity {
+	identity := shinoqueFileIdentity{mtime: info.ModTime().UnixNano(), size: info.Size()}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		identity.dev, identity.ino = stat.Dev, stat.Ino
+	}
+	return identity
+}
+
+func shinoqueDiscoveryHome(home string) (shinoqueFileIdentity, string) {
 	if !filepath.IsAbs(home) {
-		return "home must be absolute"
+		return shinoqueFileIdentity{}, "home must be absolute"
 	}
 	info, err := os.Stat(home)
 	if err != nil {
-		return "home is unavailable"
+		return shinoqueFileIdentity{}, "home is unavailable"
 	}
 	if !info.IsDir() {
-		return "home is not a directory"
+		return shinoqueFileIdentity{}, "home is not a directory"
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) {
-		return "home is not owned by this uid"
+		return shinoqueFileIdentity{}, "home is not owned by this uid"
 	}
-	return ""
+	// The directory's mtime changes whenever Shinoque writes inside it, so
+	// only a different directory counts as a home change.
+	return shinoqueFileIdentity{dev: stat.Dev, ino: stat.Ino}, ""
+}
+
+// checkHome validates home on every request and invalidates the solud verdict
+// when the directory at that path is replaced.
+func (c *shinoqueDiscoveryCache) checkHome(home string) string {
+	identity, reason := shinoqueDiscoveryHome(home)
+	if reason == "" && identity != c.homeID {
+		c.homeID = identity
+		c.invalidate()
+	}
+	return reason
+}
+
+// forget drops the parsed discovery. Only losing a loaded file invalidates
+// the solud verdict: a file that stays missing or invalid must not force a
+// /proc scan on every request for the default source.
+func (c *shinoqueDiscoveryCache) forget() {
+	if c.path != "" {
+		c.invalidate()
+	}
+	c.path, c.content, c.config = "", nil, shinoqueRelayConfig{}
 }
 
 // Lstat and home validation run on every request. Open without following links
@@ -71,35 +108,119 @@ func shinoqueDiscoveryHome(home string) string {
 func (c *shinoqueDiscoveryCache) discover() (shinoqueRelayConfig, bool, string) {
 	config, found, reason := c.readDiscovery()
 	if reason != "" {
-		c.path, c.content, c.config = "", nil, shinoqueRelayConfig{}
-	}
-	if found && reason == "" && shinoqueSoludListening(config.port) {
-		return shinoqueRelayConfig{}, true, "discovery port belongs to solud"
+		c.forget()
 	}
 	return config, found, reason
 }
 
-// Defense in depth for Linux-visible listeners, checked even on cache hits.
-// Inspect only solud descriptors, without HTTP probes or sending the token.
-// WSL cannot see native Windows listeners here; stripping browser authority
-// headers in the proxy remains necessary on every platform and destination.
-func shinoqueSoludListening(port string) bool {
+// Defense in depth for Linux-visible listeners: the relay must never forward
+// to a solud, which would treat the relayed request as a local caller. The
+// LISTEN socket inodes are read on every request, cache hits included; the
+// process scan behind them runs only when they change, when discovery is
+// invalidated, or after shinoqueSoludVerdictTTL. Inspect only solud
+// descriptors, without HTTP probes or sending the token. WSL cannot see native
+// Windows listeners here; stripping browser authority headers in the proxy
+// remains necessary on every platform and destination.
+//
+// A port takeover binds a new listening socket, so its inode changes and the
+// next request rescans before forwarding. Residual: the same listening socket
+// handed to a solud (inherited across fork and exec, or sent with SCM_RIGHTS)
+// keeps its inode, so a cached verdict covers it until the TTL expires. Only
+// the listener's own same-uid owner can do that, and such a process could
+// already forward the port to solud; header stripping covers that case.
+func (c *shinoqueDiscoveryCache) soludRejection(port string, generation uint64, tables *shinoqueProcTables) string {
+	sockets := shinoqueListenSockets(port, tables)
+	if len(sockets) == 0 {
+		// Nothing to scan; the per-request listener check refuses the port.
+		return ""
+	}
+	names := make([]string, 0, len(sockets))
+	for name := range sockets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	key := port + "|" + strings.Join(names, ",")
+	now := time.Now
+	if c.now != nil {
+		now = c.now
+	}
+	started := now()
+	v := &c.solud
+	v.mu.Lock()
+	if v.key == key && v.generation == generation && started.Before(v.expires) {
+		v.mu.Unlock()
+		return ""
+	}
+	// Concurrent requests for the same sockets share one scan, whatever their
+	// generation, so a burst of failing requests runs one scan at a time; none
+	// forwards before it completes. A waiter joins only a scan of the socket set
+	// it read itself, so a takeover (new inode) always gets its own scan. The
+	// result is cached under the starter's generation only: a newer generation
+	// rescans on its next request.
+	flight := key
+	// After waiting for or running a scan, the snapshot is stale.
+	defer tables.reset()
+	if scan := v.inflight[flight]; scan != nil {
+		v.mu.Unlock()
+		<-scan.done
+		return scan.reason
+	}
+	// Until the scan completes, the result is a refusal: a panicking scanner
+	// releases its waiters with a refusal and caches nothing.
+	scan := &shinoqueSoludScan{done: make(chan struct{}), reason: "cannot scan for solud listeners"}
+	if v.inflight == nil {
+		v.inflight = make(map[string]*shinoqueSoludScan)
+	}
+	v.inflight[flight] = scan
+	v.mu.Unlock()
+	defer func() {
+		v.mu.Lock()
+		delete(v.inflight, flight)
+		// Only "not solud" is cached; refusals and scan errors rescan next time.
+		if scan.reason == "" {
+			v.key, v.generation, v.expires = key, generation, started.Add(shinoqueSoludVerdictTTL)
+		}
+		v.mu.Unlock()
+		close(scan.done)
+	}()
+	scanSolud := shinoqueSoludHolds
+	if c.scanSolud != nil {
+		scanSolud = c.scanSolud
+	}
+	if holds, err := scanSolud(sockets); err == nil {
+		scan.reason = ""
+		if holds {
+			scan.reason = "discovery port belongs to solud"
+		}
+	}
+	return scan.reason
+}
+
+// shinoqueListenSockets returns the fd link names of LISTEN sockets on port.
+func shinoqueListenSockets(port string, tables *shinoqueProcTables) map[string]bool {
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
-		return false
+		return nil
+	}
+	var entries []tcpEntry
+	for _, table := range []struct{ path, proto string }{{"/proc/net/tcp", "tcp"}, {"/proc/net/tcp6", "tcp6"}} {
+		if data, err := tables.read(table.path); err == nil {
+			entries = append(entries, parseProcNetTCPFrom(bytes.NewReader(data), table.proto)...)
+		}
 	}
 	sockets := make(map[string]bool)
-	for _, entry := range append(parseProcNetTCP("/proc/net/tcp", "tcp"), parseProcNetTCP("/proc/net/tcp6", "tcp6")...) {
+	for _, entry := range entries {
 		if entry.port == uint16(n) {
 			sockets["socket:["+strconv.FormatUint(entry.inode, 10)+"]"] = true
 		}
 	}
-	if len(sockets) == 0 {
-		return false
-	}
+	return sockets
+}
+
+func shinoqueSoludHolds(sockets map[string]bool) (bool, error) {
 	processes, err := os.ReadDir("/proc")
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, process := range processes {
 		pid, err := strconv.Atoi(process.Name())
@@ -118,17 +239,23 @@ func shinoqueSoludListening(port string) bool {
 		for _, fd := range fds {
 			target, err := os.Readlink(filepath.Join(dir, fd.Name()))
 			if err == nil && sockets[target] {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 // Check both tables on every relay request. Only a missing tcp6 table (IPv6
 // disabled at boot) is optional; other missing or malformed proc data refuses.
 func shinoqueLocalListenerAllowed(port string) bool {
-	reason := shinoqueLocalListenerRejection(port, os.Getuid(), os.ReadFile)
+	return shinoqueLocalListenerAllowedFrom(port, nil)
+}
+
+// shinoqueLocalListenerAllowedFrom checks the request's table snapshot, the
+// same one its solud verdict key came from.
+func shinoqueLocalListenerAllowedFrom(port string, tables *shinoqueProcTables) bool {
+	reason := shinoqueLocalListenerRejection(port, os.Getuid(), tables.read)
 	if reason != "" {
 		log.Printf("shinoque relay: listener check refused port=%q: %s", port, reason)
 	}
@@ -240,7 +367,7 @@ func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, str
 	}
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		c.path, c.content, c.config = "", nil, shinoqueRelayConfig{}
+		c.forget()
 		return shinoqueRelayConfig{}, false, ""
 	}
 	if err != nil {
@@ -282,8 +409,13 @@ func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, str
 	}
 	// Reuse parsed discovery only after reading and validating the current file.
 	// Different contents can share the same inode, size and mtime.
+	identity := shinoqueFileIdentityOf(after)
 	if c.path == path && bytes.Equal(c.content, content) {
-		return c.config, true, shinoqueDiscoveryHome(c.config.home)
+		if identity != c.identity {
+			c.identity = identity
+			c.invalidate()
+		}
+		return c.config, true, c.checkHome(c.config.home)
 	}
 	record, err := parseShinoqueDiscovery(content)
 	if err != nil {
@@ -295,11 +427,12 @@ func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, str
 	if record.Port < 1 || record.Port > 65535 {
 		return fail("discovery port must be from 1 to 65535")
 	}
-	if reason := shinoqueDiscoveryHome(record.Home); reason != "" {
+	if reason := c.checkHome(record.Home); reason != "" {
 		return fail(reason)
 	}
 	config := shinoqueRelayConfig{port: strconv.Itoa(record.Port), home: record.Home, relayAuth: record.RelayAuth, privateDeviceProof: record.PrivateDeviceProof}
-	c.path, c.content, c.config = path, content, config
+	c.path, c.identity, c.content, c.config = path, identity, content, config
+	c.invalidate()
 	return config, true, ""
 }
 

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,47 @@ func startSleeper(t *testing.T, env ...string) *exec.Cmd {
 		}
 	}
 	return cmd
+}
+
+// startDetachedSleeper runs a sleeper the way a detached pane job runs: its
+// launching shell exits at once, so it is re-parented away from this process
+// (which plays the daemon) and is no daemon descendant. Its environment holds
+// only env and PATH.
+func startDetachedSleeper(t *testing.T, env ...string) int {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("process-tree fixtures use sleep")
+	}
+	args := append([]string{"PATH=" + os.Getenv("PATH")}, env...)
+	cmd := exec.Command("sh", "-c", `env -i "$@" sleep 30 >/dev/null 2>&1 & echo $!`, "sh")
+	cmd.Args = append(cmd.Args, args...)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("start detached sleeper: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("detached sleeper pid %q: %v", out, err)
+	}
+	t.Cleanup(func() {
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+		}
+	})
+	for _, kv := range env {
+		key, want, _ := strings.Cut(kv, "=")
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if got, ok := readProcEnviron(pid); ok && got[key] == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("detached fixture environment never showed %s", key)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	return pid
 }
 
 func TestIdentifyCallerRelayIsHuman(t *testing.T) {
@@ -132,8 +174,10 @@ func TestIdentifyCallerDetachedPaneProcessKeepsPaneEnv(t *testing.T) {
 		t.Skip("needs /proc")
 	}
 	a := authorityTestServer(t)
-	cmd := startSleeper(t, "SOLU_PANE_ID=p-escaped")
-	stubPeerPID(t, cmd.Process.Pid, true)
+	// Detached (re-parented away from the daemon): a process the daemon
+	// started is its worker whatever its environment says (ST-10 A2).
+	pid := startDetachedSleeper(t, "SOLU_PANE_ID=p-escaped")
+	stubPeerPID(t, pid, true)
 	got := a.identifyCaller(httptest.NewRequest("POST", "/", nil))
 	if got.Kind != callerPane || got.PaneID != "p-escaped" {
 		t.Fatalf("process carrying SOLU_PANE_ID = %+v, want pane p-escaped", got)
@@ -147,23 +191,36 @@ func TestIdentifyCallerCleanEnvChildOfPaneProcess(t *testing.T) {
 		t.Skip("needs /proc")
 	}
 	a := authorityTestServer(t)
-	cmd := exec.Command("sh", "-c", "env -i sleep 30 & echo $!; wait")
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "SOLU_PANE_ID=p-launcher"}
-	out, err := cmd.StdoutPipe()
-	if err != nil {
+	// The launcher carries the pane's SOLU_PANE_ID and is detached:
+	// re-parented away from this process (the daemon), as a real detached
+	// pane job is. Its clean-env child is placed by the launcher's
+	// environment. A launcher the daemon started would be its worker
+	// (ST-10 A2).
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	script := `env -i PATH="$PATH" SOLU_PANE_ID=p-launcher sh -c 'env -i sleep 30 & echo $! > "$1"; wait' sh "$1" >/dev/null 2>&1 &`
+	if err := exec.Command("sh", "-c", script, "sh", pidFile).Run(); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	var childPID int
-	if _, err := fmt.Fscan(out, &childPID); err != nil {
-		t.Fatalf("read child pid: %v", err)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && n > 0 {
+				childPID = n
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("detached launcher never reported its child")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	launcher := readPpid(childPID)
 	t.Cleanup(func() {
-		if p, err := os.FindProcess(childPID); err == nil {
-			_ = p.Kill()
+		for _, pid := range []int{childPID, launcher} {
+			if p, err := os.FindProcess(pid); err == nil && pid > 1 {
+				_ = p.Kill()
+			}
 		}
 	})
 	stubPeerPID(t, childPID, true)
@@ -366,9 +423,16 @@ func TestPromptInputGate(t *testing.T) {
 	if a.promptInputGate(req)(target) {
 		t.Fatal("a worker could type into a permission prompt")
 	}
-	stubPeerPID(t, 0, false) // untraceable: never drop the person's keys
+	// Untraceable with no browser headers is a program, held in every mode;
+	// with them it is the person's own untraceable desktop, not held (until
+	// approved devices are required).
+	stubPeerPID(t, 0, false)
+	if a.promptInputGate(req)(target) {
+		t.Fatal("an untraceable program could type into a permission prompt")
+	}
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	if !a.promptInputGate(req)(target) {
-		t.Fatal("an untraceable caller was held back")
+		t.Fatal("the person's untraceable desktop was held back")
 	}
 }
 

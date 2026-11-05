@@ -13,7 +13,8 @@ export const CHECKIN_HINT =
 export const USAGE_LABEL = 'Share usage statistics';
 export const USAGE_HINT =
   'For each Claude Code or Codex turn: model, tokens, project folder, git remote and branch. ' +
-  'Only while signed in. Turns from before you switch this on are never sent.';
+  'Sent while this computer is connected to your account, even after you sign out. ' +
+  'Turning this on or connecting can also send earlier turns still on this computer.';
 export const CRASH_LABEL = 'Send crash reports';
 export const CRASH_HINT =
   "When SoluTerminal's background service hits an error: the error and where in our code it " +

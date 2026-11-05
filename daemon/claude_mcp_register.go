@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/url"
@@ -201,9 +202,43 @@ func ensureClaudeMcpRegistration(listenAddr string) {
 	}
 	claudeMcpRegMu.Lock()
 	defer claudeMcpRegMu.Unlock()
+	desired := claudeMcpDesiredURL(listenAddr)
+	// A stdio entry is decided here, never by the URL policy below (which
+	// reads it as missing and would overwrite it): a bridge entry of ours
+	// that this daemon can't serve goes back to HTTP; a live one, or one
+	// someone else wrote, stays.
+	if path, _, ok := readClaudeConfig(); ok {
+		handled, outcome := false, ""
+		changed, err := updateClaudeConfig(path, func(data []byte) ([]byte, bool, error) {
+			handled, outcome = false, ""
+			next, isStdio, change, err := claudePlanBridgeEntry(data, desired)
+			if err != nil {
+				return nil, false, nil // unparseable: the URL policy decides
+			}
+			if isStdio {
+				handled, outcome = true, "turned a bridge entry this daemon can't serve back into "+desired
+				return next, change, nil
+			}
+			// Our own HTTP entry moves to the bridge when this daemon serves
+			// the socket (Claude only; Codex follows in a later release).
+			next, change, err = claudePlanBridgeMigration(data, desired)
+			if change {
+				handled, outcome = true, "moved the soluterminal entry from "+desired+" to the MCP bridge (new Claude sessions use it; SOLU_MCP_BRIDGE_REGISTER=0 moves it back)"
+			}
+			return next, change, err
+		})
+		switch {
+		case err != nil:
+			log.Printf("claude-mcp: %v", err)
+		case changed:
+			log.Printf("claude-mcp: %s", outcome)
+		}
+		if handled {
+			return
+		}
+	}
 	existing, hasPaneHeader, haveCfg := currentClaudeMcpURL()
 	action := claudeMcpAction(existing)
-	desired := claudeMcpDesiredURL(listenAddr)
 	headerUpgrade := claudeMcpNeedsHeaderUpgrade(action, existing, desired, hasPaneHeader)
 	if headerUpgrade {
 		action = "fix"
@@ -263,47 +298,39 @@ func ensureClaudeMcpRegistration(listenAddr string) {
 // A parse failure aborts rather than overwriting a file we couldn't read; the
 // CLI path (which owns the schema) heals it on a later boot.
 func registerClaudeMcpDirect(desired, action, existing string, headerUpgrade bool, reason string) {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	path, _, ok := readClaudeConfig()
+	if !ok {
 		return
 	}
-	path := filepath.Join(home, ".claude.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Printf("claude-mcp: could not parse %s: %v (not overwriting)", path, err)
-		return
-	}
-	if cfg == nil {
-		cfg = map[string]any{}
-	}
-	servers, _ := cfg["mcpServers"].(map[string]any)
-	if servers == nil {
-		servers = map[string]any{}
-		cfg["mcpServers"] = servers
-	}
-	servers["soluterminal"] = map[string]any{
-		"type": "http",
-		"url":  desired,
-		"headers": map[string]any{
-			claudeMcpPaneHeaderName: claudeMcpPaneHeaderValue,
-		},
-	}
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := path + ".solu-tmp"
-	if err := os.WriteFile(tmp, out, 0600); err != nil {
-		log.Printf("claude-mcp: could not write %s: %v", tmp, err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		log.Printf("claude-mcp: could not replace %s: %v", path, err)
+	// Only our member changes; every other byte of the file stays.
+	if _, err := updateClaudeConfig(path, func(data []byte) ([]byte, bool, error) {
+		if err := validateJSONObject(data); err != nil {
+			return nil, false, fmt.Errorf("could not parse %s: %w (not overwriting)", path, err)
+		}
+		// The caller decided from an earlier read. If the entry now holds a
+		// URL other than the one it saw (another program changed it
+		// meanwhile), write nothing; the next start decides again. A missing
+		// entry is still ours to write: the CLI path may have just removed
+		// it before its add failed, and a missing entry is always added.
+		var seen struct {
+			McpServers map[string]struct {
+				URL     string `json:"url"`
+				Command string `json:"command"`
+			} `json:"mcpServers"`
+		}
+		_ = json.Unmarshal(data, &seen)
+		cur, present := seen.McpServers["soluterminal"]
+		if present && ((cur.URL != existing && cur.URL != "") || (cur.URL == "" && cur.Command != "")) {
+			// Another URL, or a stdio entry that appeared meanwhile.
+			return nil, false, nil
+		}
+		next, err := jsonSetNestedMember(data, "mcpServers", "soluterminal", claudeHTTPEntryJSON(desired))
+		if err != nil {
+			return nil, false, fmt.Errorf("could not edit %s: %w (not overwriting)", path, err)
+		}
+		return next, true, nil
+	}); err != nil {
+		log.Printf("claude-mcp: %v", err)
 		return
 	}
 	switch action {
@@ -316,4 +343,18 @@ func registerClaudeMcpDirect(desired, action, existing string, headerUpgrade boo
 	default:
 		log.Printf("claude-mcp: registered soluterminal MCP server at %s (direct write; %s)", desired, reason)
 	}
+}
+
+// readClaudeConfig reads ~/.claude.json; ok is false when it doesn't exist.
+func readClaudeConfig() (string, []byte, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", nil, false
+	}
+	path := filepath.Join(home, ".claude.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", nil, false
+	}
+	return path, data, true
 }

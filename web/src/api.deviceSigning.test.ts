@@ -101,6 +101,26 @@ describe('approved-device request signing', () => {
     expect(signDeviceRequest).not.toHaveBeenCalled();
   });
 
+  it('signs the local device list read, so an approved browser is told it can manage devices', async () => {
+    approveLocally();
+    fetchMock.mockResolvedValueOnce(new Response('{"policy":"approved","devices":[],"canManageDevices":true}', { status: 200 }));
+    const state = await api.listRemoteDevices();
+    expect(state?.canManageDevices).toBe(true);
+    expect(sentHeaders().get('X-Solu-Device-Target')).toBe('local/dmn_test');
+    expect(signDeviceRequest).toHaveBeenCalledWith('local/dmn_test', 'GET', '/api/remote-devices', '', expect.anything(), 0);
+  });
+
+  it('sends one approval with the displayed enrolment and never resends a device_required refusal', async () => {
+    approveLocally();
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: 'device_required', message: 'no' }), {
+      status: 403, headers: { 'X-Solu-Human-Proof': 'unknown' },
+    }));
+    await expect(api.approveRemoteDevice('dev_1', 'enr_AAECAwQFBgcICQoLDA0ODw')).rejects.toMatchObject({ status: 403 });
+    const posts = fetchMock.mock.calls.filter((c) => String(c[0]).endsWith('/api/remote-devices/dev_1/approve'));
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String((posts[0][1] as RequestInit).body))).toEqual({ enrolmentId: 'enr_AAECAwQFBgcICQoLDA0ODw' });
+  });
+
   it('signs a local DELETE without a body', async () => {
     approveLocally();
     await apiFetch('/api/remote-devices/dev_a', { method: 'DELETE' });

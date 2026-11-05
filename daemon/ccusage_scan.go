@@ -95,12 +95,29 @@ func startCCUsageScanner(ctx context.Context, dataDir, cloudBase, token string, 
 	// timeout policy). reportCCUsageBatch tolerates a nil client too, but an
 	// explicit shared one is cheaper over the daemon's lifetime.
 	client := &http.Client{Timeout: ccUsageReportTimeout}
+	privacy := activePrivacy.Load()
+	if privacy != nil {
+		cursors.uploadAllowed = privacy.usageUploadAllowed
+		client.Transport = usageUploadTransport{allowed: privacy.usageUploadAllowed}
+	}
+	unregister := privacy.registerUsage(cursors.Save, func(ctx context.Context) error {
+		snapshot, err := snapshotUsageSkips(listTranscripts(claudeConfigDirsForDataDir(filepath.Dir(cursors.path))))
+		if err != nil {
+			return err
+		}
+		return drainUsageSkips(ctx, cursors.revision, func() { scanOnce(ctx, cursors, ledger, client, "", "", nil, snapshot) }, cursors.Save, func() bool {
+			return snapshot.reached(func(path string) int64 { off, _ := cursors.Get(path); return off })
+		})
+	})
+	defer unregister()
+	stopCheckpoints := startUsageCheckpoints(cursors.save, cursors.nextCheckpoint)
+	defer stopCheckpoints()
 
 	// One resolver for the scanner's lifetime so cwd→repo lookups are cached
 	// across passes (a remote URL effectively never changes).
 	repos := newRepoResolver()
 
-	run := func() {
+	runScan := func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("cc-usage: scan panic recovered: %v", r)
@@ -116,6 +133,8 @@ func startCCUsageScanner(ctx context.Context, dataDir, cloudBase, token string, 
 		}
 		scanOnce(ctx, cursors, ledger, client, cloudBase, token, repos)
 	}
+
+	run := func() { privacy.runUsage(runScan) }
 
 	// One scan shortly after boot, then on the tick.
 	select {
@@ -141,7 +160,6 @@ func startCCUsageScanner(ctx context.Context, dataDir, cloudBase, token string, 
 			// Best-effort final persist so the last pass's ledger upgrades
 			// and cursor advances survive a clean shutdown.
 			_ = ledger.Flush()
-			_ = cursors.Save()
 			return
 		case <-tick.C:
 			run()
@@ -162,7 +180,7 @@ func startCCUsageScanner(ctx context.Context, dataDir, cloudBase, token string, 
 // and nothing is double-committed.
 // repos may be nil (tests pass nil to stay hermetic / skip git execs); when
 // non-nil each record's GitRepo is resolved from its cwd.
-func scanOnce(ctx context.Context, cursors *cursorStore, ledger *inAppLedger, client *http.Client, cloudBase, token string, repos *repoResolver) {
+func scanOnce(ctx context.Context, cursors *cursorStore, ledger *inAppLedger, client *http.Client, cloudBase, token string, repos *repoResolver, snapshots ...*usageSkipSnapshot) {
 	// Persist any hook-recorded ledger entries and trim ancient ones on EVERY
 	// exit path (fix N2). A deferred flush+prune means even a pass that bails
 	// early — no files, or a mid-loop report failure that returns — still
@@ -175,7 +193,26 @@ func scanOnce(ctx context.Context, cursors *cursorStore, ledger *inAppLedger, cl
 		ledger.Prune(time.Now().Add(-ccUsageLedgerRetention))
 	}()
 
-	files := listTranscripts(claudeConfigDirsForDataDir(filepath.Dir(cursors.path)))
+	if cloudBase != "" {
+		if cursors.flushSkipped() != nil {
+			log.Print("cc-usage: pending skip checkpoint failed; upload blocked")
+			return
+		}
+		if cursors.uploadAllowed != nil && !cursors.uploadAllowed() {
+			return
+		}
+	}
+	defer func() {
+		if cursors.save(false) != nil {
+			log.Print("cc-usage: checkpoint failed")
+		}
+	}()
+	var files []string
+	if len(snapshots) > 0 && snapshots[0] != nil {
+		files = snapshots[0].files
+	} else {
+		files = listTranscripts(claudeConfigDirsForDataDir(filepath.Dir(cursors.path)))
+	}
 	if len(files) == 0 {
 		return
 	}
@@ -207,6 +244,9 @@ func scanOnce(ctx context.Context, cursors *cursorStore, ledger *inAppLedger, cl
 	// those files' cursors, or we re-read them every tick forever. So we only
 	// skip the POST when accum is empty; we ALWAYS commit pending cursors.
 	flush := func() bool {
+		if cloudBase != "" && cursors.uploadAllowed != nil && !cursors.uploadAllowed() {
+			return false
+		}
 		if len(accum) > 0 {
 			deduped := dedupKeepMax(accum)
 			if err := reportCCUsageBatch(ctx, client, cloudBase, token, deduped); err != nil {
@@ -214,12 +254,22 @@ func scanOnce(ctx context.Context, cursors *cursorStore, ledger *inAppLedger, cl
 				return false // leave cursors unadvanced for retry
 			}
 		}
-		for _, pc := range pending {
-			cursors.SetBilledState(pc.path, pc.offset, pc.size, pc.modNano, pc.lastBilledTurnTS, pc.lastBilledMessageID, pc.lastBilledRequestID, pc.workflowAttributionKey)
-		}
-		if len(pending) > 0 {
-			if err := cursors.Save(); err != nil {
-				log.Printf("cc-usage: save cursors: %v", err)
+		if cloudBase == "" || token == "" {
+			updates := make(map[string]scanCursor, len(pending))
+			for _, pc := range pending {
+				updates[pc.path] = scanCursor{
+					Offset: pc.offset, Size: pc.size, ModTimeUnixNano: pc.modNano,
+					LastBilledTurnTS: pc.lastBilledTurnTS, LastBilledMessageID: pc.lastBilledMessageID,
+					LastBilledRequestID: pc.lastBilledRequestID, WorkflowAttributionKey: pc.workflowAttributionKey,
+				}
+			}
+			if cursors.commitSkipped(updates) != nil {
+				log.Print("cc-usage: skip checkpoint failed; upload blocked")
+				return false
+			}
+		} else {
+			for _, pc := range pending {
+				cursors.SetBilledState(pc.path, pc.offset, pc.size, pc.modNano, pc.lastBilledTurnTS, pc.lastBilledMessageID, pc.lastBilledRequestID, pc.workflowAttributionKey)
 			}
 		}
 		accum = accum[:0]
@@ -242,7 +292,7 @@ func scanOnce(ctx context.Context, cursors *cursorStore, ledger *inAppLedger, cl
 		if err != nil {
 			continue // file vanished between walk and stat — skip
 		}
-		curSize := fi.Size()
+		curSize := usageSkipLimit(fi.Size(), path, snapshots)
 		curModNano := fi.ModTime().UnixNano()
 		start, lastBilledTurnTS, lastBilledMessageID, lastBilledRequestID, storedAttributionKey, reset := cursors.ReadBilledState(path, curSize, curModNano)
 		// Resolve workflow attribution before the unchanged-file fast path. A
@@ -280,7 +330,22 @@ func scanOnce(ctx context.Context, cursors *cursorStore, ledger *inAppLedger, cl
 		}
 		filesThisPass++
 
-		recs, consumed := readUsageFrom(path, start)
+		var recs []ccUsageRecord
+		var consumed int
+		if len(snapshots) > 0 && snapshots[0] != nil {
+			buf, ok := usageSkipWindow(path, start, curSize)
+			if !ok {
+				continue
+			}
+			recs, consumed = extractUsageLines(buf)
+			// A partial line at the opt-in boundary belongs to the skipped
+			// interval too; do not later upload its completion.
+			if start+int64(len(buf)) == curSize {
+				consumed = len(buf)
+			}
+		} else {
+			recs, consumed = readUsageFrom(path, start)
+		}
 		// Even if this file yielded zero NEW records (e.g. all appended
 		// lines were non-usage), we still want to advance its cursor past
 		// the consumed bytes so we don't re-scan them. The advance only

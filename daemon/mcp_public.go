@@ -49,7 +49,7 @@ const mcpPublicServerInstructions = "The user's multi-pane terminal workspace. "
 	"list_panes: states, workspace/#numbers, open_asks person count, flagOwner bookmark owner; worker_notices marks escalations. ids/#numbers/@handles address panes. " +
 	"Message agents with ask_pane, never send_input; wait_for_pane waits, read_pane_tail reads. send_input/ask_pane messages wait while the person types, until the box is empty and typing stops; do not resend. Put-back messages need their Send/Clear; held messages wait behind them. " +
 	"post_user_ask: one decision/action each, your own only; resolve_user_ask when done. Do not repeat open asks. Flags are user bookmarks. " +
-	"needs_approval: answer_prompt only when the user asked. spawn_pane opens sessions. Never close leads. Workers archive once finished/read/committed/pushed; close plain finished panes you started unless asked to keep. " +
+	"needs_approval: answer_prompt if asked; traced only (Codex too), not own. spawn_pane opens sessions. Never close leads. Workers archive once finished/read/committed/pushed; close plain finished panes you started unless asked to keep. " +
 	"Pane/workspace writes: MCP, not REST. create_workspace: empty, no overwrite, 5/hour/verified pane, 20/hour total. Move to existing layouts only. Moving others, rename or delete (delete: empty only): user_requested + Allow even with Agent permissions. No _current. " +
 	"Unverified: explicit targets + user request + Allow; no cmd:auto/starter/auto-archive."
 

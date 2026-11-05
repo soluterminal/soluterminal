@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"net/url"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -67,13 +65,11 @@ func (rr *repoResolver) resolve(ctx context.Context, cwd string) string {
 
 // gitOriginURL execs `git -C <cwd> config --get remote.origin.url` with a hard
 // timeout. Any error (not a repo, no origin, git missing, timeout) yields "".
-// GIT_TERMINAL_PROMPT=0 guarantees git never blocks on an interactive prompt.
+// The hardened command never prompts and reads only the repository's config.
 func gitOriginURL(ctx context.Context, cwd string) string {
 	cctx, cancel := context.WithTimeout(ctx, ccRepoResolveTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "git", "-C", cwd, "config", "--get", "remote.origin.url")
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	out, err := cmd.Output()
+	out, err := hardenedGitCommand(cctx, cwd, "config", "--get", "remote.origin.url").Output()
 	if err != nil {
 		return ""
 	}

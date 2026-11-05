@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -85,7 +88,12 @@ func (c *shinoqueTokenCache) readHome(home string) string {
 	path := filepath.Join(home, "relay-token")
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// A changed or lost token file invalidates the solud verdict; the
+	// generation counter never sees the token itself.
 	fail := func() string {
+		if c.path != "" {
+			c.discovery.invalidate()
+		}
 		c.path, c.token, c.info = "", "", nil
 		return ""
 	}
@@ -112,6 +120,9 @@ func (c *shinoqueTokenCache) readHome(home string) string {
 	after, err := file.Stat()
 	if err != nil || !shinoqueTokenMetadata(after) || !sameShinoqueTokenFile(opened, after) {
 		return fail()
+	}
+	if c.path != "" {
+		c.discovery.invalidate()
 	}
 	c.path, c.info = path, after
 	c.token = strings.TrimSpace(string(content))
@@ -227,13 +238,46 @@ func shinoqueRelayWebOrigin(relayURL string) string {
 	return shinoqueWebOrigin(u.String(), allowHTTP)
 }
 
+// The relay's upstream transport is http.DefaultTransport with at most 8 dials
+// in flight, so a cold-launch burst does not connect all at once; some WSL
+// network modes (consomme) refuse wider loopback connect bursts. Only dials are
+// limited: open streaming responses never hold a slot.
+var shinoqueRelayTransport = func() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = shinoqueLimitDials(transport.DialContext, 8)
+	return transport
+}()
+
+type shinoqueDialFunc func(ctx context.Context, network, address string) (net.Conn, error)
+
+// shinoqueLimitDials holds a slot only while dial runs: a waiter gives up when
+// its context ends, and every return from dial releases the slot.
+func shinoqueLimitDials(dial shinoqueDialFunc, limit int) shinoqueDialFunc {
+	slots := make(chan struct{}, limit)
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		defer func() { <-slots }()
+		return dial(ctx, network, address)
+	}
+}
+
 // This handler is installed only on the authenticated cloud tunnel. It has no
 // HTML rewriting or CSP mutation: shinoque owns its document sandbox.
 func newShinoqueRelayHandler(next http.Handler, tokens *shinoqueTokenCache, activeRelayURL func() string) http.Handler {
-	return newShinoqueRelayHandlerWithListenerCheck(next, tokens, activeRelayURL, shinoqueLocalListenerAllowed)
+	return newShinoqueRelayHandlerWithTables(next, tokens, activeRelayURL, shinoqueLocalListenerAllowedFrom)
 }
 
 func newShinoqueRelayHandlerWithListenerCheck(next http.Handler, tokens *shinoqueTokenCache, activeRelayURL func() string, listenerAllowed func(string) bool) http.Handler {
+	return newShinoqueRelayHandlerWithTables(next, tokens, activeRelayURL, func(port string, _ *shinoqueProcTables) bool {
+		return listenerAllowed(port)
+	})
+}
+
+func newShinoqueRelayHandlerWithTables(next http.Handler, tokens *shinoqueTokenCache, activeRelayURL func() string, listenerAllowed func(string, *shinoqueProcTables) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isShinoquePath(r.URL.Path) {
 			next.ServeHTTP(w, r)
@@ -256,7 +300,8 @@ func newShinoqueRelayHandlerWithListenerCheck(next http.Handler, tokens *shinoqu
 			http.Error(w, "invalid relay origin", http.StatusForbidden)
 			return
 		}
-		config, ok := tokens.discovery.resolve()
+		tables := &shinoqueProcTables{}
+		config, ok := tokens.discovery.resolveWith(tables)
 		if !ok {
 			http.Error(w, shinoqueUnavailable, http.StatusServiceUnavailable)
 			return
@@ -278,7 +323,7 @@ func newShinoqueRelayHandlerWithListenerCheck(next http.Handler, tokens *shinoqu
 		}
 		// Resolve discovery for this request, then check and proxy the same
 		// immutable port. Do not re-resolve the destination after this check.
-		if !listenerAllowed(port) {
+		if !listenerAllowed(port, tables) {
 			http.Error(w, shinoqueUnavailable, http.StatusServiceUnavailable)
 			return
 		}
@@ -288,6 +333,7 @@ func newShinoqueRelayHandlerWithListenerCheck(next http.Handler, tokens *shinoqu
 			rest = "/"
 		}
 		proxy := &httputil.ReverseProxy{
+			Transport:     shinoqueRelayTransport,
 			FlushInterval: -1,
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(target)
@@ -327,6 +373,18 @@ func newShinoqueRelayHandlerWithListenerCheck(next http.Handler, tokens *shinoqu
 			ModifyResponse: func(resp *http.Response) error {
 				resp.Header.Del("Set-Cookie")
 				return nil
+			},
+			// A refused, failed or cut upstream connection may mean the
+			// listener changed: rescan before the next forward. The log and
+			// 502 are ReverseProxy's defaults.
+			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+				// The client's own abort says nothing about the listener; every
+				// other failure, deadlines included, forces a rescan.
+				if !errors.Is(err, context.Canceled) || r.Context().Err() == nil {
+					tokens.discovery.invalidate()
+				}
+				log.Printf("http: proxy error: %v", err)
+				w.WriteHeader(http.StatusBadGateway)
 			},
 		}
 		proxy.ServeHTTP(w, r)

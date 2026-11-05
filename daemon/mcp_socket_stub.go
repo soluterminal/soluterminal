@@ -24,3 +24,7 @@ func mcpSocketPeerCredPlatform(net.Conn) (int, int, error) {
 func mcpProcessStartTimePlatform(int) (uint64, bool) { return 0, false }
 
 func mcpSocketFilesystemOKPlatform(string) error { return errors.New("unsupported") }
+
+func mcpBridgeCheckSocket(string) error {
+	return errors.New("the MCP socket isn't supported on this platform yet")
+}

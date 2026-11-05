@@ -132,6 +132,9 @@ const paneClaimedCallerHelp = "An unverified caller must name pane_id explicitly
 type paneCaller struct {
 	ID      string
 	Claimed string
+	// heldAtPrompt: keys are refused at a permission prompt, checked at write
+	// time: send_input's when the caller may not answer it, ask_pane's always.
+	heldAtPrompt bool
 }
 
 // paneConfirmCaller names the asking agent for the person: its @handle, else

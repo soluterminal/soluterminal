@@ -62,6 +62,16 @@ describe('PaneReviewChip', () => {
     expect(screen.getByText(/not re-reviewed/)).toBeTruthy();
   });
 
+  it('"Needs your decision" opens to the pane\'s asks as well as the reviewer\'s questions', () => {
+    const onHold: PaneReview = { ...changes, verdict: 'comment', mustFix: 0, findings: [], questions: ['Ship behind a flag?'] };
+    const p = { ...pane(onHold), asks: [{ id: 'a1', text: 'Rotate the key now?', source: '@lead', createdAt: Date.now() }] } as PaneInfo;
+    render(<PaneReviewChip pane={p} />);
+    fireEvent.click(screen.getByRole('button', { name: /needs your decision/ }));
+    expect(screen.getByText('Ship behind a flag?')).toBeTruthy();
+    expect(screen.getByText('Rotate the key now?')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Dismiss ask from @lead' })).toBeTruthy();
+  });
+
   it('Clear removes the result from the pane', async () => {
     const clear = vi.spyOn(api, 'clearPaneReview').mockResolvedValue(undefined);
     useStore.setState({ panes: { p1: pane(changes) } } as never);

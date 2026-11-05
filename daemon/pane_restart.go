@@ -28,6 +28,10 @@ import (
 // different session).
 
 func (a *apiServer) handleRestartPane(w http.ResponseWriter, r *http.Request) {
+	// Restarting runs the pane's command again: the person's, like opening one.
+	if !a.requireHuman(w, r, "restart a pane") {
+		return
+	}
 	id := r.PathValue("id")
 	p, ok := a.mgr.Get(id)
 	if !ok {

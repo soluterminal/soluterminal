@@ -70,13 +70,15 @@ type codexCursor struct {
 }
 
 type codexCursorStore struct {
-	path string
-	mu   sync.Mutex
-	m    map[string]codexCursor
+	path          string
+	mu            sync.Mutex
+	m             map[string]codexCursor
+	checkpoint    usageCheckpoint[codexCursor]
+	uploadAllowed func() bool
 }
 
 func newCodexCursorStore(dataDir string) *codexCursorStore {
-	return &codexCursorStore{path: filepath.Join(dataDir, "codex-usage-cursors.json"), m: map[string]codexCursor{}}
+	return &codexCursorStore{path: filepath.Join(dataDir, "codex-usage-cursors.json"), m: map[string]codexCursor{}, checkpoint: usageCheckpoint[codexCursor]{lastSave: time.Now()}}
 }
 
 func (s *codexCursorStore) Load() error {
@@ -102,6 +104,7 @@ func (s *codexCursorStore) Load() error {
 		m = map[string]codexCursor{}
 	}
 	s.m = m
+	s.checkpoint.lastSave = s.checkpoint.clock()
 	return nil
 }
 
@@ -122,29 +125,34 @@ func (s *codexCursorStore) Resume(path string, curSize, curModNano int64) (codex
 
 func (s *codexCursorStore) Set(path string, c codexCursor) {
 	s.mu.Lock()
-	s.m[path] = c
+	s.checkpoint.set(s.m, path, c)
 	s.mu.Unlock()
 }
 
-// PruneMissing forgets cursors whose files no longer exist.
-func (s *codexCursorStore) PruneMissing(present map[string]struct{}) {
+func (s *codexCursorStore) Save() error { return s.save(true) }
+func (s *codexCursorStore) save(force bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for p := range s.m {
-		if _, ok := present[p]; !ok {
-			delete(s.m, p)
-		}
-	}
+	return s.checkpoint.save(s.path, s.m, force)
 }
-
-func (s *codexCursorStore) Save() error {
+func (s *codexCursorStore) commitSkipped(updates map[string]codexCursor) error {
 	s.mu.Lock()
-	b, err := json.Marshal(s.m)
-	s.mu.Unlock()
-	if err != nil {
-		return err
+	defer s.mu.Unlock()
+	s.checkpoint.skip(s.m, updates)
+	return s.checkpoint.save(s.path, s.m, true)
+}
+func (s *codexCursorStore) flushSkipped() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.checkpoint.pending) == 0 {
+		return nil
 	}
-	return writeFileAtomicSynced(s.path, b, 0o600)
+	return s.checkpoint.save(s.path, s.m, true)
+}
+func (s *codexCursorStore) revision() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkpoint.revision
 }
 
 // codexAccountResolver maps a rollout's (creator_account_id, creator_user_id)
@@ -160,8 +168,32 @@ func startCodexUsageScanner(ctx context.Context, dataDir, cloudBase, token strin
 		log.Printf("codex-usage: load cursors: %v (starting fresh)", err)
 	}
 	client := &http.Client{Timeout: ccUsageReportTimeout}
+	privacy := activePrivacy.Load()
+	if privacy != nil {
+		cursors.uploadAllowed = privacy.usageUploadAllowed
+		client.Transport = usageUploadTransport{allowed: privacy.usageUploadAllowed}
+	}
+	unregister := privacy.registerUsage(cursors.Save, func(ctx context.Context) error {
+		snapshot, err := snapshotUsageSkips(listCodexRollouts(codexUsageRoots()))
+		if err != nil {
+			return err
+		}
+		return drainUsageSkips(ctx, cursors.revision, func() {
+			codexUsageScanPass(ctx, cursors, ledger, client, "", "", codex, codexUsageRoots(), time.Now(), snapshot)
+		}, cursors.Save, func() bool {
+			return snapshot.reached(func(path string) int64 {
+				cursors.mu.Lock()
+				defer cursors.mu.Unlock()
+				return cursors.m[path].Offset
+			})
+		})
+	})
+	defer unregister()
+	stopCheckpoints := startUsageCheckpoints(cursors.save, cursors.nextCheckpoint)
+	defer stopCheckpoints()
+
 	var supportedAt, probedAt time.Time
-	run := func() {
+	runScan := func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("codex-usage: scan panic recovered: %v", r)
@@ -171,7 +203,7 @@ func startCodexUsageScanner(ctx context.Context, dataDir, cloudBase, token strin
 		if !usageUploadAllowedNow() {
 			// Usage statistics are off: advance past new turns without
 			// sending them (see startCCUsageScanner).
-			codexScanOnce(ctx, cursors, ledger, client, "", "", nil, codexUsageRoots(), time.Now())
+			codexUsageScanPass(ctx, cursors, ledger, client, "", "", codex, codexUsageRoots(), time.Now())
 			return
 		}
 		// A cloud that predates the provider column would store Codex rows as
@@ -188,14 +220,10 @@ func startCodexUsageScanner(ctx context.Context, dataDir, cloudBase, token strin
 			}
 			supportedAt = time.Now()
 		}
-		// The saved-login index is rebuilt once per pass (a handful of small
-		// files) so a login added since the last pass labels new rows.
-		var accounts codexAccountResolver
-		if codex != nil {
-			accounts = codex.UsageAccountResolver()
-		}
-		codexScanOnce(ctx, cursors, ledger, client, cloudBase, token, accounts, codexUsageRoots(), time.Now())
+		codexUsageScanPass(ctx, cursors, ledger, client, cloudBase, token, codex, codexUsageRoots(), time.Now())
 	}
+	run := func() { privacy.runUsage(runScan) }
+
 	select {
 	case <-ctx.Done():
 		return
@@ -207,7 +235,6 @@ func startCodexUsageScanner(ctx context.Context, dataDir, cloudBase, token strin
 	for {
 		select {
 		case <-ctx.Done():
-			_ = cursors.Save()
 			return
 		case <-tick.C:
 			run()
@@ -291,19 +318,40 @@ func listCodexRollouts(roots []string) []string {
 	return out
 }
 
+// Every cursor-writing mode resolves the same local metadata. Omitting the
+// resolver only while OFF/draining would persist a weaker key and turn the
+// first ON pass into a false stronger-attribution replay of skipped history.
+func codexUsageScanPass(ctx context.Context, cursors *codexCursorStore, ledger *inAppLedger, client *http.Client, cloudBase, token string, login codexLoginState, roots []string, now time.Time, snapshots ...*usageSkipSnapshot) {
+	var accounts codexAccountResolver
+	if login != nil {
+		accounts = login.UsageAccountResolver()
+	}
+	codexScanOnce(ctx, cursors, ledger, client, cloudBase, token, accounts, roots, now, snapshots...)
+}
+
 // codexScanOnce performs one pass. Like scanOnce, records accumulate into
 // chunks that are deduped, reported, and only then have their cursors
 // committed; a failed report leaves those cursors for the next pass.
-func codexScanOnce(ctx context.Context, cursors *codexCursorStore, ledger *inAppLedger, client *http.Client, cloudBase, token string, accounts codexAccountResolver, roots []string, now time.Time) {
-	files := listCodexRollouts(roots)
-	present := make(map[string]struct{}, len(files))
-	for _, f := range files {
-		present[f] = struct{}{}
+func codexScanOnce(ctx context.Context, cursors *codexCursorStore, ledger *inAppLedger, client *http.Client, cloudBase, token string, accounts codexAccountResolver, roots []string, now time.Time, snapshots ...*usageSkipSnapshot) {
+	if cloudBase != "" {
+		if cursors.flushSkipped() != nil {
+			log.Print("codex-usage: pending skip checkpoint failed; upload blocked")
+			return
+		}
+		if cursors.uploadAllowed != nil && !cursors.uploadAllowed() {
+			return
+		}
 	}
-	if len(files) > 0 {
-		// An empty listing may be a transient walk failure; never forget
-		// every cursor (and re-read the whole horizon) because of it.
-		cursors.PruneMissing(present)
+	defer func() {
+		if cursors.save(false) != nil {
+			log.Print("codex-usage: checkpoint failed")
+		}
+	}()
+	var files []string
+	if len(snapshots) > 0 && snapshots[0] != nil {
+		files = snapshots[0].files
+	} else {
+		files = listCodexRollouts(roots)
 	}
 
 	type pendingCursor struct {
@@ -317,6 +365,9 @@ func codexScanOnce(ctx context.Context, cursors *codexCursorStore, ledger *inApp
 	horizon := now.Add(-codexUsageBackfillHorizon)
 
 	flush := func() bool {
+		if cloudBase != "" && cursors.uploadAllowed != nil && !cursors.uploadAllowed() {
+			return false
+		}
 		if len(accum) > 0 {
 			deduped := dedupKeepMax(accum)
 			if err := reportCCUsageBatch(ctx, client, cloudBase, token, deduped); err != nil {
@@ -324,12 +375,18 @@ func codexScanOnce(ctx context.Context, cursors *codexCursorStore, ledger *inApp
 				return false
 			}
 		}
-		for _, pc := range pending {
-			cursors.Set(pc.path, pc.cur)
-		}
-		if len(pending) > 0 {
-			if err := cursors.Save(); err != nil {
-				log.Printf("codex-usage: save cursors: %v", err)
+		if cloudBase == "" || token == "" {
+			updates := make(map[string]codexCursor, len(pending))
+			for _, pc := range pending {
+				updates[pc.path] = pc.cur
+			}
+			if cursors.commitSkipped(updates) != nil {
+				log.Print("codex-usage: skip checkpoint failed; upload blocked")
+				return false
+			}
+		} else {
+			for _, pc := range pending {
+				cursors.Set(pc.path, pc.cur)
 			}
 		}
 		accum, pending = accum[:0], pending[:0]
@@ -349,7 +406,7 @@ func codexScanOnce(ctx context.Context, cursors *codexCursorStore, ledger *inApp
 		if err != nil {
 			continue
 		}
-		size, modNano := fi.Size(), fi.ModTime().UnixNano()
+		size, modNano := usageSkipLimit(fi.Size(), path, snapshots), fi.ModTime().UnixNano()
 		cur, resumed := cursors.Resume(path, size, modNano)
 		if !resumed && fi.ModTime().Before(horizon) {
 			// Beyond the backfill horizon: remember the file without reading
@@ -377,12 +434,21 @@ func codexScanOnce(ctx context.Context, cursors *codexCursorStore, ledger *inApp
 		}
 		filesThisPass++
 
-		buf, ok := readJSONLWindow(path, start)
+		var buf []byte
+		var ok bool
+		if len(snapshots) > 0 && snapshots[0] != nil {
+			buf, ok = usageSkipWindow(path, start, size)
+		} else {
+			buf, ok = readJSONLWindow(path, start)
+		}
 		if !ok {
 			continue
 		}
 		bytesThisPass += int64(len(buf))
 		recs, consumed := extractCodexUsage(buf, &st)
+		if len(snapshots) > 0 && snapshots[0] != nil && start+int64(len(buf)) == size {
+			consumed = len(buf)
+		}
 		// The window may have revealed the identity (first pass over a new
 		// file), so attribution is resolved again from the updated state.
 		attr = codexAttribution(ledger, accounts, st)
@@ -511,4 +577,10 @@ func codexAttribution(ledger *inAppLedger, accounts codexAccountResolver, st cod
 		r.key = strings.Join([]string{inApp, r.account, r.workflowInvocationID, r.workflowRole}, "\x1f")
 	}
 	return r
+}
+
+func (s *codexCursorStore) nextCheckpoint() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkpoint.nextDelay()
 }

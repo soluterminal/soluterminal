@@ -326,8 +326,8 @@ func (p *Pane) checkPutBack() bool {
 	msg := p.putBackReceipt()
 	var shown, known bool
 	if msg != nil {
-		if _, typed, ok := draftGuardScreen(p); ok {
-			shown, known = putBackShown(typed, !msg.claude, msg.body)
+		if screen, typed, ok := draftGuardScreen(p); ok {
+			shown, known = p.putBackShownInTypedBox(msg, screen, typed)
 		}
 	}
 	p.mu.Lock()
@@ -377,8 +377,8 @@ func (p *Pane) keptPutBack() *unsentPaneMessage {
 	if msg == nil {
 		return nil
 	}
-	if _, typed, ok := draftGuardScreen(p); ok {
-		if shown, known := putBackShown(typed, !msg.claude, msg.body); known && !shown {
+	if screen, typed, ok := draftGuardScreen(p); ok {
+		if shown, known := p.putBackShownInTypedBox(msg, screen, typed); known && !shown {
 			return nil
 		}
 	}
@@ -392,8 +392,8 @@ func (p *Pane) keptPutBack() *unsentPaneMessage {
 // typing in the box since included: their edit does not make the agent's
 // text safe to send.
 func (p *Pane) putBackRefusal(msg *unsentPaneMessage) error {
-	if _, typed, ok := draftGuardScreen(p); ok {
-		if shown, known := putBackShown(typed, !msg.claude, msg.body); known && !shown {
+	if screen, typed, ok := draftGuardScreen(p); ok {
+		if shown, known := p.putBackShownInTypedBox(msg, screen, typed); known && !shown {
 			return nil
 		}
 	}

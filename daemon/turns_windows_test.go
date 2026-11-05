@@ -109,7 +109,7 @@ func TestTurnGitWindowsNoConsole(t *testing.T) {
 			if got.Window != 0 || got.Visible {
 				t.Errorf("background Git acquired a console window: hwnd=%#x visible=%v", got.Window, got.Visible)
 			}
-			wantArgs := append(append([]string{"-C", dir}, turnGitSafeConfig...), args...)
+			wantArgs := hardenedGitArgv(dir, args)
 			if !reflect.DeepEqual(got.Args, wantArgs) || got.Input != "snapshot input" {
 				t.Errorf("Git pipes/arguments changed: %+v", got)
 			}

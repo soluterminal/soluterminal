@@ -2251,16 +2251,18 @@ function relaySigningTarget(scopePrefix: string, scopeBackendPrefix: string): st
 // daemon that approved this browser is signed when it can carry authority,
 // that is anything but GET/HEAD, with a JSON (string) body or none. Uploads
 // stay unsigned: no route that needs the person takes one.
-function localSigningTarget(scopePrefix: string, scopeBackendPrefix: string, init?: RequestInit): string | null {
+// signRead also signs a GET whose answer depends on who asks (the device
+// list's canManageDevices).
+function localSigningTarget(scopePrefix: string, scopeBackendPrefix: string, init?: RequestInit, signRead = false): string | null {
   if (scopePrefix !== '') return null;
   const method = (init?.method ?? 'GET').toUpperCase();
-  if (method === 'GET' || method === 'HEAD') return null;
+  if ((method === 'GET' || method === 'HEAD') && !signRead) return null;
   if (init?.body != null && typeof init.body !== 'string') return null;
   return localProofTarget(scopeBackendPrefix);
 }
 
-function requestSigningTarget(scopePrefix: string, scopeBackendPrefix: string, init?: RequestInit): string | null {
-  return localSigningTarget(scopePrefix, scopeBackendPrefix, init) ?? relaySigningTarget(scopePrefix, scopeBackendPrefix);
+function requestSigningTarget(scopePrefix: string, scopeBackendPrefix: string, init?: RequestInit, signRead = false): string | null {
+  return localSigningTarget(scopePrefix, scopeBackendPrefix, init, signRead) ?? relaySigningTarget(scopePrefix, scopeBackendPrefix);
 }
 
 const isLocalTarget = (target: string) => target.startsWith('local/');
@@ -2356,12 +2358,12 @@ export function streamSigningNeeded(scope?: RoutingScope, url?: string): boolean
   return streamSigningTarget(scope?.prefix ?? prefix, scope?.backendPrefix ?? backendPrefix, url) !== null;
 }
 
-export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+export function apiFetch(path: string, init?: RequestInit, opts?: { signRead?: boolean }): Promise<Response> {
   const headers = new Headers(init?.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const requestPrefix = prefix;
   const requestBackendPrefix = backendPrefix;
-  const target = requestSigningTarget(requestPrefix, requestBackendPrefix, init);
+  const target = requestSigningTarget(requestPrefix, requestBackendPrefix, init, opts?.signRead);
   // Unsigned requests take the same synchronous path as always.
   if (!target) return fetchBounded(requestPrefix + requestBackendPrefix + path, init ?? {}, headers);
   const send = () => signRelayRequest(target, path, init ?? {}, headers, requestBackendPrefix)
@@ -2409,6 +2411,23 @@ function apiFetchScoped(scope: RoutingScope, path: string, init?: RequestInit): 
   const send = () => signRelayRequest(target, path, init ?? {}, headers, scope.backendPrefix)
     .then((signedInit) => fetchBounded(scope.prefix + scope.backendPrefix + path, signedInit, headers));
   return isLocalTarget(target) ? withLocalProofRetry(scope.backendPrefix, send) : send();
+}
+
+// A restart request is sent once, without the generic stale-proof retry. Pin
+// the local target for capability, mutation and health, including Dual's WSL
+// backend even while the Windows workspace is selected.
+export function backgroundServiceClient() {
+  const scope = currentRoutingScope();
+  const route = isRouterMode() ? '/b/wsl' : scope.backendPrefix;
+  return async (path: string, init: RequestInit = {}): Promise<Response> => {
+    if (scope.prefix || scope.key !== currentRoutingScope().key) throw new Error('Reopen Settings on this computer to restart its background service.');
+    const headers = new Headers(init.headers);
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    const target = requestSigningTarget('', route, init);
+    const signed = target ? await signRelayRequest(target, path, init, headers, route) : init;
+    if (scope.key !== currentRoutingScope().key) throw new Error('The selected computer changed.');
+    return fetchBounded(route + path, signed, headers);
+  };
 }
 
 // Workflow task mutations take an optional captured scope (the Tasks UI pins
@@ -3719,11 +3738,29 @@ export interface RemoteDevice extends DeviceEnrolmentReply {
    * traced (a browser at this computer) or headers.
    */
   approvedVia?: string;
+  /** "alerts": may only take over push alerts (the notifications handler). */
+  scope?: 'alerts';
+}
+
+// Notifications handler (daemon/notifications_handler.go): the approved
+// device whose app delivers Code alerts while this computer skips its phone
+// push for them.
+export interface NotificationsHandlerState {
+  active: boolean;
+  deviceName?: string;
+  client?: string;
+  expiresAtMs?: number;
 }
 
 export interface RemoteDevicesState {
   policy: 'any' | 'approved';
   devices: RemoteDevice[];
+  /**
+   * The daemon's own check says this screen's approval would go through
+   * (daemon canApproveDevices). A hint: Approve is shown only then, and the
+   * approval itself decides. Absent from an older daemon: hidden.
+   */
+  canManageDevices?: boolean;
 }
 
 // Agent permissions (daemon/caller_authority.go): whether agents in panes may
@@ -4864,8 +4901,10 @@ const coreApi = {
       body: JSON.stringify({ personal }),
     }).then(j<import('./types').PersonalViewSettings>),
   // null = older daemon without the endpoint, so the group stays hidden.
+  // Signed at this computer too, so an approved browser the daemon can't
+  // trace is told it can manage devices.
   listRemoteDevices: async (): Promise<RemoteDevicesState | null> => {
-    const res = await apiFetch('/api/remote-devices');
+    const res = await apiFetch('/api/remote-devices', undefined, { signRead: true });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`remote devices: ${res.status}`);
     return res.json();
@@ -4922,6 +4961,16 @@ const coreApi = {
       method: 'POST',
       ...(enrolmentId ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enrolmentId }) } : {}),
     }).then(j<RemoteDevice>),
+  // null = older daemon without the endpoint.
+  getNotificationsHandler: async (): Promise<NotificationsHandlerState | null> => {
+    const res = await apiFetch('/api/notifications/handler');
+    if (res.status === 404) return null;
+    return j<NotificationsHandlerState>(res);
+  },
+  // "Take alerts back": a person's act at this computer, ending whoever's
+  // lease it is (a plain DELETE releases only the caller's own).
+  releaseNotificationsHandler: (): Promise<{ released: boolean }> =>
+    apiFetch('/api/notifications/handler?takeBack=1', { method: 'DELETE' }).then(j<{ released: boolean }>),
   removeRemoteDevice: (id: string): Promise<void> =>
     apiFetch(`/api/remote-devices/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(async (r) => {
       // The daemon's reason (e.g. the last device while approved devices are
@@ -5114,7 +5163,7 @@ const coreApi = {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: messageId, action }),
-    }).then(j<{ outcome: 'submitted' | 'cleared' | 'kept' | 'left_in_composer' | 'sent_unconfirmed' | 'queued' }>),
+    }).then(j<{ outcome: 'submitted' | 'cleared' | 'partly_cleared' | 'kept' | 'left_in_composer' | 'sent_unconfirmed' | 'queued' }>),
 
   submitPaneMessage: (id: string, text: string) =>
     apiFetch(`/api/panes/${id}/submit-message`, {

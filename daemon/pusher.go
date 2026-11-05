@@ -47,6 +47,9 @@ type Pusher struct {
 	// private reports whether the person allows only approved devices; when
 	// it does, notifications carry no session content (minimisePushBody).
 	private func() bool
+	// alertsHandled reports a live notifications-handler lease: Code alerts
+	// (codeAlertKinds) then ask the cloud to skip FCM. Nil = never.
+	alertsHandled func() bool
 
 	cloudBase string
 	token     string
@@ -783,6 +786,9 @@ func (p *Pusher) deliver(body []byte, logKey, kind string) bool {
 	}
 	if p.private != nil && p.private() {
 		body = minimisePushBody(body)
+	}
+	if codeAlertKinds[kind] && p.alertsHandled != nil && p.alertsHandled() {
+		body = withSkipFCM(body)
 	}
 	url := p.cloudBase + "/api/internal/notify"
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))

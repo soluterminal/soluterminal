@@ -1,3 +1,4 @@
+import { BackgroundServiceSetting } from './BackgroundServiceSetting';
 import { useEffect, useRef, useState } from 'react';
 import { usePhoneAccessAllowed } from '../../entitlements';
 import { useStore } from '../../store';
@@ -88,6 +89,7 @@ export function DevicesTab() {
 
   return (
     <>
+      <BackgroundServiceSetting />
     {(showDesktopRow || (desktop && phoneAllowed)) && (
     <SettingsGroup title="Devices">
       {showDesktopRow && (

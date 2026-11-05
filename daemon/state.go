@@ -167,11 +167,11 @@ func (p *Pane) claudeMenuOffScreen(hasCodex bool) bool {
 	if !claude {
 		return false
 	}
-	text, ok := p.gridVisibleText()
+	text, ok := p.gridMenuText(false)
 	if !ok || isGridChoicePromptText(text, false) {
 		return false
 	}
-	if screen, ok := p.screenVisibleText(); ok && isGridChoicePromptText(screen, false) {
+	if screen, ok := p.screenMenuText(false); ok && isGridChoicePromptText(screen, false) {
 		return false
 	}
 	return true
@@ -268,14 +268,14 @@ func (p *Pane) computeStateWithHasCodex(hasCodex bool) PaneRuntimeState {
 			inputPos := atomic.LoadInt64(&p.LastInputStrippedPos)
 			if matchAbsPos > ackedPos {
 				atomic.StoreInt64(&p.LastAckedChoicePromptPos, matchAbsPos)
-				if !p.claudeMenuOffScreen(hasCodex) {
+				if !p.claudeMenuOffScreen(hasCodex) && !p.codexMenuIsEcho(hasCodex) {
 					return StateChoicePrompt
 				}
-			} else if inputPos <= ackedPos && !p.claudeMenuOffScreen(hasCodex) {
+			} else if inputPos <= ackedPos && !p.claudeMenuOffScreen(hasCodex) && !p.codexMenuIsEcho(hasCodex) {
 				return StateChoicePrompt
 			}
-			// Same menu, user has answered, or a Claude menu that is no longer
-			// on screen. Fall through.
+			// Same menu, user has answered, a Claude menu that is no longer
+			// on screen, or a Codex prompt echo. Fall through.
 		}
 
 		// TUIs can paint prompts as cell diffs in the normal buffer.
@@ -287,7 +287,7 @@ func (p *Pane) computeStateWithHasCodex(hasCodex bool) PaneRuntimeState {
 		// poll path: seeding the emulator replays scrollback and has a
 		// deliberate settle delay, so doing that inside /api/panes makes
 		// ordinary polling scale badly with pane count.
-		if gridText, gridGeneration, ok := p.gridVisibleTextWithGeneration(); ok {
+		if gridText, gridGeneration, ok := p.gridMenuTextWithGeneration(hasCodex); ok {
 			if isGridChoicePromptText(gridText, hasCodex) {
 				// Moving a trust-menu selector is input, but still needs the
 				// human until the menu disappears from the current screen.
@@ -356,7 +356,7 @@ func (p *Pane) computeStateWithHasCodex(hasCodex bool) PaneRuntimeState {
 		// past current output; an answered same-fingerprint menu falls
 		// through instead of re-firing every poll.
 		if hasCodex || strings.Contains(s, "trust this folder") {
-			if screenText, ok := p.screenVisibleText(); ok {
+			if screenText, ok := p.screenMenuText(hasCodex); ok {
 				if len(folderTrustPromptMatches(screenText)) > 0 {
 					return StateChoicePrompt
 				}

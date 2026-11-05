@@ -1,3 +1,4 @@
+import { restartBackgroundService } from './lib/backgroundService';
 import './loadExtensions';
 import { isTemporaryWorkspaceView, workspaceViewLayout } from './lib/workspaceView';
 import { canExitWorkspaceView } from './lib/workspaceViewKeyboard';
@@ -150,6 +151,7 @@ import { useAgentIntegrationPrompt } from './agentIntegration';
 import { startAgent } from './agentStart';
 import { AgentInstallPrompt } from './components/AgentInstallPrompt';
 import { DeviceApprovalPrompt } from './components/DeviceApprovalPrompt';
+import { ApproveThisScreenPrompt } from './components/ApproveThisScreenPrompt';
 import { HumanProofBanner } from './components/HumanProofBanner';
 import { remoteDevicePendingText } from './components/settings/RemoteDevicesSetting';
 import { forgetPaneConfirm, notePaneConfirm, resyncPaneConfirms } from './lib/paneConfirm';
@@ -563,6 +565,14 @@ export default function App() {
     return () => window.removeEventListener('solu:open-palette', onOpen);
   }, []);
   const [broadcastOpen, setBroadcastOpen] = useState(false);
+  useEffect(() => {
+    const restart = () => {
+      useSettings.getState().openSettings('devices');
+      void restartBackgroundService();
+    };
+    window.addEventListener('solu:restart-background-service', restart);
+    return () => window.removeEventListener('solu:restart-background-service', restart);
+  }, []);
   const settingsOpen = useSettings((s) => s.open);
   const [activityOpen, setActivityOpen] = useState(false);
   const isMobile = useIsMobile();
@@ -1212,7 +1222,7 @@ export default function App() {
           // trusted_devices.go). It is approved here, at the computer, after
           // comparing codes, so a relayed view gets no prompt.
           if (!isRelayedSession(useCloud.getState())) {
-            st.toast(remoteDevicePendingText(msg.text), {
+            st.toast(remoteDevicePendingText(msg.text, msg.hint), {
               kind: 'warn',
               ttlMs: 0,
               logToRecent: true,
@@ -2262,6 +2272,7 @@ export default function App() {
       <SetupChecklist open={checklistOpen && firstRunReady} onClose={dismissChecklist} />
       <AgentInstallPrompt />
       <DeviceApprovalPrompt />
+      <ApproveThisScreenPrompt />
       <PrivateRelayIdentityWarning />
       <PrivateRelayStatus />
       {showEmbedChrome('whatsNew') && <WhatsNewToast />}

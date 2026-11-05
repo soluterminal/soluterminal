@@ -118,11 +118,19 @@ func (a *apiServer) ownedScheduleRefused(w http.ResponseWriter, id string) bool 
 
 // scheduleMutationRefused is the pair of guards every human-surface schedule
 // mutation runs, so a new handler cannot pick up one and miss the other.
+// scheduleMCPTools are where an agent manages schedules instead: the REST
+// routes are the person's, like the app's other changes. A schedule runs
+// commands and types into panes, so a run started here is input like any.
+var scheduleMCPTools = []string{"create_schedule", "set_schedule_enabled", "cancel_schedule"}
+
 func (a *apiServer) scheduleMutationRefused(w http.ResponseWriter, id string) bool {
 	return a.agentRunScheduleRefused(w, id) || a.ownedScheduleRefused(w, id)
 }
 
 func (a *apiServer) createSchedule(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "create a schedule", scheduleMCPTools...) {
+		return
+	}
 	var in ScheduleInput
 	if !decodeJSON(w, r, &in, defaultJSONBodyBytes) {
 		return
@@ -136,6 +144,9 @@ func (a *apiServer) createSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) updateSchedule(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "change a schedule", scheduleMCPTools...) {
+		return
+	}
 	id := r.PathValue("id")
 	if a.scheduleMutationRefused(w, id) {
 		return
@@ -153,6 +164,9 @@ func (a *apiServer) updateSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) deleteSchedule(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "delete a schedule", scheduleMCPTools...) {
+		return
+	}
 	id := r.PathValue("id")
 	if a.scheduleMutationRefused(w, id) {
 		return
@@ -165,6 +179,9 @@ func (a *apiServer) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) enableSchedule(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "turn on a schedule", scheduleMCPTools...) {
+		return
+	}
 	id := r.PathValue("id")
 	if a.scheduleMutationRefused(w, id) {
 		return
@@ -204,6 +221,9 @@ func (a *apiServer) markScheduleRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) disableSchedule(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "turn off a schedule", scheduleMCPTools...) {
+		return
+	}
 	id := r.PathValue("id")
 	if a.scheduleMutationRefused(w, id) {
 		return
@@ -220,6 +240,9 @@ func (a *apiServer) disableSchedule(w http.ResponseWriter, r *http.Request) {
 // See ScheduleStore.SnoozeNext for semantics — refuses on one-time or
 // paused schedules, idempotent for the same upcoming fire.
 func (a *apiServer) snoozeSchedule(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "skip a schedule's next run", scheduleMCPTools...) {
+		return
+	}
 	id := r.PathValue("id")
 	if a.scheduleMutationRefused(w, id) {
 		return
@@ -233,6 +256,9 @@ func (a *apiServer) snoozeSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiServer) fireSchedule(w http.ResponseWriter, r *http.Request) {
+	if !a.requireHuman(w, r, "run a schedule now", scheduleMCPTools...) {
+		return
+	}
 	id := r.PathValue("id")
 	if a.scheduleMutationRefused(w, id) {
 		return
@@ -280,24 +306,34 @@ func (a *apiServer) injectPane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caller := a.identifyCaller(r)
-	if !a.promptInputGateFor(caller)(p) {
+	promptHeld := func() {
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error":   "human_required",
 			"message": "That pane is showing a permission prompt. Agents can't answer it on their own; the person can, or can turn on Settings → Privacy & security → Agent permissions.",
 		})
+	}
+	if !a.promptInputGateFor(caller)(p) {
+		promptHeld()
 		return
 	}
-	write := p.Write
+	// The prompt gate again at write time, under the writer lock.
+	write := func(b []byte) (int, error) {
+		return p.writeWithPrecondition(b, true, false, a.promptWriteCheck(caller, p, b, "rest-schedule"))
+	}
 	if caller.Kind != callerHuman {
 		// As writeProgrammaticInput, but it may not send or clear a put-back
 		// message in the input box either, except with keys that answer a
 		// live menu.
 		write = func(b []byte) (int, error) {
 			policy := p.autoModePolicy()
-			return p.writeWithFleetAdmissionPolicy(b, true, false, &policy, time.Now().Add(ariaJevTimeout), p.putBackKeysCheck())
+			return p.writeWithFleetAdmissionPolicy(b, true, false, &policy, time.Now().Add(ariaJevTimeout), bothChecks(a.promptWriteCheck(caller, p, b, "rest-schedule"), p.putBackKeysCheck()))
 		}
 	}
 	if _, err := write([]byte(req.Text)); err != nil {
+		if errors.Is(err, errPromptHeld) {
+			promptHeld()
+			return
+		}
 		if errors.Is(err, errAutoModePolicyChanged) || errors.Is(err, errPutBackInBox) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return

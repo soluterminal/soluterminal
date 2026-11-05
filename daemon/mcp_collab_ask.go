@@ -314,6 +314,11 @@ func (a *apiServer) mcpToolAskPane(args map[string]any, callerPane string) any {
 }
 
 func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
+	// A message never answers a prompt, whoever sends it. One or two letters
+	// are written as raw keys, and a dialog still drawn after its first
+	// answer (menuInputDrawn) passes the state check below: the write-time
+	// check holds them there.
+	c.heldAtPrompt = true
 	callerPane := c.ID
 	ref, _ := args["pane_id"].(string)
 	text, _ := args["text"].(string)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -46,36 +47,43 @@ func backupConfigFile(path, backupDir string) error {
 // rewriteConfigFile applies edit to path, backing it up first. Results:
 // "absent", "nothing to remove", "left as is (…)" or "removed".
 func rewriteConfigFile(path, backupDir string, edit func(string) (string, bool, bool)) (string, error) {
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return "absent", nil
+	validate := func([]byte) error { return nil }
+	switch filepath.Ext(path) {
+	case ".json":
+		validate = validateJSONObject
+	case ".toml":
+		validate = validateTOML
 	}
-	if err != nil {
-		return "", err
+	for attempt := 0; attempt < configWriteAttempts; attempt++ {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return "absent", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		next, changed, ok := edit(string(data))
+		if !ok {
+			return "left as is (unrecognized shape)", nil
+		}
+		if !changed {
+			return "nothing to remove", nil
+		}
+		if err := backupConfigFile(path, backupDir); err != nil {
+			return "", fmt.Errorf("backup failed, file left unchanged: %w", err)
+		}
+		// Through a symlink, exclusive temp file, mode kept, re-read before
+		// the rename (writeAgentConfig).
+		err = writeAgentConfig(path, data, []byte(next), validate)
+		if errors.Is(err, errConfigChangedMeanwhile) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		return "removed", nil
 	}
-	next, changed, ok := edit(string(data))
-	if !ok {
-		return "left as is (unrecognized shape)", nil
-	}
-	if !changed {
-		return "nothing to remove", nil
-	}
-	if err := backupConfigFile(path, backupDir); err != nil {
-		return "", fmt.Errorf("backup failed, file left unchanged: %w", err)
-	}
-	mode := os.FileMode(0o644)
-	if info, statErr := os.Stat(path); statErr == nil {
-		mode = info.Mode().Perm()
-	}
-	tmp := path + ".solu-tmp"
-	if err := os.WriteFile(tmp, []byte(next), mode); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	return "removed", nil
+	return "", fmt.Errorf("%s kept changing while it was being updated", path)
 }
 
 // agentIntegrationOwner names the SoluTerminal install whose entries a
@@ -86,10 +94,23 @@ func rewriteConfigFile(path, backupDir string, edit func(string) (string, bool, 
 type agentIntegrationOwner struct {
 	MCPURL  string
 	HookURL string
-	GOOS    string
+	// MCPSocket is the socket this install's bridge entries name.
+	MCPSocket string
+	GOOS      string
 }
 
-func (o agentIntegrationOwner) all() bool { return o.MCPURL == "" && o.HookURL == "" }
+func (o agentIntegrationOwner) all() bool {
+	return o.MCPURL == "" && o.HookURL == "" && o.MCPSocket == ""
+}
+
+// ownsBridgeEntry reports whether a bridge entry of ours (args from
+// ~/.claude.json) names this install's socket.
+func (o agentIntegrationOwner) ownsBridgeEntry(args []string) bool {
+	if o.all() {
+		return true
+	}
+	return o.MCPSocket != "" && len(args) == 3 && args[1] == "--socket" && args[2] == o.MCPSocket
+}
 
 // ownsMCPURL reports whether an existing registration points at this install.
 // On Windows the canonical ports are one family (see mcpTakeoverSiblingEntry).
@@ -222,8 +243,8 @@ func removeClaudeMcpServer(home, backupDir string, owner agentIntegrationOwner) 
 		res.Error = err.Error()
 		return res
 	}
-	if existing := claudeJSONServerURL(string(data)); !owner.ownsMCPURL(existing) {
-		res.Result = "left as is (it belongs to another SoluTerminal at " + existing + ")"
+	if why := claudeServerNotOwned(string(data), owner); why != "" {
+		res.Result = why
 		return res
 	}
 	if _, changed, ok := claudeJSONRemoveServer(string(data)); ok && !changed {
@@ -244,12 +265,72 @@ func removeClaudeMcpServer(home, backupDir string, owner agentIntegrationOwner) 
 		}
 		_ = out // fall through to the direct edit
 	}
-	result, err := rewriteConfigFile(path, backupDir, claudeJSONRemoveServer)
+	// The ownership check runs again on every attempt: a retry after
+	// another program's save must not remove an entry that has since become
+	// another install's.
+	result, err := rewriteConfigFile(path, backupDir, claudeRemoveOwnedServer(owner))
 	res.Result = result
 	if err != nil {
 		res.Error = err.Error()
 	}
 	return res
+}
+
+// claudeServerNotOwned says why mcpServers.soluterminal in body is not
+// owner's to remove, or "" when it is (or there is nothing there).
+func claudeServerNotOwned(body string, owner agentIntegrationOwner) string {
+	existing := claudeJSONServerURL(body)
+	if existing == "" && claudeJSONHasServer(body) {
+		// A stdio entry: ours only as a bridge entry naming this install's
+		// socket. Someone else's, or another install's bridge, stays.
+		if !claudeEntryIsOurBridge([]byte(body)) {
+			return "left as is (it isn't a SoluTerminal entry)"
+		}
+		if !owner.ownsBridgeEntry(claudeJSONServerArgs(body)) {
+			return "left as is (it belongs to another SoluTerminal's MCP socket)"
+		}
+		return ""
+	}
+	if !owner.ownsMCPURL(existing) {
+		return "left as is (it belongs to another SoluTerminal at " + existing + ")"
+	}
+	return ""
+}
+
+// claudeRemoveOwnedServer is claudeJSONRemoveServer for an entry owner still
+// owns when the file is read; otherwise it changes nothing.
+func claudeRemoveOwnedServer(owner agentIntegrationOwner) func(string) (string, bool, bool) {
+	return func(body string) (string, bool, bool) {
+		if claudeServerNotOwned(body, owner) != "" {
+			return body, false, true
+		}
+		return claudeJSONRemoveServer(body)
+	}
+}
+
+// claudeJSONHasServer reports whether mcpServers.soluterminal exists.
+func claudeJSONHasServer(body string) bool {
+	var cfg struct {
+		McpServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if json.Unmarshal([]byte(body), &cfg) != nil {
+		return false
+	}
+	_, ok := cfg.McpServers["soluterminal"]
+	return ok
+}
+
+// claudeJSONServerArgs is the args of mcpServers.soluterminal.
+func claudeJSONServerArgs(body string) []string {
+	var cfg struct {
+		McpServers map[string]struct {
+			Args []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if json.Unmarshal([]byte(body), &cfg) != nil {
+		return nil
+	}
+	return cfg.McpServers["soluterminal"].Args
 }
 
 // claudeJSONServerURL is the url of mcpServers.soluterminal ("" if none).

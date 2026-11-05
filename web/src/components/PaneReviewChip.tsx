@@ -5,6 +5,7 @@ import { formatAgo } from '../lib/turnTime';
 import { api } from '../api';
 import { useStore } from '../store';
 import { useAnchoredCard } from './useAnchoredCard';
+import { PaneAskList } from './PaneAskList';
 
 // "Was this work reviewed, by which model, and what is still open?" — the
 // latest solu-review result for a pane (daemon pane_review.go), as a compact
@@ -147,6 +148,12 @@ export function PaneReviewChip({ pane }: { pane: PaneInfo }) {
               <ul className="pane-review-list">
                 {(r.questions ?? []).map((q, i) => <li key={i}>{q}</li>)}
               </ul>
+            </>
+          )}
+          {r.verdict === 'comment' && (pane.asks ?? []).length > 0 && (
+            <>
+              <div className="pane-review-heading">Asks waiting on you</div>
+              <PaneAskList pane={pane} asks={pane.asks ?? []} />
             </>
           )}
           {notes.length > 0 && (

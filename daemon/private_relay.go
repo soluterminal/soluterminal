@@ -663,6 +663,8 @@ func (a *apiServer) privateHandshake(ws *websocket.Conn) (*privateRecords, strin
 	s.mu.Lock()
 	d := s.find(hello.Device)
 	var deviceKey *ecdsa.PublicKey
+	// An alerts-only device (deviceStatusApprovedAlerts) never opens it:
+	// everything inside the channel counts as that device.
 	if d != nil && d.Status == deviceStatusApproved {
 		deviceKey = d.key
 	}

@@ -109,6 +109,12 @@
       "approvedBy": "Benjamin",
       "date": "2026-11-03",
       "note": "Benjamin approved the 8-line set in the CMO pane (\"yes 1236 notes\"); BULLETIN 4c6664d."
+    },
+    "0.0.1237": {
+      "sha256": "3860c0a7d082114e9a2c5c1887a8566516dcf0c4fdb0bb0eba5c664530da0d61",
+      "approvedBy": "Benjamin",
+      "date": "2026-11-04",
+      "note": "Benjamin approved the 13-line set relayed by @release-lead (\"notes yes, drop the line, ok deploy site\")."
     }
   }
 }

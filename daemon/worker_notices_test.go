@@ -631,7 +631,7 @@ func TestNeverPushedBranchEscalatesWithFreshCommitEvidence(t *testing.T) {
 		})
 	}
 	// A missing repository is uncertainty, not evidence of unpublished commits.
-	if _, reason := workerGitCleanPushed(context.Background(), t.TempDir()); reason != "work has no pushed upstream" {
+	if _, reason := workerGitCleanPushed(context.Background(), t.TempDir()); !strings.HasPrefix(reason, workerGitUnreadable) || !workerPublicationUncertain(reason) {
 		t.Fatalf("unverified repository became unpublished work: %q", reason)
 	}
 }

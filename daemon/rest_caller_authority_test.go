@@ -94,8 +94,9 @@ func TestPaneWorkspaceRESTCallerAuthority(t *testing.T) {
 					case "relay human":
 						wantKind = callerHuman
 					case "pane", "delegated pane":
-						child := startSleeper(t, "SOLU_PANE_ID=lead")
-						stubPeerPID(t, child.Process.Pid, true)
+						// A detached pane job: re-parented away from the
+						// daemon, placed by its SOLU_PANE_ID.
+						stubPeerPID(t, startDetachedSleeper(t, "SOLU_PANE_ID=lead"), true)
 						req.Header.Set("Sec-Fetch-Site", "same-origin")
 						wantKind = callerPane
 						if caller == "delegated pane" {

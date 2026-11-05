@@ -4,6 +4,8 @@ package main
 
 import (
 	"bufio"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -38,5 +40,23 @@ func TestMountFSTypeFindsDrvFs(t *testing.T) {
 		if got := mountFSType(bufio.NewScanner(strings.NewReader(mountinfo)), path); got != want {
 			t.Fatalf("%s: fstype %q, want %q", path, got, want)
 		}
+	}
+}
+
+// Without a readable mount table the filesystem can't be checked: refused.
+func TestMCPSocketFilesystemCheckFailsClosed(t *testing.T) {
+	prev := mcpMountInfoPath
+	mcpMountInfoPath = filepath.Join(t.TempDir(), "missing-mountinfo")
+	t.Cleanup(func() { mcpMountInfoPath = prev })
+	if err := mcpSocketFilesystemOKPlatform(t.TempDir()); err == nil {
+		t.Fatal("unreadable mountinfo passed the check")
+	}
+	empty := filepath.Join(t.TempDir(), "mountinfo")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mcpMountInfoPath = empty
+	if err := mcpSocketFilesystemOKPlatform(t.TempDir()); err == nil {
+		t.Fatal("a mount table without the directory passed the check")
 	}
 }

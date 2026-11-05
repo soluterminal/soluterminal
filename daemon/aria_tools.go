@@ -302,6 +302,9 @@ func hardenedGitStatus(dir string, includeDiffStat bool, maxCommits int) (map[st
 		return nil, err
 	}
 	repoRoot, err := turnResolveRepo(ctx, dir)
+	if err != nil && err.Error() != "not a git repository" {
+		return nil, fmt.Errorf("repository cannot be read: %v", err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("not a git repo: %v", err)
 	}

@@ -450,7 +450,7 @@ func TestChangingTheMode(t *testing.T) {
 	if w.Code != http.StatusForbidden || refusal["error"] != "device_required" {
 		t.Fatalf("lowering report → off by headers alone = %d, %v", w.Code, refusal)
 	}
-	wantRecovery := "Lower the device check from an approved browser or app. If none is left, add SOLU_HUMAN_PROOF=off to .solu/env in your home folder (in Linux if SoluTerminal runs in WSL), then restart SoluTerminal's background service: if it runs in WSL, run wsl --shutdown in Windows and reopen SoluTerminal (this stops everything running in WSL); if it runs on Windows without WSL, quit SoluTerminal from the tray and reopen it; with a Linux command-line install, run systemctl --user restart soluterminal."
+	wantRecovery := "Lower the device check from an approved browser or app. If none is left, add SOLU_HUMAN_PROOF=off to ~/.solu/env (WSL, Linux or macOS) or %USERPROFILE%\\.solu\\env (Windows-native), then restart SoluTerminal's background service. If your desktop tray has Restart background service, choose it (on Windows it restarts only the WSL service; if it refuses, use the steps below). Otherwise: with WSL, quit SoluTerminal from the tray icon, run wsl --shutdown in Windows PowerShell (this stops everything running in WSL, including your agents) and reopen SoluTerminal; on Linux run systemctl --user restart soluterminal.service, or if you start it yourself, stop and start it again; on macOS run launchctl kickstart -k gui/$(id -u)/com.soluterminal.daemon, or if you start it yourself, stop and start it again; on Windows without WSL, quit SoluTerminal from the tray icon and reopen it. Then approve a device in Settings › Privacy & security, remove the SOLU_HUMAN_PROOF=off line, and restart the same way again. While that line is there, any browser or program on this computer can approve or remove devices."
 	if refusal["message"] != wantRecovery {
 		t.Fatalf("lowering refusal lost the background-service recovery steps: %v", refusal["message"])
 	}
@@ -839,8 +839,11 @@ func TestRacingFirstApprovalsOverHTTP(t *testing.T) {
 	a := humanProofTestServer(t, humanProofReport)
 	stubPeerPID(t, 0, false)
 	ids := []string{}
-	for i := 0; i < 8; i++ {
-		d, _ := a.trustedDevices.enroll("Racer", newTestDevice(t).spki, 2)
+	for i := 0; i < devicePendingLimit; i++ { // a full list refuses more
+		d, err := a.trustedDevices.enroll("Racer", newTestDevice(t).spki, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
 		ids = append(ids, d.ID)
 	}
 	codes := make(chan int, len(ids))

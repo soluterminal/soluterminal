@@ -140,6 +140,11 @@ func (s *trustedDevices) pruneCommittedV3Locked() error {
 			(d.Status == deviceStatusPending && (d.RevealedAt == nil || !s.now().Before(d.RevealedAt.Add(deviceRevealLifetime))))) {
 			continue
 		}
+		// A V1/V2 request waits devicePendingLifetime: a full list refuses
+		// new ones, so it must clear by itself.
+		if d.CodeVersion < 3 && d.Status == deviceStatusPending && !s.now().Before(d.CreatedAt.Add(devicePendingLifetime)) {
+			continue
+		}
 		if d.Verify != nil && d.Verify.expired(s.now()) {
 			next := *d
 			next.Verify = nil
@@ -184,6 +189,19 @@ func (s *trustedDevices) replaceDeviceV3Locked(next *trustedDevice) error {
 }
 
 func (s *trustedDevices) commitDeviceV3(name, spki, commit string) (*trustedDevice, bool, error) {
+	return s.commitDeviceV3From(name, spki, commit, false)
+}
+
+// commitDeviceV3From is commitDeviceV3; forwarded as in enrollReportFrom.
+func (s *trustedDevices) commitDeviceV3From(name, spki, commit string, forwarded bool) (*trustedDevice, bool, error) {
+	return s.commitDeviceV3Scoped(name, spki, commit, forwarded, "")
+}
+
+// commitDeviceV3Scoped is commitDeviceV3From for a device with scope (""
+// for the person's own device). The scope is fixed here: a request for a key
+// already approved keeps that record's scope, and one whose code was shown
+// can't be replaced.
+func (s *trustedDevices) commitDeviceV3Scoped(name, spki, commit string, forwarded bool, scope string) (*trustedDevice, bool, error) {
 	key, err := parseDevicePublicKey(spki)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %v", errDeviceV3Fields, err)
@@ -214,9 +232,19 @@ func (s *trustedDevices) commitDeviceV3(name, spki, commit string) (*trustedDevi
 	index := -1
 	for i, d := range devices {
 		if d.ID == id {
-			if d.Status == deviceStatusApproved {
+			// Same key, same scope: a key never moves between scopes by
+			// asking again, whatever its record's state.
+			if d.scope() != scope {
+				return nil, false, errDeviceScopeMismatch
+			}
+			if d.Status == deviceStatusApproved || d.Status == deviceStatusApprovedAlerts {
 				snapshot := *d
 				return &snapshot, false, nil
+			}
+			// A request whose code was shown (any V1/V2 request, or a
+			// revealed V3 one) waits as it is: anyone can send its key.
+			if d.Status == deviceStatusPending {
+				return nil, false, errDevicePendingKept
 			}
 			index = i
 			break
@@ -224,26 +252,18 @@ func (s *trustedDevices) commitDeviceV3(name, spki, commit string) (*trustedDevi
 	}
 	created := index == -1
 	if created {
-		pending, oldest := 0, -1
-		for i, d := range devices {
-			if d.Status != deviceStatusApproved {
-				pending++
-				if oldest == -1 || d.CreatedAt.Before(devices[oldest].CreatedAt) {
-					oldest = i
-				}
-			}
-		}
-		if pending >= devicePendingLimit {
-			devices = append(devices[:oldest], devices[oldest+1:]...)
+		if err := admitPendingLocked(devices, forwarded); err != nil {
+			return nil, false, err
 		}
 		index = len(devices)
 		devices = append(devices, nil)
 	}
 	d := &trustedDevice{
-		ID: id, Name: name, PublicKey: spki, key: key,
+		ID: id, Name: name, PublicKey: spki, key: key, Forwarded: forwarded || (!created && devices[index].Forwarded),
 		Status: deviceStatusCommitted, CodeVersion: 3, CreatedAt: s.now().UTC(),
 		EnrolmentID: attempt.EnrolmentID,
 		Commit:      commit, DaemonNonce: attempt.DaemonNonce, CodeIdentity: computer,
+		Scope: scope,
 	}
 	devices[index] = d
 	if err := s.saveDevicesV3Locked(devices); err != nil {

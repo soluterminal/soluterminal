@@ -61,6 +61,7 @@ import { paneUnread } from '../lib/turnChip';
 import { planSelectionSend } from '../lib/selectionSend';
 import { replayPinTarget } from '../lib/replayPin';
 import { createPaneInputOwnership, type PaneClaimReason } from '../lib/paneInputOwnership';
+import { CLAIM_FEEDBACK_TIMEOUT_MS, CLAIM_REGRAB_WINDOW_MS, claimAttempt, parseClaimDenied, reportClaimRefused } from '../lib/claimFeedback';
 
 interface Props {
   pane: PaneInfo;
@@ -1989,6 +1990,12 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         transportSend(JSON.stringify({type: 'owner-viewer-clean-close', ready: true}));
       };
       let autoClaimPending = false;
+      // The last Type here on this socket (lib/claimFeedback): when it was
+      // sent, and when the daemon granted it. A refusal's reason, or losing
+      // the pane again right after the grant, goes to the chip.
+      let takeoverSentAt = 0;
+      let takeoverGrantedAt = 0;
+      let takeoverAttempt = 0;
       // True while the pending claim is a CONDITIONAL kind the daemon may
       // DENY: adopt-unowned, and (since claim arbitration) first-open /
       // reconnect — any automatic claim against a live owner whose user is
@@ -2153,8 +2160,12 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         // Claimer fires {type:"claim"} on THIS pane's WS. Centralising
         // via store lets "Take over" claim every pane at once.
         registerClaimer(pane.id, () => {
-          if (ws.readyState !== WebSocket.OPEN) return;
-          ws.send(JSON.stringify({ type: 'claim', reason: 'takeover' }));
+          // A claim that can't be sent is said so, never dropped silently.
+          if (ws.readyState !== WebSocket.OPEN || !sendAllowed()) { reportClaimRefused('unreachable'); return; }
+          takeoverSentAt = Date.now();
+          takeoverGrantedAt = 0;
+          takeoverAttempt = claimAttempt();
+          if (inputOwnership.claim('takeover') === 'failed') reportClaimRefused('unreachable', takeoverAttempt);
         });
         // Redrawer fires {type:"redraw"} — user-triggered from the
         // pane-header button or keybinding. Daemon-side this does
@@ -2341,7 +2352,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           // back to writing as text if that fails.
           try {
             const msg = JSON.parse(ev.data) as {
-              type?: string; owned?: boolean; owner?: string; bytes?: number;
+              type?: string; owned?: boolean; owner?: string; denied?: string; bytes?: number;
               offset?: number; epoch?: number; resume?: boolean; token?: string; expiresAtMs?: number; leaseMs?: number;
             };
             if (msg.type === 'owner-retirement-probe') {
@@ -2495,6 +2506,18 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
               // present), so fall through to the locked state instead of
               // waiting for an owned:true that will never come. The initial
               // frame itself is never that ack (see sawInitialOwnershipFrame).
+              // Type here's outcome, for the chip only. Authority is the
+              // daemon's: this reads its answer and never claims again.
+              const denied = parseClaimDenied(msg.denied);
+              const now = Date.now();
+              if (takeoverSentAt && now - takeoverSentAt < CLAIM_FEEDBACK_TIMEOUT_MS) {
+                if (msg.owned) { takeoverSentAt = 0; takeoverGrantedAt = now; }
+                else if (denied) { takeoverSentAt = 0; reportClaimRefused(denied, takeoverAttempt); }
+              } else if (!msg.owned && ownerState === 'other' && !denied && takeoverGrantedAt
+                && now - takeoverGrantedAt < CLAIM_REGRAB_WINDOW_MS) {
+                takeoverGrantedAt = 0;
+                reportClaimRefused('regrabbed', takeoverAttempt);
+              }
               const isInitialFrame = !sawInitialOwnershipFrame;
               sawInitialOwnershipFrame = true;
               // The subscribe-time state predates our claim. In particular,

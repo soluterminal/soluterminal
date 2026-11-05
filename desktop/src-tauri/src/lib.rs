@@ -25,6 +25,7 @@ mod shell_update_manifest;
 mod single_instance;
 mod startup_screen;
 mod this_computer_update;
+mod restart_service;
 mod tray_icon;
 mod tray_notice;
 mod window_geometry;
@@ -790,8 +791,16 @@ fn finish_startup(
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
     #[cfg(windows)]
+    let restart_service_item = MenuItem::with_id(app, "restart_background_service", "Restart background service", true, None::<&str>)?;
+    #[cfg(windows)]
+    app.manage(restart_service::RestartMenuItem(restart_service_item.clone()));
+    #[cfg(windows)]
     let menu = if matches!(desktop_mode, launch_mode::LaunchMode::Local) {
-        Menu::with_items(app, &[&show, &hide, &switch, &repair, &sep, &quit])?
+        if matches!(actual_backend, "wsl" | "dual") {
+            Menu::with_items(app, &[&show, &hide, &restart_service_item, &switch, &repair, &sep, &quit])?
+        } else {
+            Menu::with_items(app, &[&show, &hide, &switch, &repair, &sep, &quit])?
+        }
     } else {
         Menu::with_items(app, &[&show, &hide, &switch_to_local, &sep, &quit])?
     };
@@ -802,6 +811,8 @@ fn finish_startup(
         Menu::with_items(app, &[&show, &hide, &switch_to_local, &sep, &quit])?
     };
 
+    #[cfg(windows)]
+    let restart_window_url = started.initial_url.clone();
     let maximize_from_menu = maximize_on_first_show.clone();
     let maximize_from_tray = maximize_on_first_show.clone();
     let _tray = TrayIconBuilder::with_id("main")
@@ -820,6 +831,17 @@ fn finish_startup(
                 if let Some(w) = app.get_webview_window("main") {
                     dispatch_desktop_will_background_event(&w, "tray-hide");
                     let _ = w.hide();
+                }
+            }
+            "restart_background_service" => {
+                #[cfg(windows)]
+                if matches!(actual_backend, "wsl" | "dual") {
+                    restart_service::native_restart(app, &restart_window_url);
+                    return;
+                }
+                show_main_window(app, &maximize_from_menu);
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.eval("window.dispatchEvent(new CustomEvent('solu:restart-background-service'));");
                 }
             }
             "switch_launch_mode" => {
@@ -897,6 +919,11 @@ fn finish_startup(
             }
         })
         .build(app)?;
+
+    #[cfg(not(windows))]
+    if matches!(desktop_mode, launch_mode::LaunchMode::Local) {
+        restart_service::discover(app, &menu, &started.initial_url);
+    }
 
     // First-launch: NO auto-fired native pair dialog anymore.
     //

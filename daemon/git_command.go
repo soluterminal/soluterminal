@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -117,28 +118,27 @@ func setGitRunOnceForTest(runOnce gitRunOnceFunc) func() {
 	}
 }
 
-// gitRunOnceExec intentionally does not use exec.CommandContext. The timeout
-// path kills the entire process group and then bounds Cmd.Wait itself, covering
-// both descendant processes and the lost-exit-notification incident class.
+// gitRunOnceExec does not give the command a cancellable context. The
+// timeout path kills the entire process group and then bounds Cmd.Wait itself,
+// covering both descendant processes and the lost-exit-notification incident
+// class.
 func gitRunOnceExec(dir string, timeout time.Duration, args []string) gitAttempt {
 	return gitRunOnceExecIndex(dir, timeout, args, "")
 }
 
 // An alternate index uses exactly the shared process-group, timeout and wait
-// bounds. The override is explicit and never mutates the daemon environment.
-func gitRunOnceExecIndex(dir string, timeout time.Duration, args []string, index string) (result gitAttempt) {
-	var output bytes.Buffer
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+// bounds. The override is explicit and never mutates the daemon environment
+// (hardenedGitCommand drops any inherited GIT_INDEX_FILE).
+func gitRunOnceExecIndex(dir string, timeout time.Duration, args []string, index string) gitAttempt {
+	cmd := hardenedGitCommand(context.Background(), dir, args...)
 	if index != "" {
-		kept := cmd.Env[:0]
-		for _, value := range cmd.Env {
-			if !strings.HasPrefix(strings.ToUpper(value), "GIT_INDEX_FILE=") {
-				kept = append(kept, value)
-			}
-		}
-		cmd.Env = append(kept, "GIT_INDEX_FILE="+index)
+		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+index)
 	}
+	return gitRunOnceCmd(cmd, timeout)
+}
+
+func gitRunOnceCmd(cmd *exec.Cmd, timeout time.Duration) (result gitAttempt) {
+	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	// Workflow children must remain in the daemon's Windows Job Object. The
@@ -301,7 +301,7 @@ func runGitResult(dir string, args ...string) (string, int, error) {
 			return "", -1, fmt.Errorf("git %s: timed out after %s (2 attempts, group killed)", strings.Join(args, " "), timeout)
 		}
 		if attempt.err != nil {
-			return attempt.out, attempt.exitCode, fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), attempt.err, strings.TrimSpace(attempt.out))
+			return attempt.out, attempt.exitCode, fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), attempt.err, gitFailureReason(attempt.out))
 		}
 		if attemptNumber == 2 {
 			gitMetricsState.TimeoutRetriesSucceeded.Add(1)
@@ -317,6 +317,15 @@ func runGit(dir string, args ...string) (string, error) {
 		return "", err
 	}
 	return out, nil
+}
+
+// runGitFetch is runGit for gitFetchCommand: the release and preview
+// checkouts' `git fetch <remote> <refspec>`, the one git allowed a transport.
+func runGitFetch(dir, remote, refspec string) error {
+	_, err := gitRawUsing(dir, []string{"fetch", remote, refspec}, func(dir string, timeout time.Duration, _ []string) gitAttempt {
+		return gitRunOnceCmd(gitFetchCommand(context.Background(), dir, remote, refspec), timeout)
+	})
+	return err
 }
 
 // gitRaw is the binary-safe counterpart of runGit. Git's -z formats may
@@ -352,7 +361,7 @@ func gitRawUsing(dir string, args []string, runAttempt gitRunOnceFunc) (string, 
 			return "", fmt.Errorf("git %s: timed out after %s (2 attempts, group killed)", strings.Join(args, " "), timeout)
 		}
 		if attempt.err != nil {
-			return "", fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), attempt.err, strings.TrimSpace(attempt.out))
+			return "", fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), attempt.err, gitFailureReason(attempt.out))
 		}
 		if attemptNumber == 2 {
 			gitMetricsState.TimeoutRetriesSucceeded.Add(1)

@@ -69,23 +69,25 @@ func atoiSafe(s string) int {
 	return n
 }
 
-func (a *apiServer) mcpToolAnswerPrompt(args map[string]any) any {
+// mcpToolAnswerPrompt also returns the prompt it answered, read before the
+// answer changes it: the approval it resolved, or the menu's input revision.
+func (a *apiServer) mcpToolAnswerPrompt(args map[string]any) (any, string) {
 	paneID, _ := args["pane_id"].(string)
 	option, _ := args["option"].(string)
 	option = strings.TrimSpace(option)
 	if strings.TrimSpace(paneID) == "" {
-		return toolErr("pane_id is required")
+		return toolErr("pane_id is required"), ""
 	}
 	if option == "" {
-		return toolErr(`option is required — a menu number ("1") for a terminal pane, or "allow"/"deny" for a native pane`)
+		return toolErr(`option is required — a menu number ("1") for a terminal pane, or "allow"/"deny" for a native pane`), ""
 	}
 	p, ok := a.mgr.Get(paneID)
 	if !ok {
-		return toolErr("no pane with id " + paneID + " (call list_panes for ids)")
+		return toolErr("no pane with id " + paneID + " (call list_panes for ids)"), ""
 	}
 	snap := p.Snapshot()
 	if snap.Status == PaneExited {
-		return toolErr("pane " + paneID + " has exited — nothing to answer")
+		return toolErr("pane " + paneID + " has exited — nothing to answer"), ""
 	}
 
 	if snap.Kind == "native" {
@@ -95,7 +97,7 @@ func (a *apiServer) mcpToolAnswerPrompt(args map[string]any) any {
 }
 
 // answerNativePrompt resolves a Focus pane's single pending approval.
-func (a *apiServer) answerNativePrompt(p *Pane, option string) any {
+func (a *apiServer) answerNativePrompt(p *Pane, option string) (any, string) {
 	var allow bool
 	switch strings.ToLower(option) {
 	case "allow", "yes", "approve", "y":
@@ -103,11 +105,11 @@ func (a *apiServer) answerNativePrompt(p *Pane, option string) any {
 	case "deny", "no", "reject", "n":
 		allow = false
 	default:
-		return toolErr(`native pane: option must be "allow" or "deny" (got ` + option + ")")
+		return toolErr(`native pane: option must be "allow" or "deny" (got ` + option + ")"), ""
 	}
 	pending := p.peekNativePending("")
 	if pending == nil {
-		return toolErr("pane " + p.ID + " has no pending approval to answer")
+		return toolErr("pane " + p.ID + " has no pending approval to answer"), ""
 	}
 	denyReason := ""
 	if !allow {
@@ -117,9 +119,9 @@ func (a *apiServer) answerNativePrompt(p *Pane, option string) any {
 	resolved, err := p.resolveApprovalWithPolicy(pending.RequestID, allow, denyReason, &policy)
 	if err != nil {
 		if err == errNoPendingApproval {
-			return toolErr("the approval was already resolved (someone else answered it)")
+			return toolErr("the approval was already resolved (someone else answered it)"), ""
 		}
-		return toolErr("resolve failed: " + err.Error())
+		return toolErr("resolve failed: " + err.Error()), ""
 	}
 	// Converge with the in-app ConfirmCard / lock-screen paths, exactly like
 	// handlePaneApprovalResolve does.
@@ -130,15 +132,15 @@ func (a *apiServer) answerNativePrompt(p *Pane, option string) any {
 	if !allow {
 		verb = "Denied"
 	}
-	return toolOK(fmt.Sprintf("%s the pending %s approval on pane %s ('%s').", verb, resolved.ToolName, p.ID, p.Title))
+	return toolOK(fmt.Sprintf("%s the pending %s approval on pane %s ('%s').", verb, resolved.ToolName, p.ID, p.Title)), approvalPromptID(pending.RequestID)
 }
 
 // answerTerminalPrompt validates the pane is on a menu and the option exists,
 // then writes the digit to the PTY.
-func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string) any {
+func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string) (any, string) {
 	if state := p.computeStateCached(); state != StateChoicePrompt {
 		return toolErr("pane " + paneID + " is not on a choice prompt (state=" + string(state) +
-			"). answer_prompt only acts on a live numbered menu; it will not type into a running or idle pane.")
+			"). answer_prompt only acts on a live numbered menu; it will not type into a running or idle pane."), ""
 	}
 	// The rendered screen is the live menu. Raw scrollback can hold stale
 	// menus, and Codex's inline frames collapse rows onto one line once the
@@ -155,13 +157,14 @@ func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string) any {
 		// State said choice-prompt but no options parsed — a transient
 		// surfacing miss (the menu scrolled behind a spinner burst). Refuse
 		// rather than blind-fire a digit.
-		return toolErr("pane " + paneID + " looks like a menu but its options could not be read right now — try again in a moment")
+		return toolErr("pane " + paneID + " looks like a menu but its options could not be read right now — try again in a moment"), ""
 	}
 	label, present := opts[option]
 	if !present {
 		return toolErr(fmt.Sprintf("option %q is not on pane %s's menu. Presented options: %s",
-			option, paneID, describeOptions(opts)))
+			option, paneID, describeOptions(opts))), ""
 	}
+	prompt := promptRevID(p)
 	policy := p.autoModePolicy()
 	writeAnswer := func(b []byte) (int, error) {
 		return p.writeWithAutoModePolicy(b, false, policy, time.Now().Add(ariaJevTimeout))
@@ -171,7 +174,7 @@ func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string) any {
 	// like every menu-choice reply: the digit is a control answer, not a user
 	// prompt, and must stay out of the prompt-recorder strip.
 	if _, err := writeAnswer([]byte(option)); err != nil {
-		return toolErr("write to pane " + paneID + " failed: " + err.Error())
+		return toolErr("write to pane " + paneID + " failed: " + err.Error()), ""
 	}
 	// Codex's submit-style menus ("enter to submit") can treat the digit as
 	// "move here" rather than "choose". Confirm with Enter only when the menu
@@ -181,15 +184,15 @@ func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string) any {
 		if after, ok := p.ScreenSnapshot(); ok {
 			if text, ok := snapshotVisibleText(after); ok && menuNeedsSubmit(text) {
 				if focusedMenuOption(menuRegion(text)) != option {
-					return toolErr(fmt.Sprintf("pressed %s on pane %s but the menu's selection did not move to it; nothing was confirmed. Read the pane and try again, or tell the user.", option, paneID))
+					return toolErr(fmt.Sprintf("pressed %s on pane %s but the menu's selection did not move to it; nothing was confirmed. Read the pane and try again, or tell the user.", option, paneID)), ""
 				}
 				if _, err := writeAnswer([]byte("\r")); err != nil {
-					return toolErr("confirm on pane " + paneID + " failed: " + err.Error())
+					return toolErr("confirm on pane " + paneID + " failed: " + err.Error()), ""
 				}
 			}
 		}
 	}
-	return toolOK(fmt.Sprintf("Selected option %s (%q) on pane %s ('%s').", option, label, paneID, p.Title))
+	return toolOK(fmt.Sprintf("Selected option %s (%q) on pane %s ('%s').", option, label, paneID, p.Title)), prompt
 }
 
 const answerPromptSettle = 300 * time.Millisecond

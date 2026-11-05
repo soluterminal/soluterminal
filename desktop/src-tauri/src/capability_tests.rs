@@ -60,9 +60,10 @@ fn only_the_main_window_may_update_this_computer() {
     let app = app();
     let cloud = "https://soluterminal-cloud.onrender.com/";
     for (label, allowed) in [("main", true), ("workspace_2", false), ("browser_1", false)] {
-        let window = WebviewWindowBuilder::new(&app, label, WebviewUrl::External(cloud.parse().unwrap()))
-            .build()
-            .unwrap();
+        let window =
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::External(cloud.parse().unwrap()))
+                .build()
+                .unwrap();
         assert_eq!(
             ask_cmd(window.as_ref(), cloud, "desktop_update_this_computer"),
             allowed,
@@ -72,14 +73,24 @@ fn only_the_main_window_may_update_this_computer() {
             .as_ref()
             .window()
             .add_child(
-                WebviewBuilder::new(format!("bpane_{label}"), WebviewUrl::External(cloud.parse().unwrap())),
+                WebviewBuilder::new(
+                    format!("bpane_{label}"),
+                    WebviewUrl::External(cloud.parse().unwrap()),
+                ),
                 LogicalPosition::new(0.0, 0.0),
                 LogicalSize::new(100.0, 100.0),
             )
             .unwrap();
-        assert!(!ask_cmd(&pane, cloud, "desktop_update_this_computer"), "bpane_{label}");
+        assert!(
+            !ask_cmd(&pane, cloud, "desktop_update_this_computer"),
+            "bpane_{label}"
+        );
         // Any other origin, even in the main window, gets nothing.
-        assert!(!ask_cmd(window.as_ref(), "https://evil.example/", "desktop_update_this_computer"));
+        assert!(!ask_cmd(
+            window.as_ref(),
+            "https://evil.example/",
+            "desktop_update_this_computer"
+        ));
     }
 }
 
@@ -132,4 +143,42 @@ fn a_direct_popout_window_has_no_commands() {
     .build()
     .unwrap();
     assert!(!ask(window.as_ref(), dev_server));
+}
+
+// Recovery bypasses webview device proof only for a real native tray click.
+// Guard both registration and every shipped capability, so an accidental
+// invoke surface cannot turn that recovery action into a page API.
+#[test]
+fn native_service_recovery_is_absent_from_webview_commands_and_capabilities() {
+    let source = include_str!("lib.rs");
+    let start = source
+        .find(".invoke_handler(tauri::generate_handler![")
+        .unwrap();
+    let end = source[start..].find("])").unwrap();
+    let handler = &source[start..start + end];
+    let recovery = include_str!("restart_service.rs");
+    assert!(!recovery.contains("#[tauri::command]"));
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+    let capabilities: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    assert!(!capabilities.is_empty());
+    for forbidden in [
+        "native_restart",
+        "restart_background_service",
+        "restart_service::",
+        "native_attempt",
+    ] {
+        assert!(
+            !handler.contains(forbidden),
+            "native recovery registered as a webview command: {forbidden}"
+        );
+        for capability in &capabilities {
+            assert!(
+                !capability.contains(forbidden),
+                "native recovery granted to a webview: {forbidden}"
+            );
+        }
+    }
 }

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -116,10 +117,15 @@ func TestTrustedDeviceEnrollment(t *testing.T) {
 	if _, err := a.trustedDevices.enroll("rsa?", "bm90IGEga2V5"); err == nil {
 		t.Fatal("a non-P-256 key was accepted")
 	}
-	for i := 0; i < devicePendingLimit+2; i++ {
-		if _, err := a.trustedDevices.enroll("spam", newTestDevice(t).spki); err != nil {
-			t.Fatal(err)
+	// A full list refuses new requests; none waiting is dropped for them.
+	for i := 1; i < devicePendingLimit+2; i++ {
+		_, err := a.trustedDevices.enroll("spam", newTestDevice(t).spki)
+		if full := i >= devicePendingLimit; full != errors.Is(err, errDevicePendingFull) || (!full && err != nil) {
+			t.Fatalf("request %d: %v", i+1, err)
 		}
+	}
+	if a.trustedDevices.find(first.ID) == nil {
+		t.Fatal("the first waiting request was dropped for later ones")
 	}
 	pending := 0
 	for _, rec := range a.trustedDevices.record.Devices {

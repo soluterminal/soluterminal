@@ -432,9 +432,9 @@ func (p *previewChannel) cleanScriptRoot(repo string) (string, func()) {
 	none := func() {}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	git := func(args ...string) ([]byte, error) { return exec.CommandContext(ctx, "git", args...).Output() }
-	_, _ = git("-C", repo, "fetch", "-q", "origin", "main") // offline: use what is there
-	out, err := git("-C", repo, "rev-parse", "origin/main^{commit}")
+	git := func(args ...string) ([]byte, error) { return hardenedGitCommand(ctx, repo, args...).Output() }
+	_ = gitFetchCommand(ctx, repo, "origin", "main").Run() // offline: use what is there
+	out, err := git("rev-parse", "origin/main^{commit}")
 	sha := strings.TrimSpace(string(out))
 	if err != nil || len(sha) < 12 {
 		return repo, none
@@ -445,8 +445,13 @@ func (p *previewChannel) cleanScriptRoot(repo string) (string, func()) {
 	defer p.sourceMu.Unlock()
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 		_ = os.RemoveAll(dir) // never handed out, so nothing runs from it
-		_, _ = git("-C", repo, "worktree", "prune")
-		if _, err := git("-C", repo, "worktree", "add", "-q", "--detach", dir, sha); err != nil {
+		_, _ = git("worktree", "prune")
+		// The checkout would run any filter driver the repository's own config
+		// defines; this project defines none, so fall back to repo instead.
+		if _, err := git("config", "--get-regexp", `^filter\.`); processExitCode(err) != 1 {
+			return repo, none
+		}
+		if _, err := git("worktree", "add", "-q", "--detach", dir, sha); err != nil {
 			return repo, none
 		}
 	}
@@ -498,7 +503,7 @@ func (p *previewChannel) pruneScriptRoots(ctx context.Context, repo, base string
 		if i == 0 {
 			continue
 		}
-		_ = exec.CommandContext(ctx, "git", "-C", repo, "worktree", "remove", "--force", r.path).Run()
+		_ = hardenedGitCommand(ctx, repo, "worktree", "remove", "--force", r.path).Run()
 		_ = os.RemoveAll(r.path)
 	}
 }

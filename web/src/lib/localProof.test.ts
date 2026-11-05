@@ -10,8 +10,9 @@ vi.mock('./deviceIdentity', async (orig) => {
 });
 
 import { signDeviceRequest } from './deviceIdentity';
+import v from './testdata/device-code-v3.json';
 import {
-  approveThisBrowserFirst, ensureLocalClock, isPaneSocketUrl, localClockOffset, localProofTarget, localSocketStanding,
+  approveThisBrowserFirst, askToApproveThisBrowser, ensureLocalClock, isPaneSocketUrl, localClockOffset, localProofTarget, localSocketStanding,
   localSocketStandingChanged, refreshLocalProof,
 } from './localProof';
 
@@ -107,5 +108,31 @@ describe('localProof', () => {
     fetchMock.mockResolvedValueOnce(statusReply({ device: 'approved' }));
     await refreshLocalProof('');
     expect(localSocketStanding('')).toMatchObject({ target: 'local/dmn_a' });
+  });
+  it('asks with V3 commit/reveal and shows the code it computed, never the one the daemon sent', async () => {
+    const me = { id: v.deviceId, spki: v.deviceSPKI };
+    const { deviceIdentity } = await import('./deviceIdentity');
+    vi.mocked(deviceIdentity).mockResolvedValueOnce({ ...me, code: '', key: {} as CryptoKeyPair });
+    const committed = { id: me.id, status: 'committed', enrolmentId: v.enrolmentId, daemonIdentity: v.daemonSPKI, daemonNonce: v.daemonNonce, codeVersion: 3 };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify(committed), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...committed, status: 'pending', daemonNonce: undefined, code: 'SERVER-SENT-CODE' }), { status: 200 }))
+      .mockResolvedValueOnce(statusReply({ device: 'pending' }));
+    const code = await askToApproveThisBrowser('');
+    expect(code).not.toBe('SERVER-SENT-CODE');
+    expect(code).toMatch(/\S/);
+    const [enrolUrl, enrolInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(enrolUrl).toBe('/api/remote-devices/enroll');
+    const sent = JSON.parse(String(enrolInit.body));
+    expect(sent).toMatchObject({ publicKey: me.spki, codeVersion: 3 });
+    expect(sent.commit).toMatch(/\S/);
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/remote-devices/enroll/reveal');
+  });
+
+  it('refuses a local request that offers no V3 code', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'dev_me', status: 'pending', daemonIdentity: 'MFkw', codeVersion: 2 }), { status: 200 }))
+      .mockResolvedValueOnce(statusReply({ device: 'pending' }));
+    await expect(askToApproveThisBrowser('')).rejects.toThrow();
   });
 });

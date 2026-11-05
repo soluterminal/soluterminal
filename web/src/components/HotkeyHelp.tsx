@@ -36,6 +36,7 @@ const GROUPS: ShortcutGroup[] = [
   {
     title: 'Sessions',
     items: [
+      { label: 'Unsent message → Clear checks the whole input box. Supported agents can clear wrapped or multi-line text; Partly cleared keeps agents blocked until the box is empty.' },
       { actionId: 'pane.new', label: 'New session dialog' },
       { keys: ['Alt', '→'], label: 'Split right with new session' },
       { keys: ['Alt', '↓'], label: 'Split down with new session' },
@@ -236,6 +237,7 @@ export function HotkeyHelp({ open, onClose }: Props) {
           <h2 className="dialog-title">Keyboard shortcuts</h2>
           <button onClick={onClose} title="Close (Esc)" aria-label="Close">×</button>
         </div>
+        <p className="settings-row-hint">Recovery: Settings → Devices &amp; updates → Restart background service (supported local installs). If your desktop tray has Restart background service, you can choose it there too. Panes keep running.</p>
         <input
           ref={inputRef}
           className="hotkey-help-search"

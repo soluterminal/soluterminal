@@ -1,0 +1,101 @@
+{
+  "agent": "claude",
+  "version": "2.1.310",
+  "cols": 66,
+  "rows": 40,
+  "steps": [
+    {
+      "name": "boot",
+      "bytes": 1602
+    },
+    {
+      "name": "wrapped",
+      "bytes": 6414
+    },
+    {
+      "name": "wrapped_clear",
+      "bytes": 6931
+    },
+    {
+      "name": "empty_noop",
+      "bytes": 6931
+    },
+    {
+      "name": "line1",
+      "bytes": 7579
+    },
+    {
+      "name": "newline",
+      "bytes": 8069
+    },
+    {
+      "name": "multiline",
+      "bytes": 8753
+    },
+    {
+      "name": "edited_multiline",
+      "bytes": 10069
+    },
+    {
+      "name": "multiline_clear",
+      "bytes": 10578
+    }
+  ],
+  "command": [
+    "claude",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "default",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--setting-sources",
+    "project"
+  ],
+  "inputs": [
+    {
+      "step": "wrapped",
+      "typed": "ST11 alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau.",
+      "paced_seconds": 0.04
+    },
+    {
+      "step": "wrapped_clear",
+      "one_write_hex_byte": "7f",
+      "count": 167
+    },
+    {
+      "step": "empty_noop",
+      "one_write_hex_byte": "7f",
+      "count": 4096
+    },
+    {
+      "step": "line1",
+      "typed": "ST11 first line"
+    },
+    {
+      "step": "newline",
+      "hex": "1b5b31333b3275"
+    },
+    {
+      "step": "multiline",
+      "typed": "ST11 second line"
+    },
+    {
+      "step": "edited_multiline",
+      "hex": "1b5b31333b3275",
+      "typed": "person edited line"
+    },
+    {
+      "step": "multiline_clear",
+      "one_write_hex_byte": "7f",
+      "count": 150
+    }
+  ],
+  "environment": {
+    "TERM": "xterm-256color",
+    "COLORTERM": "truecolor",
+    "FORCE_COLOR": "1",
+    "NO_COLOR": "unset"
+  }
+}

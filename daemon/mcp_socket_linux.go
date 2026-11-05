@@ -66,6 +66,9 @@ func parseProcStatStartTime(stat string) (uint64, bool) {
 	return start, err == nil && start > 0
 }
 
+// mcpMountInfoPath is a variable so tests can make it unreadable.
+var mcpMountInfoPath = "/proc/self/mountinfo"
+
 // mcpSocketFilesystemOKPlatform refuses a directory on a Windows drive mounted
 // into WSL (DrvFs over 9p): Unix sockets and modes there are not the Linux
 // kernel's to enforce.
@@ -74,12 +77,17 @@ func mcpSocketFilesystemOKPlatform(dir string) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.Open("/proc/self/mountinfo")
+	f, err := os.Open(mcpMountInfoPath)
 	if err != nil {
-		return nil
+		// Without the mount table the filesystem can't be checked: refuse.
+		return fmt.Errorf("can't read %s to check the filesystem of %s: %w", mcpMountInfoPath, dir, err)
 	}
 	defer f.Close()
-	fstype := mountFSType(bufio.NewScanner(f), real)
+	sc := bufio.NewScanner(f)
+	fstype := mountFSType(sc, real)
+	if err := sc.Err(); err != nil || fstype == "" {
+		return fmt.Errorf("can't find the filesystem of %s in %s", dir, mcpMountInfoPath)
+	}
 	switch fstype {
 	case "9p", "drvfs":
 		return fmt.Errorf("%s is on a %s filesystem (a Windows drive); the MCP socket needs the Linux filesystem", dir, fstype)
