@@ -13,7 +13,9 @@ import (
 // one process instead of written into the user's config:
 //
 //   - Claude Code: --mcp-config <json> (adds to the user's servers; no
-//     --strict-mcp-config) and --settings <json> carrying our hooks.
+//     --strict-mcp-config) and --settings <json> carrying our hooks. Windows
+//     .cmd launches materialize those values as user-private JSON files at
+//     the child boundary (claudeConfigFileArgs).
 //   - Codex: -c mcp_servers.soluterminal.url=… and its pane header, plus the
 //     context-pack note as developer_instructions when a pack is attached.
 //

@@ -266,6 +266,17 @@ func runAgent() int {
 		}
 	}
 
+	// Batch files have cmd.exe argument parsing rather than native argv parsing.
+	// Keep injected hook/MCP JSON out of that transport. The agent owns these
+	// files, so they survive daemon restarts and disappear when the pane exits.
+	childArgs, cleanupConfig, configErr := claudeConfigFileArgs(args[0], args[1:])
+	if configErr != nil {
+		log.Printf("Claude launch configuration: %v", configErr)
+		return 1
+	}
+	defer cleanupConfig()
+	args = append([]string{args[0]}, childArgs...)
+
 	// Spawn the child either attached to a PTY (terminal panes) or wired
 	// to plain pipes (--no-pty: headless stream-json agents that refuse a
 	// TTY stdin). Both produce a childIO plus the child's *os.Process and a
@@ -285,11 +296,13 @@ func runAgent() int {
 		// just the child — matching the PTY path's setsid.
 		inR, inW, perr := os.Pipe()
 		if perr != nil {
-			log.Fatalf("stdin pipe: %v", perr)
+			log.Printf("stdin pipe: %v", perr)
+			return 1
 		}
 		outR, outW, perr := os.Pipe()
 		if perr != nil {
-			log.Fatalf("stdout pipe: %v", perr)
+			log.Printf("stdout pipe: %v", perr)
+			return 1
 		}
 		c := exec.Command(args[0], args[1:]...)
 		if *cwd != "" {
@@ -302,7 +315,8 @@ func runAgent() int {
 		c.SysProcAttr = pipeChildSysProcAttr()
 		applyNoWindow(c)
 		if err := startWithoutCoreDumps(c); err != nil {
-			log.Fatalf("pipe start: %v", err)
+			log.Printf("pipe start: %v", err)
+			return 1
 		}
 		// The child holds its own dups; drop the parent's copies of the
 		// child-side ends so EOF propagates when the child exits.
@@ -319,7 +333,8 @@ func runAgent() int {
 		// https://github.com/golang/go/issues/62708).
 		ppty, perr := gopty.New()
 		if perr != nil {
-			log.Fatalf("pty new: %v", perr)
+			log.Printf("pty new: %v", perr)
+			return 1
 		}
 		c := ppty.Command(args[0], args[1:]...)
 		if *cwd != "" {
@@ -337,7 +352,8 @@ func runAgent() int {
 		// scrollback.
 		_ = ppty.Resize(int(*cols), int(*rows))
 		if err := startWithoutCoreDumps(c); err != nil {
-			log.Fatalf("pty start: %v", err)
+			log.Printf("pty start: %v", err)
+			return 1
 		}
 		cio = ppty
 		proc = c.Process
@@ -565,6 +581,7 @@ func runAgent() int {
 	// Wait for child to exit, broadcast exit, close everything.
 	go func() {
 		err := waitFn()
+		cleanupConfig() // before FrameExit lets the daemon retire/kill this agent
 		code := exitCodeFromWait(err, waitState())
 		msg, _ := json.Marshal(map[string]int{"code": code})
 		// Publish exit state BEFORE broadcasting so a new connection
@@ -957,6 +974,9 @@ func ensureLocalBinOnPath(env []string) []string {
 		return env
 	}
 	localBin := filepath.Join(home, ".local", "bin")
+	if runtime.GOOS == "windows" {
+		return prependDirsOnPath(env, []string{localBin}, ";", true)
+	}
 	sep := string(os.PathListSeparator)
 	for i, kv := range env {
 		if !strings.HasPrefix(kv, "PATH=") {

@@ -476,3 +476,79 @@ func TestNormalizePromptTextJoinsWrappedFooter(t *testing.T) {
 		t.Fatalf("normalizePromptText = %q, want %q", got, want)
 	}
 }
+
+// Synthetic menus share an accept-once row and generic footer. Clipping the
+// header and siblings leaves the actual short-pane Claude permission shape;
+// that lone row cannot establish which menu it belongs to.
+func TestAutoApprovalMenuVisibility(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, header, siblings, fullReason string
+	}{
+		{"plan-exit rows", "", "   2. Yes, manually approve edits\n   3. No, keep planning", "plan-exit menu"},
+		{"plan-exit header", "Ready to code?", "   2. No", "plan-exit menu"},
+		{"exit-plan yes/no", "Exit plan mode?", "   2. No", "plan-exit menu"},
+		{"reset header", "Use your reset?", "   2. No", "billing/reset confirmation"},
+		{"usage credits row", "", "   2. Yes, buy usage credits\n   3. No", "billing/credits menu"},
+		{"upgrade row", "", "   2. Upgrade to Max\n   3. No", "billing/upgrade menu"},
+		{"question with generic footer", "", "   2. Type something.\n   3. No", "question menu"},
+		{"plain permission", "", "   2. No", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, provider := range []struct {
+				name, pointer string
+				hasCodex      bool
+			}{
+				{"claude", "❯", false},
+				{"codex", "›", true},
+			} {
+				t.Run(provider.name, func(t *testing.T) {
+					clippedRows := fixtureScreen(" "+provider.pointer+" 1. Yes", "", " Esc to cancel · Tab to amend")
+					clipped := fixtureScreen("Do you want to proceed?", clippedRows)
+					header := tc.header
+					if header == "" {
+						header = "Do you want to proceed?"
+					}
+					full := fixtureScreen(header, " "+provider.pointer+" 1. Yes", tc.siblings, "", " Esc to cancel · Tab to amend")
+					if got := autoApprovalDeclineReason(full, provider.hasCodex); got != tc.fullReason {
+						t.Fatalf("full menu: reason = %q, want %q", got, tc.fullReason)
+					}
+					for _, screen := range []string{clipped, clippedRows} {
+						if got := autoApprovalDeclineReason(screen, provider.hasCodex); got == "" {
+							t.Fatalf("clipped menu approved: %q", screen)
+						}
+					}
+					if got := autoApprovalDeclineReason(clipped, provider.hasCodex); got != "menu has no visible sibling option" {
+						t.Fatalf("clipped permission shape: reason = %q", got)
+					}
+					// Deny evidence that remains visible must still win over
+					// the new structural check.
+					if tc.header != "" {
+						if got := autoApprovalDeclineReason(tc.header+"\n"+clipped, provider.hasCodex); got != tc.fullReason {
+							t.Fatalf("visible header with clipped rows: reason = %q, want %q", got, tc.fullReason)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestAutoApprovalMenuVisibilityRequiresAcceptOnceFocus(t *testing.T) {
+	t.Parallel()
+	for _, label := range []string{
+		"Always allow",
+		"Yes, and switch to auto mode",
+		"Yes, and use auto mode",
+	} {
+		t.Run(label, func(t *testing.T) {
+			for _, siblings := range []string{"", "   2. No", " ↓ 2. Yes"} {
+				s := fixtureScreen("Do you want to proceed?", " ❯ 1. "+label, siblings, "", " Esc to cancel · Tab to amend")
+				if reason := autoApprovalDeclineReason(s, false); reason == "" {
+					t.Fatalf("focused %q approved with siblings %q", label, siblings)
+				}
+			}
+		})
+	}
+}

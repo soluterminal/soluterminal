@@ -109,6 +109,9 @@ func prependPathDir(env []string, dir string) []string {
 	if dir == "" {
 		return env
 	}
+	if os.PathListSeparator == ';' {
+		return prependDirsOnPath(env, []string{dir}, ";", true)
+	}
 	sep := string(os.PathListSeparator)
 	for i, kv := range env {
 		if !strings.HasPrefix(kv, "PATH=") {

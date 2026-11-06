@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LocalProofStatus } from '../../lib/localProof';
 
 const status: { current: LocalProofStatus | null } = { current: null };
+const frame = vi.hoisted(() => ({ embedded: false }));
+vi.mock('../../embed', async (orig) => ({ ...(await orig<typeof import('../../embed')>()), isEmbedded: () => frame.embedded }));
 
 vi.mock('../../lib/localProof', async (orig) => {
   const real = await orig<typeof import('../../lib/localProof')>();
@@ -27,7 +29,7 @@ const base: LocalProofStatus = {
   approvedDevices: 0, canBootstrap: true,
 };
 
-beforeEach(() => { status.current = { ...base }; });
+beforeEach(() => { status.current = { ...base }; frame.embedded = false; });
 afterEach(() => {
   act(() => { useStore.getState().closeDialog(null); setBackend(null); });
   vi.restoreAllMocks();
@@ -41,6 +43,13 @@ describe('HumanProofSetting', () => {
     expect(screen.getByText(/If you lose every approved device/)).toHaveTextContent("add SOLU_HUMAN_PROOF=off to ~/.solu/env (WSL, Linux or macOS) or %USERPROFILE%\\.solu\\env (Windows-native), then restart SoluTerminal's background service. If your desktop tray has Restart background service, choose it (on Windows it restarts only the WSL service; if it refuses, use the steps below). Otherwise: with WSL, quit SoluTerminal from the tray icon, run wsl --shutdown in Windows PowerShell (this stops everything running in WSL, including your agents) and reopen SoluTerminal; on Linux run systemctl --user restart soluterminal.service, or if you start it yourself, stop and start it again; on macOS run launchctl kickstart -k gui/$(id -u)/com.soluterminal.daemon, or if you start it yourself, stop and start it again; on Windows without WSL, quit SoluTerminal from the tray icon and reopen it. Then approve a device in Settings › Privacy & security, remove the SOLU_HUMAN_PROOF=off line, and restart the same way again. While that line is there, any browser or program on this computer can approve or remove devices.");
     const select = screen.getByRole('combobox', { name: HUMAN_PROOF_LABEL });
     expect((select.querySelector('option[value="require"]') as HTMLOptionElement).disabled).toBe(true);
+  });
+
+  it('in the Shinoque Code frame offers no first-device button and points at a browser at the computer', async () => {
+    frame.embedded = true;
+    render(<HumanProofSetting />);
+    expect(await screen.findByText('Approve the first browser from a web browser on this computer, in Settings → Privacy & security.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approve this browser' })).toBeNull();
   });
 
   it('asks for approval from another device once one is approved, and shows the code', async () => {

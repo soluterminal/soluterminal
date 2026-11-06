@@ -3,6 +3,7 @@ import {
   IconSearch, IconLock, IconPencil, IconEye, IconEyeOff, IconMaximize, IconMinimize,
 } from './ui/icons';
 import { api } from '../api';
+import { isSaveApprovalRefusal, saveFailureText } from '../lib/saveRefusalCopy';
 import { useStore } from '../store';
 import type { FileTileInfo } from '../types';
 import { detectLang, tokenizeLine, type Tok } from '../lib/highlight';
@@ -144,9 +145,37 @@ export function FileTile({ info }: Props) {
     setMatchIdx((m) => { const len = matches.length; return ((m + delta) % len + len) % len; });
   }
 
-  async function commitLine(lineNo: number) {
+  const refusalToast = useRef<string | null>(null);
+  const refusedDraft = useRef<string | null>(null);
+  const saving = useRef(false);
+  function refusalToastShown(): boolean {
+    const text = refusalToast.current;
+    return !!text && useStore.getState().toasts.some((t) => t.message === text);
+  }
+  const clearRefusalToastRef = useRef<() => void>(() => {});
+  function clearRefusalToast() {
+    const text = refusalToast.current;
+    if (!text) return;
+    refusalToast.current = null;
+    refusedDraft.current = null;
+    const { toasts, dismissToast } = useStore.getState();
+    for (const t of toasts) if (t.message === text) dismissToast(t.id);
+  }
+  clearRefusalToastRef.current = clearRefusalToast;
+
+  // The tile closing takes its refusal with it.
+  useEffect(() => () => clearRefusalToastRef.current(), []);
+
+  async function commitLine(lineNo: number, fromBlur = false) {
     if (!file) return;
     const text = draft;
+    const draftText = text;
+    // Clicking the refusal's dismiss button blurs the input: don't save again
+    // (and re-show it) for text that was just refused. Enter still retries.
+    if (fromBlur && refusedDraft.current === `${lineNo}:${text}` && refusalToastShown()) return;
+    // Leaving a line you did not change has nothing to save (or to refuse).
+    if (fromBlur && text === file.lines[lineNo]) { setEditingLine(null); return; }
+    saving.current = true;
     try {
       const res = await api.writeFileLine(file.path, lineNo, text, file.mtime);
       setFile({
@@ -155,20 +184,41 @@ export function FileTile({ info }: Props) {
         mtime: res.mtime,
       });
       setEditingLine(null);
+      clearRefusalToast();
       toast('Saved', { kind: 'success', icon: '✓', ttlMs: 1500 });
     } catch (e) {
       const msg = (e as Error).message;
       if (/mtime mismatch/i.test(msg)) {
+        clearRefusalToast();
         toast('File changed on disk — reloading', { kind: 'warn', icon: '⚠' });
         setEditingLine(null);
         await load(file.path);
       } else {
-        toast('Save failed: ' + msg, { kind: 'error', icon: '⚠' });
+        clearRefusalToast();
+        const refusal = isSaveApprovalRefusal(e);
+        const text = 'Save failed: ' + saveFailureText(e);
+        const text0 = draftText;
+        // The approval advice has a next step to read: keep it until it is
+        // dismissed or the person edits again.
+        refusalToast.current = refusal ? text : null;
+        refusedDraft.current = refusal ? `${lineNo}:${text0}` : null;
+        toast(text, { kind: 'error', icon: '⚠', ...(refusal ? { ttlMs: 0 } : {}) });
       }
+    } finally {
+      saving.current = false;
     }
   }
 
   function startEdit(lineNo: number, current: string) {
+    // A refused change is still only in the input: never replace it silently.
+    if (editingLine !== null && editingLine !== lineNo && saving.current) return; // its save is still answering
+    if (editingLine !== null && editingLine !== lineNo && refusedDraft.current?.startsWith(`${editingLine}:`)) {
+      // The click blurred the input, which is where Enter and Escape are heard.
+      linesRef.current?.querySelector<HTMLInputElement>('input.file-line-input')?.focus();
+      toast(`Line ${editingLine + 1} has a change that isn't saved. Press Enter to try again, or Escape to discard it.`, { kind: 'warn', icon: '⚠', ttlMs: 6000 });
+      return;
+    }
+    clearRefusalToast();
     setEditingLine(lineNo);
     setDraft(current);
   }
@@ -232,7 +282,7 @@ export function FileTile({ info }: Props) {
         <button
           className="iconbtn"
           title="Reload from disk"
-          onClick={(e) => { e.stopPropagation(); void load(info.path); }}
+          onClick={(e) => { e.stopPropagation(); clearRefusalToast(); void load(info.path); }}
         >⟳</button>
         <button
           className="iconbtn"
@@ -345,13 +395,13 @@ export function FileTile({ info }: Props) {
                       autoFocus
                       className="file-line-input"
                       value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
+                      onChange={(e) => { clearRefusalToast(); setDraft(e.target.value); }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') { e.preventDefault(); void commitLine(i); }
-                        if (e.key === 'Escape') { e.preventDefault(); setEditingLine(null); }
+                        if (e.key === 'Escape') { e.preventDefault(); clearRefusalToast(); setEditingLine(null); }
                         e.stopPropagation();
                       }}
-                      onBlur={() => commitLine(i)}
+                      onBlur={() => commitLine(i, true)}
                     />
                   </div>
                 );

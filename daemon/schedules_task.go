@@ -333,6 +333,13 @@ func (s *ScheduleStore) runTaskAttempt(schedID, bin, cwd, prompt, permission, mo
 	if settings != "" {
 		args = append(args, "--settings", settings)
 	}
+	args, cleanupConfig, err := claudeConfigFileArgs(bin, args)
+	if err != nil {
+		run.Status = "error"
+		run.Detail = "launch configuration failed: " + err.Error()
+		return run, nil, readTaskMarkers(markers)
+	}
+	defer cleanupConfig()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
 	cmd.Env = providerChildEnvForBin(bin, withResolvedNodeBin(os.Environ(), resolveNodeBin))

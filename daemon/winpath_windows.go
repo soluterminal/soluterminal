@@ -66,12 +66,19 @@ func findOnWindowsPath(name string) (string, bool) {
 			break
 		}
 	}
+	exts := windowsPathExts()
+	if filepath.Ext(name) != "" {
+		// An explicitly suffixed command names that exact file first. Bare
+		// commands use PATHEXT only: npm also writes a POSIX shell shim with
+		// no extension, which must never win over its Windows .cmd sibling.
+		exts = append([]string{""}, exts...)
+	}
 	for _, dir := range strings.Split(pathVal, ";") {
 		dir = strings.TrimSpace(dir)
 		if dir == "" {
 			continue
 		}
-		for _, ext := range windowsPathExts() {
+		for _, ext := range exts {
 			cand := filepath.Join(dir, name+ext)
 			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
 				return cand, true
@@ -82,10 +89,10 @@ func findOnWindowsPath(name string) (string, bool) {
 }
 
 // windowsPathExts returns the executable extensions to try (lowercased), from
-// %PATHEXT% with a sensible default, always including the empty extension so a
-// name that already carries one (e.g. "claude.exe") still resolves.
+// %PATHEXT% with a sensible default. Explicitly suffixed commands are handled
+// by findOnWindowsPath; bare commands must not resolve npm's extensionless shims.
 func windowsPathExts() []string {
-	exts := []string{""}
+	var exts []string
 	pe := os.Getenv("PATHEXT")
 	if pe == "" {
 		pe = ".COM;.EXE;.BAT;.CMD"

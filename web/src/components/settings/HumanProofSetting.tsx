@@ -3,6 +3,7 @@ import { api, currentRoutingScope } from '../../api';
 import { confirmDialog } from '../../lib/dialog';
 import type { RemoteDevice } from '../../api';
 import { approveThisBrowserFirst, askToApproveThisBrowser, thisDeviceName, type LocalProofMode } from '../../lib/localProof';
+import { isEmbedded } from '../../embed';
 import { useLocalProof } from '../../lib/useLocalProof';
 import { isFullApprovedDevice } from './deviceScope';
 import { SettingsGroup, SettingsRow } from './SettingsRow';
@@ -96,13 +97,16 @@ export function HumanProofSetting() {
   else if (status.device === 'pending') browserHint = code
     ? `Waiting. In a browser or app that’s already approved, open Settings → Privacy & security and approve “${thisDeviceName()}” if it shows V3 code ${code}.`
     : 'Waiting for approval from a browser or app that’s already approved here. If you no longer have the code, remove this request there, then ask again.';
+  // A Shinoque Code window gets no first-device button: the first browser is
+  // approved from a web browser at the computer.
+  else if (status.canBootstrap && isEmbedded()) browserHint = 'Approve the first browser from a web browser on this computer, in Settings → Privacy & security.';
   else if (status.canBootstrap) browserHint = 'No browser or app is approved on this computer yet. Approve this one to start.';
   else browserHint = "This screen isn't an approved device yet. Choose Ask to approve this browser, then approve it from a browser or app you've already approved. Recovery steps are below if you're locked out.";
 
   return (
     <SettingsGroup title="This computer">
       <SettingsRow label="This browser" hint={browserHint}>
-        {!approved && status.canBootstrap && (
+        {!approved && status.canBootstrap && !isEmbedded() && (
           <button type="button" className="settings-btn primary" disabled={pending}
             onClick={() => void run(() => approveThisBrowserFirst(backendPrefix))}>
             Approve this browser

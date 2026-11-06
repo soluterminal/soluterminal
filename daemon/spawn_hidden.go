@@ -11,6 +11,9 @@ import (
 // console_window_guard_test.go requires this or an equivalent for every spawn.
 func hiddenCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if err := prepareProviderExec(cmd); err != nil {
+		cmd.Err = err
+	}
 	applyNoWindow(cmd)
 	return cmd
 }

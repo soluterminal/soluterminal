@@ -121,6 +121,20 @@ func TestParseAutoApprovalMenuReadsScrollMarkerRows(t *testing.T) {
 	}
 }
 
+func TestAutoApprovalAcceptsVisibleScrollMarkerSiblings(t *testing.T) {
+	for name, rows := range map[string]string{
+		"down-marker sibling": "❯ 1. Yes\n↓ 2. Yes, and switch to auto mode · auto mode\n     handles these prompts for you",
+		"down-marker third row": "❯ 1. Yes\n  2. Yes, and don't ask again\n↓ 3. No",
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := scrollMarkerHead + rows + "\n\n Esc to cancel · Tab to amend"
+			if reason := autoApprovalDeclineReason(s, false); reason != "" {
+				t.Fatalf("visible marker sibling declined: %s", reason)
+			}
+		})
+	}
+}
+
 func TestPlainTextWithArrowIsNotAMenu(t *testing.T) {
 	s := "● Ran the build\n  ↓ 2 files changed\n  ↑ 3 files added\n  ↓  12  tokens\n❯ \n"
 	if reason := autoApprovalDeclineReason(s, false); reason != "no focused numbered menu" {

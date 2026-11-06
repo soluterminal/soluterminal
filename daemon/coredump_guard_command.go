@@ -32,10 +32,22 @@ func commandCoreDumpSpec(cmd interface{ Start() error }) (path string, argv []st
 	switch c := cmd.(type) {
 	case *exec.Cmd:
 		if c != nil {
+			if err := prepareProviderExec(c); err != nil {
+				return c.Path, nil, c.Dir, err
+			}
 			return c.Path, append([]string(nil), c.Args...), c.Dir, nil
 		}
 	case *gopty.Cmd:
 		if c != nil {
+			if len(c.Args) > 0 {
+				bin, args, err := providerBatchArgv(c.Path, c.Args[1:], c.Env)
+				if err != nil {
+					return c.Path, nil, c.Dir, err
+				}
+				if bin != c.Path {
+					c.Path, c.Args = bin, append([]string{bin}, args...)
+				}
+			}
 			return c.Path, append([]string(nil), c.Args...), c.Dir, nil
 		}
 	}

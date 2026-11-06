@@ -48,7 +48,12 @@ func runTitleCLI(ctx context.Context, prompt string) (string, error) {
 	if err != nil {
 		return "", errTitleCLIUnavailable
 	}
-	cmd := hiddenCommand(ctx, bin, titleCLIArgs()...)
+	args, cleanupConfig, err := claudeConfigFileArgs(bin, titleCLIArgs())
+	if err != nil {
+		return "", fmt.Errorf("Claude launch configuration: %w", err)
+	}
+	defer cleanupConfig()
+	cmd := hiddenCommand(ctx, bin, args...)
 	// A neutral directory: the title needs no project files.
 	cmd.Dir = os.TempDir()
 	cmd.Env = providerChildEnvForBin(bin, withResolvedNodeBin(os.Environ(), resolveNodeBin))

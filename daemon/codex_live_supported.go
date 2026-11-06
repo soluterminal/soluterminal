@@ -339,6 +339,9 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, routeOve
 	server.Stdout = io.Discard
 	server.Stderr = io.Discard // never mix RPC diagnostics into the TUI
 	applyNoWindow(server)
+	if err = prepareProviderExec(server); err != nil {
+		return errors.New("could not prepare Codex app-server")
+	}
 	if err = server.Start(); err != nil {
 		return errors.New("could not start Codex app-server")
 	}
@@ -395,6 +398,9 @@ func runCodexLiveTerminal(dir, daemonURL, paneID string, argv []string, routeOve
 	client.Stdin = os.Stdin
 	client.Stdout = os.Stdout
 	client.Stderr = os.Stderr
+	if err = prepareProviderExec(client); err != nil {
+		return errors.New("could not prepare Codex terminal")
+	}
 	if err = client.Start(); err != nil {
 		return errors.New("could not start Codex terminal")
 	}

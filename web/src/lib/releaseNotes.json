@@ -1,4 +1,10 @@
 {
+  "0.0.1239": [
+    "Fixed: on Windows without WSL, Claude Code and Codex installed through npm now start from SoluTerminal.",
+    "Auto-approve now leaves a prompt for you when a very short pane can't show the menu's other options.",
+    "When a save in the editor is refused, the message now says what to do next and stays until you close it or edit the line; your text is kept.",
+    "In an embedded editor window, Settings now points you to a web browser on this computer to approve the first browser, instead of offering a button that couldn't finish."
+  ],
   "0.0.1238": [
     "Security fixes. We recommend updating.",
     "If SoluTerminal asks you to restart the desktop app after updating, please do.",

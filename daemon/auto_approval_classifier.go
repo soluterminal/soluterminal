@@ -24,7 +24,8 @@ import (
 //     approve rule, including the Codex header-only fast path, can override it;
 //  2. structural approve rules (Codex modal fast path, Codex MCP modal);
 //  3. focused row must be an accept-once / session-allow row;
-//  4. the menu must offer an explicit escape option ("No…", "Cancel…",
+//  4. at least one sibling option must be visible, including scroll-marker rows;
+//  5. the menu must offer an explicit escape option ("No…", "Cancel…",
 //     "Esc to cancel").
 //
 // Both directAutoFire (via currentAutoApprovalPromptText) and the cautious
@@ -465,7 +466,13 @@ func autoApprovalDeclineReason(s string, hasCodex bool) string {
 	if len(menu.options) == 0 || !isAcceptOnceFocusedRow(menu.options[0]) {
 		return "focused option is not an accept-once approval"
 	}
-	// 4. A real permission prompt always offers an escape.
+	// 4. A lone focused row and generic footer cannot establish the menu's
+	// scope when the other options are clipped. Scroll-marker siblings count
+	// as visible options through parseAutoApprovalMenu.
+	if len(menu.options) < 2 {
+		return "menu has no visible sibling option"
+	}
+	// 5. A real permission prompt always offers an escape.
 	if !menuHasEscapeOption(menu) {
 		return "menu offers no No/Cancel escape option"
 	}

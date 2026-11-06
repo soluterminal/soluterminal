@@ -45,10 +45,11 @@ var errLocalCleanupPaused = errors.New("local voice cleanup is paused after repe
 
 // cleanProc is one started `claude -p` waiting for a single dictation.
 type cleanProc struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	lines   chan string  // stdout lines; closed when the process exits
-	variant cleanVariant // which system prompt it was started with
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	lines         chan string  // stdout lines; closed when the process exits
+	variant       cleanVariant // which system prompt it was started with
+	cleanupConfig func()
 }
 
 // cleanVariant is the system prompt a process was started with: the cleanup
@@ -74,7 +75,12 @@ func (p *cleanProc) retire() {
 		_ = killChildTree(p.cmd.Process)
 		_ = p.cmd.Process.Kill()
 	}
-	go func() { _ = waitOwnedCommand(p.cmd) }()
+	go func() {
+		_ = waitOwnedCommand(p.cmd)
+		if p.cleanupConfig != nil {
+			p.cleanupConfig()
+		}
+	}()
 }
 
 func (p *cleanProc) exited() bool {
@@ -156,7 +162,17 @@ func (c *localCleaner) spawn(v cleanVariant) (*cleanProc, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(bin, localCleanupArgs(v)...)
+	args, cleanupConfig, err := claudeConfigFileArgs(bin, localCleanupArgs(v))
+	if err != nil {
+		return nil, err
+	}
+	started := false
+	defer func() {
+		if !started {
+			cleanupConfig()
+		}
+	}()
+	cmd := exec.Command(bin, args...)
 	// A neutral directory: cleanup needs no project files or CLAUDE.md.
 	cmd.Dir = os.TempDir()
 	cmd.Env = c.env(bin)
@@ -171,10 +187,14 @@ func (c *localCleaner) spawn(v cleanVariant) (*cleanProc, error) {
 		return nil, err
 	}
 	cmd.Stderr = &boundedBuf{limit: 4 << 10}
+	if err := prepareProviderExec(cmd); err != nil {
+		return nil, err
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	p := &cleanProc{cmd: cmd, stdin: stdin, lines: make(chan string, 64), variant: v}
+	p := &cleanProc{cmd: cmd, stdin: stdin, lines: make(chan string, 64), variant: v, cleanupConfig: cleanupConfig}
+	started = true
 	go func() {
 		defer close(p.lines)
 		sc := bufio.NewScanner(stdout)
