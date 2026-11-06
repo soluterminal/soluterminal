@@ -1,6 +1,10 @@
 import type { Layout } from '../types';
 import type { DropZone } from './paneDnd';
 
+export interface InsertLeafOptions {
+  rebalance?: boolean;
+}
+
 export function leafId(n: Layout): string | null {
   if (n.type === 'pane') return n.paneId;
   if (n.type === 'browser') return n.browserId;
@@ -21,9 +25,15 @@ export function insertPane(layout: Layout | null, paneId: string, direction: 'ho
   return insertLeaf(layout, { type: 'pane', paneId }, direction, target);
 }
 
-export function insertLeaf(layout: Layout | null, leaf: Layout, direction: 'horizontal' | 'vertical' | null, target: string | null): Layout {
+export function insertLeaf(
+  layout: Layout | null,
+  leaf: Layout,
+  direction: 'horizontal' | 'vertical' | null,
+  target: string | null,
+  options?: InsertLeafOptions,
+): Layout {
   if (!layout || !target || !direction) return leaf;
-  return mapLayout(layout, (node) => {
+  const next = mapLayout(layout, (node) => {
     if (leafId(node) === target) {
       return {
         type: 'split',
@@ -35,6 +45,112 @@ export function insertLeaf(layout: Layout | null, leaf: Layout, direction: 'hori
     }
     return node;
   });
+  return options?.rebalance ? rebalanceRunContainingLeaf(next, target, direction) : next;
+}
+
+// Check whether a node or its children contain a browser leaf.
+export function containsBrowserLeaf(node: Layout | null): boolean {
+  if (!node) return false;
+  if (node.type === 'browser') return true;
+  if (node.type !== 'split') return false;
+  return containsBrowserLeaf(node.a) || containsBrowserLeaf(node.b);
+}
+
+// Count leaves along a specific split dimension. Orthogonal splits count as 1 slot.
+export function dimensionLeafCount(node: Layout | null, direction: 'horizontal' | 'vertical'): number {
+  if (!node) return 0;
+  if (node.type !== 'split') return 1;
+  if (node.direction !== direction) return 1;
+  return dimensionLeafCount(node.a, direction) + dimensionLeafCount(node.b, direction);
+}
+
+// Rebalance split ratios within a contiguous run of splits in the given direction.
+// Orthogonal splits (splits with direction !== target direction) are treated as boundaries
+// and their internal splits and ratios are left completely untouched.
+export function rebalanceRun(node: Layout, direction: 'horizontal' | 'vertical'): Layout {
+  if (node.type !== 'split') return node;
+  if (node.direction !== direction) return node;
+
+  const a = rebalanceRun(node.a, direction);
+  const b = rebalanceRun(node.b, direction);
+
+  // Splits involving browser leaves maintain deliberate user/default width (e.g. 0.6/0.4).
+  if (containsBrowserLeaf(node.a) || containsBrowserLeaf(node.b)) {
+    return { ...node, a, b };
+  }
+
+  const countA = dimensionLeafCount(a, direction);
+  const countB = dimensionLeafCount(b, direction);
+  const total = countA + countB;
+  const ratio = total > 0 ? countA / total : 0.5;
+
+  return {
+    ...node,
+    ratio,
+    a,
+    b,
+  };
+}
+
+function findPathToLeaf(node: Layout, targetId: string): Layout[] | null {
+  if (leafId(node) === targetId) {
+    return [node];
+  }
+  if (node.type === 'split') {
+    const pathA = findPathToLeaf(node.a, targetId);
+    if (pathA) return [node, ...pathA];
+    const pathB = findPathToLeaf(node.b, targetId);
+    if (pathB) return [node, ...pathB];
+  }
+  return null;
+}
+
+// Rebalance only the contiguous run of same-direction splits that the target leaf joins,
+// leaving every other split ratio elsewhere in the layout tree untouched.
+export function rebalanceRunContainingLeaf(
+  layout: Layout,
+  targetId: string,
+  direction: 'horizontal' | 'vertical',
+): Layout {
+  const path = findPathToLeaf(layout, targetId);
+  if (!path || path.length < 2) return layout;
+
+  // The last element is the leaf; the element before it is the split containing the leaf.
+  let runRootIndex = path.length - 2;
+  while (runRootIndex > 0) {
+    const parent = path[runRootIndex - 1];
+    if (parent.type === 'split' && parent.direction === direction) {
+      runRootIndex--;
+    } else {
+      break;
+    }
+  }
+
+  const runRoot = path[runRootIndex];
+  if (runRoot.type !== 'split') return layout;
+
+  let current: Layout = rebalanceRun(runRoot, direction);
+
+  // Re-attach up to the root, preserving all orthogonal splits and ratios above runRoot.
+  for (let i = runRootIndex - 1; i >= 0; i--) {
+    const ancestor = path[i];
+    if (ancestor.type === 'split') {
+      current = {
+        ...ancestor,
+        a: ancestor.a === path[i + 1] ? current : ancestor.a,
+        b: ancestor.b === path[i + 1] ? current : ancestor.b,
+      };
+    }
+  }
+
+  return current;
+}
+
+// Rebalance split ratios so that leaves along the same direction receive equal shares.
+export function rebalanceLayout(layout: Layout | null, direction?: 'horizontal' | 'vertical'): Layout | null {
+  if (!layout) return null;
+  if (layout.type !== 'split') return layout;
+  return rebalanceRun(layout, direction ?? layout.direction);
 }
 
 // movePaneInLayout handles drag-to-move semantics:
