@@ -85,8 +85,8 @@ func UpdateClaimToken(dataDir, newToken string) error {
 	return SaveClaim(dataDir, c)
 }
 
-// SaveClaim writes claim.json atomically with 0600 perms (contains
-// the machine token).
+// SaveClaim writes claim.json atomically and durably with 0600 perms (it
+// contains the machine token). A power cut must not leave a torn pairing.
 func SaveClaim(dataDir string, c *Claim) error {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return err
@@ -95,12 +95,7 @@ func SaveClaim(dataDir string, c *Claim) error {
 	if err != nil {
 		return err
 	}
-	path := claimFilePath(dataDir)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomicSynced(claimFilePath(dataDir), b, 0o600)
 }
 
 // claimStartResult is the parsed POST /api/claim/start response: a

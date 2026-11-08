@@ -127,6 +127,12 @@
       "approvedBy": "Benjamin",
       "date": "2026-11-06",
       "note": "Benjamin approved the 4-line set relayed by @release-lead (\"notes 1239 yes\")."
+    },
+    "0.0.1240": {
+      "sha256": "7327ea9f9714fcef5a71828e5f4d6f4170f7f083448ed1103bf6e95ca707bf87",
+      "approvedBy": "Benjamin",
+      "date": "2026-11-07",
+      "note": "Benjamin approved the 8-line set relayed by @release-lead (\"notes 1240 yes\")."
     }
   }
 }

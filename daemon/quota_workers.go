@@ -889,6 +889,9 @@ func visibleWorkerOrigin(o *PaneOrigin) *PaneOrigin {
 	o = o.clone()
 	if o != nil {
 		o.Worker = visibleWorkerInfo(o.Worker)
+		// The start baseline carries up to 2000 per-path digests; only the
+		// daemon's archive checks read it.
+		o.WorkerGit = nil
 	}
 	return o
 }

@@ -14,7 +14,16 @@ import (
 // counters: concurrent tasks/accounts would contaminate the result. Multiple
 // sessions can contain inherited fork histories, so leave those unknown until
 // the harness exposes per-request identities that allow safe deduplication.
+//
+// A panic while decoding or reading the log (a corrupt or crafted file, as
+// GO-2026-6865 could cause in the zstd decoder) leaves the usage unknown
+// instead of taking the daemon down.
 func readDSHInvocationUsage(root string) (input, output *int64) {
+	defer func() {
+		if recover() != nil {
+			input, output = nil, nil
+		}
+	}()
 	files, err := filepath.Glob(filepath.Join(root, "*", "*", "session*.jsonl.zstd"))
 	if err != nil || len(files) != 1 {
 		return nil, nil
@@ -36,6 +45,7 @@ func readDSHInvocationUsage(root string) (input, output *int64) {
 	count := 0
 	completed := false
 	for scanner.Scan() {
+		usageScanLine(scanner.Bytes())
 		var event dshUsageEvent
 		if json.Unmarshal(scanner.Bytes(), &event) != nil {
 			return nil, nil

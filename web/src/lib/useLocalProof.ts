@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { currentRoutingScope, onRoutingScopeChange } from '../api';
 import { localProofStatus, onLocalProofChange, refreshLocalProof, type LocalProofStatus } from './localProof';
 
@@ -14,19 +14,32 @@ export function useLocalProof(): { status: LocalProofStatus | null; backendPrefi
   const [status, setStatus] = useState<LocalProofStatus | null>(() =>
     scope.prefix === '' ? localProofStatus(scope.backendPrefix) : null);
 
-  useEffect(() => onRoutingScopeChange(() => setScope(currentRoutingScope())), []);
+  // The scope a reply must still belong to: a slow reply from the backend
+  // just left must not paint over the one now in view.
+  const liveKey = useRef(scope.key);
+  liveKey.current = scope.key;
+
+  useEffect(() => onRoutingScopeChange(() => {
+    const next = currentRoutingScope();
+    liveKey.current = next.key;
+    // Drop the old backend's standing at once; the refetch below fills it in.
+    setStatus(next.prefix === '' ? localProofStatus(next.backendPrefix) : null);
+    setScope(next);
+  }), []);
 
   const reload = useCallback(async () => {
     if (scope.prefix !== '') {
       setStatus(null);
       return;
     }
+    const key = scope.key;
     try {
-      setStatus(await refreshLocalProof(scope.backendPrefix));
+      const fresh = await refreshLocalProof(scope.backendPrefix);
+      if (liveKey.current === key) setStatus(fresh);
     } catch {
       // Unreachable daemon: keep what we had; the next refresh tries again.
     }
-  }, [scope.prefix, scope.backendPrefix]);
+  }, [scope.prefix, scope.backendPrefix, scope.key]);
 
   useEffect(() => {
     void reload();

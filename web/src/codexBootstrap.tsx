@@ -22,6 +22,36 @@ export const CODEX_RECHECK_BACKOFF_MS = [
 ];
 let recheckToken = 0;
 
+// Durable "Codex was just installed, start it" flag behind CodexNextStepBanner.
+// Set when the install is seen finishing; cleared by the banner's dismiss or
+// once a Codex pane is running. localStorage so it outlives the 12 s toast and
+// an app restart.
+const NEXT_STEP_KEY = 'solu.codexNextStep';
+
+export type CodexNextStepSide = BackendId | 'local';
+
+// One flag per side (Dual mode keeps a separate Codex on WSL and PowerShell),
+// so finishing or dismissing one side never drops the other's pending step.
+const nextStepKey = (side: CodexNextStepSide) => `${NEXT_STEP_KEY}.${side}`;
+
+export function codexNextStepPending(side: CodexNextStepSide): boolean {
+  try {
+    return window.localStorage.getItem(nextStepKey(side)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function setCodexNextStep(side: CodexNextStepSide, on: boolean): void {
+  try {
+    if (on) window.localStorage.setItem(nextStepKey(side), '1');
+    else window.localStorage.removeItem(nextStepKey(side));
+  } catch {
+    // Private mode etc: the toast still showed once.
+  }
+  window.dispatchEvent(new Event('solu:codex-next-step'));
+}
+
 export function scheduleCodexRecheck(kind: 'install' | 'login'): void {
   // Pin the backend at schedule time so a mid-loop switch in Dual mode can't
   // re-aim the polls at the other daemon (see scheduleClaudeRecheck).
@@ -44,14 +74,18 @@ function scheduleLoop(kind: 'install' | 'login', backend: BackendId | null): voi
           const done = kind === 'install' ? st.codexInstalled === true : st.codexAuthed === true;
           if (!done) {
             step(i + 1);
-          } else if (kind === 'install' && st.codexAuthed !== true) {
-            // Installed: say so once, offer the next step, and keep watching
-            // for a sign-in done straight in the installer pane.
-            useStore.getState().toast(
-              'Codex is installed. Next, log in. Panes that were already open won’t see Codex, so use a new pane.',
-              { kind: 'success', icon: '✓', ttlMs: 12000, action: { label: 'Log in', run: () => openCodexSignIn() } },
-            );
-            scheduleLoop('login', backend);
+          } else if (kind === 'install') {
+            // Installed: keep the next step on screen after the toast is gone.
+            setCodexNextStep(backend ?? 'local', true);
+            if (st.codexAuthed !== true) {
+              // Say so once, offer the next step, and keep watching for a
+              // sign-in done straight in the installer pane.
+              useStore.getState().toast(
+                'Codex is installed. Next, log in. Panes that were already open won’t see Codex, so use a new pane.',
+                { kind: 'success', icon: '✓', ttlMs: 12000, action: { label: 'Log in', run: () => openCodexSignIn() } },
+              );
+              scheduleLoop('login', backend);
+            }
           }
         })
         .catch((e: unknown) => {
@@ -89,6 +123,22 @@ export function openCodexSignIn(onSpawn?: () => void): void {
     })
     .catch(() => {
       useStore.getState().toast('Couldn’t open a pane for signing in. Please try again.', {
+        kind: 'info',
+        icon: '!',
+        ttlMs: 8000,
+      });
+    });
+}
+
+// openCodexPane opens a plain Codex pane for a user who is already signed in:
+// a normal title and no sign-in guidance.
+export function openCodexPane(): void {
+  markSetupStarted();
+  void useStore
+    .getState()
+    .createPane({ cwd: '', cmd: ['codex'], title: 'Codex' })
+    .catch(() => {
+      useStore.getState().toast('Couldn’t open a Codex pane. Please try again.', {
         kind: 'info',
         icon: '!',
         ttlMs: 8000,

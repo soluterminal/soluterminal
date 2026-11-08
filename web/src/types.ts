@@ -16,6 +16,16 @@ export interface UpdateSettings {
   autoApply: UpdateAutoApplyMode;
   // Optional because older daemons omit it; clients then retain the manual flow.
   shellAutoApply?: UpdateAutoApplyMode;
+  // True while this install predates the on-by-default change, still says
+  // "Notify me" and nobody has answered; the app then asks once. Older daemons
+  // omit it, which means don't ask.
+  autoApplyAsk?: boolean;
+}
+
+// Sent with a PUT that is the person's answer to the automatic-updates choice;
+// the daemon then never asks again. Other saves (desktop restart) omit it.
+export interface UpdateSettingsPut extends Partial<UpdateSettings> {
+  autoApplyAnswered?: boolean;
 }
 
 export interface ShellAutoRestart {

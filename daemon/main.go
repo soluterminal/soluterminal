@@ -140,6 +140,7 @@ func runVersionCommand(out io.Writer) int {
 }
 
 func main() {
+	daemonStarted := time.Now()
 	// Dispatch argv0 before even offline subcommands. A retained shim from
 	// another build must never enter daemon startup, regardless of its args.
 	name := filepath.Base(os.Args[0])
@@ -379,6 +380,7 @@ func main() {
 	// respawns panes. A second daemon on the same data directory exits here.
 	dataDirOwner := dataDirLockHolder{Addr: *addr, Backend: *backendID, Version: version}
 	dataDirLockHeld = claimDataDirForBoot(*dataDir, dataDirOwner)
+	sweepProviderConfigsAtStartup(daemonStarted)
 	// Bound now, while no other goroutine runs, because its mode comes from
 	// the umask at bind time; published once this process owns the data
 	// directory (below). Nothing registers it yet.
@@ -426,6 +428,13 @@ func main() {
 	if _, port, err := net.SplitHostPort(*addr); err == nil {
 		mgr.codexDaemonURL = "http://127.0.0.1:" + port
 	}
+	// Before the workspace store: its first write is what marks an install as
+	// one that predates the automatic-updates default.
+	updateSettings, err := newUpdateSettingsStore(*dataDir)
+	if err != nil {
+		log.Printf("update settings unavailable: %v (using defaults)", err)
+		updateSettings = defaultUpdateSettingsStore(*dataDir)
+	}
 	ws, err := NewWorkspaceStore(*dataDir)
 	if err != nil {
 		log.Fatalf("workspace store: %v", err)
@@ -450,11 +459,6 @@ func main() {
 	if err != nil {
 		log.Printf("native settings unavailable: %v (using defaults)", err)
 		nativeSettings = defaultNativeSettingsStore(*dataDir)
-	}
-	updateSettings, err := newUpdateSettingsStore(*dataDir)
-	if err != nil {
-		log.Printf("update settings unavailable: %v (using defaults)", err)
-		updateSettings = defaultUpdateSettingsStore(*dataDir)
 	}
 	rollbackStore, err := newUpdateRollbackStore(*dataDir)
 	if err != nil {

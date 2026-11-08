@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import { useStore } from '../../store';
 import { SectionHeader } from './SectionHeader';
+import { resolveDraft, resolveForOpen as resolvePath, stripTrailingSep } from './filesPath';
 import { IconFolder, IconPin, IconX, IconSparkle, IconPlus, IconNotebook, IconPencil } from '../ui/icons';
 
 interface FilesSectionProps {
@@ -10,23 +11,6 @@ interface FilesSectionProps {
 }
 
 interface DirEntry { name: string; isDir: boolean; size: number }
-interface ResolvedPath { dirInput: string; dirAbs: string; needle: string }
-
-function resolveDraft(draft: string, focusedCwd: string | undefined): ResolvedPath {
-  const slash = draft.lastIndexOf('/');
-  const dirInput = slash >= 0 ? draft.slice(0, slash + 1) : '';
-  const needle = slash >= 0 ? draft.slice(slash + 1) : draft;
-
-  let dirAbs: string;
-  if (dirInput === '' || (!dirInput.startsWith('/') && !dirInput.startsWith('~'))) {
-    const base = focusedCwd || '~';
-    dirAbs = dirInput ? `${base}/${dirInput}` : base;
-  } else {
-    dirAbs = dirInput;
-  }
-  return { dirInput, dirAbs, needle };
-}
-
 function formatBytes(n: number): string {
   if (n < 1024) return `${n}B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)}KB`;
@@ -140,12 +124,7 @@ export function FilesSection({ collapsed, onToggle }: FilesSectionProps) {
   }, [filtered.length, selIdx]);
 
   function resolveForOpen(path: string): string {
-    const trimmed = path.trim();
-    if (!trimmed) return trimmed;
-    if (trimmed.startsWith('/') || trimmed.startsWith('~')) return trimmed;
-    const base = focusedCwd;
-    if (!base) return trimmed;
-    return base.endsWith('/') ? base + trimmed : `${base}/${trimmed}`;
+    return resolvePath(path, focusedCwd);
   }
 
   function open(path: string) {
@@ -160,7 +139,7 @@ export function FilesSection({ collapsed, onToggle }: FilesSectionProps) {
     setDraft(next);
     setSelIdx(0);
     if (entry.isDir) {
-      const base = resolveForOpen(next.replace(/\/$/, ''));
+      const base = resolveForOpen(stripTrailingSep(next));
       if (base) pushRecentDir(base);
     }
     inputRef.current?.focus();

@@ -273,3 +273,60 @@ func TestDeviceCodeV3RevealAndApprovePersistenceFailure(t *testing.T) {
 		t.Fatal("failed write approved the device")
 	}
 }
+
+// Failed V3 requests (a wrong reveal, as from a relay that swapped a key)
+// count toward the pending limit while listed, then clear by themselves:
+// five burnt attempts must not block every new request until someone
+// removes them by hand.
+func TestDeviceCodeV3FailedRequestsClear(t *testing.T) {
+	a := trustedDevicesTestServer(t)
+	s := a.trustedDevices
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	var failed []string
+	for i := 0; i < devicePendingLimit; i++ {
+		d := newTestDevice(t)
+		rec := commitDeviceV3ForTest(t, s, d, strings.Repeat("01", 32))
+		if _, err := s.revealDeviceV3(rec.ID, rec.EnrolmentID, strings.Repeat("02", 32)); !errors.Is(err, errDeviceEnrolment) {
+			t.Fatalf("wrong reveal accepted: %v", err)
+		}
+		failed = append(failed, rec.ID)
+	}
+	next := newTestDevice(t)
+	if _, _, err := s.commitDeviceV3("phone", next.spki, deviceCommitV3(dID(next), strings.Repeat("03", 32))); !errors.Is(err, errDevicePendingFull) {
+		t.Fatalf("failed requests didn't count while listed: %v", err)
+	}
+	// Still listed a moment before the lifetime ends, so the device can learn it failed.
+	now = now.Add(deviceFailedLifetime - time.Second)
+	if d := s.find(failed[0]); d == nil || d.Status != deviceStatusFailed || d.FailedAt == nil {
+		t.Fatalf("failed record = %+v", d)
+	}
+	now = now.Add(time.Second)
+	if _, _, err := s.commitDeviceV3("phone", next.spki, deviceCommitV3(dID(next), strings.Repeat("03", 32))); err != nil {
+		t.Fatalf("burnt attempts still block a new request: %v", err)
+	}
+	for _, id := range failed {
+		if s.find(id) != nil {
+			t.Fatalf("failed request %s not pruned", id)
+		}
+	}
+}
+
+// A failed record saved before FailedAt existed clears by its creation time.
+func TestDeviceCodeV3LegacyFailedRecordClears(t *testing.T) {
+	a := trustedDevicesTestServer(t)
+	s := a.trustedDevices
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	d := newTestDevice(t)
+	s.mu.Lock()
+	s.record.Devices = append(s.record.Devices, &trustedDevice{ID: dID(d), Name: "old", PublicKey: d.spki, Status: deviceStatusFailed, CodeVersion: 3, CreatedAt: now.Add(-deviceFailedLifetime)})
+	err := s.pruneCommittedV3Locked()
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.find(dID(d)) != nil {
+		t.Fatal("legacy failed record kept")
+	}
+}

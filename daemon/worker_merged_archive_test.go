@@ -266,16 +266,42 @@ func TestCherryPickedWorkerCountsAsMerged(t *testing.T) {
 	}
 }
 
-func TestMergedWorkerInMainCheckoutWithLocalChangesIsKept(t *testing.T) {
-	// The person's own edit in the main checkout predates the worker, so
-	// the existing proof exempts it; the merged close must not.
-	a, p, now, _ := mergedWorkerFixture(t, func(repo string) {
-		putCapabilityFile(t, filepath.Join(repo, "tracked.txt"), "person's edit\n")
-	})
-	mergeFeat(t, p.Cwd)
-	a.tryArchiveWorker(p, now)
-	a.tryArchiveWorker(p, now.Add(time.Hour))
-	workerKept(t, a, p)
+// A shared main checkout keeps the person's dirt from before the worker
+// started (ST-60): byte-identical old dirt, or old dirt someone has since
+// removed, does not hold a merged worker open; changed or new dirt does.
+func TestMergedWorkerInMainCheckoutKeepsOnlyChangedDirt(t *testing.T) {
+	for _, kind := range []string{"unchanged", "removed-since", "changed", "new-file"} {
+		t.Run(kind, func(t *testing.T) {
+			a, p, now, _ := mergedWorkerFixture(t, func(repo string) {
+				putCapabilityFile(t, filepath.Join(repo, "tracked.txt"), "person's edit\n")
+				putCapabilityFile(t, filepath.Join(repo, ".claude", "prov", "old.bin"), "release copy\n")
+			})
+			repo := p.Cwd
+			switch kind {
+			case "removed-since":
+				if err := os.RemoveAll(filepath.Join(repo, ".claude", "prov")); err != nil {
+					t.Fatal(err)
+				}
+			case "changed":
+				putCapabilityFile(t, filepath.Join(repo, "tracked.txt"), "edited again\n")
+			case "new-file":
+				putCapabilityFile(t, filepath.Join(repo, "notes.txt"), "new\n")
+			}
+			mergeFeat(t, repo)
+			a.tryArchiveWorker(p, now)
+			a.tryArchiveWorker(p, now.Add(time.Hour))
+			if kind == "unchanged" || kind == "removed-since" {
+				if !workerArchived(a, p) {
+					t.Fatal("pre-existing main-checkout dirt held a merged worker open")
+				}
+				if got, _ := os.ReadFile(filepath.Join(repo, "tracked.txt")); string(got) != "person's edit\n" {
+					t.Fatal("archive touched the person's edit")
+				}
+				return
+			}
+			workerKept(t, a, p)
+		})
+	}
 }
 
 func TestMergedWorkerWorktreeRemovalFailureStillArchives(t *testing.T) {
@@ -759,7 +785,8 @@ func TestMergedWorktreeRemovalRefusesBorrowedAdminEntry(t *testing.T) {
 }
 
 // Input before a restart cannot be seen, so a reply finished before the
-// daemon started never closes on merge alone (a pre-restart draft survives).
+// daemon started closes on merge only once its input box reads empty (a
+// pre-restart draft shows there); an unreadable box keeps it.
 func TestMergedWorkerReplyFromBeforeRestartIsKept(t *testing.T) {
 	a, p, now, wt := mergedWorkerFixture(t)
 	mergeFeat(t, p.Cwd)
@@ -772,6 +799,21 @@ func TestMergedWorkerReplyFromBeforeRestartIsKept(t *testing.T) {
 	workerKept(t, a, p)
 	if _, err := os.Stat(wt); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMergedWorkerReplyFromBeforeRestartClosesWithEmptyBox(t *testing.T) {
+	a, p, now, wt := mergedWorkerFixture(t)
+	mergeFeat(t, p.Cwd)
+	restartWorkerDaemon(t, a, now)
+	stubWorkerBox(t, deliveryClaudeScreen(""), true)
+	a.tryArchiveWorker(p, now)
+	a.tryArchiveWorker(p, now.Add(time.Hour))
+	if !workerArchived(a, p) {
+		t.Fatal("merged worker with an empty box was kept after a restart")
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatal("merged worktree kept")
 	}
 }
 

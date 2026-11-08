@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,7 +29,35 @@ func (r workerGitContextReader) Read(p []byte) (int, error) {
 	return r.source.Read(p)
 }
 
-type workerGitProof struct{ Head, Upstream, Dirty string }
+type workerGitProof struct {
+	Head, Upstream, Dirty string
+	// Paths is each dirty path's own digest, set with Dirty.
+	Paths map[string]string `json:",omitempty"`
+}
+
+// workerGitMaxDirtyPaths bounds the per-path digests kept in a pane's saved
+// origin. A checkout with more dirty paths keeps only the whole digest.
+const workerGitMaxDirtyPaths = 2000
+
+// workerGitDirtWithinBaseline reports whether every dirty path in proof was
+// already dirty, byte for byte, in the start baseline: dirt a shared checkout
+// had before the worker started, some of which others may since have removed
+// or committed. A new or changed path is not within it. A baseline from before
+// per-path digests needs the whole digest to match, as it did then.
+func workerGitDirtWithinBaseline(proof, baseline workerGitProof) bool {
+	if proof.Dirty == "" || proof.Dirty == baseline.Dirty {
+		return true
+	}
+	if len(baseline.Paths) == 0 || len(proof.Paths) == 0 {
+		return false
+	}
+	for path, digest := range proof.Paths {
+		if baseline.Paths[path] != digest {
+			return false
+		}
+	}
+	return true
+}
 
 // workerGitStart is captured before spawning the worker. It is immutable and
 // stored only in the daemon-owned origin, never accepted from workspace input.
@@ -118,7 +147,7 @@ func workerGitForArchive(ctx context.Context, snap PaneSnapshot, live string) (s
 		baseline = snap.Origin.WorkerGit
 	}
 	proof, why := workerGitCleanPushed(ctx, snap.Cwd)
-	if baseline != nil && baseline.Cwd == snap.Cwd && proof.Dirty == baseline.Proof.Dirty && (why == "uncommitted work" || why == "unpushed work") {
+	if baseline != nil && baseline.Cwd == snap.Cwd && workerGitDirtWithinBaseline(proof, baseline.Proof) && (why == "uncommitted work" || why == "unpushed work") {
 		// An unrelated clean commit must not make the person's unchanged dirt
 		// become worker work. A changed HEAD still needs publication proof.
 		if proof.Head == baseline.Proof.Head || workerGitCachedPublishedHead(ctx, snap.Cwd, proof.Head) {
@@ -251,6 +280,10 @@ func workerGitInspect(ctx context.Context, cwd string, published bool) (workerGi
 		h.Write(out)
 		var total int64
 		hashBuffer := make([]byte, 64<<10)
+		// Each dirty path also gets its own digest (its status code, index
+		// entry and bytes), so a shared checkout's baseline can tell dirt
+		// that was already there from dirt that is new or changed (ST-60).
+		paths := map[string]string{}
 		for _, entry := range strings.Split(string(out), "\x00") {
 			if ctx.Err() != nil {
 				return workerGitProof{}, "worktree status cannot be verified"
@@ -261,36 +294,44 @@ func workerGitInspect(ctx context.Context, cwd string, published bool) (workerGi
 			if len(entry) < 4 {
 				return workerGitProof{}, "worktree status cannot be verified"
 			}
-			h.Write([]byte(indexByPath[entry[3:]]))
+			ph := sha256.New()
+			ph.Write([]byte(entry[:2] + "\x00"))
+			w := io.MultiWriter(h, ph)
+			w.Write([]byte(indexByPath[entry[3:]]))
 			path := filepath.Join(locations[2], entry[3:])
 			st, err := os.Lstat(path)
 			if os.IsNotExist(err) && strings.Contains(entry[:2], "D") {
+				paths[entry[3:]] = hex.EncodeToString(ph.Sum(nil))
 				continue
 			}
 			if err != nil {
 				return workerGitProof{}, "worktree status cannot be verified"
 			}
-			fmt.Fprintf(h, "%s\x00%s\x00%d\x00", entry[3:], st.Mode(), st.Size())
+			fmt.Fprintf(w, "%s\x00%s\x00%d\x00", entry[3:], st.Mode(), st.Size())
 			if st.Mode()&os.ModeSymlink != 0 {
 				target, err := os.Readlink(path)
 				if err != nil {
 					return workerGitProof{}, "worktree status cannot be verified"
 				}
-				h.Write([]byte(target))
+				w.Write([]byte(target))
 			} else {
-				f, _, err := openUserFile(path, 16<<20)
+				f, info, err := openUserFile(path, -1)
 				if err != nil {
 					return workerGitProof{}, "worktree status cannot be verified"
 				}
-				n, err := io.CopyBuffer(h, workerGitContextReader{ctx, io.LimitReader(f, 16<<20+1)}, hashBuffer)
+				n, err := workerGitHashFile(ctx, w, f, info, hashBuffer)
 				f.Close()
 				total += n
-				if err != nil || ctx.Err() != nil || n > 16<<20 || total > 64<<20 {
+				if err != nil || ctx.Err() != nil || total > 64<<20 {
 					return workerGitProof{}, "worktree status cannot be verified"
 				}
 			}
+			paths[entry[3:]] = hex.EncodeToString(ph.Sum(nil))
 		}
 		proof.Dirty = hex.EncodeToString(h.Sum(nil))
+		if len(paths) <= workerGitMaxDirtyPaths {
+			proof.Paths = paths
+		}
 		return proof, "uncommitted work"
 	}
 	if !remoteContained {
@@ -300,6 +341,39 @@ func workerGitInspect(ctx context.Context, cwd string, published bool) (workerGi
 		}
 	}
 	return proof, ""
+}
+
+// workerGitWholeFileBytes is the largest dirty file hashed whole. A larger one
+// (release binaries copied into a checkout, ST-60) is fingerprinted by its
+// size, modification time and first and last workerGitSampleBytes instead of
+// making the whole checkout unverifiable: a worker that changes such a file
+// changes its time, its length or almost always its first or last MiB.
+const (
+	workerGitWholeFileBytes = 16 << 20
+	workerGitSampleBytes    = 1 << 20
+)
+
+// workerGitHashFile writes an open regular file's content proof to h and
+// returns the bytes it read. info is the opened file's fstat.
+func workerGitHashFile(ctx context.Context, h io.Writer, f *os.File, info os.FileInfo, buf []byte) (int64, error) {
+	size := info.Size()
+	if size <= workerGitWholeFileBytes {
+		n, err := io.CopyBuffer(h, workerGitContextReader{ctx, io.LimitReader(f, workerGitWholeFileBytes+1)}, buf)
+		if err == nil && n > workerGitWholeFileBytes {
+			err = errors.New("file grew while it was read")
+		}
+		return n, err
+	}
+	fmt.Fprintf(h, "sampled\x00%d\x00", info.ModTime().UnixNano())
+	head, err := io.CopyBuffer(h, workerGitContextReader{ctx, io.NewSectionReader(f, 0, workerGitSampleBytes)}, buf)
+	if err != nil {
+		return head, err
+	}
+	tail, err := io.CopyBuffer(h, workerGitContextReader{ctx, io.NewSectionReader(f, size-workerGitSampleBytes, workerGitSampleBytes)}, buf)
+	if err == nil && head+tail != 2*workerGitSampleBytes {
+		err = errors.New("file shrank while it was read")
+	}
+	return head + tail, err
 }
 
 func workerGitRun(ctx context.Context, cwd string, args ...string) (string, error) {
@@ -745,9 +819,10 @@ func workerCallNamesWorktree(c workerToolCall, path string) bool {
 }
 
 // workerGitMerged decides "merged = done" from workerGitCheckouts' proof.
-// Every checkout in it must be clean (the baseline exemption for a person's
-// own dirt does not apply) and its HEAD must have landed on the remote
-// default branch. And the worker must have merged work of its own: a commit
+// Every checkout in it must be clean, except that the start checkout may keep
+// dirt that was already there, byte for byte, when the worker started (a
+// shared primary checkout always has some), and its HEAD must have landed on
+// the remote default branch. And the worker must have merged work of its own: a commit
 // it made in its start checkout since it started, or in a worktree it created
 // and worked in (worked: its transcript and process cwds). A checkout it only
 // worked in must be clean and landed but never counts as its own work, so a
@@ -762,7 +837,7 @@ func workerGitMerged(ctx context.Context, snap PaneSnapshot, proofJSON string, c
 		return false
 	}
 	for cwd, proof := range proofs {
-		if proof.Dirty != "" || proof.Head == "" {
+		if proof.Head == "" || (proof.Dirty != "" && !(cwd == start.Cwd && workerGitDirtWithinBaseline(proof, start.Proof))) {
 			return false
 		}
 		if !workerGitLanded(ctx, cwd, proof.Head, workerGitDefaultRef(ctx, cwd)) {
@@ -842,7 +917,11 @@ func workerGitCheckouts(ctx context.Context, snap PaneSnapshot, calls []workerTo
 			continue
 		}
 		proof, why := workerGitInspect(ctx, path, false)
-		if why != "" || proof.Dirty != "" {
+		// The start checkout may keep dirt it already had when the worker
+		// started (a shared primary checkout, ST-60); anything new or changed
+		// there, and any dirt elsewhere, still keeps the worker open.
+		within := path == snap.Origin.WorkerGit.Cwd && why == "uncommitted work" && workerGitDirtWithinBaseline(proof, snap.Origin.WorkerGit.Proof)
+		if (why != "" || proof.Dirty != "") && !within {
 			return ""
 		}
 		proofs[path] = proof

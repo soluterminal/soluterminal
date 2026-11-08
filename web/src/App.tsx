@@ -113,6 +113,7 @@ import { PhoneAccessBanner } from './components/PhoneAccessBanner';
 import { ShellUpdateBanner } from './components/ShellUpdateBanner';
 import { ClaudeInstallBanner } from './components/ClaudeInstallBanner';
 import { MuseInstallBanner } from './components/MuseInstallBanner';
+import { CodexNextStepBanner } from './components/CodexNextStepBanner';
 import { PhoneAccessPairPanelGate } from './components/PhoneAccessPairPanel';
 import { Sidebar } from './components/Sidebar';
 import { PaneGrid } from './components/PaneGrid';
@@ -2177,6 +2178,7 @@ export default function App() {
         <DegradedBanner />
         <HumanProofBanner />
         <ClaudeInstallBanner hidden={firstRunReady && (welcomeOpen || checklistOpen)} />
+        <CodexNextStepBanner />
         {teamFeatures && <MuseInstallBanner />}
         {showEmbedChrome('phonePairing') && <PhoneAccessBanner />}
         {showEmbedChrome('shellUpdate') && <ShellUpdateBanner />}

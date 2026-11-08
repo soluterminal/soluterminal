@@ -1,4 +1,14 @@
 {
+  "0.0.1240": [
+    "Security and stability fixes.",
+    "New installs now install updates by themselves when nothing is running (Settings › Devices & updates › Automatic updates: Install when idle). If yours is set to Notify me, SoluTerminal asks you once whether to turn this on, and your answer stays. Required security updates still install either way. Agents can’t change this setting through SoluTerminal’s tools; it changes only in Settings or in that question.",
+    "After you install Codex, a banner now offers Log in or Start Codex to open a Codex pane, instead of a notice that disappeared after a few seconds.",
+    "A device request whose codes didn’t match now clears after 10 minutes, so failed attempts no longer block new requests.",
+    "Fixed: the sidebar’s Files box now accepts Windows paths written with / or \\.",
+    "Fixed: after switching between Windows and WSL, Settings › Privacy & security now shows that side’s settings.",
+    "Fixed: a power cut while SoluTerminal was saving could lose this computer’s pairing with your account. A WSL update that runs but doesn’t help now asks for a restart, instead of switching SoluTerminal to Windows for good.",
+    "Finished workers now also close by themselves after SoluTerminal’s background service restarts, and large uncommitted files no longer keep them open."
+  ],
   "0.0.1239": [
     "Fixed: on Windows without WSL, Claude Code and Codex installed through npm now start from SoluTerminal.",
     "Auto-approve now leaves a prompt for you when a very short pane can't show the menu's other options.",

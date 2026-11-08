@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -146,6 +147,11 @@ func accountLabel(account string) string {
 	return account
 }
 
+// usageScanLine sees each decoded line of a DSH session log before it is
+// parsed. A test seam only: tests make it panic to prove a bad log can't
+// panic the daemon.
+var usageScanLine = func([]byte) {}
+
 // dshUsageEvent is the subset of a DSH session event the meter needs.
 type dshUsageEvent struct {
 	Type string          `json:"type"`
@@ -156,23 +162,34 @@ type dshUsageEvent struct {
 // scanSessionUsage sums one session's billed turns. The model is tracked from
 // request/header so a mid-session /model switch prices correctly; fallbackModel
 // (the sidecar's) covers logs with no header.
-func scanSessionUsage(file, fallbackModel string) (deepseekusage.KeyUsage, error) {
+//
+// A corrupt or crafted log must not take the daemon down: a panic while
+// decoding or reading it (as GO-2026-6865 did in the zstd decoder) is returned
+// as a read error.
+func scanSessionUsage(file, fallbackModel string) (usage deepseekusage.KeyUsage, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			usage, err = deepseekusage.KeyUsage{}, fmt.Errorf("read %s: %v", filepath.Base(file), r)
+		}
+	}()
 	f, err := os.Open(file)
 	if err != nil {
 		return deepseekusage.KeyUsage{}, err
 	}
 	defer f.Close()
-	reader, err := zstd.NewReader(f)
+	// One decoder goroutine, the caller's: with more, the decoder works in
+	// goroutines of its own, where a panic would escape the recover above.
+	reader, err := zstd.NewReader(f, zstd.WithDecoderConcurrency(1))
 	if err != nil {
 		return deepseekusage.KeyUsage{}, err
 	}
 	defer reader.Close()
 
-	var usage deepseekusage.KeyUsage
 	model := fallbackModel
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 1<<20), 4<<20)
 	for scanner.Scan() {
+		usageScanLine(scanner.Bytes())
 		var event dshUsageEvent
 		if json.Unmarshal(scanner.Bytes(), &event) != nil {
 			continue

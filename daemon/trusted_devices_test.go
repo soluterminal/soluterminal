@@ -433,6 +433,14 @@ func TestRemoteAccessPolicyIsDecidedOnceAtFirstStart(t *testing.T) {
 			write(t, dir, "shell-info.json", `{"shell":"desktop"}`)
 			write(t, dir, "claim.json", `{"machineId":"m1","token":"t"}`)
 		}, false, remoteAccessApproved},
+		{"claim save cut off by a power loss", func(dir string) {
+			write(t, dir, "claim.json", `{"machineId":"m1","token":"t"}`)
+			write(t, dir, claimTempPrefix+"123456", `{"machineId"`)
+		}, false, remoteAccessApproved},
+		{"own policy write cut off by a power loss", func(dir string) {
+			write(t, dir, "claim.json", `{"machineId":"m1","token":"t"}`)
+			write(t, dir, trustedDevicesTempPrefix+"654321", `{"pol`)
+		}, false, remoteAccessApproved},
 		{"existing install", func(dir string) {
 			write(t, dir, "claim.json", `{"machineId":"m1","token":"t"}`)
 			write(t, dir, "workspaces.json", "{}")

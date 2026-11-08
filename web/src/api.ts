@@ -1,5 +1,5 @@
 import type { ClosedPane } from './lib/closedPanes';
-import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, NativeSettings, OrchestratorHostsInfo, PaneEffort, PaneIdentity, PaneInfo, PaneOrigin, PaneRole, Port, RecoverySettings, ReleaseCheck, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, Workspace, WorkspaceSummary } from './types';
+import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, NativeSettings, OrchestratorHostsInfo, PaneEffort, PaneIdentity, PaneInfo, PaneOrigin, PaneRole, Port, RecoverySettings, ReleaseCheck, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, UpdateSettingsPut, Workspace, WorkspaceSummary } from './types';
 import { isRouterMode, isDesktopRouterMode } from './dualBackend';
 import { setEnterGapConfig } from './ptySubmit';
 import { openTicketedEventSource, type EventStream } from './lib/ticketedEventSource';
@@ -5052,7 +5052,7 @@ const coreApi = {
     }).then(j<NativeSettings>),
   getUpdateSettings: (): Promise<UpdateSettings> =>
     apiFetch('/api/update/settings').then(j<UpdateSettings>),
-  putUpdateSettings: async (body: Partial<UpdateSettings>): Promise<UpdateSettings> => {
+  putUpdateSettings: async (body: UpdateSettingsPut): Promise<UpdateSettings> => {
     const init: RequestInit = {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },

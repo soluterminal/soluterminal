@@ -8,10 +8,33 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestWindowsProviderConfigSweepEligibility(t *testing.T) {
+	before := time.Now().Add(-time.Second)
+	dir, err := newPrivateProviderConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if ok, err := oldOwnedProviderConfigDir(dir, before); err != nil || ok {
+		t.Fatalf("new directory eligible: %t %v", ok, err)
+	}
+	if ok, err := oldOwnedProviderConfigDir(dir, time.Now().Add(time.Second)); err != nil || !ok {
+		t.Fatalf("old owned directory ineligible: %t %v", ok, err)
+	}
+	otherUser, err := windows.StringToSid("S-1-5-21-111-222-333-444")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := providerConfigOwnedBy(dir, otherUser); err != nil || ok {
+		t.Fatalf("directory accepted as another user's: %t %v", ok, err)
+	}
+}
 
 func TestWindowsClaudeConfigFilesACL(t *testing.T) {
 	args, cleanup, err := claudeConfigFileArgs(`C:\npm\claude.cmd`, claudeInjectArgs(testInjectionRecord(), "pane_private", nil))

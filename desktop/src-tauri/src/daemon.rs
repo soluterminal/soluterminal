@@ -254,7 +254,7 @@ fn default_wsl_is_running(verbose: &str, running: &str) -> bool {
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-fn decode_wsl_listing(raw: &[u8]) -> String {
+pub(crate) fn decode_wsl_listing(raw: &[u8]) -> String {
     if raw.starts_with(&[0xff, 0xfe]) || raw.contains(&0) {
         let units: Vec<_> = raw
             .chunks_exact(2)
@@ -4150,7 +4150,7 @@ mod claim_mirror_schedule_tests {
 /// 2026-08-12: hundreds of concurrent wsl.exe during a VM death, enough
 /// Windows-side memory pressure to worsen the outage it was probing).
 #[cfg(windows)]
-fn run_wsl_bounded(args: &[&str], timeout: Duration) -> Result<std::process::Output, String> {
+pub(crate) fn run_wsl_bounded(args: &[&str], timeout: Duration) -> Result<std::process::Output, String> {
     run_wsl_bounded_with_stdin(args, None, timeout)
 }
 

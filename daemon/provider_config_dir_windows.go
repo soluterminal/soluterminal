@@ -22,7 +22,10 @@ func newPrivateProviderConfigDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")")
+	// Explicit ownership also keeps elevated launches owned by this user,
+	// rather than the token's default Administrators owner.
+	sid := user.User.Sid.String()
+	sd, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;OICI;FA;;;" + sid + ")")
 	if err != nil {
 		return "", err
 	}
@@ -32,7 +35,7 @@ func newPrivateProviderConfigDir() (string, error) {
 		if _, err := rand.Read(nonce[:]); err != nil {
 			return "", err
 		}
-		path := filepath.Join(os.TempDir(), "solu-claude-config-"+hex.EncodeToString(nonce[:]))
+		path := filepath.Join(os.TempDir(), providerConfigPrefix+hex.EncodeToString(nonce[:]))
 		ptr, err := windows.UTF16PtrFromString(path)
 		if err != nil {
 			return "", err

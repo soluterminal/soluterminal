@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,6 +54,41 @@ func TestWorkerGitBaselineDistinguishesExistingAndNewDirt(t *testing.T) {
 		})
 	}
 }
+func TestWorkerGitBaselineComparesEachPath(t *testing.T) {
+	for _, kind := range []string{"unchanged", "one-removed", "one-changed", "one-added"} {
+		t.Run(kind, func(t *testing.T) {
+			cwd := archiveRepo(t)
+			putCapabilityFile(t, filepath.Join(cwd, "a.txt"), "person a\n")
+			putCapabilityFile(t, filepath.Join(cwd, "b.txt"), "person b\n")
+			snap := workerGitBaseline(t, cwd)
+			switch kind {
+			case "one-removed":
+				if err := os.Remove(filepath.Join(cwd, "b.txt")); err != nil {
+					t.Fatal(err)
+				}
+			case "one-changed":
+				putCapabilityFile(t, filepath.Join(cwd, "b.txt"), "worker b\n")
+			case "one-added":
+				putCapabilityFile(t, filepath.Join(cwd, "c.txt"), "worker c\n")
+			}
+			_, why := workerGitForArchive(context.Background(), snap, "")
+			if want := kind == "unchanged" || kind == "one-removed"; (why == "") != want {
+				t.Fatalf("why=%q", why)
+			}
+		})
+	}
+}
+
+func TestWorkerGitDirtWithinBaselineNeedsPerPathDigests(t *testing.T) {
+	old := workerGitProof{Dirty: "whole"}
+	if workerGitDirtWithinBaseline(workerGitProof{Dirty: "other", Paths: map[string]string{"a": "1"}}, old) {
+		t.Fatal("a baseline without per-path digests matched different dirt")
+	}
+	if !workerGitDirtWithinBaseline(workerGitProof{Dirty: "whole"}, old) || !workerGitDirtWithinBaseline(workerGitProof{}, old) {
+		t.Fatal("identical or no dirt did not match")
+	}
+}
+
 func TestWorkerGitChecksNewWorktrees(t *testing.T) {
 	cwd := archiveRepo(t)
 	putCapabilityFile(t, filepath.Join(cwd, "tracked.txt"), "pre-existing person edit\n")

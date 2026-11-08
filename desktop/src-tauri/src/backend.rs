@@ -88,12 +88,12 @@ pub fn resolve_backend(app: &AppHandle, interactive: bool) -> Backend {
             if !crate::daemon::wsl_start_allowed() {
                 return saved;
             }
-            let st = wsl_status();
+            let (st, reason) = wsl_probe();
             if st != WslStatus::Ready {
                 if let Some(fallback) = unattended_backend(interactive) {
                     return fallback;
                 }
-                return repair_or_fallback(app, saved, st);
+                return repair_or_fallback(app, saved, st, &reason);
             }
         }
         return saved;
@@ -105,7 +105,8 @@ pub fn resolve_backend(app: &AppHandle, interactive: bool) -> Backend {
     // install-needs-reboot case can keep pref=Wsl for the next launch
     // while running HostNative this session).
     let start_allowed = crate::daemon::wsl_start_allowed();
-    run_first_run_wizard(app, wsl_status(), offer_setup, start_allowed)
+    let (status, reason) = wsl_probe();
+    run_first_run_wizard(app, status, &reason, offer_setup, start_allowed)
 }
 
 /// Environment flag the tray "Repair setup" item sets before restarting.
@@ -133,7 +134,7 @@ fn take_wsl_setup_offer() -> bool {
 enum FirstRunPlan {
     /// WSL works: ask which one the user prefers.
     AskPreference,
-    /// A distro exists but WSL needs updating: offer the update.
+    /// A distro exists but WSL can't run it: offer the update.
     OfferUpdate,
     /// No usable WSL and the user asked via Repair setup: offer install.
     OfferInstall,
@@ -148,7 +149,7 @@ enum FirstRunPlan {
 fn first_run_plan(status: WslStatus, offer_setup: bool, start_allowed: bool) -> FirstRunPlan {
     match status {
         WslStatus::Ready => FirstRunPlan::AskPreference,
-        WslStatus::NeedsUpdate => FirstRunPlan::OfferUpdate,
+        WslStatus::NeedsUpdate | WslStatus::Failed => FirstRunPlan::OfferUpdate,
         WslStatus::NoDistro | WslStatus::Unavailable if offer_setup && start_allowed => {
             FirstRunPlan::OfferInstall
         }
@@ -175,71 +176,116 @@ pub enum WslStatus {
     Ready,
     /// Platform present but no distro installed. Fix: install a distro.
     NoDistro,
-    /// WSL signalled it needs updating. Fix: `wsl --update`.
+    /// WSL itself said it needs updating. Fix: `wsl --update`.
     NeedsUpdate,
+    /// A distro is registered but WSL couldn't run a command and gave no
+    /// reason we recognise. It may be stale or may just be having a bad
+    /// moment, so show its own words and offer the update as a possible fix.
+    Failed,
     /// wsl.exe not callable / platform not enabled / unknown failure.
     Unavailable,
 }
 
-/// Probe what WSL can actually do. We deliberately do NOT trust
-/// `wsl --status` (it exits 0 even with ZERO distros installed). The
-/// ground truth is "can I run a command in the default distro", i.e.
-/// `wsl -e true`. When that fails we classify WHY (no distro vs needs
-/// update vs unavailable) so the caller routes to the right fix instead
-/// of silently falling back to host-native — the exact failure that
-/// stranded a user on PowerShell with no explanation.
+/// `wsl -e true` can cold-boot the VM, so this is generous, but a wedged WSL
+/// must still reach a dialog instead of holding the app before its window opens.
 #[cfg(windows)]
-fn wsl_status() -> WslStatus {
-    if !crate::daemon::wsl_start_allowed() {
-        return WslStatus::Unavailable;
-    }
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let run = Command::new("wsl.exe")
-        .args(["-e", "true"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let out = match run {
-        Ok(o) if o.status.success() => return WslStatus::Ready,
-        Ok(o) => o,                                   // ran but failed — classify
-        Err(_) => return WslStatus::Unavailable,      // wsl.exe not callable
-    };
+const WSL_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(windows)]
+const WSL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(windows)]
+const WSL_PROBE_RETRY_DELAY: Duration = Duration::from_secs(3);
 
-    // wsl.exe emits UTF-16-ish text; from_utf8_lossy + lowercase is good
-    // enough for substring classification. Combine both streams.
-    let mut blob = String::from_utf8_lossy(&out.stdout).into_owned();
-    blob.push_str(&String::from_utf8_lossy(&out.stderr));
-    let blob = blob.to_lowercase();
-    if blob.contains("wsl --update") || blob.contains("please update") || blob.contains("needs to be updated") {
-        return WslStatus::NeedsUpdate;
+/// wsl.exe writes its own messages as UTF-16LE, which a plain UTF-8 read
+/// leaves with a NUL after every letter, so no substring would ever match.
+#[cfg(any(windows, test))]
+fn wsl_output_text(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut text = crate::daemon::decode_wsl_listing(stdout);
+    text.push('\n');
+    text.push_str(&crate::daemon::decode_wsl_listing(stderr));
+    text.trim().to_string()
+}
+
+/// Only what WSL says outright. Anything else needs the distro listing.
+#[cfg(any(windows, test))]
+fn classify_wsl_error(text: &str) -> Option<WslStatus> {
+    let text = text.to_lowercase();
+    if text.contains("wsl --update") || text.contains("please update") || text.contains("needs to be updated") {
+        return Some(WslStatus::NeedsUpdate);
     }
-    if blob.contains("no installed distribution") || blob.contains("has no installed") {
-        return WslStatus::NoDistro;
+    if text.contains("no installed distribution") || text.contains("has no installed") {
+        return Some(WslStatus::NoDistro);
+    }
+    None
+}
+
+/// One line for a dialog, so a long WSL error can't push the buttons away.
+#[cfg(any(windows, test))]
+fn wsl_failure_detail(reason: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if reason.is_empty() {
+        return "WSL gave no error message.".to_string();
+    }
+    let mut detail: String = reason.chars().take(MAX_CHARS).collect();
+    if reason.chars().count() > MAX_CHARS {
+        detail.push('…');
+    }
+    format!("WSL said: {detail}")
+}
+
+/// Can a command run in the default distro right now? We deliberately do NOT
+/// trust `wsl --status` (it exits 0 even with ZERO distros installed). When
+/// it can't, classify WHY so the caller routes to the right fix instead of
+/// silently falling back to host-native. Returns WSL's own text alongside.
+#[cfg(windows)]
+fn wsl_probe_once() -> (WslStatus, String) {
+    if !crate::daemon::wsl_start_allowed() {
+        return (WslStatus::Unavailable, String::new());
+    }
+    let out = match crate::daemon::run_wsl_bounded(&["-e", "true"], WSL_PROBE_TIMEOUT) {
+        Ok(o) if o.status.success() => return (WslStatus::Ready, String::new()),
+        Ok(o) => o,                                      // ran but failed — classify
+        Err(e) if e.contains("timed out") => return (WslStatus::Failed, e),
+        Err(_) => return (WslStatus::Unavailable, String::new()), // wsl.exe not callable
+    };
+    let text = wsl_output_text(&out.stdout, &out.stderr);
+    if let Some(status) = classify_wsl_error(&text) {
+        return (status, text);
     }
 
     // Secondary signal: enumerate distros. `wsl -l -q` succeeds with at
     // least one name when a distro exists. Empty/failed ⇒ no distro.
-    let list = Command::new("wsl.exe")
-        .args(["-l", "-q"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    match list {
+    let status = match crate::daemon::run_wsl_bounded(&["-l", "-q"], WSL_LIST_TIMEOUT) {
         Ok(o) if o.status.success() => {
             // UTF-16LE bytes: a real name has non-NUL ASCII letters.
-            let has_distro = o
-                .stdout
-                .iter()
-                .any(|&b| b.is_ascii_alphanumeric());
-            if has_distro {
-                // A distro is registered but `wsl -e true` still failed —
-                // most often a stale install; update is the safe move and
-                // self-corrects to install if needed.
-                WslStatus::NeedsUpdate
+            if o.stdout.iter().any(|&b| b.is_ascii_alphanumeric()) {
+                WslStatus::Failed
             } else {
                 WslStatus::NoDistro
             }
         }
+        Err(e) if e.contains("timed out") => WslStatus::Failed,
         _ => WslStatus::NoDistro,
+    };
+    (status, text)
+}
+
+/// wsl_probe_once, with one retry for an unexplained failure: a WSL that
+/// worked minutes ago can fail once while it starts or restarts, and that
+/// shouldn't cost the user a repair dialog. Logs anything but Ready, since a
+/// dialog's cause is otherwise gone once it closes.
+#[cfg(windows)]
+fn wsl_probe() -> (WslStatus, String) {
+    let mut result = wsl_probe_once();
+    if result.0 == WslStatus::Failed && !result.1.contains("timed out") {
+        crate::daemon::launch_log(&format!("WSL check failed, retrying once: {}", wsl_failure_detail(&result.1)));
+        thread::sleep(WSL_PROBE_RETRY_DELAY);
+        result = wsl_probe_once();
     }
+    if result.0 != WslStatus::Ready {
+        crate::daemon::launch_log(&format!("WSL check: {:?}: {}", result.0, wsl_failure_detail(&result.1)));
+    }
+    result
 }
 
 /// The saved backend pref WITHOUT any re-validation or dialogs — for the
@@ -276,12 +322,15 @@ pub fn reset_setup() {
 fn run_first_run_wizard(
     app: &AppHandle,
     status: WslStatus,
+    reason: &str,
     offer_setup: bool,
     start_allowed: bool,
 ) -> Backend {
     match first_run_plan(status, offer_setup, start_allowed) {
         FirstRunPlan::AskPreference => {} // fall through to the preference dialog
-        FirstRunPlan::OfferUpdate => return persist_first_run_outcome(run_update_wsl_wizard(app)),
+        FirstRunPlan::OfferUpdate => {
+            return persist_first_run_outcome(run_update_wsl_wizard(app, status, reason));
+        }
         FirstRunPlan::OfferInstall => {
             return persist_first_run_outcome(run_install_wsl_wizard(app));
         }
@@ -351,28 +400,42 @@ fn persist_first_run_outcome(outcome: SetupOutcome) -> Backend {
 /// it WSL means the next launch re-checks and auto-restores WSL once
 /// repaired (e.g. after the reboot that finishes `wsl --install`).
 #[cfg(windows)]
-fn repair_or_fallback(app: &AppHandle, saved: Backend, status: WslStatus) -> Backend {
+fn repair_or_fallback(app: &AppHandle, saved: Backend, status: WslStatus, reason: &str) -> Backend {
     let (title, body, fix_label) = match status {
         WslStatus::NoDistro => (
             "Linux (WSL) needs a distribution",
             "SoluTerminal is set to run inside Windows' Linux (WSL), but no Linux \
              distribution is installed, so the full experience can't start. Set one \
              up now? Windows will install Ubuntu (it may need a restart). You can \
-             also run on Windows directly for this session.",
+             also run on Windows directly for this session."
+                .to_string(),
             "Set up Linux now",
         ),
         WslStatus::NeedsUpdate => (
             "Linux (WSL) needs an update",
             "SoluTerminal is set to run inside Windows' Linux (WSL), but WSL needs a \
              quick update before it can start. Update now? You can also run on \
-             Windows directly for this session.",
+             Windows directly for this session."
+                .to_string(),
             "Update WSL now",
+        ),
+        WslStatus::Failed => (
+            "Linux (WSL) didn't start",
+            format!(
+                "SoluTerminal is set to run inside Windows' Linux (WSL), but WSL didn't \
+                 start.\n\n{}\n\nUpdating WSL may fix this. You can also run on Windows \
+                 directly for this session, and SoluTerminal will check WSL again next \
+                 time it opens.",
+                wsl_failure_detail(reason)
+            ),
+            "Update WSL",
         ),
         _ => (
             "Linux (WSL) is unavailable",
             "SoluTerminal is set to run inside Windows' Linux (WSL), but WSL isn't \
              available right now. Set it up? You can also run on Windows directly \
-             for this session.",
+             for this session."
+                .to_string(),
             "Set it up",
         ),
     };
@@ -392,7 +455,7 @@ fn repair_or_fallback(app: &AppHandle, saved: Backend, status: WslStatus) -> Bac
         return Backend::HostNative;
     }
     let outcome = match status {
-        WslStatus::NeedsUpdate => do_update_and_verify(app),
+        WslStatus::NeedsUpdate | WslStatus::Failed => do_update_and_verify(app),
         _ => do_install_and_verify(app),
     };
     match outcome {
@@ -434,9 +497,10 @@ pub fn set_up_wsl_on_request(app: &AppHandle) -> WslSetupRequest {
         Some(Backend::Dual) => Backend::Dual,
         _ => Backend::Wsl,
     };
-    let outcome = match wsl_status() {
+    let (status, reason) = wsl_probe();
+    let outcome = match status {
         WslStatus::Ready => SetupOutcome::ReadyNow,
-        WslStatus::NeedsUpdate => run_update_wsl_wizard(app),
+        WslStatus::NeedsUpdate | WslStatus::Failed => run_update_wsl_wizard(app, status, &reason),
         WslStatus::NoDistro | WslStatus::Unavailable => run_install_wsl_wizard(app),
     };
     match outcome {
@@ -493,18 +557,26 @@ fn run_install_wsl_wizard(app: &AppHandle) -> SetupOutcome {
     do_install_and_verify(app)
 }
 
-/// Confirm + guided WSL update. Used on first run when a distro exists
-/// but WSL itself needs updating.
+/// Confirm + guided WSL update. Used when a distro exists but WSL can't run
+/// it: WSL asked for the update, or failed and the update may fix it.
 #[cfg(windows)]
-fn run_update_wsl_wizard(app: &AppHandle) -> SetupOutcome {
+fn run_update_wsl_wizard(app: &AppHandle, status: WslStatus, reason: &str) -> SetupOutcome {
+    let lead = if status == WslStatus::Failed {
+        format!(
+            "Windows' built-in Linux (WSL) didn't start.\n\n{}\n\nUpdating WSL may fix this. Update now?",
+            wsl_failure_detail(reason)
+        )
+    } else {
+        "Windows' built-in Linux (WSL) needs a quick update before SoluTerminal can \
+         use it for the full experience. Update now?"
+            .to_string()
+    };
     let update_requested = app
         .dialog()
-        .message(
-            "Windows' built-in Linux (WSL) needs a quick update before \
-             soluterminal can use it for the full experience. Update now?\n\n\
-             Windows will ask for administrator permission. You can skip this \
-             and run on Windows directly instead.",
-        )
+        .message(format!(
+            "{lead}\n\nWindows will ask for administrator permission. You can skip \
+             this and run on Windows directly instead."
+        ))
         .title("Update WSL?")
         .kind(MessageDialogKind::Info)
         .buttons(MessageDialogButtons::OkCancelCustom(
@@ -544,9 +616,9 @@ fn do_install_and_verify(app: &AppHandle) -> SetupOutcome {
     )
 }
 
-/// Run `wsl --update` elevated, then verify. If WSL still can't run a
-/// command afterwards (e.g. there's no distro), chain into the distro
-/// install so the user is never dead-ended.
+/// Run `wsl --update` elevated, then verify. Offer the distro install only
+/// if WSL now reports no distro: the user agreed to an update, and installing
+/// over a registered distro that merely failed would strand their files.
 #[cfg(windows)]
 fn do_update_and_verify(app: &AppHandle) -> SetupOutcome {
     if let Err(e) = run_wsl_command_elevated("'--update'") {
@@ -565,9 +637,27 @@ fn do_update_and_verify(app: &AppHandle) -> SetupOutcome {
     if wait_for_wsl_ready(Duration::from_secs(8)) {
         return finish_setup_with_verify(app, "WSL is updated and ready.");
     }
-    // Updated but still not runnable — most likely no distro. Don't dead-
-    // end: fall through to the install flow.
-    do_install_and_verify(app)
+    let (status, reason) = wsl_probe();
+    match status {
+        WslStatus::Ready => finish_setup_with_verify(app, "WSL is updated and ready."),
+        WslStatus::NoDistro => run_install_wsl_wizard(app),
+        _ => {
+            app.dialog()
+                .message(format!(
+                    "WSL was updated, but it still didn't start.\n\n{}\n\nRestart this PC \
+                     and reopen SoluTerminal. For now SoluTerminal will run directly on \
+                     Windows.",
+                    wsl_failure_detail(&reason)
+                ))
+                .title("WSL still isn't ready")
+                .kind(MessageDialogKind::Warning)
+                .blocking_show();
+            // The update ran and the dialog asks for a restart: keep WSL as
+            // the saved choice so the next launch checks it again. Failed
+            // would make a first run or Repair setup save Windows for good.
+            SetupOutcome::RebootRequired
+        }
+    }
 }
 
 /// Shared post-step verify + user-facing result. Polls `wsl -e true`
@@ -602,7 +692,7 @@ fn finish_setup_with_verify(app: &AppHandle, ready_msg: &str) -> SetupOutcome {
 fn wait_for_wsl_ready(max: Duration) -> bool {
     let deadline = Instant::now() + max;
     loop {
-        if wsl_status() == WslStatus::Ready {
+        if wsl_probe_once().0 == WslStatus::Ready {
             return true;
         }
         if Instant::now() >= deadline {
@@ -731,8 +821,42 @@ mod autostart_tests {
 #[cfg(test)]
 mod first_run_tests {
     use super::{
-        first_run_plan, request_wsl_setup_offer, take_wsl_setup_offer, FirstRunPlan, WslStatus,
+        classify_wsl_error, first_run_plan, request_wsl_setup_offer, take_wsl_setup_offer,
+        wsl_failure_detail, wsl_output_text, FirstRunPlan, WslStatus,
     };
+
+    fn utf16le(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn utf16_wsl_messages_are_classified() {
+        let update = wsl_output_text(&utf16le("Please run wsl --update to continue.\r\n"), b"");
+        assert_eq!(classify_wsl_error(&update), Some(WslStatus::NeedsUpdate));
+        let none = wsl_output_text(&utf16le("This has no installed distributions.\r\n"), b"");
+        assert_eq!(classify_wsl_error(&none), Some(WslStatus::NoDistro));
+    }
+
+    #[test]
+    fn an_unexplained_failure_is_not_called_an_update() {
+        let text = wsl_output_text(b"", &utf16le("Catastrophic failure\r\nError code: Wsl/Service/E_UNEXPECTED\r\n"));
+        assert_eq!(text, "Catastrophic failure\r\nError code: Wsl/Service/E_UNEXPECTED");
+        assert_eq!(classify_wsl_error(&text), None);
+    }
+
+    #[test]
+    fn failure_detail_is_one_bounded_line() {
+        assert_eq!(wsl_failure_detail(" \n "), "WSL gave no error message.");
+        assert_eq!(wsl_failure_detail("first\r\n  second"), "WSL said: first second");
+        let long = wsl_failure_detail(&"x".repeat(1000));
+        assert_eq!(long.chars().count(), "WSL said: ".len() + 300 + 1);
+        assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn a_failed_wsl_with_a_distro_is_offered_the_update() {
+        assert_eq!(first_run_plan(WslStatus::Failed, false, true), FirstRunPlan::OfferUpdate);
+    }
 
     #[test]
     fn no_wsl_opens_on_windows_without_a_dialog() {
@@ -776,7 +900,7 @@ mod first_run_tests {
 
     #[test]
     fn low_disk_runs_windows_for_this_session_only() {
-        // wsl_status reports Unavailable when the disk gate blocks WSL; that
+        // wsl_probe_once reports Unavailable when the disk gate blocks WSL; that
         // says nothing about whether WSL is installed, so don't save Windows
         // and don't offer an install.
         for offer in [false, true] {

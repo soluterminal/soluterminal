@@ -16,6 +16,11 @@ import (
 const (
 	deviceCommitLifetime = 10 * time.Minute
 	deviceRevealLifetime = 30 * time.Minute
+	// deviceFailedLifetime is how long a failed V3 request stays listed. It
+	// still counts toward devicePendingLimit meanwhile, so failing on purpose
+	// can't grow the list; then it is pruned, so burnt attempts can't fill
+	// it for good.
+	deviceFailedLifetime = 10 * time.Minute
 )
 
 var errDeviceEnrolment = errors.New("device comparison changed or expired; start again")
@@ -137,7 +142,8 @@ func (s *trustedDevices) pruneCommittedV3Locked() error {
 	kept := make([]*trustedDevice, 0, len(s.record.Devices))
 	for _, d := range s.record.Devices {
 		if d.CodeVersion == 3 && ((d.Status == deviceStatusCommitted && !s.now().Before(d.CreatedAt.Add(deviceCommitLifetime))) ||
-			(d.Status == deviceStatusPending && (d.RevealedAt == nil || !s.now().Before(d.RevealedAt.Add(deviceRevealLifetime))))) {
+			(d.Status == deviceStatusPending && (d.RevealedAt == nil || !s.now().Before(d.RevealedAt.Add(deviceRevealLifetime)))) ||
+			(d.Status == deviceStatusFailed && !s.now().Before(failedAt(d).Add(deviceFailedLifetime)))) {
 			continue
 		}
 		// A V1/V2 request waits devicePendingLifetime: a full list refuses
@@ -165,6 +171,15 @@ func (s *trustedDevices) pruneCommittedV3Locked() error {
 		return nil
 	}
 	return s.saveDevicesV3Locked(kept)
+}
+
+// failedAt is when d's request failed: FailedAt, or its creation for records
+// from before FailedAt was kept.
+func failedAt(d *trustedDevice) time.Time {
+	if d.FailedAt != nil {
+		return *d.FailedAt
+	}
+	return d.CreatedAt
 }
 
 func (v *deviceV3Attempt) expired(now time.Time) bool {
@@ -327,7 +342,8 @@ func (s *trustedDevices) revealDeviceV3(id, enrolmentID, nonce string) (trustedD
 		if verify {
 			next.Verify = &deviceV3Attempt{State: deviceStatusFailed}
 		} else {
-			next.Status, next.Code, next.EnrolmentID = deviceStatusFailed, "", ""
+			failed := s.now().UTC()
+			next.Status, next.Code, next.EnrolmentID, next.FailedAt = deviceStatusFailed, "", "", &failed
 			next.Commit, next.DaemonNonce, next.DeviceNonce, next.CodeIdentity = "", "", "", ""
 		}
 		if err := s.replaceDeviceV3Locked(&next); err != nil {

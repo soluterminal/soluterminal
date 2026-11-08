@@ -93,6 +93,10 @@ type trustedDevice struct {
 	// Surface is where the device enrolled from: "relay" or "local" (this
 	// computer). Empty on older records.
 	Surface string `json:"surface,omitempty"`
+	// FailedAt: when a V3 request's comparison failed. The failed record is
+	// kept deviceFailedLifetime so the device can learn it failed, then
+	// pruned (pruneCommittedV3Locked).
+	FailedAt *time.Time `json:"failedAt,omitempty"`
 	// Forwarded: requested through the cloud's /m/ route without device
 	// proof; counts toward forwardedPendingLimit while it waits.
 	Forwarded bool `json:"forwarded,omitempty"`
@@ -305,6 +309,14 @@ var freshDataDirEntries = map[string]bool{
 	"shell-info.json": true,
 }
 
+// claimTempPrefix is the temp file a SaveClaim interrupted by a power cut can
+// leave behind (writeFileAtomicSynced). It doesn't make an install existing.
+const claimTempPrefix = ".claim.json.tmp-"
+
+// trustedDevicesTempPrefix is the same for this decision's own write, cut off
+// before the policy file landed.
+const trustedDevicesTempPrefix = ".trusted-devices.json.tmp-"
+
 // decideRemoteAccessPolicyOnce records, the first time a daemon carrying this
 // change starts, which remote-access policy this computer begins with, and
 // never decides again: later starts, re-pairing and updates keep whatever is
@@ -329,7 +341,7 @@ func decideRemoteAccessPolicyOnce(dataDir string, explicitRelayToken bool) (stri
 			return "", nil
 		}
 		for _, e := range entries {
-			if !freshDataDirEntries[e.Name()] {
+			if !freshDataDirEntries[e.Name()] && !strings.HasPrefix(e.Name(), claimTempPrefix) && !strings.HasPrefix(e.Name(), trustedDevicesTempPrefix) {
 				policy = remoteAccessAny
 				break
 			}

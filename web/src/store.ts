@@ -59,7 +59,7 @@ import { collectBrowserInfos, collectFileInfos, collectPaneDefs, failedPaneFromD
 import { isMobileViewport } from './lib/mobile';
 import { windowScopedKey, windowLabel, isPrimaryWindow } from './lib/windowIdentity';
 import { checkOwnedByOther, claimWorkspace, releaseWorkspace, startOwnershipHeartbeat } from './lib/workspaceOwnership';
-import { confirmDialog } from './lib/dialog';
+import { confirmDialog, confirmOrDismissDialog } from './lib/dialog';
 import { acquireWorkspaceView, installWorkspaceHandoff, resumeWorkspaceView, suspendWorkspaceView, workspaceMovedTo, workspaceViewVisible } from './lib/workspaceHandoff';
 import type { DropZone } from './lib/paneDnd';
 import {
@@ -295,6 +295,36 @@ function writeAutoApplyStamp(stamp: { version: string; at: number }) {
   autoApplyStampMem = stamp;
   try {
     localStorage.setItem(AUTO_APPLIED_KEY, JSON.stringify(stamp));
+  } catch {
+    /* memory only */
+  }
+}
+
+// The one-time "install updates by themselves?" question. Answering records it
+// on the daemon and it never returns. Dismissing without an answer snoozes it
+// here (localStorage, memory fallback) so it comes back after a week rather
+// than on every reload or status poll.
+export const AUTO_UPDATE_ASK_SNOOZE_MS = 7 * 24 * 60 * 60 * 1000;
+const AUTO_UPDATE_ASK_SNOOZE_KEY = 'solu.update.askSnoozedUntil';
+let autoUpdateAskSnoozeMem = 0;
+let autoUpdateAskOpen = false;
+function autoUpdateAskSnoozedUntil(): number {
+  try {
+    const v = Number(localStorage.getItem(AUTO_UPDATE_ASK_SNOOZE_KEY));
+    if (Number.isFinite(v) && v > 0) return v;
+  } catch {
+    /* fall through to memory */
+  }
+  return autoUpdateAskSnoozeMem;
+}
+export function resetAutoUpdateAskForTests() {
+  autoUpdateAskSnoozeMem = 0;
+  autoUpdateAskOpen = false;
+}
+function snoozeAutoUpdateAsk(now: number) {
+  autoUpdateAskSnoozeMem = now + AUTO_UPDATE_ASK_SNOOZE_MS;
+  try {
+    localStorage.setItem(AUTO_UPDATE_ASK_SNOOZE_KEY, String(autoUpdateAskSnoozeMem));
   } catch {
     /* memory only */
   }
@@ -817,10 +847,14 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   setRecoveryResumeMode: (mode: RecoveryResumeMode) => Promise<void>;
   // Per-install self-update preference. 'when-idle' lets refreshUpdateStatus
   // auto-apply the daemon swap once no native pane is mid-turn (see
-  // maybeAutoApplyUpdate); 'off' (default) keeps the notify-then-click banner.
+  // maybeAutoApplyUpdate); 'off' keeps the notify-then-click banner. New installs
+  // start on 'when-idle'; older ones keep their choice and are asked once.
   updateSettings: UpdateSettings | null;
   loadUpdateSettings: () => Promise<void>;
   setUpdateAutoApply: (mode: UpdateAutoApplyMode) => Promise<void>;
+  // Asks the one-time automatic-updates question when the daemon says to and it
+  // isn't snoozed. Only an answer changes or records anything.
+  maybeAskAutoUpdate: (now?: number) => Promise<void>;
   setUpdateShellAutoApply: (mode: UpdateAutoApplyMode) => Promise<void>;
   // Per-machine native (Focus) toggles. promptSuggestions gates the composer
   // ghost text AND the daemon --prompt-suggestions argv (opt-in, default OFF).
@@ -5097,16 +5131,44 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       // for the next poll.
       get().maybeAutoApplyUpdate();
       get().maybeAutoApplyShellUpdate();
+      void get().maybeAskAutoUpdate();
     } catch {
       // Older daemons won't expose /api/update/settings; keep Settings usable.
     }
   },
+  maybeAskAutoUpdate: async (now = Date.now()) => {
+    if (autoUpdateAskOpen || get().updateSettings?.autoApplyAsk !== true) return;
+    if (now < autoUpdateAskSnoozedUntil()) return;
+    autoUpdateAskOpen = true;
+    try {
+      const answer = await confirmOrDismissDialog({
+        title: 'Install updates automatically?',
+        message:
+          'Install updates by themselves when nothing is running? Your panes keep running; the window reconnects briefly.',
+        confirmLabel: 'Turn on',
+        cancelLabel: 'Keep notify me',
+      });
+      if (answer === null) {
+        snoozeAutoUpdateAsk(now);
+        return;
+      }
+      try {
+        await get().setUpdateAutoApply(answer ? 'when-idle' : 'off');
+      } catch {
+        // The failure is toasted and nothing was recorded; ask again later.
+        snoozeAutoUpdateAsk(now);
+      }
+    } finally {
+      autoUpdateAskOpen = false;
+    }
+  },
   setUpdateAutoApply: async (mode) => {
     const prev = get().updateSettings;
-    const optimistic: UpdateSettings = { ...(prev ?? {}), autoApply: mode };
+    // Choosing here, in Settings or in the question, is the person's answer.
+    const optimistic: UpdateSettings = { ...(prev ?? {}), autoApply: mode, autoApplyAsk: false };
     set({ updateSettings: optimistic });
     try {
-      const settings = await api.putUpdateSettings(optimistic);
+      const settings = await api.putUpdateSettings({ ...optimistic, autoApplyAnswered: true });
       set({ updateSettings: settings });
       // Turning it on with an update already available should apply now, not on
       // the next 30s poll.
@@ -5126,6 +5188,8 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     const optimistic: UpdateSettings = {
       autoApply: prev?.autoApply ?? 'off',
       shellAutoApply: mode,
+      // Saving this setting does not answer the automatic-updates question.
+      autoApplyAsk: prev?.autoApplyAsk,
     };
     set({ updateSettings: optimistic });
     if (mode === 'off') disarmShellAutoRestart();

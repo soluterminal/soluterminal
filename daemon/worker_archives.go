@@ -34,6 +34,16 @@ type workerReadReceipt struct {
 	Turn  string
 	Input uint64
 	At    time.Time
+	// Restored: loaded from worker-reads.json after a daemon restart. The
+	// pane and input counter it was bound to are gone, so it counts only
+	// while workerFinalAfterRestart holds (ST-60).
+	Restored bool
+}
+
+// workerReadRecord is a read receipt as saved in worker-reads.json.
+type workerReadRecord struct {
+	Turn string    `json:"turn"`
+	At   time.Time `json:"at"`
 }
 
 // workerRetention is a retained worker's notice record. Pending: its ask is
@@ -85,6 +95,7 @@ func workerPublicationUncertain(text string) bool {
 
 type workerArchiveState struct {
 	noticeMu         sync.Mutex
+	readsSaveMu      sync.Mutex // orders worker-reads.json writes; taken before mu, never under it
 	retained         map[string]workerRetention
 	noticesLoaded    bool
 	mu               sync.Mutex
@@ -127,6 +138,7 @@ func (a *apiServer) loadWorkerArchivesLocked(s *workerArchiveState) {
 		s.err = errors.New("archive storage unavailable")
 		return
 	}
+	a.loadWorkerReadsLocked(s)
 	raw, err := os.ReadFile(filepath.Join(a.archiveRoot(), "index.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return
@@ -187,9 +199,93 @@ func (a *apiServer) noteWorkerReplyRead(caller string, p *Pane, reply paneReply)
 	}
 	s := a.workerArchives()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	a.loadWorkerArchivesLocked(s)
-	s.reads[p.ID] = workerReadReceipt{Pane: p, Turn: key, Input: p.inputRevision.Load(), At: time.Now()}
+	input := p.inputRevision.Load()
+	if prev, ok := s.reads[p.ID]; ok && prev.Pane == p && prev.Turn == key && prev.Input == input {
+		s.mu.Unlock() // the same turn re-read: the saved receipt already stands
+		return
+	}
+	s.reads[p.ID] = workerReadReceipt{Pane: p, Turn: key, Input: input, At: time.Now()}
+	s.mu.Unlock()
+	a.saveWorkerReads(s)
+}
+
+// Read receipts survive a daemon restart as {turn, time} per pane, so a lead
+// need not re-read every finished worker after an update. Only receipts for
+// panes still open are kept. The manager lookup runs outside s.mu (archive
+// commit takes the manager lock, then s.mu); readsSaveMu orders the writes,
+// each from a snapshot taken after the previous write.
+func (a *apiServer) saveWorkerReads(s *workerArchiveState) {
+	if a.dataDir == "" {
+		return
+	}
+	s.readsSaveMu.Lock()
+	defer s.readsSaveMu.Unlock()
+	s.mu.Lock()
+	out := make(map[string]workerReadRecord, len(s.reads))
+	for id, r := range s.reads {
+		out[id] = workerReadRecord{Turn: r.Turn, At: r.At}
+	}
+	s.mu.Unlock()
+	for id := range out {
+		if _, ok := a.mgr.Get(id); !ok {
+			delete(out, id)
+		}
+	}
+	raw, err := json.Marshal(out)
+	if err == nil {
+		err = writeFileAtomicSynced(filepath.Join(a.dataDir, "worker-reads.json"), raw, 0600)
+	}
+	if err != nil {
+		log.Printf("worker read receipts save: %v", err)
+	}
+}
+
+// loadWorkerReadsLocked restores saved receipts as Restored. An unreadable
+// file restores none: a lost receipt only delays a close, never hastens one.
+func (a *apiServer) loadWorkerReadsLocked(s *workerArchiveState) {
+	raw, err := os.ReadFile(filepath.Join(a.dataDir, "worker-reads.json"))
+	if err != nil {
+		return
+	}
+	var saved map[string]workerReadRecord
+	if json.Unmarshal(raw, &saved) != nil {
+		return
+	}
+	for id, r := range saved {
+		if id != "" && r.Turn != "" && !r.At.IsZero() {
+			s.reads[id] = workerReadReceipt{Turn: r.Turn, At: r.At, Restored: true}
+		}
+	}
+}
+
+// workerFinalAfterRestart reports whether a final reply completed before this
+// daemon started may still count as the worker's final turn (ST-60). Input and
+// drafts from before a restart leave no in-memory record, so the daemon asks
+// what it can see now: no input to the pane since the restart, the agent idle,
+// no agent message waiting in or put back into its input box, and the box read
+// on screen as empty. A draft typed before the restart still shows in the box;
+// a prompt submitted then makes a newer turn or a busy agent. A box that
+// cannot be read proves nothing, and the worker stays open.
+func workerFinalAfterRestart(p *Pane, codex bool) bool {
+	if atomic.LoadInt64(&p.LastInputMs) != 0 || p.lastHumanInputMs.Load() != 0 || p.inputRevision.Load() != 0 {
+		return false
+	}
+	if p.computeStateCached() != StateIdle {
+		return false
+	}
+	p.mu.Lock()
+	msg := p.currentUnsentMessageLocked()
+	p.mu.Unlock()
+	if msg != nil || p.putBackReceipt() != nil {
+		return false
+	}
+	screen, blanked, ok := draftGuardScreen(p)
+	if !ok {
+		return false
+	}
+	draft, known := composerDraft(typedComposerScreen(screen, blanked, codex), codex)
+	return known && draft == ""
 }
 
 // workerMergedSeen is when a worker's final reply and Git proof were first
@@ -814,9 +910,12 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	grace := time.Duration(q.settings.WorkerMergedGraceMinutes) * time.Minute
 	started := q.startedAt
 	q.mu.Unlock()
-	// Restored panes need a newly observed final turn. Input before a daemon
-	// restart cannot be reconstructed from its ephemeral writer counter.
-	final := key != "" && !reply.CompletedAt.Before(started) && !reply.CompletedAt.After(now)
+	// Input before a daemon restart cannot be reconstructed from its ephemeral
+	// writer counter. A final turn from before the restart counts only while
+	// the pane shows nothing that could have followed it (ST-60).
+	beforeRestart := reply.CompletedAt.Before(started)
+	afterRestart := key != "" && beforeRestart && workerFinalAfterRestart(p, reply.Agent == agentCodex)
+	final := key != "" && (!beforeRestart || afterRestart) && !reply.CompletedAt.After(now)
 	noInput := atomic.LoadInt64(&p.LastInputMs) == 0 || atomic.LoadInt64(&p.LastInputMs) < reply.CompletedAt.UnixMilli()
 	if !enabled || key == "" || !noInput {
 		a.clearWorkerRetention(p.ID)
@@ -850,7 +949,9 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		return
 	}
 	inputRev := p.inputRevision.Load()
-	read := receipt.Pane == p && receipt.Turn == key && receipt.Input == inputRev && !receipt.At.Before(reply.CompletedAt)
+	bound := receipt.Pane == p && receipt.Input == inputRev
+	restored := receipt.Restored && afterRestart && inputRev == 0
+	read := (bound || restored) && receipt.Turn == key && !receipt.At.Before(reply.CompletedAt)
 	live := a.workerLiveCwd(p)
 	ctx, cancel := context.WithTimeout(baseContext, 4*time.Second)
 	proof, reason := workerGitForArchive(ctx, snap, live)
@@ -865,8 +966,8 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	// Merged = done: once every owned checkout is clean and has landed on the
 	// remote default branch, the worker closes after a grace without a read
 	// receipt. Its reply stays readable from the archive. Like the read
-	// rule, it needs a reply finished since the daemon started: input or a
-	// draft typed before a restart cannot be seen. It needs no publication
+	// rule, it needs a finished reply and an empty input box (a reply from
+	// before a restart counts, once the box proves empty). It needs no publication
 	// proof: a squash-merged branch whose remote ref was pruned has no
 	// containing ref, yet its content is on the branch.
 	merged, ownWorktree, checkouts := false, "", ""
@@ -908,6 +1009,24 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	allowed, flag := workerArchiveAllowed(true, key != "", read || merged, noInput, reason == "" || merged)
 	if !allowed {
 		if flag {
+			if beforeRestart && !read {
+				// A reply from before the restart with no receipt: the receipt
+				// may have been lost, not unread. Keep known notices, never
+				// invent or reopen one (the flag dedupe below is in memory).
+				prior, known := a.retainedWorker(p.ID)
+				lead := a.workerNoticeLead(snap.ID, snap.Origin)
+				if reason == "" {
+					if known && !strings.Contains(prior.Reason, "final reply unread by lead") && !strings.HasPrefix(prior.Reason, "archive ") {
+						a.clearWorkerRetention(p.ID)
+					}
+					return
+				}
+				if known && prior.Lead == lead && (prior.Reason == reason || prior.Reason == reason+"; final reply unread by lead") {
+					return
+				}
+				a.flagWorkerLead(lead, snap.ID, reason)
+				return
+			}
 			if !read {
 				if reason != "" {
 					reason += "; "
@@ -994,7 +1113,9 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	a.mgr.withCurrentPane(p, func() {
 		p.agentWriteMu.Lock()
 		defer p.agentWriteMu.Unlock()
-		if baseContext.Err() != nil || p.workerArchiving.Load() || p.inputRevision.Load() != inputRev || (atomic.LoadInt64(&p.LastInputMs) > 0 && atomic.LoadInt64(&p.LastInputMs) >= reply.CompletedAt.UnixMilli()) {
+		// A pre-restart final also needs no keystroke since the restart: one
+		// noted during the slow proof may not have reached the write yet.
+		if baseContext.Err() != nil || p.workerArchiving.Load() || p.inputRevision.Load() != inputRev || (atomic.LoadInt64(&p.LastInputMs) > 0 && atomic.LoadInt64(&p.LastInputMs) >= reply.CompletedAt.UnixMilli()) || (beforeRestart && p.lastHumanInputMs.Load() != 0) {
 			return
 		}
 		latest := workerReplyFromFile(reply.Path, reply.Agent)
