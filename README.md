@@ -3,7 +3,7 @@
 A focused workspace for Claude Code and Codex on Windows. Run them side by side in PowerShell and WSL panes,
 keep them running when you close the window, and stay in charge of what they can approve.
 
-![SoluTerminal: Claude Code asks Codex for a review](docs/media/hero.gif)
+![SoluTerminal: close the window and Claude Code and Codex keep working; agents can't approve themselves](docs/media/hero.gif)
 <sub>The real app, sped up and trimmed.</sub>
 
 **On Windows?** Get the app from [soluterminal.com](https://soluterminal.com/download/?utm_source=github&utm_campaign=oss-launch) (free during beta).

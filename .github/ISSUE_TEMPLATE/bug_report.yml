@@ -4,7 +4,7 @@ labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: "Please don't paste API keys, tokens, emails or private code. Screenshots: check them for names and paths first."
+      value: "Issues here are public. Please don't paste API keys, tokens, emails or private code. Screenshots: check them for names and paths first."
   - type: textarea
     id: what-happened
     attributes:
@@ -30,7 +30,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: SoluTerminal version (Settings › About)
+      label: SoluTerminal version
+      description: Click the version (or Update) at the bottom right of the window, open Details, and copy the first number next to App (daemon).
   - type: dropdown
     id: pane
     attributes:
@@ -42,3 +43,6 @@ body:
     attributes:
       label: Did soluterminal.com/help/fix-a-problem/ help?
       options: ["Didn't try it", "Tried it, didn't help", "Partly"]
+  - type: markdown
+    attributes:
+      value: "Prefer to report privately? Use Help › Send feedback in the app (needs a free account)."
