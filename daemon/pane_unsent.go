@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -302,6 +305,9 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID     string `json:"id"`
 		Action string `json:"action"`
+		// TextSha256: the person's client hashed the text it showed them.
+		// Send of a not-typed message requires it.
+		TextSha256 string `json:"textSha256"`
 	}
 	if !decodeJSON(w, r, &req, defaultJSONBodyBytes) {
 		return
@@ -330,7 +336,7 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	// Sending a message the pane was never given types an agent's text: only
 	// the person, who was shown it, may do that.
-	if msg := p.Snapshot().UnsentMessage; msg != nil && msg.ID == req.ID && msg.NotTyped && req.Action == "send" && !a.requireHuman(w, r, untypedSendAction) {
+	if msg := p.Snapshot().UnsentMessage; msg != nil && msg.ID == req.ID && msg.NotTyped && req.Action == "send" && (!a.requireHuman(w, r, untypedSendAction) || refuseUnreviewedUntypedSend(w, msg, req.TextSha256)) {
 		return
 	}
 	if req.Action == "keep" && !a.requireHuman(w, r, putBackKeepAction) {
@@ -354,12 +360,17 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	defer p.deliveryMu.Unlock()
 	msg := p.Snapshot().UnsentMessage
 	if msg == nil || msg.ID != req.ID {
+		if req.Action == "send" && req.TextSha256 != "" {
+			// The message the person reviewed is gone or was replaced.
+			writeJSON(w, http.StatusConflict, map[string]any{"code": "unsent_text_changed", "error": unsentTextReviewMessage})
+			return
+		}
 		http.Error(w, "unsent message changed", http.StatusConflict)
 		return
 	}
 	// The receipt can change between the check above and the lock: check the
 	// one Send would act on.
-	if msg.NotTyped && req.Action == "send" && !a.requireHuman(w, r, untypedSendAction) {
+	if msg.NotTyped && req.Action == "send" && (!a.requireHuman(w, r, untypedSendAction) || refuseUnreviewedUntypedSend(w, msg, req.TextSha256)) {
 		return
 	}
 	if msg.PutBack && !a.requireHuman(w, r, putBackAction) {
@@ -572,6 +583,29 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	p.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"outcome": outcome})
+}
+
+const unsentTextReviewMessage = "The message changed or wasn't shown; review it again"
+
+// unsentTextSha256 is the lowercase hex SHA-256 of text's UTF-8 bytes.
+func unsentTextSha256(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+// refuseUnreviewedUntypedSend refuses Send of a not-typed message unless the
+// person's client hashed exactly the text Send would type (409, and reports
+// true). A client with no hash predates the check and is told to update.
+func refuseUnreviewedUntypedSend(w http.ResponseWriter, msg *unsentPaneMessage, textSha256 string) bool {
+	if textSha256 == "" {
+		writeJSON(w, http.StatusConflict, map[string]any{"code": "unsent_text_unconfirmed", "error": unsentTextReviewMessage + ". Update SoluTerminal to send this message.", "update": true})
+		return true
+	}
+	if subtle.ConstantTimeCompare([]byte(textSha256), []byte(unsentTextSha256(msg.body))) != 1 {
+		writeJSON(w, http.StatusConflict, map[string]any{"code": "unsent_text_changed", "error": unsentTextReviewMessage})
+		return true
+	}
+	return false
 }
 
 // actOnUntypedMessage resolves a message a busy pane was never given: Send

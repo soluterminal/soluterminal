@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { useEntitlements } from '../entitlements';
 import { WelcomeOverlay } from './WelcomeOverlay';
 
@@ -80,5 +80,55 @@ describe('WelcomeOverlay', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     expect(screen.getByText(/last few lines of terminal text/)).toBeInTheDocument();
     expect(screen.getByText(/through our relay/)).toBeInTheDocument();
+  });
+
+  it('can be skipped from its first slide, with a single Skip there', () => {
+    useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
+    const close = vi.fn();
+    render(<WelcomeOverlay open onClose={close} />);
+    expect(screen.getAllByRole('button', { name: /skip/i })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Skip tour' }));
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('tells someone who skips from slide 1 about the check-in first', () => {
+    useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
+    const close = vi.fn();
+    render(<WelcomeOverlay open onClose={close} />);
+    // Shown on the slide that has Skip tour, before anything is pressed.
+    const dialog = screen.getByRole('dialog', { name: 'Welcome to SoluTerminal' });
+    expect(dialog.textContent).toMatch(
+      /one anonymous check-in a day \(version, OS, a random install ID and two yes\/no usage flags\)/,
+    );
+    expect(dialog.textContent).toMatch(/turn it off in Settings/);
+    expect(screen.getByRole('button', { name: 'Skip tour' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Skip tour' }));
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('links from the check-in line to the full privacy note', () => {
+    useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
+    render(<WelcomeOverlay open onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'What leaves this computer →' }));
+    expect(screen.getByText('What leaves this computer')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Privacy policy' })).toBeInTheDocument();
+    // The short line belongs to the first slide only.
+    expect(screen.queryByRole('button', { name: 'What leaves this computer →' })).toBeNull();
+  });
+
+  it('keeps Skip in the corner on the later slides', () => {
+    useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
+    render(<WelcomeOverlay open onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(screen.queryByRole('button', { name: 'Skip tour' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeInTheDocument();
+  });
+
+  it('points at the waiting-on-you bell, and names the sliders as the alert settings', () => {
+    useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
+    render(<WelcomeOverlay open onClose={() => {}} />);
+    const text = tourText();
+    expect(text).toMatch(/bell in the top bar shows how many are\s+waiting on you/);
+    expect(text).toMatch(/sliders\s+button next to it sets how alerts and sounds reach you/);
   });
 });

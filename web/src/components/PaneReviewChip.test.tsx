@@ -39,7 +39,8 @@ describe('PaneReviewChip', () => {
 
   it('labels each outcome plainly', () => {
     expect(reviewChip({ ...changes, verdict: 'approve' }).label).toBe('✓ Reviewed');
-    expect(reviewChip({ ...changes, verdict: 'comment' }).label).toBe('Needs your decision');
+    expect(reviewChip({ ...changes, verdict: 'comment' }).label).toBe('Review: questions');
+    expect(reviewSummary({ ...changes, verdict: 'comment' })).toBe("Codex reviewed Claude's work: has questions");
     expect(reviewChip({ ...changes, verdict: 'error' }).label).toBe('Review failed');
     expect(reviewSummary({ ...changes, verdict: 'approve', author: undefined })).toBe('Codex reviewed: approved');
   });
@@ -62,11 +63,11 @@ describe('PaneReviewChip', () => {
     expect(screen.getByText(/not re-reviewed/)).toBeTruthy();
   });
 
-  it('"Needs your decision" opens to the pane\'s asks as well as the reviewer\'s questions', () => {
+  it('"Review: questions" opens to the pane\'s asks as well as the reviewer\'s questions', () => {
     const onHold: PaneReview = { ...changes, verdict: 'comment', mustFix: 0, findings: [], questions: ['Ship behind a flag?'] };
     const p = { ...pane(onHold), asks: [{ id: 'a1', text: 'Rotate the key now?', source: '@lead', createdAt: Date.now() }] } as PaneInfo;
     render(<PaneReviewChip pane={p} />);
-    fireEvent.click(screen.getByRole('button', { name: /needs your decision/ }));
+    fireEvent.click(screen.getByRole('button', { name: /has questions/ }));
     expect(screen.getByText('Ship behind a flag?')).toBeTruthy();
     expect(screen.getByText('Rotate the key now?')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Dismiss ask from @lead' })).toBeTruthy();

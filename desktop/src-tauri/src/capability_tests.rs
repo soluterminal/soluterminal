@@ -1,24 +1,19 @@
 // Capability scoping, checked through Tauri's own ACL with the real
-// capabilities/*.json. `remote.urls` must include `http://127.0.0.1:*`, so
-// what keeps a local dev server shown in a browser pane (a child webview of
-// the app's window) from calling the desktop commands is that capabilities
-// name the app's webviews, not its windows: Tauri grants a command when
-// either the window label or the webview label matches.
+// capabilities/*.json. A capability's remote.urls names the exact origins the
+// app's windows load (daemon::APP_ADDRS and the hosted cloud); any other page,
+// such as a preview of a pane's dev server on its own origin, gets no
+// commands, even inside the app's window and with the window's invoke key.
 
 use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{get_ipc_response, mock_builder, INVOKE_KEY};
 use tauri::webview::InvokeRequest;
-use tauri::{LogicalPosition, LogicalSize, WebviewBuilder, WebviewUrl, WebviewWindowBuilder};
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 struct AsWebview<'a>(&'a tauri::Webview<tauri::test::MockRuntime>);
 impl AsRef<tauri::Webview<tauri::test::MockRuntime>> for AsWebview<'_> {
     fn as_ref(&self) -> &tauri::Webview<tauri::test::MockRuntime> {
         self.0
     }
-}
-
-fn ask(webview: &tauri::Webview<tauri::test::MockRuntime>, origin: &str) -> bool {
-    ask_cmd(webview, origin, "plugin:app|version")
 }
 
 fn ask_cmd(webview: &tauri::Webview<tauri::test::MockRuntime>, origin: &str, cmd: &str) -> bool {
@@ -40,7 +35,12 @@ fn ask_cmd(webview: &tauri::Webview<tauri::test::MockRuntime>, origin: &str, cmd
 // One expansion of generate_context!() for the tests (run() has the other).
 fn app() -> tauri::App<tauri::test::MockRuntime> {
     mock_builder()
-        .invoke_handler(tauri::generate_handler![desktop_update_this_computer])
+        .invoke_handler(tauri::generate_handler![
+            desktop_update_this_computer,
+            apply_shell_update,
+            desktop_set_backend_mode,
+            browser_pane_ping
+        ])
         .build(tauri::generate_context!())
         .unwrap()
 }
@@ -52,9 +52,32 @@ fn desktop_update_this_computer() -> &'static str {
     "ok"
 }
 
+// Stand-ins for more desktop commands under their real names: installing an
+// update, switching the backend (restarts the shell) and the version ping.
+#[tauri::command]
+fn apply_shell_update() -> &'static str {
+    "ok"
+}
+#[tauri::command]
+fn desktop_set_backend_mode() -> &'static str {
+    "ok"
+}
+#[tauri::command]
+fn browser_pane_ping() -> &'static str {
+    "ok"
+}
+
+const DESKTOP_COMMANDS: [&str; 5] = [
+    "plugin:app|version",
+    "browser_pane_ping",
+    "apply_shell_update",
+    "desktop_set_backend_mode",
+    "desktop_update_this_computer",
+];
+
 // Only the main window may ask this computer's daemon to install its update.
-// Workspace windows, pop-out browsers and browser panes are refused, from the
-// cloud page's origin as from a local one.
+// Workspace windows and any other window are refused, from the cloud page's
+// origin as from a local one.
 #[test]
 fn only_the_main_window_may_update_this_computer() {
     let app = app();
@@ -69,22 +92,6 @@ fn only_the_main_window_may_update_this_computer() {
             allowed,
             "{label}"
         );
-        let pane = window
-            .as_ref()
-            .window()
-            .add_child(
-                WebviewBuilder::new(
-                    format!("bpane_{label}"),
-                    WebviewUrl::External(cloud.parse().unwrap()),
-                ),
-                LogicalPosition::new(0.0, 0.0),
-                LogicalSize::new(100.0, 100.0),
-            )
-            .unwrap();
-        assert!(
-            !ask_cmd(&pane, cloud, "desktop_update_this_computer"),
-            "bpane_{label}"
-        );
         // Any other origin, even in the main window, gets nothing.
         assert!(!ask_cmd(
             window.as_ref(),
@@ -94,55 +101,88 @@ fn only_the_main_window_may_update_this_computer() {
     }
 }
 
+// A preview page framed in the app's window (a pane's dev server, the router's
+// or the daemon's preview origin on a random port) asks with the window's own
+// invoke key and is refused every command; the app's own origins keep them.
 #[test]
-fn browser_pane_webviews_get_no_desktop_commands() {
+fn a_framed_preview_page_gets_no_commands() {
     let app = app();
     let daemon = "http://127.0.0.1:8787/";
-    let dev_server = "http://127.0.0.1:3000/";
-    for window_label in ["main", "workspace_2", "browser_1"] {
-        let window = WebviewWindowBuilder::new(
-            &app,
-            window_label,
-            WebviewUrl::External(daemon.parse().unwrap()),
-        )
-        .build()
-        .unwrap();
-        assert!(
-            ask(window.as_ref(), daemon),
-            "{window_label}: the app's own page lost its commands"
-        );
-
-        let pane = window
-            .as_ref()
-            .window()
-            .add_child(
-                WebviewBuilder::new(
-                    format!("bpane_{window_label}"),
-                    WebviewUrl::External(dev_server.parse().unwrap()),
-                ),
-                LogicalPosition::new(0.0, 0.0),
-                LogicalSize::new(100.0, 100.0),
-            )
+    let window =
+        WebviewWindowBuilder::new(&app, "main", WebviewUrl::External(daemon.parse().unwrap()))
+            .build()
             .unwrap();
-        assert!(
-            !ask(&pane, dev_server),
-            "{window_label}: a browser-pane page reached the desktop commands"
-        );
+    for addr in crate::daemon::APP_ADDRS {
+        let origin = format!("http://{addr}/");
+        for cmd in DESKTOP_COMMANDS {
+            assert!(ask_cmd(window.as_ref(), &origin, cmd), "{origin} lost {cmd}");
+        }
+    }
+    for preview in [
+        "http://127.0.0.1:49152/",
+        "http://127.0.0.1:5173/",
+        "http://localhost:5173/",
+        "http://localhost:8787/",
+        "http://[::1]:5173/",
+        "http://127.0.0.1:8788/",
+    ] {
+        for cmd in DESKTOP_COMMANDS {
+            assert!(!ask_cmd(window.as_ref(), preview, cmd), "{preview} reached {cmd}");
+        }
     }
 }
 
+// remote.urls lists exact origins only: no wildcard host or port, nothing but
+// the app's own addresses and the hosted cloud.
 #[test]
-fn a_direct_popout_window_has_no_commands() {
-    let app = app();
-    let dev_server = "http://127.0.0.1:3000/";
-    let window = WebviewWindowBuilder::new(
-        &app,
-        "directbrowser_1",
-        WebviewUrl::External(dev_server.parse().unwrap()),
-    )
-    .build()
-    .unwrap();
-    assert!(!ask(window.as_ref(), dev_server));
+fn remote_urls_are_the_exact_app_origins() {
+    let mut want: Vec<String> = crate::daemon::APP_ADDRS
+        .iter()
+        .map(|addr| format!("http://{addr}"))
+        .collect();
+    want.push("https://soluterminal-cloud.onrender.com".to_string());
+    want.sort();
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let Some(urls) = json.pointer("/remote/urls").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let mut got: Vec<String> = urls
+            .iter()
+            .map(|u| u.as_str().unwrap().to_string())
+            .collect();
+        for url in &got {
+            assert!(!url.contains('*'), "{}: wildcard in {url}", path.display());
+            let parsed: tauri::Url = url.parse().unwrap();
+            assert!(
+                parsed.path() == "/" && parsed.query().is_none(),
+                "{}: {url} is not a bare origin",
+                path.display()
+            );
+        }
+        got.sort();
+        assert_eq!(got, want, "{}", path.display());
+        checked += 1;
+    }
+    assert!(checked >= 2, "expected the main and workspace capabilities");
+}
+
+// Removed with the native and pop-out browsers: no capability may name a
+// browser window or webview any more.
+#[test]
+fn no_capability_names_a_browser_window() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for retired in ["browser_*", "bpane_", "browser-pane-create", "open-external-window"] {
+            assert!(!text.contains(retired), "{}: {retired}", path.display());
+        }
+    }
 }
 
 // Recovery bypasses webview device proof only for a real native tray click.

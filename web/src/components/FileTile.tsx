@@ -38,7 +38,6 @@ export function FileTile({ info }: Props) {
   const setFocus = useStore((s) => s.setFocus);
   const closeFile = useStore((s) => s.closeFileInLayout);
   const setFilePath = useStore((s) => s.setFilePath);
-  const openBrowserHere = useStore((s) => s.openBrowserHere); // kept in scope, unused here but consistent
   const launchShellHere = useStore((s) => s.launchShellHere);
   const focusedPaneId = useStore((s) => s.focusedPaneId);
   const toast = useStore((s) => s.toast);
@@ -62,9 +61,6 @@ export function FileTile({ info }: Props) {
   const [wrap, setWrap] = useState(true); // default on: long lines never dead-end
   const linesRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  // Suppress noisy linter for openBrowserHere; eliminating it isn't worth
-  // diverging from the sibling tile components.
-  void openBrowserHere;
 
   // Syntax highlighting: detect language from the path, then pre-tokenize
   // every line once (memoized on content) so re-renders from edits/reveals

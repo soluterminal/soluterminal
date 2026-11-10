@@ -5,10 +5,10 @@ import { useStore } from '../store';
 import type { PaneInfo, Port } from '../types';
 import { PortPanel } from './PortPanel';
 import { usePortPreferences } from '../lib/portPreferences';
-import { openExternalWindow } from '../tauri-browser';
+import { openInSystemBrowser } from '../tauri-browser';
 vi.mock('../tauri-browser', async (original) => ({
   ...(await original<typeof import('../tauri-browser')>()),
-  openExternalWindow: vi.fn(),
+  openInSystemBrowser: vi.fn(),
 }));
 const port = (over: Partial<Port> = {}): Port => ({
   port: 5173,
@@ -30,7 +30,7 @@ const port = (over: Partial<Port> = {}): Port => ({
 const pane = { id: 'pane-1', title: 'Frontend', cwd: '/home/user/project' } as PaneInfo;
 describe('workspace services', () => {
   beforeEach(() => {
-    vi.mocked(openExternalWindow).mockResolvedValue(true);
+    vi.mocked(openInSystemBrowser).mockReset().mockResolvedValue(true);
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -108,10 +108,7 @@ describe('workspace services', () => {
       }),
     );
     expect(open).toHaveBeenCalledWith(
-      'http://127.0.0.1:5173',
-      undefined,
-      undefined,
-      expect.objectContaining({ backend: 'win', previewPath: '/api/proxy/5173~YWJj/' }),
+      expect.objectContaining({ url: 'http://127.0.0.1:5173', backend: 'win', previewPath: '/api/proxy/5173~YWJj/' }),
     );
     expect(error).not.toHaveBeenCalled();
   });
@@ -123,16 +120,42 @@ describe('workspace services', () => {
     expect(screen.getByRole('button', { name: 'Copy address' })).toBeEnabled();
     expect(screen.getByText(/Remote preview requires/)).toBeInTheDocument();
   });
-  it('uses the selected backend and exact listener for external cloud opening', async () => {
+  it('opens a cloud service in the system browser with its exact listener and a scoped pass', async () => {
     configureApi({ prefix: '/m/host', token: 'secret' });
     useStore.setState({ ports: [port({ backend: 'win' })] });
     usePortPreferences.setState({ scope: 'all' });
     render(<PortPanel />);
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Open externally' })));
-    expect(openExternalWindow).toHaveBeenCalledWith(
-      expect.stringContaining('/m/host/b/win/api/proxy/5173~YWJj/?access_token=spp1.fixture.pass'),
-      'Frontend',
-    );
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Open in browser' })));
+    await vi.waitFor(() => expect(openInSystemBrowser).toHaveBeenCalledTimes(1));
+    const [opened] = vi.mocked(openInSystemBrowser).mock.calls[0];
+    expect(opened).toContain('/m/host/b/win/api/proxy/5173~YWJj/?access_token=spp1.fixture.pass');
+    expect(opened).not.toContain('secret');
+  });
+  it('opens a local service at its own address and reports no popup error', async () => {
+    const toast = vi.spyOn(useStore.getState(), 'toast');
+    vi.mocked(openInSystemBrowser).mockResolvedValue(false); // window.open in a browser tab
+    render(<PortPanel />);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Open in browser' })));
+    await vi.waitFor(() => expect(openInSystemBrowser).toHaveBeenCalledWith('http://127.0.0.1:5173', expect.any(Event)));
+    expect(toast).not.toHaveBeenCalled();
+  });
+  it('says why a WSL service sharing a Windows app\'s port can\'t open in the browser', async () => {
+    const toast = vi.spyOn(useStore.getState(), 'toast');
+    useStore.setState({ ports: [port({ backend: 'wsl' }), port({ backend: 'win', paneId: undefined })] });
+    usePortPreferences.setState({ scope: 'all' });
+    render(<PortPanel />);
+    const wslRow = screen.getByText('WSL').closest('.port-row') as HTMLElement;
+    await act(async () => fireEvent.click(within(wslRow).getByRole('button', { name: 'Open in browser' })));
+    await vi.waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('A Windows app also uses port 5173'), expect.objectContaining({ kind: 'warn' })));
+    expect(openInSystemBrowser).not.toHaveBeenCalled();
+  });
+  it('previews only pane services; an unowned local one opens in the browser instead', () => {
+    useStore.setState({ ports: [port({ paneId: undefined })] });
+    usePortPreferences.setState({ scope: 'all' });
+    render(<PortPanel />);
+    expect(screen.getByRole('button', { name: 'Open preview' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Open in browser' })).toBeEnabled();
+    expect(screen.getByText(/Preview shows services started in a soluterminal pane/)).toBeInTheDocument();
   });
   it('copies the service address without copying cloud credentials', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);

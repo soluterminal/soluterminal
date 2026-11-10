@@ -140,7 +140,7 @@ export function ApproveThisScreenPrompt() {
           style={{ marginRight: 'auto' }}
           onClick={(e) => {
             e.preventDefault();
-            void openInSystemBrowser(SITE_HELP_LOST_DEVICES_URL);
+            void openInSystemBrowser(SITE_HELP_LOST_DEVICES_URL, e.nativeEvent);
           }}
         >
           Locked out?

@@ -39,6 +39,9 @@ export interface PaletteAction {
   hint?: string;
   category: string;
   keywords?: string;
+  /** Words this action answers to first: typing one (or the first four or
+   *  more letters of one) ranks it above every other match. */
+  aliases?: string[];
   shortcut?: string;
   run: () => void | Promise<void>;
 }

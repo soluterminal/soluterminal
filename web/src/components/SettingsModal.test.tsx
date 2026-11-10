@@ -109,9 +109,11 @@ describe('SettingsModal', () => {
     const { unmount } = render(<SettingsModal />);
     act(() => useSettings.getState().openSettings());
     let labels = screen.getAllByRole('tab').map((t) => t.textContent);
-    // No sign-in state, no personal view and no voice module: no Account or
-    // Notifications & voice tab.
-    expect(labels).toEqual(['Appearance', 'Terminal & panes', 'Sidebar', 'Privacy & security', 'Devices & updates']);
+    // No sign-in state, no personal view and no voice module: Account still
+    // shows for Presentation mode; Notifications & voice does not.
+    expect(labels).toEqual(['Appearance', 'Terminal & panes', 'Sidebar', 'Account', 'Privacy & security', 'Devices & updates']);
+    fireEvent.click(screen.getByRole('tab', { name: 'Account' }));
+    expect(screen.getByRole('checkbox', { name: 'Presentation mode' })).toBeInTheDocument();
     unmount();
 
     useCloud.setState({ withoutAccount: true, session: null });

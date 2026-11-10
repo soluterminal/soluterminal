@@ -13,7 +13,7 @@ const IPHONE_UA =
 
 function openMenu() {
   render(<AlertsMenu />);
-  fireEvent.click(screen.getByRole('button', { name: /alerts/i }));
+  fireEvent.click(screen.getByRole('button', { name: /notification settings/i }));
 }
 
 beforeEach(() => {
@@ -25,6 +25,38 @@ afterEach(() => {
   vi.restoreAllMocks();
   useEntitlements.setState({ loaded: false, team: false, operator: false, account: false });
   useStore.setState({ notifyEnabled: false });
+});
+
+describe('AlertsMenu trigger', () => {
+  it('keeps one icon and one name whatever the alert channels are set to', () => {
+    const glyphs: string[] = [];
+    for (const state of [
+      { notifyEnabled: false, voiceAlertMode: 'off' as const },
+      { notifyEnabled: true, voiceAlertMode: 'off' as const },
+      { notifyEnabled: true, voiceAlertMode: 'chime' as const },
+    ]) {
+      useStore.setState(state);
+      const { unmount } = render(<AlertsMenu />);
+      const button = screen.getByRole('button', { name: 'Notification settings' });
+      expect(button).toHaveAttribute('title', 'Notification settings');
+      glyphs.push(button.querySelector('svg')!.innerHTML);
+      unmount();
+    }
+    expect(new Set(glyphs).size).toBe(1);
+  });
+
+  it('adds the unread count to the name', () => {
+    useStore.setState({ unreadNotifications: 3 });
+    try {
+      render(<AlertsMenu />);
+      expect(screen.getByRole('button', { name: 'Notification settings, 3 new' })).toHaveAttribute(
+        'title',
+        'Notification settings — 3 new',
+      );
+    } finally {
+      useStore.setState({ unreadNotifications: 0 });
+    }
+  });
 });
 
 describe('AlertsMenu push by tier', () => {

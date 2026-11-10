@@ -1,4 +1,4 @@
-import { isDesktopApp, openExternalWindow, openInSystemBrowser } from '../tauri-browser';
+import { openInSystemBrowser } from '../tauri-browser';
 
 // The public download page. Users are never sent to the release repository:
 // its URL carries a personal account name, and its asset list is confusing.
@@ -22,10 +22,7 @@ export function describeShellUpdateFailure(error?: string): string {
 }
 
 export async function openDesktopDownloadPage(): Promise<void> {
-  const handed = await openInSystemBrowser(DESKTOP_DOWNLOAD_URL);
-  // Without the opener plugin, window.open can silently do nothing inside the
-  // desktop app, so fall back to an in-app window there.
-  if (!handed && isDesktopApp()) await openExternalWindow(DESKTOP_DOWNLOAD_URL);
+  await openInSystemBrowser(DESKTOP_DOWNLOAD_URL);
 }
 
 // Last resort after every automatic path failed: say why, then open the

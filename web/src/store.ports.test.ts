@@ -117,3 +117,35 @@ it('reconnects a saved browser to the replacement listener in the same pane', as
   await useStore.getState().refreshPorts();
   expect(useStore.getState().browsers).toBe(stable);
 });
+
+const paneService = { ...ports[0], paneId: 'app', scheme: 'http', webStatus: 'ready', previewPath: '/api/proxy/5173~b2xk/' } as Port;
+
+it('Alt+B previews a pane service, then closes the tile', () => {
+  useStore.setState({ layout: null, ports: [{ ...ports[0], port: 9000 }, paneService] });
+  useStore.getState().toggleBrowser();
+  const [tile] = Object.values(useStore.getState().browsers);
+  expect(tile.url).toBe('http://127.0.0.1:5173');
+  expect(tile.service).toEqual(expect.objectContaining({ paneId: 'app', previewPath: '/api/proxy/5173~b2xk/' }));
+  useStore.getState().toggleBrowser();
+  expect(useStore.getState().browsers).toEqual({});
+});
+
+it('Alt+B says there is nothing to preview instead of opening an empty tile', () => {
+  const toast = vi.spyOn(useStore.getState(), 'toast');
+  useStore.setState({ layout: null, ports: [{ ...ports[0] }] });
+  useStore.getState().toggleBrowser();
+  expect(useStore.getState().browsers).toEqual({});
+  expect(toast).toHaveBeenCalledWith(expect.stringContaining('No previews yet'), expect.anything());
+});
+
+it('opens a page of the service, never another origin, in the one tile', () => {
+  useStore.setState({ layout: null });
+  const service = serviceTarget(paneService);
+  useStore.getState().openBrowserHere(service, 'http://127.0.0.1:5173/admin?tab=2');
+  useStore.getState().openBrowserHere(service, 'https://example.com/phish');
+  const tiles = Object.values(useStore.getState().browsers);
+  expect(tiles).toHaveLength(1);
+  expect(tiles[0].url).toBe('http://127.0.0.1:5173');
+  useStore.getState().openBrowserHere(service, 'http://127.0.0.1:5173/admin?tab=2');
+  expect(Object.values(useStore.getState().browsers)[0].url).toBe('http://127.0.0.1:5173/admin?tab=2');
+});

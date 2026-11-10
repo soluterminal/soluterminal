@@ -94,9 +94,11 @@ func deviceCommitV3(id, nonce string) string {
 }
 
 func deviceCodeV3(deviceSPKI, daemonSPKI, enrolmentID, deviceNonce, daemonNonce string) string {
-	return crockfordCode(sha256.Sum256([]byte(strings.Join([]string{
+	code := crockfordCode(sha256.Sum256([]byte(strings.Join([]string{
 		"SOLU-DEVICE-CODE-V3", deviceSPKI, daemonSPKI, enrolmentID, deviceNonce, daemonNonce,
 	}, "\n"))))
+	feedbackPairingCodes.remember(code, time.Now().Add(deviceRevealLifetime))
+	return code
 }
 
 func deviceSPKIHash(spki string) (string, error) {

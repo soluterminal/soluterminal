@@ -14,9 +14,9 @@ vi.mock('../lib/deviceIdentity', async (orig) => {
   };
 });
 
-import { api, DEVICE_APPROVAL_EVENT, requestDeviceApproval, type RemoteDevice } from '../api';
+import { api, ApiError, DEVICE_APPROVAL_EVENT, requestDeviceApproval, type RemoteDevice } from '../api';
 import * as identity from '../lib/deviceIdentity';
-import { CODE_DIFFERS, CODE_MATCHES, DeviceApprovalPrompt, FORGET_AND_COMPARE } from './DeviceApprovalPrompt';
+import { CODE_DIFFERS, CODE_MATCHES, DeviceApprovalPrompt, FORGET_AND_COMPARE, REQUEST_WAITING } from './DeviceApprovalPrompt';
 import v3 from '../lib/testdata/device-code-v3.json';
 
 const device = (status: 'pending' | 'approved', daemonIdentity: string): RemoteDevice =>
@@ -94,6 +94,38 @@ describe('DeviceApprovalPrompt', () => {
     expect(enroll).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('V2')).toBeNull();
     expect(identity.pinComputerIdentity).not.toHaveBeenCalled();
+  });
+
+  // F-009: after a reload the browser has lost the nonce its waiting
+  // request's code covers. It says so plainly and never shows a code, not
+  // even the computer's own one from the status poll.
+  it('explains a request already waiting for this browser without showing a code', async () => {
+    const { enroll, reveal, status, pending } = setupV3();
+    const raw = '{"error":"request_waiting","message":"a request for this device is already waiting with its code shown"}';
+    enroll.mockRejectedValue(new ApiError(409, raw, JSON.parse(raw)));
+    status.mockResolvedValue(pending);
+    await ask();
+    expect(await screen.findByRole('alert')).toHaveTextContent(REQUEST_WAITING);
+    expect(screen.queryByText(/request_waiting|ApiError|already waiting with its code shown/)).toBeNull();
+    expect(screen.queryByText('…')).toBeNull();
+    expect(screen.queryByText('SERVER-CODE')).toBeNull();
+    expect(screen.queryByText('V3')).toBeNull();
+    expect(reveal).not.toHaveBeenCalled();
+    await polls(2);
+    expect(status).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Ask for approval' })).toBeInTheDocument();
+    expect(identity.pinComputerIdentity).not.toHaveBeenCalled();
+    expect(identity.markDeviceEnrolled).not.toHaveBeenCalled();
+  });
+
+  it('shows the server sentence of another refusal, not its raw body', async () => {
+    const { enroll } = setupV3();
+    const raw = '{"error":"too_many_pending","message":"too many devices are waiting for approval on this computer"}';
+    enroll.mockRejectedValue(new ApiError(429, raw, JSON.parse(raw)));
+    await ask();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't ask for approval: too many devices are waiting for approval on this computer");
+    expect(alert.textContent).not.toContain('too_many_pending');
   });
 
   // After a reload the first refusal can come before the prompt has mounted.

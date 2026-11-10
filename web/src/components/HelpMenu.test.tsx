@@ -78,7 +78,7 @@ describe('HelpMenu', () => {
 
     openMenu(trigger);
     fireEvent.click(screen.getByRole('menuitem', { name: /^Help/ }));
-    expect(openInSystemBrowser).toHaveBeenCalledWith('https://soluterminal.com/help/');
+    expect(openInSystemBrowser).toHaveBeenCalledWith('https://soluterminal.com/help/', expect.any(Event));
 
     const inbox = vi.fn();
     window.addEventListener('solu:open-inbox', inbox);

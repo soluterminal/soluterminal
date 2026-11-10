@@ -119,6 +119,21 @@ it('keeps raw recognition and recording active when optional deferred cleanup fa
   expect(recognize).toHaveBeenCalledTimes(1);
   expect(options.deliver).toHaveBeenCalledWith('English ending', expect.objectContaining({ rawText: 'English ending', cleanup: 'failed' }));
 });
+it('checks the context policy once, as recording starts, and uses that answer for every upload', async () => {
+  options.request = undefined; options.deferCleanup = true;
+  const check = { allowed: true };
+  const startCheck = vi.spyOn(api, 'startVoiceContextCheck').mockReturnValue(check);
+  const recognize = vi.spyOn(api, 'transcribe').mockResolvedValue({ text: 'some words', cleanup: 'deferred', quota: null });
+  const tidy = vi.spyOn(api, 'cleanupVoice').mockResolvedValue({ text: 'Some words.', cleanup: 'ok' });
+  expect(controller.start(options)).toBe(true);
+  expect(startCheck).toHaveBeenCalledTimes(1);
+  ready(); await settle();
+  capture.onSegment(segment(0)); await settle();
+  capture.onSegment(segment(1)); await settle();
+  expect(startCheck).toHaveBeenCalledTimes(1);
+  expect(recognize.mock.calls.map((c) => c[1]?.contextCheck)).toEqual([check, check]);
+  expect(tidy.mock.calls.map((c) => c[1]?.contextCheck)).toEqual([check, check]);
+});
 it('keeps capturing after a transient request failure until the bounded buffer requires review', async () => {
   options.request = vi.fn().mockRejectedValue(new Error('Temporary network failure'));
   await start(); capture.onSegment(segment(0)); await settle();

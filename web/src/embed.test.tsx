@@ -8,7 +8,8 @@ import { DesktopInstallerLink } from './components/DesktopInstallerLink';
 import { useStore } from './store';
 import { isTauri } from './voice';
 import { getWindowInfo, windowScopedKey } from './lib/windowIdentity';
-import { openExternalWindow, openInSystemBrowser } from './tauri-browser';
+import { openInSystemBrowser } from './tauri-browser';
+import { dispatchTrusted, setUserActivation, trusted } from './test/trustedEvent';
 
 const base = {
   framed: true,
@@ -18,6 +19,7 @@ const base = {
   referrer: '',
 };
 const origin = 'http://127.0.0.1:4700';
+const click = () => trusted(new MouseEvent('click'));
 const host = (data: unknown, from = origin, source: MessageEventSource | null = window.parent) =>
   new MessageEvent('message', { data, origin: from, source });
 
@@ -33,6 +35,7 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  setUserActivation(null);
   __recomputeEmbedForTests();
 });
 
@@ -173,12 +176,12 @@ describe('host protocol', () => {
     sendEmbedReady('1.2.3');
     sendEmbedReady('1.2.3');
     expect(post).toHaveBeenCalledExactlyOnceWith({ source: 'soluterminal', v: 1, kind: 'ready', protocolVersion: 3, windowIdentity: 'shinoque', version: '1.2.3' }, origin);
-    expect(openEmbedUrl('https://example.com/docs')).toBe(true);
+    expect(openEmbedUrl('https://example.com/docs', click())).toBe(true);
     expect(post).toHaveBeenLastCalledWith({ source: 'soluterminal', v: 1, kind: 'open-url', url: 'https://example.com/docs' }, origin);
     for (const url of ['javascript:alert(1)', 'file:///tmp/data', 'https://user:pass@example.com/']) {
       expect(openEmbedUrl(url)).toBe(false);
     }
-    expect(openEmbedUrl('https://example.com/?access_token=opaque#id_token=opaque')).toBe(true);
+    expect(openEmbedUrl('https://example.com/?access_token=opaque#id_token=opaque', click())).toBe(true);
     expect(post).toHaveBeenCalledTimes(3);
     expect(post.mock.calls.every(([, target]) => String(target) === origin && String(target) !== '*')).toBe(true);
   });
@@ -190,12 +193,104 @@ describe('host protocol', () => {
     a.href = 'https://claude.com/cai/oauth/authorize?code=true&response_type=code&code_challenge=abc&state=opaque';
     a.target = '_blank';
     document.body.append(a);
-    expect(a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))).toBe(false);
+    expect(dispatchTrusted(a, new MouseEvent('click', { bubbles: true, cancelable: true }))).toBe(false);
     expect(post).toHaveBeenCalledWith({ source: 'soluterminal', v: 1, kind: 'open-url', url: a.href }, origin);
     __recomputeEmbedForTests({ ...base, framed: false });
     expect(a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))).toBe(true);
     expect(openEmbedUrl(a.href)).toBe(false);
     a.remove();
+  });
+
+  describe('open-url needs a person to have clicked', () => {
+    const url = 'http://127.0.0.1:5173/admin';
+    const opened = { source: 'soluterminal', v: 1, kind: 'open-url', url };
+    const anchor = () => {
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      document.body.append(a);
+      return a;
+    };
+    const refused = (toast: unknown) => vi.waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.stringContaining('click Open in browser'), { kind: 'warn' }));
+
+    it('posts nothing for a programmatic call and tells the person to click instead', async () => {
+      const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
+      const toast = vi.spyOn(useStore.getState(), 'toast').mockImplementation(() => {});
+      expect(openEmbedUrl(url)).toBe(false);
+      setUserActivation(false);
+      expect(openEmbedUrl(url)).toBe(false);
+      expect(await openInSystemBrowser(url)).toBe(false);
+      expect(post).not.toHaveBeenCalled();
+      await refused(toast);
+      expect(toast).toHaveBeenCalledTimes(3);
+    });
+
+    it('posts once for a real click, xterm link mouseup, or Enter or Space on the control', () => {
+      const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
+      setUserActivation(false);
+      const gestures = [
+        click(),
+        trusted(new MouseEvent('mouseup', { button: 0 })),
+        trusted(new KeyboardEvent('keydown', { key: 'Enter' })),
+        trusted(new KeyboardEvent('keydown', { key: ' ' })),
+      ];
+      for (const gesture of gestures) {
+        post.mockClear();
+        expect(openEmbedUrl(url, gesture)).toBe(true);
+        expect(post).toHaveBeenCalledExactlyOnceWith(opened, origin);
+      }
+      stop = installEmbedBridge(() => {});
+      const a = anchor();
+      post.mockClear();
+      expect(dispatchTrusted(a, new MouseEvent('click', { bubbles: true, cancelable: true }))).toBe(false);
+      expect(post).toHaveBeenCalledExactlyOnceWith(opened, origin);
+      a.remove();
+    });
+
+    it('posts nothing for an untrusted dispatched link click, and still keeps the frame from navigating', async () => {
+      const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
+      const toast = vi.spyOn(useStore.getState(), 'toast').mockImplementation(() => {});
+      stop = installEmbedBridge(() => {});
+      const a = anchor();
+      expect(a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))).toBe(false);
+      a.click();
+      expect(post).not.toHaveBeenCalled();
+      await refused(toast);
+      a.remove();
+    });
+
+    it('posts nothing on any event-carrying path after a keypress elsewhere, then a programmatic trigger', async () => {
+      const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
+      const toast = vi.spyOn(useStore.getState(), 'toast').mockImplementation(() => {});
+      stop = installEmbedBridge(() => {});
+      // Typing in a terminal leaves the frame with transient user activation.
+      setUserActivation(true);
+      const a = anchor();
+      a.click();
+      a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      for (const event of [
+        new MouseEvent('click'),
+        new MouseEvent('mouseup', { button: 0 }),
+        new KeyboardEvent('keydown', { key: 'Enter' }),
+        trusted(new KeyboardEvent('keydown', { key: 'a' })),
+        trusted(new MouseEvent('mouseup', { button: 2 })),
+        trusted(new MouseEvent('mousedown')),
+      ]) {
+        expect(openEmbedUrl(url, event)).toBe(false);
+        expect(await openInSystemBrowser(url, event)).toBe(false);
+      }
+      expect(post).not.toHaveBeenCalled();
+      await refused(toast);
+      a.remove();
+    });
+
+    it('lets a caller with no event use transient activation as the backstop', () => {
+      const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
+      setUserActivation(true);
+      expect(openEmbedUrl(url)).toBe(true);
+      expect(post).toHaveBeenCalledExactlyOnceWith(opened, origin);
+    });
   });
 
   it('passes notification title and body through unchanged', () => {
@@ -210,14 +305,12 @@ describe('host protocol', () => {
   it('routes browser helpers through the host only in embed mode', async () => {
     const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
     const popup = vi.spyOn(window, 'open').mockImplementation(() => null);
-    expect(await openInSystemBrowser('https://example.com/login')).toBe(true);
-    expect(await openExternalWindow('https://example.com/help')).toBe(true);
-    expect(post).toHaveBeenCalledTimes(2);
+    expect(await openInSystemBrowser('https://example.com/login', click())).toBe(true);
+    expect(post).toHaveBeenCalledTimes(1);
     expect(popup).not.toHaveBeenCalled();
     __recomputeEmbedForTests({ ...base, framed: false });
     expect(await openInSystemBrowser('https://example.com/login')).toBe(false);
-    expect(await openExternalWindow('https://example.com/help')).toBe(false);
-    expect(popup).toHaveBeenCalledTimes(2);
+    expect(popup).toHaveBeenCalledTimes(1);
   });
 
   it('consumes registered host keys before other capture listeners', () => {

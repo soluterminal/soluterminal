@@ -16,7 +16,7 @@ interface PaneContextMenuProps {
   y: number;
   menuRef: RefObject<HTMLDivElement>;
   isClaudePane: boolean;
-  // Native-renderer pane: hide terminal-only items (Force redraw — native has
+  // Native-renderer pane: hide terminal-only items (Fix display — native has
   // no xterm grid to repaint). Defaults to false (terminal pane).
   isNative?: boolean;
   onSplitRight: () => void;
@@ -53,11 +53,11 @@ interface PaneContextMenuProps {
   // (a task for its lead, archived once finished) or, for your own pane, back
   // to neither. Absent ⇒ hidden.
   onSetTeamKind?: (kind: 'lead' | 'worker' | 'none') => void;
-  onRedraw?: () => void;
-  // Terminal panes only: re-measure and re-assert this device's width so the
-  // shared PTY resizes back to match — the fix for gibberish after an app
-  // update or a takeover from another device. Absent ⇒ hidden.
-  onRealign?: () => void;
+  // Terminal panes only: "Fix display" — realign (re-assert this device's
+  // width so the shared PTY resizes back to match: gibberish after an app
+  // update or a takeover from another device), then the forced redraw (Codex
+  // ghost cells). Absent ⇒ hidden.
+  onFixDisplay?: () => void;
   // Any running pane: restart its agent in place on the installed binary,
   // resuming the conversation (or offering a fresh restart when there is none).
   // Absent ⇒ hidden.
@@ -107,8 +107,7 @@ export function PaneContextMenu({
   onEditIdentity,
   onConvertRole,
   onSetTeamKind,
-  onRedraw,
-  onRealign,
+  onFixDisplay,
   onRestartPane,
   onResumePane,
   onClosePane,
@@ -302,18 +301,13 @@ export function PaneContextMenu({
             title="Back to a plain pane of yours">Remove lead</button>}
         </>;
       })()}
-      {!isNative && onRealign && pane.status === 'running' && (
+      {!isNative && onFixDisplay && pane.status === 'running' && (
         <button
           role="menuitem"
-          onClick={onRealign}
-          title="Fix garbled / misaligned text after an app update or a takeover from another device"
+          onClick={onFixDisplay}
+          title="Fix jumbled, misaligned or leftover text: realigns the pane to this window, then redraws it"
         >
-          Realign display
-        </button>
-      )}
-      {!isNative && onRedraw && pane.status === 'running' && (
-        <button role="menuitem" onClick={onRedraw}>
-          Force redraw
+          Fix display
         </button>
       )}
       {onResumePane && pane.status === 'exited' && pane.resumable && (

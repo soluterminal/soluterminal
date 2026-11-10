@@ -27,6 +27,29 @@ describe('ErrorBoundary', () => {
     fireEvent.click(screen.getByRole('button', { name: /try again/i }));
 
     expect(screen.getByText('Recovered panel')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Report this' })).not.toBeInTheDocument();
     spy.mockRestore();
+  });
+
+  it('a per-pane boundary offers Report this, filled in with the pane type and error', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const opened = vi.fn();
+    const onOpen = (e: Event) => opened((e as CustomEvent).detail);
+    window.addEventListener('solu:open-inbox', onOpen);
+    try {
+      render(
+        <ErrorBoundary label="Pane p1" reportAs="Codex">
+          <Crash />
+        </ErrorBoundary>,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Report this' }));
+      expect(opened).toHaveBeenCalledWith({
+        view: 'compose',
+        prefill: { type: 'bug', body: 'The Codex pane stopped with an error: xterm mount failed' },
+      });
+    } finally {
+      window.removeEventListener('solu:open-inbox', onOpen);
+      spy.mockRestore();
+    }
   });
 });

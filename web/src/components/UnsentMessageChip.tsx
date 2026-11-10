@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { api } from '../api';
+import { useRef, useState } from 'react';
+import { api, ApiError } from '../api';
 import { confirmDialog } from '../lib/dialog';
+import { canHashText, textSha256 } from '../lib/textSha256';
 import { useStore } from '../store';
 import type { PaneInfo } from '../types';
 
@@ -49,37 +50,64 @@ function behindUnsent(pane: PaneInfo): boolean {
   return !!pane.unsentMessage && !pane.unsentMessage.notTyped;
 }
 
+/** The daemon's refusal of a Send whose text the person did not review:
+ *  its message, or null for any other error. */
+function reviewRefusal(err: unknown): string | null {
+  if (!(err instanceof ApiError) || err.status !== 409) return null;
+  const body = err.body as { code?: unknown; error?: unknown } | undefined;
+  if (body?.code !== 'unsent_text_changed' && body?.code !== 'unsent_text_unconfirmed') return null;
+  return typeof body.error === 'string' ? body.error : "The message changed or wasn't shown; review it again";
+}
+
 function ReceiptChip({ pane, actionGuard }: { pane: PaneInfo; actionGuard?: () => boolean }) {
   const [pending, setPending] = useState(false);
+  // "Review again" opens Send… on the receipt as it is after the refresh.
+  const reviewAgain = useRef<(() => void) | null>(null);
   const msg = pane.unsentMessage;
+  reviewAgain.current = null;
   if (!msg) return null;
   const act = async (action: 'send' | 'clear' | 'keep') => {
     if (pending || actionGuard?.() === false) return;
     setPending(true);
     try {
       // A message the pane was never given is an agent's text: the person
-      // reads all of it before Send types it.
+      // reads all of it before Send types it, and the daemon types it only
+      // if it is still exactly the text shown (its hash goes with Send).
+      let shownSha256: string | undefined;
       if (action === 'send' && msg.notTyped) {
-        if (!msg.text) {
+        const shown = msg.text;
+        if (!shown) {
           useStore.getState().toast('The message text is not available; ask the sender to send it again.', { kind: 'warn' });
+          return;
+        }
+        if (!canHashText()) {
+          useStore.getState().toast('This message can only be sent from a secure page. Open SoluTerminal over https or on this computer, then send it there.', { kind: 'warn' });
           return;
         }
         const ok = await confirmDialog({
           title: `Send ${msg.sender}'s message?`,
-          message: `This is typed into the pane, then Enter is pressed:\n\n${msg.text}`,
+          message: `This is typed into the pane, then Enter is pressed:\n\n${shown}`,
           confirmLabel: 'Type it and press Enter',
         });
         if (!ok) return;
+        shownSha256 = await textSha256(shown);
       }
-      const result = await api.actOnUnsentMessage(pane.id, msg.id, action);
+      const result = await (shownSha256 ? api.actOnUnsentMessage(pane.id, msg.id, action, shownSha256) : api.actOnUnsentMessage(pane.id, msg.id, action));
       await useStore.getState().refreshPanes();
       if (result.outcome !== 'submitted' && result.outcome !== 'cleared' && result.outcome !== 'kept') {
         useStore.getState().toast(result.outcome === 'partly_cleared' ? 'Partly cleared: text may remain in the input box. Agents are still blocked; check the pane before acting again.' : result.outcome === 'left_in_composer' ? 'The message is still in the input box.' : 'Could not confirm the input box changed.', { kind: 'warn' });
       }
     } catch (err) {
+      const refusal = reviewRefusal(err);
+      if (refusal) {
+        await useStore.getState().refreshPanes().catch(() => undefined);
+        useStore.getState().toast(refusal, { kind: 'warn', action: { label: 'Review again', run: () => reviewAgain.current?.() } });
+        return;
+      }
       useStore.getState().toast(String(err), { kind: 'warn' });
     } finally { setPending(false); }
   };
+  if (msg.notTyped) reviewAgain.current = () => void act('send');
   // An agent's message put back in the box blocks agents until it is gone;
   // once the person edits it, Send would send their edit too, so they Clear
   // it or keep it as their own draft.

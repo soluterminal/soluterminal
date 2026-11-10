@@ -17,6 +17,7 @@ import { SignupConsentPrompt } from './SignupConsentPrompt';
 import { INSTALL_SCRIPT_DEFAULT_CLOUD, INSTALL_SCRIPT_URL } from '../lib/siteLinks';
 import { WINDOWS_VERSIONS_NOTE } from '../lib/windowsOnlyCopy';
 import { usePollWhileVisible } from '../lib/usePollWhileVisible';
+import { accountNotReadyReportText, feedbackMailto, openMailDraft } from '../lib/feedbackReport';
 
 // How often the machine list re-checks while it is on screen and visible:
 // quicker while the account is waiting for its first PC.
@@ -93,25 +94,7 @@ export function CloudGate({ children }: { children: ReactNode }) {
   if (authorised === null) {
     return appAdmittedRef.current ? <>{children}</> : <CenteredMessage>Checking access…</CenteredMessage>;
   }
-  if (authorised === false) {
-    return (
-      <div className="cloud-gate-shell">
-        <div className="cloud-gate-panel cloud-gate-panel--compact">
-          <h1 className="cloud-gate-title">Account not ready</h1>
-          <div className="cloud-gate-subtitle">
-            This account has no SoluTerminal profile yet. Sign out and try again in a minute;
-            if it keeps happening, send feedback from the app (Ctrl+K → Send feedback) or email
-            hello@soluterminal.com.
-          </div>
-          <button
-            type="button"
-            onClick={() => void signOut()}
-            className="primary cloud-gate-primary"
-          >Sign out</button>
-        </div>
-      </div>
-    );
-  }
+  if (authorised === false) return <AccountNotReady onSignOut={() => void signOut()} />;
 
   // Local-auth: daemon is the only reachable host, nothing to pick.
   // Fall straight through to the app with prefix=''; applySession has
@@ -121,6 +104,44 @@ export function CloudGate({ children }: { children: ReactNode }) {
     return <MachinePicker />;
   }
   return <>{children}</>;
+}
+
+// The app isn't loaded here, so in-app feedback can't be reached: the panel
+// offers the same Copy report / Email it as a signed-out feedback form.
+function AccountNotReady({ onSignOut }: { onSignOut: () => void }) {
+  const [note, setNote] = useState<string | null>(null);
+  // Shown when the clipboard refuses, so the text can be selected by hand.
+  const [showText, setShowText] = useState(false);
+  const text = accountNotReadyReportText(typeof __SOLU_WEB_VERSION__ === 'string' ? __SOLU_WEB_VERSION__ : 'dev');
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setNote('Copied. Paste it into an email to hello@soluterminal.com, or into a GitHub issue (those are public, so check it first).');
+    } catch {
+      setNote("Couldn't copy. Select the text in the preview and copy it, or use Email it.");
+      setShowText(true);
+    }
+  };
+  return (
+    <div className="cloud-gate-shell">
+      <div className="cloud-gate-panel cloud-gate-panel--compact">
+        <h1 className="cloud-gate-title">Account not ready</h1>
+        <div className="cloud-gate-subtitle">
+          Your account isn&apos;t ready yet. Sign out and try again in a minute. If it keeps happening, copy this
+          report or email it to us.
+        </div>
+        {note && <div className="cloud-gate-subtitle" role="status">{note}</div>}
+        {showText && (
+          <textarea className="dialog-control" readOnly rows={6} value={text} aria-label="Report" />
+        )}
+        <div className="cloud-gate-actions">
+          <button type="button" onClick={() => void copy()}>Copy report</button>
+          <button type="button" onClick={() => void openMailDraft(feedbackMailto(text).href)}>Email it</button>
+          <button type="button" onClick={onSignOut} className="primary cloud-gate-primary">Sign out</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function CenteredMessage({ children }: { children: ReactNode }) {

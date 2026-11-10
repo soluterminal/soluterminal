@@ -1,41 +1,28 @@
 import type { PaneInfo } from '../types';
-import { effectivePaneAgent } from '../lib/agentKind';
 import { paneAgentRssMB } from '../lib/agentMemory';
-import { confirmDialog } from '../lib/dialog';
+import { Tooltip } from './Tooltip';
 
 function memoryLabel(mb: number) {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
 }
 
-export function AgentMemoryChip({ pane, onReclaim }: {
-  pane: PaneInfo;
-  onReclaim: () => void;
-}) {
+// Display-only, like the Terminal header's readout (PaneHeader.tsx): a chip
+// that restarted the agent on click looked like any other status chip, so a
+// curious click cost a restart. Reclaiming stays in the pane menu.
+export function AgentMemoryChip({ pane }: { pane: PaneInfo }) {
   const mb = paneAgentRssMB(pane);
   if (!(mb > 0)) return null;
 
   const label = memoryLabel(mb);
   const heavy = mb >= 500;
-  const conversationKind = effectivePaneAgent(pane) === 'codex' ? 'thread' : 'session';
   return (
-    <button
-      className={`iconbtn pane-mem-chip${heavy ? ' heavy' : ''}`}
-      title={`Agent memory ${label}${heavy ? ' — heavy.' : '.'} Click to restart this agent and reclaim it (your conversation is kept).`}
-      aria-label={`Agent memory ${label}. Click to restart and reclaim.`}
-      onClick={async (e) => {
-        e.stopPropagation();
-        if (
-          await confirmDialog({
-            message: `Restart this agent to reclaim ${label} of memory?\n\nYour conversation is kept — it resumes the same ${conversationKind}. The agent will be briefly unavailable while it restarts.`,
-            confirmLabel: 'Restart & reclaim',
-          })
-        ) {
-          onReclaim();
-        }
-      }}
-      onDoubleClick={(e) => e.stopPropagation()}
-    >
-      {label}
-    </button>
+    <Tooltip label={`Agent memory ${label}${heavy ? ' — heavy' : ''}. To reclaim it, use Restart pane in the ⋯ menu; your conversation is kept.`}>
+      <span
+        className={`iconbtn pane-mem-chip readonly${heavy ? ' heavy' : ''}`}
+        aria-label={`Agent memory ${label}`}
+      >
+        {label}
+      </span>
+    </Tooltip>
   );
 }

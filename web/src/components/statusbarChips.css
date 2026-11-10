@@ -29,6 +29,16 @@
   background: var(--bg-elev);
   color: var(--fg);
 }
+/* Operator reasons can be long ("host disk: 102.9 GB free on C:\…"); cap the
+   chip so one reason never pushes the version off the bar. The full text is
+   in the tooltip and the aria-label. */
+.statusbar-system { max-width: 32ch; }
+.statusbar-system > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.statusbar-system > svg { flex-shrink: 0; }
 .statusbar-system:hover { background: var(--bg-elev); color: var(--fg); }
 .statusbar-system.warn { color: var(--warn); }
 .statusbar-system.critical { color: var(--danger); }

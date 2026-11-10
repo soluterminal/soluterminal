@@ -37,8 +37,8 @@ export function GridLayoutPicker() {
           type="button"
           className="chrome-btn"
           onClick={toggle}
-          title="Open multiple panes (grid)"
-          aria-label="Open multiple panes"
+          title="Layout: arrange or add panes"
+          aria-label="Layout: arrange or add panes"
           aria-expanded={open}
         >
           <IconGrid />

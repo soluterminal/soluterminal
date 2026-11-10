@@ -41,7 +41,7 @@ const GROUPS: ShortcutGroup[] = [
       { keys: ['Alt', '→'], label: 'Split right with new session' },
       { keys: ['Alt', '↓'], label: 'Split down with new session' },
       { keys: ['Alt', 'Enter'], label: 'Copy the focused pane to the right (same folder and command)' },
-      { actionId: 'browser.new', label: 'Open or close the built-in browser' },
+      { actionId: 'browser.new', label: 'Open or close the preview of your panes\' services' },
       { keys: ['Alt', 'Shift', 'B'], label: 'Send one message to several panes at once' },
       { keys: ['Alt', 'W'], label: 'Close focused tile (sessions ask for confirm)' },
       { actionId: 'pane.reopenClosed', label: 'Reopen the last closed pane (resumes its Claude/Codex session)' },

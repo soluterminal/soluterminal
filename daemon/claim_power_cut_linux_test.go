@@ -21,8 +21,9 @@ import (
 // writeFileAtomicSynced) beside the last claim.json that landed, or beside
 // none on a first pairing. Each row puts a data directory in one of those
 // states, starts the compiled solud on it, and reads what the person sees:
-// whether the pairing survived (GET /api/cloud/status) and which remote-access
-// policy the first start decided (GET /api/remote-devices). It then pairs
+// whether the pairing survived (GET /api/cloud/status), which remote-access
+// policy the first start decided (GET /api/remote-devices), and that start-up
+// removed the leftover temp file. It then pairs
 // again through SaveClaim, as both pairing flows do, and restarts: the pairing
 // must take and the policy must not be decided a second time.
 func TestClaimSaveCutByPowerLossRecoversOnRestart(t *testing.T) {
@@ -55,6 +56,11 @@ func TestClaimSaveCutByPowerLossRecoversOnRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		// The cut happened before this start, not during it.
+		old := time.Now().Add(-time.Hour)
+		if err := os.Chtimes(f.Name(), old, old); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -116,6 +122,9 @@ func TestClaimSaveCutByPowerLossRecoversOnRestart(t *testing.T) {
 			}
 			if got := remoteAccessPolicyOf(t, base); got != row.policy {
 				t.Fatalf("after the cut: remote-access policy = %q, want %q", got, row.policy)
+			}
+			if left, _ := filepath.Glob(filepath.Join(data, claimTempPrefix+"*")); len(left) != 0 {
+				t.Fatalf("after the cut: start-up left %v behind", left)
 			}
 			stop()
 

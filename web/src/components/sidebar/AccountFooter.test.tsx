@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useCloud } from '../../cloud';
+import { useEntitlements } from '../../entitlements';
 import { AccountFooter } from './AccountFooter';
 import type { Session } from '@supabase/supabase-js';
 
@@ -35,5 +36,29 @@ describe('AccountFooter usage entry point', () => {
     expect(screen.queryByRole('button', { name: /open usage/i })).toBeNull();
     // Identity row still renders (email + sign out).
     expect(screen.getByText('ben@example.com')).toBeInTheDocument();
+  });
+});
+
+describe('AccountFooter email privacy', () => {
+  afterEach(() => {
+    useCloud.setState({ session: null });
+    localStorage.removeItem('solu.hideIdentities');
+    useEntitlements.setState({ loaded: false, viewPersonal: false });
+  });
+
+  it('hides the email in Presentation mode', () => {
+    localStorage.setItem('solu.hideIdentities', '1');
+    useCloud.setState({ session: fakeSession });
+    const { container } = render(<AccountFooter />);
+    expect(container.innerHTML).not.toContain('ben@example.com');
+    expect(document.querySelector('.sidebar-footer-identity')).toHaveTextContent('Signed in');
+    expect(document.querySelector('.sidebar-footer')?.getAttribute('title')).toBe('Signed in');
+  });
+
+  it('hides the email in the personal view', () => {
+    useEntitlements.setState({ loaded: true, viewPersonal: true });
+    useCloud.setState({ session: fakeSession });
+    render(<AccountFooter />);
+    expect(screen.queryByText('ben@example.com')).toBeNull();
   });
 });

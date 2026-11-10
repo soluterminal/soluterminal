@@ -18,6 +18,8 @@ import { canUpdateThisComputerHere, THIS_COMPUTER_PHASE_LABEL, updateThisCompute
 import { UPDATE_CHECK_FAILED } from '../lib/updateErrors';
 import { useIsMobileDevice } from './useIsMobileView';
 import { useDismiss } from './useDismiss';
+import { useDaemonHealth } from '../lib/useDaemonHealth';
+import { useVersionIdentity } from '../lib/useVersionIdentity';
 
 function formatRelative(ms: number | undefined): string {
   if (!ms) return 'never';
@@ -66,6 +68,8 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
   const releaseUpdateHold = useStore((s) => s.releaseUpdateHold);
   const rollbackDecline = useStore((s) => s.rollbackDecline);
   const toast = useStore((s) => s.toast);
+  // Plan, build and channel at a glance (lib/identityBadge.ts).
+  const identity = useVersionIdentity(useDaemonHealth().health, status);
   // Panes whose agent speaks an older protocol than the daemon (see the
   // per-pane stale dot). A number, so the selector result stays stable.
   const stalePaneCount = useStore((s) => Object.values(s.panes).filter((p) => p.agentStale).length);
@@ -462,6 +466,7 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
       role="dialog"
       aria-label="Update status"
     >
+      <div className="vp-identity" role="status" data-testid="vp-identity">{identity.line}</div>
       {/* Zone A — verdict + summary + primary action (fixed, never scrolls) */}
       <div className="vp-verdict">
         {queuedRollbackTarget ? (

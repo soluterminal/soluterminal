@@ -268,7 +268,7 @@ func buildSupportBundle(a *apiServer, paneID string, offline *supportBundleOffli
 	if supportBundleHasDaemonIdentity(a) {
 		web := CurrentWebProvenance()
 		exe, _ := os.Executable()
-		machineID, machineName := a.feedbackMachineIdentity()
+		machineID, machineName := a.claimMachineIdentity()
 		versions.Text = supportBundleKV("version", map[string]any{
 			"daemon": a.ver, "webVersion": web.WebVersion, "webSourceSha": web.SourceSHA,
 			"shellVersion": a.liveShellVersion(), "shellPlatform": a.shellPlatform,

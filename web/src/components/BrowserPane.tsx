@@ -1,69 +1,95 @@
-import { useEffect, useRef, useState } from 'react';
-import { currentPrefix, currentRoutingScope, relayNeedsTicket } from '../api';
-import { browserAccessPath, browserAccessUrl, browserTileSandbox } from '../lib/portBrowser';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { currentRoutingScope, relayNeedsTicket } from '../api';
+import {
+  browserAccessPath,
+  browserAccessUrl,
+  browserTileSandbox,
+  desktopShellBlocksPreviews,
+  framesInThisWindow,
+  loadDaemonPreviewOrigin,
+  previewOriginsVersion,
+  subscribePreviewOrigins,
+  systemBrowserUrl,
+} from '../lib/portBrowser';
 import { debugLog } from '../debug';
 import { isEmbedded, openEmbedUrl } from '../embed';
 import { useStore } from '../store';
-import {
-  browserPaneClose,
-  browserPaneCreate,
-  browserPaneNavigate,
-  browserPanePing,
-  browserPaneSetBounds,
-  browserPaneSetVisible,
-  isDesktopApp,
-  openExternalWindow,
-} from '../tauri-browser';
+import { openInSystemBrowser } from '../tauri-browser';
 import type { BrowserInfo, BrowserServiceTarget } from '../types';
 import { DRAG_MIME, computeZone, type DropZone } from '../lib/paneDnd';
-import { toBrowserUrl } from '../lib/urlOrSearch';
-import { BrowserStartPage } from './BrowserStartPage';
 
-// BrowserPane renders either a native child webview (desktop app via
-// Tauri) or a plain <iframe> (cloud/PWA fallback). The native path
-// loads any URL the user throws at it (Google, GitHub, banks) because
-// it's not subject to X-Frame-Options / frame-ancestors. The iframe
-// path works for localhost dev servers but breaks on most public sites.
+// BrowserPane is the preview tile: one sandboxed <iframe> showing a service
+// one of the person's panes is running, on every client (desktop, browser,
+// phone). The src comes from browserAccessUrl, the same routing the Services
+// list uses: the localhost address on this computer, the desktop router's
+// preview origin for a backend, or the daemon's /api/proxy through the relay
+// (which strips X-Frame-Options and CSP for the page).
 //
-// Cross-origin caveat in the iframe path: we can't read the iframe's
-// document (title, URL, DOM). Refresh and URL changes bust the src so
-// it reloads.
+// In the desktop app the page is framed only on a preview origin of its own
+// (the router's or the daemon's, framesInThisWindow), and only in a shell new
+// enough to keep that origin out of its capabilities; otherwise the tile
+// offers the person's browser instead.
 //
-// Cloud-mode URL rewriting (iframe path only): `http://localhost:<port>`
-// is meaningless on a phone connected via the cloud relay. When we
-// detect a localhost URL in cloud mode we rewrite it to go through the
-// daemon's reverse-proxy route. The URL bar keeps showing the friendly
-// localhost form so users know what they're looking at.
-export async function wrapForCloud(url: string): Promise<string> {
-  return (await browserAccessUrl(url)) ?? '';
-}
+// The parent can't read a cross-origin frame, so it can't see a page that
+// refuses framing. Instead: a reachability probe before showing it, a load
+// timeout, and an "Open in browser" button that is always there. Anything that
+// is not a pane's service (an old saved tile on a public site) opens in the
+// system browser instead.
+
+/** How long a page may take to fire load before the tile offers the browser. */
+export const PREVIEW_LOAD_TIMEOUT_MS = 15_000;
 
 function useServiceBrowserSrc(url: string, service: BrowserServiceTarget | undefined, nonce: number): string | null {
-  const path = browserAccessPath(url,service);
+  const path = service ? browserAccessPath(url, service) : null;
   const proxied = path !== null && relayNeedsTicket(path);
   const key = `${currentRoutingScope().key}|${nonce}|${path}`;
-  const [minted,setMinted] = useState<{key:string;src:string|null}|null>(null);
-  useEffect(()=>{
+  const [minted, setMinted] = useState<{ key: string; src: string | null } | null>(null);
+  useEffect(() => {
     if (!proxied) return;
     let cancelled = false;
-    browserAccessUrl(url,service).then(src=>{if(!cancelled)setMinted({key,src});},err=>{
-      debugLog('[browser-pane] proxy pass failed',String(err));
-      if(!cancelled)setMinted({key,src:null});
+    browserAccessUrl(url, service).then(src => { if (!cancelled) setMinted({ key, src }); }, err => {
+      debugLog('[browser-pane] proxy pass failed', String(err));
+      if (!cancelled) setMinted({ key, src: null });
     });
-    return ()=>{cancelled=true;};
-  },[key,proxied,url,service]);
+    return () => { cancelled = true; };
+  }, [key, proxied, url, service]);
   return proxied ? minted?.key === key ? minted.src : null : path;
 }
 
-function canOpenInShinoqueWeb(raw: string): boolean {
+type Failure = { kind: 'unreachable' | 'timeout'; detail: string };
+
+/**
+ * Whether src answers at all. Same-origin (the relay's proxy route) reads the
+ * status: the proxy's own refusals (403 unowned listener, 502 dev server down,
+ * 503/504 relay) fail; an app's own error page still shows. Cross-origin (a
+ * localhost dev server, the router's preview origin) can only tell a network
+ * failure from an answer.
+ */
+export async function probePreview(src: string): Promise<Failure | null> {
+  let u: URL;
+  try { u = new URL(src, location.href); } catch { return { kind: 'unreachable', detail: 'The preview address is not valid.' }; }
+  const host = u.port ? `Port ${u.port}` : u.host;
   try {
-    const url = new URL(raw);
-    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
-  } catch { return false; }
+    if (u.origin === location.origin) {
+      const r = await fetch(u.href, { cache: 'no-store', credentials: 'same-origin' });
+      if (r.ok || ![403, 502, 503, 504].includes(r.status)) return null;
+      const body = (await r.text().catch(() => '')).split('\n', 1)[0].trim();
+      return { kind: 'unreachable', detail: body.slice(0, 200) || `The preview answered ${r.status}.` };
+    }
+    // Opaque either way; HEAD keeps the second request to the dev server cheap.
+    await fetch(u.href, { method: 'HEAD', mode: 'no-cors', cache: 'no-store', credentials: 'omit' });
+    return null;
+  } catch {
+    const label = u.origin === location.origin ? 'The preview' : host;
+    return { kind: 'unreachable', detail: `${label} isn’t answering. Is the dev server still running?` };
+  }
+}
+
+function serviceLabel(raw: string): string {
+  return raw.replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
 
 export function BrowserPane({ info }: { info: BrowserInfo }) {
-  const setBrowserUrl = useStore((s) => s.setBrowserUrl);
   const closeBrowser = useStore((s) => s.closeBrowserInLayout);
   const setFocus = useStore((s) => s.setFocus);
   const focused = useStore((s) => s.focusedPaneId === info.id);
@@ -71,175 +97,120 @@ export function BrowserPane({ info }: { info: BrowserInfo }) {
   const isDraggingPane = useStore((s) => s.isDraggingPane);
   const setDraggingPane = useStore((s) => s.setDraggingPane);
 
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const [draft, setDraft] = useState(info.url);
   const [nonce, setNonce] = useState(0); // iframe reload trigger
   const [dropZone, setDropZone] = useState<DropZone | null>(null);
   const [beingDragged, setBeingDragged] = useState(false);
+  const [failure, setFailure] = useState<Failure | null>(null);
+  const [waitedOut, setWaitedOut] = useState(false); // "Keep waiting" after a timeout
+  // Back: the frame's own history is out of reach (cross-origin), but its
+  // navigations join the window's session history. A load counts as a step
+  // only when that history grew: a reload, an HMR full reload or a
+  // location.replace adds no entry, and Back must never step the app itself.
+  // A Back we started is answered by one load.
+  const [depth, setDepth] = useState(0);
+  const loads = useRef(0);
+  const goingBack = useRef(false);
+  const historyLength = useRef(0);
 
-  // Lock the initial preference to use native vs. iframe to the lifetime
-  // of this pane so hot-reload doesn't flip mid-session. `nativeFailed`
-  // flips to true if the Rust command is denied by ACL (happens when
-  // the Tauri shell MSI is older than the web bundle's expectations)
-  // or any other failure path — then we fall back to iframe rendering
-  // so the pane isn't just a blank white box.
-  const nativeRef = useRef<boolean>(isDesktopApp());
-  const [nativeFailed, setNativeFailed] = useState(false);
-  const accessPath = browserAccessPath(info.url,info.service);
-  const accessUrl = useServiceBrowserSrc(info.url,info.service,nonce);
-  const useNative = nativeRef.current && !nativeFailed && !currentPrefix() && !info.service?.backend && accessPath !== null;
-  // No URL yet: show the local start page, with no webview or iframe behind it.
-  const showStart = !info.url;
+  // Re-render when a preview origin becomes known (it changes src).
+  useSyncExternalStore(subscribePreviewOrigins, previewOriginsVersion);
+  const service = info.service;
+  const accessPath = service ? browserAccessPath(info.url, service) : null;
+  const accessUrl = useServiceBrowserSrc(info.url, service, nonce);
+  const frameKey = `${nonce}:${service?.previewPath ?? ''}:${info.url}`;
 
-  // One-time diagnostic per pane mount. Tells us whether the native
-  // path will even be attempted, what Tauri globals are visible, and
-  // which Tauri shell version is actually running (via ping). If the
-  // ping log doesn't appear in the console, the shell is stale (older
-  // MSI without the ping command) and we know to tell the user to
-  // reinstall before anything else.
+  // A new page or a reload starts over: no history, no verdict.
   useEffect(() => {
-    const w = window as unknown as {
-      __SOLU_TAURI__?: unknown;
-      __TAURI_INTERNALS__?: { invoke?: unknown };
-    };
-    debugLog(
-      '[browser-pane] mount id=%s isDesktopApp=%s __SOLU_TAURI__=%s __TAURI_INTERNALS__.invoke=%s',
-      info.id,
-      nativeRef.current,
-      typeof w.__SOLU_TAURI__,
-      typeof w.__TAURI_INTERNALS__?.invoke,
-    );
-    if (nativeRef.current) {
-      void browserPanePing().then((v) =>
-        debugLog('[browser-pane] ping result shell_version=%s', v),
-      );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    loads.current = 0;
+    goingBack.current = false;
+    setDepth(0);
+    setFailure(null);
+    setWaitedOut(false);
+  }, [frameKey]);
 
-  useEffect(() => { setDraft(info.url); }, [info.url]);
+  const framable = accessUrl !== null && framesInThisWindow(accessUrl);
 
-  // Native mode: create the child webview on mount, sync bounds each
-  // frame, close on unmount. Navigation (URL changes) handled in a
-  // separate effect so the webview isn't torn down on every URL edit.
   useEffect(() => {
-    if (!useNative || showStart) return;
-    const body = bodyRef.current;
-    if (!body) return;
-
-    const id = info.id;
+    if (!accessUrl || !framable) return;
     let cancelled = false;
-    let rafId = 0;
-    let last = { x: -1, y: -1, w: -1, h: -1 };
-
-    function rect() {
-      const r = body!.getBoundingClientRect();
-      return { x: r.left, y: r.top, w: r.width, h: r.height };
-    }
-
-    // Wait up to ~500 ms for react-resizable-panels + flex layout to settle
-    // to a non-zero rect that has ALSO STOPPED CHANGING, then create the
-    // webview at that final rect. Two problems this guards against:
-    //  1. zero-size on cold mount — a webview created at 0×0 or full-window
-    //     paints over the app ("fake fullscreen" bug, the original reason this
-    //     wait existed).
-    //  2. the "opens big then snaps small" flash: on a fresh mount the
-    //     PanelGroup briefly reports the new pane at FULL window width before
-    //     the split ratio applies, so creating right away lands the webview big
-    //     and the tick loop then shrinks it — a visible resize. Requiring the
-    //     rect to be unchanged for a couple of frames means we create it at its
-    //     FINAL bounds, so it appears already-sized.
-    async function waitForStableRect() {
-      const started = performance.now();
-      let r = rect();
-      let prev = r;
-      let stableFrames = 0;
-      while (!cancelled && performance.now() - started < 500) {
-        const sane = r.w >= 4 && r.h >= 4;
-        const unchanged =
-          Math.round(r.x) === Math.round(prev.x) &&
-          Math.round(r.y) === Math.round(prev.y) &&
-          Math.round(r.w) === Math.round(prev.w) &&
-          Math.round(r.h) === Math.round(prev.h);
-        if (sane && unchanged) {
-          if (++stableFrames >= 2) break; // sane AND settled for 2 frames
-        } else {
-          stableFrames = 0;
-        }
-        prev = r;
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => resolve()),
-        );
-        r = rect();
+    void probePreview(accessUrl).then((f) => { if (!cancelled && f) setFailure(f); });
+    const timer = setTimeout(() => {
+      if (!cancelled && loads.current === 0) {
+        setFailure((prev) => prev ?? { kind: 'timeout', detail: 'The page has not finished loading. It may refuse to be shown inside SoluTerminal, or still be starting.' });
       }
-      return r;
+    }, PREVIEW_LOAD_TIMEOUT_MS);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [accessUrl, framable, frameKey]);
+
+  function onFrameLoad() {
+    loads.current += 1;
+    const grew = history.length > historyLength.current;
+    historyLength.current = history.length;
+    if (loads.current === 1) {
+      setFailure((prev) => (prev?.kind === 'timeout' ? null : prev));
+      return;
     }
-
-    async function init() {
-      const r = await waitForStableRect();
-      if (cancelled) return;
-      last = r;
-      debugLog('[browser-pane] init id=%s url=%s rect=%o', id, info.url, r);
-      const ok = await browserPaneCreate(id, info.url, r);
-      debugLog('[browser-pane] create result id=%s ok=%s', id, ok);
-      if (cancelled) return;
-      if (!ok) {
-        // ACL denied / command missing / runtime error. Fall back to
-        // iframe so the user sees SOMETHING instead of a blank pane.
-        setNativeFailed(true);
-        return;
-      }
-      rafId = requestAnimationFrame(tick);
+    if (goingBack.current) {
+      goingBack.current = false;
+      setDepth((d) => Math.max(0, d - 1));
+    } else if (grew) {
+      setDepth((d) => d + 1);
     }
-
-    function tick() {
-      if (cancelled) return;
-      const r = rect();
-      // Integer-quantize so sub-pixel jitter doesn't spam IPC.
-      if (
-        Math.round(r.x) !== Math.round(last.x) ||
-        Math.round(r.y) !== Math.round(last.y) ||
-        Math.round(r.w) !== Math.round(last.w) ||
-        Math.round(r.h) !== Math.round(last.h)
-      ) {
-        last = r;
-        void browserPaneSetBounds(id, r);
-      }
-      rafId = requestAnimationFrame(tick);
-    }
-
-    void init();
-    return () => {
-      cancelled = true;
-      if (rafId) cancelAnimationFrame(rafId);
-      void browserPaneClose(id);
-    };
-    // info.id is stable per pane; don't re-run on info.url changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [info.id, useNative, showStart]);
-
-  // Native mode: navigate when the URL or reload nonce changes.
-  useEffect(() => {
-    if (!useNative || showStart) return;
-    void browserPaneNavigate(info.id, info.url);
-  }, [info.id, info.url, info.service?.previewPath, nonce, useNative, showStart]);
-
-  // Hide the native child webview while ANY pane drag is in progress.
-  // The native webview is an OS-level window that paints above the
-  // React DOM, so it would otherwise obscure the drop-zone overlay.
-  // Also gives the user visual confirmation that the browser tile is
-  // participating in the drag surface.
-  useEffect(() => {
-    if (!useNative || showStart) return;
-    void browserPaneSetVisible(info.id, !isDraggingPane);
-  }, [info.id, isDraggingPane, useNative, showStart]);
-
-  function commitUrl(next: string) {
-    const url = toBrowserUrl(next, { currentUrl: info.url, useNative });
-    if (!url) return;
-    setBrowserUrl(info.id, url);
   }
+
+  function goBack() {
+    if (depth === 0) return;
+    const appUrl = location.href;
+    goingBack.current = true;
+    history.back();
+    // If the step left the frame's history and moved the app instead, undo it.
+    window.setTimeout(() => {
+      if (location.href !== appUrl) {
+        goingBack.current = false;
+        setDepth(0);
+        history.forward();
+      }
+    }, 400);
+  }
+
+  function reload() {
+    if (service) void useStore.getState().refreshPorts();
+    // A restarted daemon listens for previews on a new port: ask again.
+    void loadDaemonPreviewOrigin();
+    setNonce((n) => n + 1);
+  }
+
+  function openInBrowser(event: Event) {
+    if (isEmbedded()) { openEmbedUrl(info.url, event); return; }
+    void systemBrowserUrl(info.url, service, useStore.getState().ports)
+      .then((url) => {
+        if (url) return openInSystemBrowser(url);
+        useStore.getState().toast('This address can’t be opened in a browser.', { kind: 'warn' });
+      })
+      .catch((err) => {
+        debugLog('[browser-pane] open in browser failed', String(err));
+        useStore.getState().toast(err instanceof Error ? err.message : 'Could not open the browser.', { kind: 'warn' });
+      });
+  }
+
+  const label = serviceLabel(info.url);
+  const blocked = !service
+    ? { title: 'This page opens in your browser', detail: `The preview shows only services your panes are running. ${label}` }
+    : accessUrl !== null && !framable
+      ? {
+          title: 'This preview opens in your browser',
+          detail: desktopShellBlocksPreviews()
+            ? `Update the SoluTerminal desktop app to preview here. ${label}`
+            : `It can’t be shown inside this window. ${label}`,
+        }
+      : failure?.kind === 'unreachable'
+        ? { title: 'Couldn’t load this preview', detail: failure.detail }
+        : failure?.kind === 'timeout' && !waitedOut
+          ? { title: 'This page is taking a while', detail: failure.detail }
+          : null;
+  // A refused or failed page is not left mounted behind the message; a slow
+  // one keeps loading underneath in case it gets there.
+  const showFrame = !!service && accessUrl !== null && framable && failure?.kind !== 'unreachable';
 
   return (
     <div
@@ -278,68 +249,66 @@ export function BrowserPane({ info }: { info: BrowserInfo }) {
           setDraggingPane(false);
         }}
       >
-        <span className="activity-dot idle" title={useNative ? 'native browser' : 'internal browser'} />
+        <span className="activity-dot idle" title="Preview" />
         <button
+          type="button"
+          className="iconbtn"
+          title="Back"
+          aria-label="Back"
+          disabled={depth === 0}
+          onClick={(e) => { e.stopPropagation(); goBack(); }}
+        >←</button>
+        <button
+          type="button"
           className="iconbtn"
           title="Reload"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (info.service) void useStore.getState().refreshPorts();
-            setNonce((n) => n + 1);
-          }}
+          aria-label="Reload"
+          onClick={(e) => { e.stopPropagation(); reload(); }}
         >⟳</button>
-        <input
-          className="browser-url"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              commitUrl(draft);
-              setNonce((n) => n + 1);
-            }
-          }}
-          spellCheck={false}
-          autoComplete="off"
-          placeholder={useNative ? 'Type a URL or search' : 'http://localhost:3000'}
-        />
-        {isEmbedded() && (
+        <span className="browser-service" title={info.url}>{label}</span>
+        <button
+          type="button"
+          className="iconbtn browser-open-external"
+          title="Open in your browser"
+          disabled={!isEmbedded() && accessPath === null && !!service}
+          onClick={(e) => { e.stopPropagation(); openInBrowser(e.nativeEvent); }}
+        >↗ Open in browser</button>
+        <div className="pane-actions">
           <button
             type="button"
             className="iconbtn"
-            title="Open in shinoque Web"
-            aria-label="Open in shinoque Web"
-            disabled={!canOpenInShinoqueWeb(info.url)}
-            onClick={(e) => { e.stopPropagation(); openEmbedUrl(info.url); }}
-          >↗ Web</button>
-        )}
-        <button
-          className="iconbtn"
-          title="Open in a new window"
-          onClick={(e) => {
-            e.stopPropagation();
-            void browserAccessUrl(info.url,info.service).then(url=>{if(url)return openExternalWindow(url,info.title || info.url);}).catch(err=>debugLog('[browser-pane] popout failed',String(err)));
-          }}
-        >↗</button>
-        <div className="pane-actions">
-          <button
-            className="iconbtn"
-            title="Close browser tile"
+            title="Close preview"
+            aria-label="Close preview"
             onClick={(e) => { e.stopPropagation(); closeBrowser(info.id); }}
           >×</button>
         </div>
       </div>
-      <div className="pane-body browser-body" ref={bodyRef}>
-        {showStart && <BrowserStartPage onOpen={commitUrl} />}
-        {accessPath === null && <p role="status" className="port-notice">This service belongs to a different machine. Open it again from Services on that machine.</p>}
-        {!useNative && !showStart && accessUrl !== null && (
+      <div className="pane-body browser-body">
+        {service && accessPath === null && <p role="status" className="port-notice">This service belongs to a different machine. Open it again from Services on that machine.</p>}
+        {showFrame && (
           <iframe
-            ref={iframeRef}
-            key={`${nonce}:${info.service?.previewPath ?? ''}`}
+            key={frameKey}
             src={accessUrl}
-            title={info.title || info.url}
+            title={info.title || label}
             sandbox={browserTileSandbox(accessUrl)}
+            onLoad={onFrameLoad}
+            // A pane drag must reach the tile's drop zones, not the page.
+            style={isDraggingPane ? { pointerEvents: 'none' } : undefined}
+            hidden={!!blocked}
           />
+        )}
+        {blocked && (
+          <div className="browser-fallback" role="status">
+            <p className="browser-fallback-title">{blocked.title}</p>
+            <p className="browser-fallback-detail">{blocked.detail}</p>
+            <div className="browser-fallback-actions">
+              <button type="button" className="port-action" onClick={(e) => openInBrowser(e.nativeEvent)}>Open in browser</button>
+              {service && <button type="button" className="port-action" onClick={reload}>Reload</button>}
+              {failure?.kind === 'timeout' && (
+                <button type="button" className="port-action" onClick={() => setWaitedOut(true)}>Keep waiting</button>
+              )}
+            </div>
+          </div>
         )}
         {dropZone && !beingDragged && (
           <div className={`drop-zone-overlay zone-${dropZone}`} aria-hidden>

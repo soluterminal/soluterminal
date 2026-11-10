@@ -93,8 +93,8 @@ export function Topbar({
   // / waiting for input) as a dot on the toggle — otherwise it's invisible.
   const { count: attnCount, hasChoice: attnHasChoice } = useAttentionBadge();
   const showToggleAttn = !!sidebarCollapsed && attnCount > 0;
-  // Internal browser (single-instance): the topbar button opens it and, when
-  // it's already open, closes it — the same toggle as Alt+B. `browserOpen` is a
+  // Preview tile (single-instance): the topbar button previews a pane's
+  // service and, when it's already open, closes it — the same toggle as Alt+B. `browserOpen` is a
   // primitive selector so it re-renders only when the browser opens/closes.
   const browserOpen = useStore((s) => Object.keys(s.browsers).length > 0);
   const toggleBrowser = useStore((s) => s.toggleBrowser);
@@ -172,16 +172,17 @@ export function Topbar({
                 of the public top bar; Alt+R, the palette and the pane menu
                 still reach it. Team installs keep the button. */}
             {teamFeatures && <RefreshViewButton />}
-            {/* Internal browser toggle — open a single localhost-peek tile, click
-                again (or Alt+B) to close it. Single-instance by design; the
-                `active` class lights it while the browser is open. */}
+            {/* Preview toggle — open the single preview tile on a service this
+                workspace's panes run, click again (or Alt+B) to close it.
+                Single-instance by design; the `active` class lights it while
+                the preview is open. */}
             <button
               type="button"
               className={`chrome-btn${browserOpen ? ' active' : ''}`}
               onClick={() => toggleBrowser()}
               aria-pressed={browserOpen}
-              title={browserOpen ? 'Close browser (Alt+B)' : 'Open browser — peek at a localhost service (Alt+B)'}
-              aria-label={browserOpen ? 'Close browser' : 'Open browser'}
+              title={browserOpen ? 'Close preview (Alt+B)' : 'Preview a service your panes are running (Alt+B)'}
+              aria-label={browserOpen ? 'Close preview' : 'Open preview'}
             >
               <IconGlobe />
             </button>

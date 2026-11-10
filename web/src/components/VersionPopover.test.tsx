@@ -5,6 +5,7 @@ import type { UpdateStatus } from '../types';
 import { VersionPopover } from './VersionPopover';
 import { api } from '../api';
 import { useCloud } from '../cloud';
+import { useEntitlements } from '../entitlements';
 import { resetUpdateThisComputerForTest } from '../lib/updateThisComputer';
 
 const anchors: HTMLElement[] = [];
@@ -43,6 +44,22 @@ afterEach(() => {
 });
 
 describe('VersionPopover', () => {
+  it('opens on the plan, build and channel line, stating a mismatch plainly', () => {
+    const team = { tier: 'team' as const, team: true, operator: false, account: true, accountSwitching: false, teamCredentials: false, smartApprovals: null };
+    useEntitlements.setState({ loaded: true, ...team, real: team, viewPersonal: false });
+    try {
+      renderPopover({
+        current: '0.0.1240', latest: '0.0.1241', available: true,
+        updateChannel: 'team', runningFlavor: 'public',
+      } as UpdateStatus);
+      const line = screen.getByTestId('vp-identity');
+      expect(line).toHaveAttribute('role', 'status');
+      expect(line).toHaveTextContent('Team plan, public build installed — moving to the team build · v0.0.1240');
+      expect(line.parentElement?.firstElementChild).toBe(line);
+    } finally {
+      useEntitlements.setState({ loaded: false });
+    }
+  });
   it('notes panes on older agent builds only when there are any', () => {
     const realPanes = useStore.getState().panes;
     try {

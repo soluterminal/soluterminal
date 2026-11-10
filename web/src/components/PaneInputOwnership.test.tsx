@@ -25,6 +25,7 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {
   onData(fn: (data: string) => void) { this.emit = fn; return { dispose() {} }; }
   onWriteParsed() { return { dispose() {} }; }
   onScroll() { return { dispose() {} }; }
+  onResize() { return { dispose() {} }; }
   onLineFeed() { return { dispose() {} }; }
   onRender() { return { dispose() {} }; }
   onSelectionChange() { return { dispose() {} }; }
@@ -202,6 +203,23 @@ describe('Pane input ownership wiring', () => {
     act(() => interaction.releaseTerminalRetirement(key, 'test-retirement'));
     expect(flush).not.toHaveBeenCalled();
     expect(lifecycleLog).not.toHaveBeenCalledWith('pane.input.reclaimed', expect.anything());
+  });
+
+  it("Fix display's redraw skips alt-screen panes this viewer does not own", () => {
+    const socket = mount();
+    const redraws = () => socket.sent.filter((x) => typeof x === 'string' && JSON.parse(x).type === 'redraw').length;
+    const buffer = (terminals[0] as unknown as { buffer: { active: { type: string } } }).buffer;
+    act(() => socket.ownership(false, 'other'));
+    buffer.active.type = 'alternate';
+    act(() => useStore.getState().redrawPane(key));
+    expect(redraws()).toBe(0);
+    buffer.active.type = 'normal';
+    act(() => useStore.getState().redrawPane(key));
+    expect(redraws()).toBe(1);
+    buffer.active.type = 'alternate';
+    act(() => socket.ownership(true, 'you'));
+    act(() => useStore.getState().redrawPane(key));
+    expect(redraws()).toBe(2);
   });
 
   it('never replays terminal CPR/DA responses made during a claim', () => {

@@ -3,6 +3,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { useEntitlements } from '../../entitlements';
 import { useStore } from '../../store';
 import { api } from '../../api';
+import { openFeedback } from '../../lib/feedbackReport';
 import { InboxHost, openInbox, openInboxAt } from './InboxPanel';
 import { __resetFeedbackInboxForTests } from '../../lib/useFeedbackInbox';
 import { setExtensionsForTests } from '../../extensions';
@@ -262,6 +263,7 @@ describe('InboxHost / thread', () => {
     vi.spyOn(api, 'feedbackInboxRead').mockResolvedValue(undefined);
     const threadSpy = vi.spyOn(api, 'feedbackThread').mockResolvedValue({
       number: 42,
+      state: 'open',
       title: 'Paste fails on Windows',
       filedAt: '2026-07-09T10:00:00Z',
       events: [
@@ -290,22 +292,32 @@ describe('InboxHost / thread', () => {
     expect(screen.getByText('You replied', { exact: false })).toBeInTheDocument();
   });
 
-  it('a fixed thread hides the reply box', async () => {
+  it.each(['fixed', 'cant-reproduce', 'not-planned', 'answered', 'closed'] as const)('a closed %s thread offers a prefilled follow-up, never a reply', async (event) => {
     vi.spyOn(api, 'feedbackInboxRead').mockResolvedValue(undefined);
     vi.spyOn(api, 'feedbackThread').mockResolvedValue({
       number: 38,
+      state: 'closed',
       title: 'Dark mode flashes white',
       filedAt: '2026-07-05T10:00:00Z',
-      events: [
-        { event: 'filed', message: 'Report filed', at: '2026-07-05T10:00:00Z' },
-        { event: 'fixed', message: 'Your report was fixed', at: '2026-07-10T09:00:00Z' },
-      ],
+      events: [{ event, message: 'Closed report history', at: '2026-07-10T09:00:00Z' }],
     });
-    __resetFeedbackInboxForTests([fbEvent({ number: 38, title: 'Dark mode flashes white', event: 'fixed', message: 'Your report was fixed' })]);
+    const reply = vi.spyOn(api, 'feedbackReply');
     openHost();
-    fireEvent.click(screen.getAllByText(/report was fixed/)[0]);
-    await screen.findByText(/This report is fixed/);
-    expect(screen.queryByPlaceholderText(/Add details/)).toBeNull();
+    act(() => openInbox('feed', 38));
+    const followUp = await screen.findByRole('button', { name: 'Send a follow-up' });
+    expect(screen.queryByPlaceholderText(/Add details/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument();
+    fireEvent.click(followUp);
+    expect(((await screen.findByLabelText('What happened?')) as HTMLTextAreaElement).value).toContain('Follow-up to #38');
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it('does not offer replies when the server cannot establish live state', async () => {
+    vi.spyOn(api, 'feedbackThread').mockResolvedValue({ number: 42, title: 'Unknown state', filedAt: '2026-07-09T10:00:00Z', events: [], state: 'unknown' });
+    openHost();
+    act(() => openInbox('feed', 42));
+    await screen.findByText('Unknown state');
+    expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument();
   });
 });
 
@@ -314,17 +326,27 @@ describe('InboxHost / compose', () => {
     useStore.setState({ schedules: [sched()] });
     openHost();
     fireEvent.click(screen.getByRole('button', { name: 'Send feedback' }));
-    expect(screen.getByLabelText('Title')).toBeInTheDocument();
+    expect(screen.getByLabelText('Title (optional)')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.getByText(/approve PR #7/)).toBeInTheDocument();
   });
 
-  it('setFeedbackOpen (Ctrl+K path) opens the panel on compose', () => {
+  it('openFeedback (status bar, Help, Ctrl+K) opens the panel on compose', () => {
     render(<InboxHost />);
     act(() => {
-      useStore.getState().setFeedbackOpen(true);
+      openFeedback();
     });
-    expect(screen.getByRole('button', { name: 'Send feedback' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Title')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
+    expect(screen.getByLabelText('What happened?')).toBeInTheDocument();
+  });
+
+  it('"Report this" opens the form filled in with the error', () => {
+    localStorage.removeItem('solu.feedbackDraft.v2');
+    render(<InboxHost />);
+    act(() => {
+      openFeedback({ type: 'bug', body: 'The Codex pane stopped with an error: boom' });
+    });
+    expect(screen.getByLabelText('What happened?')).toHaveValue('The Codex pane stopped with an error: boom');
+    expect(screen.getByRole('button', { name: 'Bug' })).toHaveAttribute('aria-pressed', 'true');
   });
 });

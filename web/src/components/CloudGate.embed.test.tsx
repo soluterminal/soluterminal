@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCloud } from '../cloud';
 import { __recomputeEmbedForTests } from '../embed';
 import { CloudGate } from './CloudGate';
-import { AccountTab, useAccountTabVisible } from './settings/AccountTab';
+import { AccountTab } from './settings/AccountTab';
 import type { Session } from '@supabase/supabase-js';
 
 const restored = vi.hoisted(() => ({ session: null as Session | null, wait: null as Promise<void> | null }));
@@ -31,8 +31,7 @@ function embedded(framed = true) {
 }
 
 function AppWithAccountSettings() {
-  const visible = useAccountTabVisible();
-  return <><div>Local app</div>{visible && <AccountTab />}</>;
+  return <><div>Local app</div><AccountTab /></>;
 }
 
 beforeEach(() => {

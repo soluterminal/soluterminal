@@ -138,7 +138,7 @@ export SOLU_SOURCE_SHA="$SOURCE_SHA"
   mkdir -p daemon/agentscripts
   tar -cf - --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' --mode='u=rwX,go=rX' \
     --exclude='*.test.mjs' --exclude='README.md' --exclude='deploy' \
-    scripts/fix-agent scripts/pr-agent scripts/investigate scripts/triage scripts/agent-defaults.env |
+    scripts/fix-agent scripts/pr-agent scripts/investigate scripts/triage scripts/feedback-privacy/migration.mjs scripts/pane-workspaces.mjs scripts/agent-defaults.env |
     gzip -n -9 >daemon/agentscripts/operator-agents.tar.gz
   touch daemon/agentscripts/.gitkeep
 )

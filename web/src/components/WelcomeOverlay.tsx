@@ -44,8 +44,9 @@ function buildSlides(team: boolean, phone: boolean): Slide[] {
       title: 'When an agent needs you',
       body: (
         <>
-          Its pane turns amber and the bell in the top bar shows a count. Click the
-          bell to jump straight there.
+          Its pane turns amber and the bell in the top bar shows how many are
+          waiting on you. Click the bell to jump straight there. The sliders
+          button next to it sets how alerts and sounds reach you.
         </>
       ),
     },
@@ -70,6 +71,7 @@ export function WelcomeOverlay({ open, onClose }: Props) {
 
   if (!open) return null;
 
+  const first = slide === 0;
   const last = slide >= slides.length - 1;
   const current = slides[slide];
 
@@ -92,13 +94,16 @@ export function WelcomeOverlay({ open, onClose }: Props) {
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <h2 id={titleId} ref={headingRef} tabIndex={-1} style={{ margin: 0, fontSize: 16 }}>{current.title}</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            title="Skip (Esc)"
-            aria-label="Skip"
-            style={{ fontSize: 11, padding: '2px 8px' }}
-          >Skip</button>
+          {/* The first slide offers Skip tour beside Next instead. */}
+          {!first && (
+            <button
+              type="button"
+              onClick={onClose}
+              title="Skip (Esc)"
+              aria-label="Skip"
+              style={{ fontSize: 11, padding: '2px 8px' }}
+            >Skip</button>
+          )}
         </div>
         <div style={{ marginTop: 12, marginBottom: 16, lineHeight: 1.55, fontSize: 13 }}>
           {current.body}
@@ -109,6 +114,12 @@ export function WelcomeOverlay({ open, onClose }: Props) {
             {slide + 1} / {slides.length}
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
+            {/* Getting to the first agent shouldn't take three slides. Skipping
+                still goes on to the setup checklist, and Help › Getting
+                started brings the tour back. */}
+            {first && (
+              <button type="button" title="Skip tour (Esc)" onClick={onClose}>Skip tour</button>
+            )}
             {slide > 0 && (
               <button
                 type="button"
@@ -125,6 +136,19 @@ export function WelcomeOverlay({ open, onClose }: Props) {
             >{last ? 'Get started' : 'Next'}</button>
           </div>
         </div>
+        {/* Skip tour skips the last slide's full privacy note, so the first
+            slide says the check-in is on and links to that note. */}
+        {first && (
+          <div style={{ marginTop: 12, fontSize: 11, color: 'var(--fg-dim)', lineHeight: 1.5 }}>
+            SoluTerminal sends one anonymous check-in a day (version, OS, a random install ID and two yes/no usage
+            flags). You can turn it off in Settings.{' '}
+            <button
+              type="button"
+              onClick={() => setSlide(slides.length - 1)}
+              style={{ fontSize: 11, padding: 0, border: 0, background: 'none', color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline' }}
+            >What leaves this computer →</button>
+          </div>
+        )}
       </div>
     </div>
   );

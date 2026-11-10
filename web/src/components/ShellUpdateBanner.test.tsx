@@ -7,7 +7,7 @@ import { resetUpdateThisComputerForTest } from '../lib/updateThisComputer';
 const realApplyAllUpdates = useStore.getState().applyAllUpdates;
 
 // Controllable tauri-browser mock: the banner + hook read isDesktopApp(),
-// getShellVersion() (local shell version), and openExternalWindow() (apply).
+// getShellVersion() (local shell version), and openInSystemBrowser() (apply).
 const mock = vi.hoisted(() => ({
   isDesktop: true,
   pingVersion: '0.0.803' as string | null,
@@ -35,10 +35,6 @@ vi.mock('../tauri-browser', () => ({
     : null),
   browserPanePing: () => Promise.resolve(mock.pingVersion),
   getShellVersion: () => Promise.resolve(mock.pingVersion),
-  openExternalWindow: (url: string) => {
-    mock.opened.push(url);
-    return Promise.resolve(true);
-  },
   openInSystemBrowser: (url: string) => {
     mock.opened.push(url);
     return Promise.resolve(true);

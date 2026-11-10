@@ -3,7 +3,6 @@
 [default]
 description = "Default permissions for soluterminal-desktop custom commands."
 permissions = [
-    "allow-open-external-window",
     "allow-open-workspace-window",
     "allow-desktop-set-backend-mode",
     "allow-desktop-set-up-wsl",
@@ -17,11 +16,6 @@ permissions = [
     "allow-reveal-shell-installer",
     "allow-global-hotkey-owned",
     "allow-browser-pane-ping",
-    "allow-browser-pane-create",
-    "allow-browser-pane-set-bounds",
-    "allow-browser-pane-navigate",
-    "allow-browser-pane-close",
-    "allow-browser-pane-set-visible",
 ]
 
 [[permission]]
@@ -92,36 +86,6 @@ description = "Sentinel ping: returns the Tauri shell version so JS can verify w
 commands.allow = ["browser_pane_ping"]
 
 [[permission]]
-identifier = "allow-open-external-window"
-description = "Allow JS to spawn a Tauri WebviewWindow for an arbitrary URL (pop-out browser)."
-commands.allow = ["open_external_window"]
-
-[[permission]]
 identifier = "allow-open-workspace-window"
 description = "Allow JS to spawn a second full-app workspace window (multi-monitor)."
 commands.allow = ["open_workspace_window"]
-
-[[permission]]
-identifier = "allow-browser-pane-create"
-description = "Allow JS to create an in-pane native browser webview."
-commands.allow = ["browser_pane_create"]
-
-[[permission]]
-identifier = "allow-browser-pane-set-bounds"
-description = "Allow JS to reposition/resize an in-pane browser webview."
-commands.allow = ["browser_pane_set_bounds"]
-
-[[permission]]
-identifier = "allow-browser-pane-navigate"
-description = "Allow JS to navigate an in-pane browser webview to a new URL."
-commands.allow = ["browser_pane_navigate"]
-
-[[permission]]
-identifier = "allow-browser-pane-close"
-description = "Allow JS to destroy an in-pane browser webview."
-commands.allow = ["browser_pane_close"]
-
-[[permission]]
-identifier = "allow-browser-pane-set-visible"
-description = "Allow JS to show/hide an in-pane browser webview."
-commands.allow = ["browser_pane_set_visible"]

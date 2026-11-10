@@ -342,28 +342,76 @@
   max-width: 600px;
   margin: 0 auto;
 }
-.inbox-compose label {
+.inbox-compose label,
+.inbox-compose-label {
   display: block;
   font-size: 11px;
   color: var(--fg-dim);
   margin-bottom: 3px;
 }
 
-.inbox-dropzone {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 10px;
-  border: 1px dashed var(--border-strong);
+/* "What we'll send": one bordered block, a row per item, each with its
+   own Show link and (for pane text and logs) an editable preview. */
+.inbox-send-preview {
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: transparent;
+  padding: 8px 10px;
 }
-.inbox-dropzone.is-drag {
-  border-color: var(--accent-2);
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
+.inbox-send-preview-toggle {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--fg);
+  cursor: pointer;
+}
+.inbox-send-preview-toggle::before {
+  content: '▸';
+  display: inline-block;
+  width: 1em;
+  color: var(--fg-dim);
+}
+.inbox-send-preview-toggle[aria-expanded="true"]::before { content: '▾'; }
+.inbox-send-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.inbox-send-row-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.inbox-send-row-title { font-size: 12px; }
+.inbox-compose label.inbox-send-check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.inbox-send-check input { margin-top: 2px; }
+.inbox-send-pane { margin: 6px 0 0 22px; }
+.inbox-send-details {
+  display: grid;
+  gap: 2px;
+  margin: 6px 0 0;
+  font-size: 11px;
+}
+.inbox-send-details > div { display: flex; gap: 8px; }
+.inbox-send-details dt { color: var(--fg-dim); min-width: 12em; }
+.inbox-send-details dd { margin: 0; font-family: var(--font-mono, monospace); word-break: break-all; }
+.inbox-send-text {
+  margin-top: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  white-space: pre;
+  overflow-x: auto;
 }
 
 /* A caution, not an error — warn palette, app sans, dialog-help register.

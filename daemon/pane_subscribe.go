@@ -234,12 +234,16 @@ const (
 // cut — the client adopts it as its offset baseline so the NEXT
 // reconnect can resume exactly. resumed reports whether snapshot is
 // an exact-resume slice (apply in place, no terminal reset) rather
-// than a full replay (reset + replace).
+// than a full replay (reset + replace). replayCols is the width a full
+// normal-buffer replay was produced at (0 when unknown); the client
+// writes the replay at that width, since its own width is often a
+// mid-layout measurement right after a workspace switch.
 type subStream struct {
 	id               int64
 	snapshot         []byte
 	resumed          bool
 	cutOffset        int64
+	replayCols       uint16
 	ch               <-chan []byte
 	ctrl             <-chan []byte
 	updateSize       func(cols, rows uint16)
@@ -305,6 +309,19 @@ type subOptions struct {
 	// the client doesn't send it (older clients): the reattach paint then
 	// stays unshifted.
 	termCols, termRows uint16
+	// replayWidth: the client writes a full replay at the width replay-start
+	// reports (replayCols), not at termCols, so the reattach repaint is lined
+	// up at that width. Older clients write it at termCols.
+	replayWidth bool
+}
+
+// reattachAlignCols is the width the client parses a full replay at, which is
+// the width reattachPaintRowOffset must simulate.
+func reattachAlignCols(opts subOptions, modelCols int) int {
+	if opts.replayWidth && modelCols > 1 {
+		return modelCols
+	}
+	return int(opts.termCols)
 }
 
 // detachSubscribers releases every subscriber parked on this pane object and
@@ -514,6 +531,7 @@ func (p *Pane) subscribeStream(cols, rows uint16, mode subMode, since int64, opt
 	// readLoop's per-payload fanout is no longer stalled by that work.
 	var gridSnap grid.Snapshot
 	var haveGridSnap bool
+	var replayCols uint16
 	gridSkipRow := -1
 	gridMaxCols, gridMaxRows := 0, 0
 	// Skip the synthetic grid paint only for native/mobile terminal subs that
@@ -522,6 +540,9 @@ func (p *Pane) subscribeStream(cols, rows uint16, mode subMode, since int64, opt
 	if includeReplay && !altScreenAtCut && p.replayEmu != nil && !opts.skipSyntheticPaint {
 		gridSnap = p.replayEmu.Snapshot()
 		haveGridSnap = true
+		// The stale-width trim below keeps only bytes written at this width,
+		// and the grid paint is addressed in it.
+		replayCols = uint16(gridSnap.Cols)
 		if !hasCodex {
 			// The raw tail's own bytes own the input row; the model
 			// must not overwrite it (phantom-prompt drift — see
@@ -584,7 +605,7 @@ func (p *Pane) subscribeStream(cols, rows uint16, mode subMode, since int64, opt
 		replay := make([]byte, 0, len(modePrefix)+len(rawSnapshot))
 		replay = append(replay, modePrefix...)
 		replay = append(replay, rawSnapshot...)
-		if off := reattachPaintRowOffset(int(opts.termCols), int(opts.termRows), replay, gridSnap); off != 0 {
+		if off := reattachPaintRowOffset(reattachAlignCols(opts, gridSnap.Cols), int(opts.termRows), replay, gridSnap); off != 0 {
 			gridPaint = serializeGridSnapshotAt(gridSnap, gridSkipRow, gridMaxCols, gridMaxRows, off, int(opts.termRows))
 		}
 	}
@@ -872,6 +893,7 @@ func (p *Pane) subscribeStream(cols, rows uint16, mode subMode, since int64, opt
 		snapshot:         snapshot,
 		resumed:          resumed,
 		cutOffset:        cutOffset,
+		replayCols:       replayCols,
 		ch:               c,
 		ctrl:             ctl,
 		updateSize:       updateSize,

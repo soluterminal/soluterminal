@@ -415,7 +415,9 @@ func deviceCode(spkiB64, daemonSPKI string) string {
 	if daemonSPKI != "" {
 		input = "SOLU-DEVICE-CODE-V2\n" + strings.TrimSpace(spkiB64) + "\n" + strings.TrimSpace(daemonSPKI)
 	}
-	return crockfordCode(sha256.Sum256([]byte(input)))
+	code := crockfordCode(sha256.Sum256([]byte(input)))
+	feedbackPairingCodes.remember(code, time.Now().Add(devicePendingLifetime))
+	return code
 }
 
 func codeVersionOf(daemonSPKI string) int {

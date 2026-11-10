@@ -104,7 +104,14 @@ test('workspace services filter, preview, shared preferences and stale recovery'
   const external = panel.locator('.port-row').filter({ hasText: ':8000' });
   await expect(external.getByRole('button', { name: 'Open preview', exact: true })).toBeDisabled();
   await external.getByRole('button', { name: 'Check web service', exact: true }).click();
-  await expect(external.getByRole('button', { name: 'Open preview', exact: true })).toBeEnabled();
+  // Confirmed as a web service, but no pane started it: it opens in the
+  // person's own browser, never the preview tile.
+  await expect(external.getByRole('button', { name: 'Open in browser', exact: true })).toBeEnabled();
+  await expect(external.getByRole('button', { name: 'Open preview', exact: true })).toBeDisabled();
+  await expect(external.getByRole('button', { name: 'Open preview', exact: true })).toHaveAttribute(
+    'title',
+    'Preview shows services started in a soluterminal pane; use Open in browser',
+  );
   expect(checks).toBe(1);
   await panel.getByRole('checkbox').check();
   const database = panel.locator('.port-row').filter({ hasText: ':5432' });

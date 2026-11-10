@@ -10,7 +10,8 @@ import { currentRoutingScope, routingPrincipalAllowed, onRoutingScopeChange, typ
 import { flushSync } from 'react-dom';
 import { closedNeighbor, closedPaneLabel, rememberClosedNeighbor, type ClosedPane } from './lib/closedPanes';
 import { create, type StateCreator } from 'zustand';
-import { bindSavedBrowser, reconnectServiceBrowsers } from './lib/ports';
+import { bindSavedBrowser, isWebService, reconnectServiceBrowsers, workspacePorts } from './lib/ports';
+import { serviceTarget } from './lib/portBrowser';
 import type { BrowserServiceTarget } from './types';
 import { isPreviewBuild } from './previewBoot';
 import { isPreviewAcceptanceHost } from './previewAcceptanceShell';
@@ -71,7 +72,6 @@ import {
 } from './lib/bundleParity';
 import { getDaemonHealthState, refreshDaemonHealth, subscribeDaemonHealthState } from './lib/useDaemonHealth';
 import { slotValue } from './extensions';
-import { defaultBrowserUrl } from './lib/browserStart';
 export type PaneSnapshotFn = (opts?: { screen?: boolean }) => string;
 export type { DropZone } from './lib/paneDnd';
 export { leafCount, paneIdsInOrder } from './lib/layout';
@@ -688,6 +688,8 @@ const paneActivityLastSet = new Map<string, number>();
 const paneActivityPending = new Map<string, number>();
 const paneActivityTimers = new Map<string, number>();
 const PANE_ACTIVITY_MIN_INTERVAL_MS = 500;
+// Fix display: gap between the realign and the forced redraw (see fixPaneDisplay).
+export const FIX_DISPLAY_REDRAW_DELAY_MS = 1200;
 
 // Shape of events stored in the activity log (mirrors the daemon's
 // uiEvent fields we care about). Every optional field is populated by
@@ -1183,6 +1185,10 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   unregisterRealigner: (id: string, expected?: unknown) => void;
   realignPane: (id: string) => void;
   realignAllPanes: () => void;
+  // The pane menu's "Fix display": realign, then once the resize has settled,
+  // the forced redraw (daemon Pane.Redraw). Both are user repairs; neither runs
+  // automatically.
+  fixPaneDisplay: (id: string) => void;
 
   // Hard "refresh the app" (Ctrl+Shift+R). Deterministic JS reload that
   // doesn't depend on the WebView2 accelerator (which behaves inconsistently
@@ -1231,14 +1237,6 @@ export interface State extends ToastDialogSlice, FeatureSlices {
    *  Dismissed by the modal calling setBannerSetupOpen(false). */
   bannerSetupOpen: boolean;
   setBannerSetupOpen: (v: boolean) => void;
-  /** Feedback modal visibility. Opened from the status-bar Feedback chip or
-   *  the command palette "Send feedback" action. In the store (not App
-   *  useState) so any chrome element can trigger it without prop-drilling. */
-  feedbackOpen: boolean;
-  // Which view the modal opens on. 'mine' = the "My reports" list — the
-  // inbox's feedback rows land there so the reply box is one tap away.
-  feedbackView: 'new' | 'mine';
-  setFeedbackOpen: (v: boolean, view?: 'new' | 'mine') => void;
   /** Local diagnostic preview/download dialog. Kept in the store so Help,
    *  the command palette, and legacy/new Settings surfaces share one action. */
   supportBundleOpen: boolean;
@@ -1445,18 +1443,20 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // field flip + new-pid reconcile, mirroring setPaneEffort.
   setPaneModel: (id: string, model: string) => Promise<PaneInfo | null>;
 
-  // Internal browser tiles (iframes rendering localhost services).
-  // Managed client-side — daemon knows nothing about them. URL + title
-  // persist via workspace autosave same way terminal panes do.
+  // The preview tile: one sandboxed iframe showing a service one of the
+  // user's panes is running (Services, the "Preview detected" toast, an
+  // agent's open_browser). Managed client-side — daemon knows nothing about
+  // it. URL + service persist via workspace autosave same way terminal panes do.
   browsers: Record<string, BrowserInfo>;
-  openBrowserHere: (url: string, anchorPaneId?: string | null, direction?: 'horizontal' | 'vertical', service?: BrowserServiceTarget) => void;
-  setBrowserUrl: (id: string, url: string) => void;
+  // Open (or retarget) the single preview tile at service, optionally at a
+  // page of it (url must share the service's origin; otherwise its root).
+  openBrowserHere: (service: BrowserServiceTarget, url?: string) => void;
   setBrowserTitle: (id: string, title: string) => void;
   closeBrowserInLayout: (id: string) => void;
-  // Single-instance toggle for the internal browser (Alt+B / topbar button):
-  // open one if none exists, else close the one that's open. The browser is a
-  // peek-at-localhost affordance, not a primary surface, so we cap it at one.
-  toggleBrowser: (url?: string) => void;
+  // Single-instance toggle for the preview tile (Alt+B / topbar button):
+  // close it when open, else preview the first service this workspace's
+  // panes run (any pane's otherwise), else say there is none yet.
+  toggleBrowser: () => void;
   // Close the single browser tile if open; quiet no-op otherwise. Serves the
   // daemon's close-browser UI event (the agent's close_browser MCP tool) and
   // the close half of toggleBrowser.
@@ -3184,19 +3184,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
   notifyEnabled: notifyDefault,
   bannerSetupOpen: false,
   setBannerSetupOpen: (v) => set({ bannerSetupOpen: v }),
-  feedbackOpen: false,
-  feedbackView: 'new',
-  // The modal is retired — feedback now lives in the inbox panel. The setter
-  // keeps its signature (Topbar / Ctrl+K / tests) and re-routes: compose for
-  // a new report, the feed for 'mine' (threads live there now).
-  setFeedbackOpen: (v, view) => {
-    set({ feedbackOpen: false, feedbackView: view ?? 'new' });
-    if (v) {
-      window.dispatchEvent(new CustomEvent('solu:open-inbox', {
-        detail: { view: view === 'mine' ? 'feed' : 'compose' },
-      }));
-    }
-  },
   supportBundleOpen: false,
   setSupportBundleOpen: (v) => set({ supportBundleOpen: v }),
   agentsPanelOpen: false,
@@ -3215,20 +3202,21 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
   openVersionPopoverFrom: (source) => set({ versionPopoverOpen: true, versionPopoverSource: source }),
   daemonOnline: true, // optimistic; flipped by the poll tick below
 
-  openBrowserHere: (url, anchorPaneId, direction, service) => {
-    // Single-instance: the internal browser exists to peek at a localhost
-    // service, not as a primary surface, so we never spawn a second tile. If
-    // one is already open, REUSE it — navigate it to the new URL and focus it
-    // — so e.g. clicking a different detected port drives the one browser
-    // instead of stacking tiles. (The anchor/direction args only matter when
-    // creating the first one.)
+  openBrowserHere: (service, page) => {
+    let url = service.url;
+    try { if (page && new URL(page).origin === new URL(service.url).origin) url = page; } catch { /* keep the service root */ }
+    // Single-instance: the preview tile exists to peek at a pane's service,
+    // not as a primary surface, so we never spawn a second tile. If one is
+    // already open, REUSE it — navigate it to the new service and focus it —
+    // so e.g. clicking a different detected port drives the one tile instead
+    // of stacking tiles.
     const openIds = collectBrowserIds(get().layout);
     if (openIds.length > 0) {
       const id = openIds[0];
       set((s) => {
         const b = s.browsers[id];
         return {
-          browsers: b ? { ...s.browsers, [id]: { ...b, url, service } } : s.browsers,
+          browsers: b ? { ...s.browsers, [id]: { ...b, url, service, title: undefined } } : s.browsers,
           focusedPaneId: id, // select the reused tile (no lastUserFocusId stamp — see below)
           zoomedPaneId: null,
         };
@@ -3240,27 +3228,12 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     const info: BrowserInfo = { id, url, service, createdAt: new Date().toISOString() };
     set((s) => {
       const leaf: Layout = { type: 'browser', browserId: id };
-      let nextLayout: Layout;
-      if (!s.layout) {
-        nextLayout = leaf;
-      } else if (anchorPaneId) {
-        // Explicit anchor: split at that leaf (preserves legacy API for
-        // any caller that wants a specific adjacency).
-        nextLayout = insertLeaf(s.layout, leaf, direction ?? 'horizontal', anchorPaneId);
-      } else {
-        // Default (URL-click from PortPanel, open-browser messages):
-        // append as a full-height right column so the browser lives
-        // alongside all existing panes without halving a specific one.
-        // 0.6/0.4 keeps terminals usable while still giving the browser
-        // enough width for most sites.
-        nextLayout = {
-          type: 'split',
-          direction: 'horizontal',
-          ratio: 0.6,
-          a: s.layout,
-          b: leaf,
-        };
-      }
+      // Append as a full-height right column so the tile lives alongside all
+      // existing panes without halving a specific one. 0.6/0.4 keeps
+      // terminals usable while still giving the page enough width.
+      const nextLayout: Layout = s.layout
+        ? { type: 'split', direction: 'horizontal', ratio: 0.6, a: s.layout, b: leaf }
+        : leaf;
       return {
         browsers: { ...s.browsers, [id]: info },
         layout: nextLayout,
@@ -3272,16 +3245,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
         // tile. (setFocus repoints zoom; these direct-focus paths don't.)
         zoomedPaneId: null,
       };
-    });
-    scheduleAutosave(get);
-  },
-  setBrowserUrl: (id, url) => {
-    set((s) => {
-      const b = s.browsers[id];
-      if (!b) return {};
-      let service = b.service;
-      try { if (service && new URL(service.url).origin !== new URL(url).origin) service = undefined; } catch { service = undefined; }
-      return { browsers: { ...s.browsers, [id]: { ...b, url, service } } };
     });
     scheduleAutosave(get);
   },
@@ -3321,14 +3284,19 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     });
     scheduleAutosave(get);
   },
-  toggleBrowser: (url) => {
-    const openIds = collectBrowserIds(get().layout);
-    if (openIds.length > 0) {
+  toggleBrowser: () => {
+    const st = get();
+    if (collectBrowserIds(st.layout).length > 0) {
       // Already open → Alt+B / button closes it (there's only ever one).
-      get().closeBrowser();
-    } else {
-      get().openBrowserHere(url ?? defaultBrowserUrl(get().ports));
+      st.closeBrowser();
+      return;
     }
+    const previewable = (p: Port) => !!p.paneId && isWebService(p);
+    const port =
+      workspacePorts(st.ports, st.activeWorkspace, st.activeBackend, st.workspaces).find(previewable) ??
+      st.ports.find(previewable);
+    if (port) st.openBrowserHere(serviceTarget(port));
+    else st.toast('No previews yet. Start your app in a pane; it appears under Services.', { kind: 'info' });
   },
   closeBrowser: () => {
     const openIds = collectBrowserIds(get().layout);
@@ -3347,7 +3315,7 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       const target = anchorPaneId ?? s.focusedPaneId ?? null;
       const leaf: Layout = { type: 'file', fileId: id };
       const nextLayout = s.layout
-        ? insertLeaf(s.layout, leaf, target ? direction : null, target)
+        ? insertLeaf(s.layout, leaf, target ? direction : null, target, { rebalance: true })
         : leaf;
       // Maintain LRU-ish recent list (max 15).
       const recent = [path, ...s.recentFilePaths.filter((p) => p !== path)].slice(0, 15);
@@ -4176,6 +4144,14 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     if (fn) {
       try { fn(); } catch (e) { console.warn('[solu] realigner threw:', e); }
     }
+  },
+  fixPaneDisplay: (id) => {
+    get().realignPane(id);
+    // Redraw after the realign's last forced resize lands (refit passes up to
+    // ~750ms + 100ms client debounce + 140ms daemon coalesce ≈ 990ms), so the
+    // redraw's bump dance starts from the corrected width. The redrawer skips
+    // alt-screen panes this viewer doesn't own (see Pane.tsx).
+    window.setTimeout(() => get().redrawPane(id), FIX_DISPLAY_REDRAW_DELAY_MS);
   },
   realignAllPanes: () => {
     const s = get();

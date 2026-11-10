@@ -152,7 +152,6 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
   const resumePane = useStore((s) => s.resumePane);
   // "Don't resume": no Resume offer on the pane body (⋯ menu still has it).
   const restartPaused = isRestartPaused(pane);
-  const refreshPane = useStore((s) => s.refreshPane);
   const setPaneEffort = useStore((s) => s.setPaneEffort);
   const setPaneModel = useStore((s) => s.setPaneModel);
   const setPaneContextPack = useStore((s) => s.setPaneContextPack);
@@ -1865,10 +1864,11 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
               />
             )}
           </div>
-          {/* Memory chip: the agent's resident RAM (sampled ~60s). Tap to restart
-              the agent and reclaim it (conversation kept). Goes amber when heavy.
-              Hidden until the first sample (agentRssMB 0/absent). */}
-          <AgentMemoryChip pane={pane} onReclaim={() => { void refreshPane(pane.id); }} />
+          {/* Memory chip: the agent's resident RAM (sampled ~60s), display-only
+              like the Terminal header's. Restart pane in the ⋯ menu reclaims it.
+              Goes amber when heavy. Hidden until the first sample (agentRssMB
+              0/absent). */}
+          <AgentMemoryChip pane={pane} />
           {/* Maximise/restore — header parity with the Terminal pane
               (PaneHeader.tsx). Same classes/glyphs/titles so it looks and behaves
               identically; positioned AFTER the mode toggle and BEFORE the ⋯ menu to

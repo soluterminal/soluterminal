@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { api } from '../../api';
 import { useStore } from '../../store';
+import { Tooltip } from '../Tooltip';
 
 // Compact auto-approver status pill for the account footer. Carries the two
 // signals that matter at a glance — paused state and how many auto-approvals
@@ -49,14 +50,18 @@ export function AriaHeaderStatus() {
           reset
         </button>
       )}
-      <span
-        className="aria-cap"
-        title={paused
+      {/* Focusable so the explanation shows for keyboard users too; the
+          bare "219/hr" never said what was being counted. */}
+      <Tooltip
+        label={paused
           ? 'Autoresponder paused — no auto-sends fire while paused'
           : `${autoFires} auto-approval${autoFires === 1 ? '' : 's'} in the last hour`}
+        side="top"
       >
-        {paused ? 'paused' : `${autoFires}/hr`}
-      </span>
+        <span className="aria-cap" tabIndex={0}>
+          {paused ? 'paused' : `${autoFires} auto-approved/hr`}
+        </span>
+      </Tooltip>
     </>
   );
 }

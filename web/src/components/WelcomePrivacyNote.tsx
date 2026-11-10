@@ -30,7 +30,7 @@ export function WelcomePrivacyNote({ account }: { account: boolean }) {
         href={SITE_PRIVACY_URL}
         onClick={(e) => {
           e.preventDefault();
-          void openInSystemBrowser(SITE_PRIVACY_URL);
+          void openInSystemBrowser(SITE_PRIVACY_URL, e.nativeEvent);
         }}
       >
         Privacy policy

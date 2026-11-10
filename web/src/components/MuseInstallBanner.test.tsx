@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import type { Health } from '../types';
 
-// --- Mocks (mirror of ClaudeInstallBanner.test.tsx, muse-flavored) ---------
+// --- Mocks (mirror of AgentSetupBanner.test.tsx, muse-flavored) ---------
 let healthValue: Health | null = null;
 const refreshDaemonHealth = vi.fn();
 vi.mock('../lib/useDaemonHealth', () => ({

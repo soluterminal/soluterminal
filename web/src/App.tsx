@@ -8,7 +8,8 @@ import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from
 import { noteUserActivity, useStore, paneIdsInOrder } from './store';
 import { isRelayedSession, useCloud } from './cloud';
 import { api, currentRoutingScope, noteUiEventsSseFailure } from './api';
-import { serviceTarget } from './lib/portBrowser';
+import { agentPreviewPort, isPlainWebUrl, serviceTarget } from './lib/portBrowser';
+import { openInSystemBrowser } from './tauri-browser';
 import { isTauri, playVoice, type VoiceEvent } from './voice';
 import { getEmbedTheme, isEmbedded, sendEmbedNotification, sendEmbedReady } from './embed';
 import { showEmbedChrome } from './embedChrome';
@@ -103,6 +104,7 @@ import { Topbar } from './components/Topbar';
 import { ScheduleHistoryDeepLink } from './components/ScheduleHistoryDialog';
 import { routeNotificationTap } from './lib/notificationTap';
 import { InboxHost } from './components/inbox/InboxPanel';
+import { openFeedback } from './lib/feedbackReport';
 import { ScheduleDialogHost } from './components/ScheduleDialogHost';
 import { UpdateOverlay } from './components/UpdateOverlay';
 import { RequiredUpdateModal } from './components/RequiredUpdateModal';
@@ -111,9 +113,8 @@ import { DegradedBanner } from './components/DegradedBanner';
 import { UpdateBanner } from './components/UpdateBanner';
 import { PhoneAccessBanner } from './components/PhoneAccessBanner';
 import { ShellUpdateBanner } from './components/ShellUpdateBanner';
-import { ClaudeInstallBanner } from './components/ClaudeInstallBanner';
+import { AgentSetupBanner } from './components/AgentSetupBanner';
 import { MuseInstallBanner } from './components/MuseInstallBanner';
-import { CodexNextStepBanner } from './components/CodexNextStepBanner';
 import { PhoneAccessPairPanelGate } from './components/PhoneAccessPairPanel';
 import { Sidebar } from './components/Sidebar';
 import { PaneGrid } from './components/PaneGrid';
@@ -163,6 +164,7 @@ import { PrivateRelayStatus } from './components/PrivateRelayStatus';
 import { RebuildBackoff } from './lib/rebuildBackoff';
 import { PRIVATE_RELAY_STATUS_EVENT } from './lib/privateRelay';
 import { installerUpdate } from './lib/installerUpdate';
+import { recordDisplayFix } from './lib/displayFixTelemetry';
 
 const ActivityDialog = lazy(() =>
   import('./components/ActivityDialog').then((mod) => ({ default: mod.ActivityDialog })),
@@ -1166,7 +1168,17 @@ export default function App() {
         } else if (msg.type === 'open-file' && msg.path) {
           st.openFileHere(msg.path);
         } else if (msg.type === 'open-browser' && msg.url) {
-          st.openBrowserHere(msg.url);
+          // An agent's open_browser. Current daemons accept only a pane's
+          // listed service and send its port; an older daemon may send any URL,
+          // which previews only when it is one of the panes' services here.
+          const backend = eventScope.backendPrefix === '/b/win' ? 'win' : eventScope.backendPrefix === '/b/wsl' ? 'wsl' : undefined;
+          const sent = (msg as typeof msg & {port?: import('./types').Port}).port;
+          const url = msg.url;
+          const port = agentPreviewPort(url, sent, st.ports, backend);
+          if (port && eventActive()) st.openBrowserHere(serviceTarget(port), url);
+          else if (eventActive() && isPlainWebUrl(url)) st.toast(`An agent asked to show ${url}. Only your panes' services open in the preview.`, {
+            kind: 'info', ttlMs: 10000, action: {label: 'Open in browser', run: (event) => void openInSystemBrowser(url, event)},
+          });
         } else if (msg.type === 'close-browser') {
           // Agent's close_browser MCP tool — dismiss the single tile; quiet
           // no-op when nothing is open.
@@ -1185,7 +1197,7 @@ export default function App() {
             const target = serviceTarget({...port,backend:eventScope.backendPrefix === '/b/win' ? 'win' : eventScope.backendPrefix === '/b/wsl' ? 'wsl' : undefined});
             st.toast(`Preview detected — ${msg.url.replace(/^https?:\/\//, '')}${msg.text ? ` (${msg.text})` : ''}`, {
               kind:'info',icon:'⚡',ttlMs:8000,
-              action:{label:'Open preview',run:()=>{if(eventScope.key === currentRoutingScope().key) st.openBrowserHere(target.url,undefined,undefined,target);}},
+              action:{label:'Open preview',run:()=>{if(eventScope.key === currentRoutingScope().key) st.openBrowserHere(target);}},
             });
             void st.refreshPorts();
           }
@@ -1859,8 +1871,8 @@ export default function App() {
                   setDialog({ open: true, split: null });
                   break;
                 case 'browser.new':
-                  // Toggle: Alt+B opens the single internal browser, Alt+B
-                  // again closes it (single-instance — see store.toggleBrowser).
+                  // Toggle: Alt+B opens the single preview tile, Alt+B again
+                  // closes it (single-instance — see store.toggleBrowser).
                   useStore.getState().toggleBrowser();
                   break;
                 case 'system.toggle':
@@ -1870,6 +1882,7 @@ export default function App() {
                   // Re-fit + re-assert width on every visible pane — the
                   // programmatic open/close-browser trick that unblocks
                   // gibberish after an update or a cross-device takeover.
+                  recordDisplayFix('altR');
                   useStore.getState().realignAllPanes();
                   break;
                 case 'pane.zoom':
@@ -2177,8 +2190,7 @@ export default function App() {
         <DaemonHealthBanner />
         <DegradedBanner />
         <HumanProofBanner />
-        <ClaudeInstallBanner hidden={firstRunReady && (welcomeOpen || checklistOpen)} />
-        <CodexNextStepBanner />
+        <AgentSetupBanner hidden={firstRunReady && (welcomeOpen || checklistOpen)} />
         {teamFeatures && <MuseInstallBanner />}
         {showEmbedChrome('phonePairing') && <PhoneAccessBanner />}
         {showEmbedChrome('shellUpdate') && <ShellUpdateBanner />}
@@ -2302,7 +2314,7 @@ export default function App() {
             onOpenNewPane={(split) => setDialog({ open: true, split })}
             onOpenBroadcast={() => setBroadcastOpen(true)}
             onOpenActivity={() => setActivityOpen(true)}
-            onOpenFeedback={() => useStore.getState().setFeedbackOpen(true)}
+            onOpenFeedback={() => openFeedback()}
           />
         )}
       </Suspense>

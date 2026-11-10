@@ -1,6 +1,6 @@
 import { balancedLayout, DEFAULT_LAYOUT_ASPECT, DEFAULT_LAYOUT_COLUMNS } from './autoLayout';
 import type { Layout, PaneInfo, Workspace } from '../types';
-import { buildNxMFromLeaves, buildPresetLayout, collectLeaves, layoutHasLeaf, leafId, type LayoutPresetId } from './layout';
+import { buildNxMFromLeaves, buildPresetLayout, collectLeaves, layoutHasLeaf, leafId, paneIdsInOrder, type LayoutPresetId } from './layout';
 import { createWorkspacePaneTreeSelector, flattenPaneTree, type PaneTreeNode } from './workspacePaneTree';
 import { paneTeamKind } from './paneTeam';
 
@@ -76,6 +76,16 @@ function workspaceNodes(s: WorkspaceViewState): PaneTreeNode[] {
     ? s.workspaces : [...(s.workspaces ?? []), { name: s.activeWorkspace!, backend: s.activeBackend ?? undefined, layout: s.layout, paneIds: [] } as unknown as Workspace];
   const tree = selectTrees(workspaces, s.panes, s.activeWorkspace!, s.layout, s.activeBackend).find(t => t.workspace.name === s.activeWorkspace && (!t.workspace.backend || t.workspace.backend === (s.activeBackend ?? null)));
   return tree?.nodes ?? [];
+}
+
+/** Every pane this workspace holds: its pane tree (workers recovered beside
+ * their lead included, whatever the current view shows) plus any pane tile
+ * in the saved layout itself. Same tree inputs as the view, so the shared
+ * selector's cache stays warm. */
+export function workspacePaneIds(s: WorkspaceViewState): string[] {
+  const ids = new Set(paneIdsInOrder(s.layout));
+  if (s.panes && s.activeWorkspace !== undefined) for (const n of workspaceNodes(s)) ids.add(n.pane.id);
+  return [...ids];
 }
 
 /** The top-level (or unattached) root whose subtree contains `paneId`. */

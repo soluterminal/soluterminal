@@ -1,13 +1,7 @@
-// Tauri pop-out browser helper. In the desktop app, spawns a real
-// WebviewWindow (full Chromium/WebView2) so the user can browse URLs
-// blocked by X-Frame-Options / frame-ancestors inside an iframe
-// (Google, GitHub, banks, Slack, etc). In the browser/PWA build this
-// falls back to `window.open`, which either hits a popup blocker or
-// opens the user's default browser — either way, outside the app.
-//
-// Feature-detected via try/catch on the invoke call rather than a
-// version check, so an older Tauri shell (MSI built before this
-// command landed) silently falls back to window.open instead of
+// Desktop-shell helpers. Each wraps one Tauri command or plugin call and
+// degrades quietly outside the desktop app (or on an older installed shell
+// that predates the command): feature-detected via try/catch on the invoke
+// rather than a version check, so an old shell falls back instead of
 // throwing at the user.
 
 import { isEmbedded, openEmbedUrl } from './embed';
@@ -210,21 +204,9 @@ export function multiWindowAvailable(): boolean {
   return g?.launchMode !== 'cloud';
 }
 
-// Minimum shell version where the popout window hosts its own child
-// webview AND injects window.__SOLU_POPOUT__ via init_script. 0.0.277
-// shipped the parent_label arg but relied on URL query params for the
-// React side to detect popout mode — those got eaten by the daemon's
-// auth redirect on fresh cookie jars, so the popout rendered the main
-// App instead of PopoutBrowser. 0.0.284 moved detection to the
-// init-script global and is the first version where popouts are
-// actually usable end to end. Shells below this fall back to a
-// plain "open the target URL directly" popout (no address bar, but
-// everything else works and the user can close it normally).
-const POPOUT_SHELL_MIN_VERSION = '0.0.284';
-
 // Cache the shell version; first call awaits the ping, subsequent
-// calls are synchronous. Ping is fast (one-off IPC) but we still
-// don't want to re-fetch on every popout click.
+// calls reuse it. Ping is fast (one-off IPC) but the version check and
+// the update banner both ask.
 let cachedShellVersion: Promise<string | null> | null = null;
 export function getShellVersion(): Promise<string | null> {
   if (cachedShellVersion) return cachedShellVersion;
@@ -232,104 +214,11 @@ export function getShellVersion(): Promise<string | null> {
   return cachedShellVersion;
 }
 
-function versionGte(a: string, b: string): boolean {
-  const pa = a.split('.').map((n) => parseInt(n, 10) || 0);
-  const pb = b.split('.').map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const ai = pa[i] ?? 0;
-    const bi = pb[i] ?? 0;
-    if (ai > bi) return true;
-    if (ai < bi) return false;
-  }
-  return true;
-}
-
-export async function openExternalWindow(url: string, title?: string): Promise<boolean> {
-  if (isEmbedded()) return openEmbedUrl(url);
-  const invoke = tauriInvoke();
-  if (invoke) {
-    try {
-      // Version-gate the popout-shell flow. On shells older than
-      // POPOUT_SHELL_MIN_VERSION the `parent_label` arg is ignored, so
-      // the child webview would end up attached to the main window
-      // (empty popout, content obscuring the main UI). Fall back to
-      // opening the target URL directly — same as the pre-address-bar
-      // behaviour — so auto-update daemons on old shells still get a
-      // working (if chrome-less) popout.
-      const shellVersion = await getShellVersion();
-      const canHostPopoutShell =
-        shellVersion !== null && versionGte(shellVersion, POPOUT_SHELL_MIN_VERSION);
-      if (!canHostPopoutShell) {
-        await invoke('open_external_window', { url, title: title ?? null });
-        return true;
-      }
-
-      // Load the popout window at the same daemon origin as the main
-      // window — the React bundle served from there reads
-      // `window.__SOLU_POPOUT__` (injected by Rust via init_script) and
-      // renders a fullscreen PopoutBrowser component, which spawns a
-      // native child webview for the target URL inside the popout
-      // window itself. Reusing the bundle gives us address bar +
-      // reload + close buttons for free, and keeps cross-origin
-      // support via the native child webview (same trick as in-pane
-      // browsers).
-      //
-      // Label is generated here so the popout's React code can pass
-      // it to browser_pane_create as parent_label — matches the Tauri
-      // window label created in Rust.
-      const label = `browser_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
-      const navigateUrl = new URL(window.location.href);
-      navigateUrl.searchParams.delete('popout');
-      navigateUrl.searchParams.delete('popout_url');
-      navigateUrl.searchParams.delete('popout_label');
-      navigateUrl.searchParams.delete('popout_title');
-      // Encode popout config in the URL hash (fragment). Three reasons:
-      //   - fragments survive every server-side redirect (daemon auth
-      //     gate, router mode); the browser re-attaches them to the
-      //     Location target, so the config is guaranteed to reach React
-      //     even if the popout hits /login first.
-      //   - fragments are never sent to the server, so no risk of
-      //     leaking the target URL into daemon access logs.
-      //   - the previous init-script approach (window.__SOLU_POPOUT__)
-      //     was silently failing in some WebView2 configurations, with
-      //     PopoutBrowser never mounting and the user seeing the raw
-      //     target URL full-screen. Hash handshake is observable from
-      //     JS and can't be dropped.
-      const popoutParams = new URLSearchParams();
-      popoutParams.set('popout', '1');
-      popoutParams.set('popout_url', url);
-      popoutParams.set('popout_label', label);
-      if (title) popoutParams.set('popout_title', title);
-      navigateUrl.hash = popoutParams.toString();
-      await invoke('open_external_window', {
-        url,                              // target URL (address bar + init_script fallback)
-        title: title ?? null,
-        label,
-        // Tauri 2 commands auto-rename camelCase (JS) ↔ snake_case
-        // (Rust), so this field MUST be camelCase to reach the Rust
-        // `navigate_url: Option<String>` parameter. Sending snake_case
-        // silently falls through to None and Rust opens the popout at
-        // the target URL directly, bypassing our React bundle — which
-        // is how the "no address bar" bug survived all earlier fixes.
-        navigateUrl: navigateUrl.toString(),
-      });
-      return true;
-    } catch (err) {
-      // Old shell without the command, or ACL denied. Fall through to
-      // window.open so the user still gets SOME pop-out behavior.
-      console.warn('open_external_window invoke failed, falling back to window.open:', err);
-    }
-  }
-  window.open(url, '_blank', 'noopener,noreferrer');
-  return false;
-}
-
 // Open a URL in the user's OWN default browser (Chrome/Edge/Safari…), NOT in
 // an in-app window. This is the right call for anything the user must SIGN IN
 // to — OAuth consent, account authorization — because their real browser
-// already holds their logged-in session, whereas openExternalWindow spawns a
-// WebView2 with a FRESH profile (no cookies) and would make them re-enter
-// credentials in a window that doesn't look like their browser.
+// already holds their logged-in session. It is also where every page the
+// preview tile can't show goes (public sites, pages that refuse framing).
 //
 // Uses the opener plugin (registered in lib.rs; `opener:default` grants
 // allow-open-url + allow-default-urls, which scopes http/https). Omitting the
@@ -344,8 +233,8 @@ export async function openExternalWindow(url: string, title?: string): Promise<b
 //
 // Returns true when handed to the system browser; false when it fell back to
 // window.open (browser/PWA build, where that IS the user's real browser).
-export async function openInSystemBrowser(url: string): Promise<boolean> {
-  if (isEmbedded()) return openEmbedUrl(url);
+export async function openInSystemBrowser(url: string, triggerEvent?: Event): Promise<boolean> {
+  if (isEmbedded()) return openEmbedUrl(url, triggerEvent);
   const invoke = tauriInvoke();
   if (invoke) {
     try {
@@ -362,10 +251,8 @@ export async function openInSystemBrowser(url: string): Promise<boolean> {
   return false;
 }
 
-// In-pane native browser (child webview overlaid on a React pane).
-// All five commands are no-ops in non-Tauri mode — callers use this
-// behind `isDesktopApp()` and fall back to `<iframe>` rendering.
-
+// The shell-version sentinel (desktop/src-tauri/src/shell_ping.rs). Named for
+// the retired in-pane browser; the command name stays for every shell.
 export async function browserPanePing(): Promise<string | null> {
   const invoke = tauriInvoke();
   if (!invoke) return null;
@@ -375,82 +262,6 @@ export async function browserPanePing(): Promise<string | null> {
   } catch (err) {
     console.warn('browser_pane_ping failed:', err);
     return null;
-  }
-}
-
-export async function browserPaneCreate(
-  id: string,
-  url: string,
-  rect: { x: number; y: number; w: number; h: number },
-  opts: { parentLabel?: string; timeoutMs?: number } = {},
-): Promise<boolean> {
-  const invoke = tauriInvoke();
-  if (!invoke) return false;
-  const timeoutMs = opts.timeoutMs ?? 4000;
-  try {
-    // parentLabel lets the popout window host its own child webview
-    // (omit or leave undefined for the default "main" window). Rust
-    // defaults to "main" when parent_label is None.
-    //
-    // Tauri 2 auto-renames camelCase (JS) ↔ snake_case (Rust), so this
-    // MUST be sent as parentLabel to reach Rust's `parent_label: Option<String>`.
-    // Sending snake_case silently drops it to None and the child webview
-    // attaches to the main window instead of the popout.
-    const args: Record<string, unknown> = { id, url, ...rect };
-    if (opts.parentLabel) args.parentLabel = opts.parentLabel;
-    await Promise.race([
-      invoke('browser_pane_create', args),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`browser_pane_create timed out after ${timeoutMs}ms`)), timeoutMs),
-      ),
-    ]);
-    return true;
-  } catch (err) {
-    console.warn('browser_pane_create failed:', err);
-    return false;
-  }
-}
-
-export async function browserPaneSetBounds(
-  id: string,
-  rect: { x: number; y: number; w: number; h: number },
-): Promise<void> {
-  const invoke = tauriInvoke();
-  if (!invoke) return;
-  try {
-    await invoke('browser_pane_set_bounds', { id, ...rect });
-  } catch (err) {
-    // Bounds updates can race with close; don't log those.
-    if (String(err).indexOf('not found') < 0) {
-      console.warn('browser_pane_set_bounds failed:', err);
-    }
-  }
-}
-
-export async function browserPaneNavigate(id: string, url: string): Promise<void> {
-  const invoke = tauriInvoke();
-  if (!invoke) return;
-  try {
-    await invoke('browser_pane_navigate', { id, url });
-  } catch (err) {
-    // Expected on initial mount: the navigate effect fires before
-    // browser_pane_create finishes, so get_webview returns None and
-    // Rust returns "webview not found". The initial URL was already
-    // passed to WebviewBuilder in create(), so navigation is correct
-    // without this redundant call — just swallow the race.
-    if (String(err).indexOf('not found') < 0) {
-      console.warn('browser_pane_navigate failed:', err);
-    }
-  }
-}
-
-export async function browserPaneClose(id: string): Promise<void> {
-  const invoke = tauriInvoke();
-  if (!invoke) return;
-  try {
-    await invoke('browser_pane_close', { id });
-  } catch {
-    // already closed — ignore
   }
 }
 
@@ -468,21 +279,5 @@ export async function globalHotkeyOwned(combo: string): Promise<boolean> {
     return (await invoke('global_hotkey_owned', { combo })) === true;
   } catch {
     return false;
-  }
-}
-
-// Toggle native child webview visibility. We hide all child webviews
-// while a pane drag is in progress so the user can see the drop-zone
-// overlay underneath (the native webview is an OS-level window painted
-// on top of the React DOM and would otherwise obscure the overlay).
-export async function browserPaneSetVisible(id: string, visible: boolean): Promise<void> {
-  const invoke = tauriInvoke();
-  if (!invoke) return;
-  try {
-    await invoke('browser_pane_set_visible', { id, visible });
-  } catch (err) {
-    if (String(err).indexOf('not found') < 0) {
-      console.warn('browser_pane_set_visible failed:', err);
-    }
   }
 }

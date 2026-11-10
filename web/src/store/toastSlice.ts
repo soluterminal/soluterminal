@@ -44,18 +44,12 @@ export interface Toast {
    *  renders with a navigable affordance (pointer cursor + arrow) when
    *  this is present. */
   paneId?: string;
-  /** When set, clicking the toast opens this URL in the in-app browser
-   *  tile (openBrowserHere) — the "dev server just came up → preview it"
-   *  affordance. Same navigable treatment as paneId; paneId wins if both
-   *  are ever set. A plain string (not a callback) so the notification-log
-   *  copy stays serializable and can't go stale. */
-  browserUrl?: string;
   /** When set, clicking opens the workflow Tasks surface at this decision. */
   workflowTaskId?: string;
   /** An inline action ("Undo", "Reopen"): clicking the toast runs it. Wins
    *  over the navigable targets above. Not copied to the notification log —
    *  a callback can go stale once the toast is gone. */
-  action?: { label: string; run: () => void };
+  action?: { label: string; run: (event?: Event) => void };
 }
 /** A persisted-in-session copy of every toast, so the alerts bell can act as a
  *  notification center — transient toasts auto-dismiss, but the user can review
@@ -67,13 +61,12 @@ export interface NotificationEntry {
   kind: ToastKind;
   icon?: ReactNode;
   paneId?: string;
-  browserUrl?: string;
   workflowTaskId?: string;
 }
 
 export interface ToastDialogSlice {
   toasts: Toast[];
-  toast: (message: string, opts?: { kind?: ToastKind; icon?: ReactNode; ttlMs?: number; paneId?: string; browserUrl?: string; workflowTaskId?: string; logToRecent?: boolean; action?: { label: string; run: () => void } }) => void;
+  toast: (message: string, opts?: { kind?: ToastKind; icon?: ReactNode; ttlMs?: number; paneId?: string; workflowTaskId?: string; logToRecent?: boolean; action?: { label: string; run: (event?: Event) => void } }) => void;
   dismissToast: (id: number) => void;
 
   /** Where the toast stack anchors (persisted). */
@@ -131,7 +124,6 @@ export const createToastDialogSlice: StateCreator<State, [], [], ToastDialogSlic
       icon: opts.icon,
       ttlMs: opts.ttlMs,
       paneId: opts.paneId,
-      browserUrl: opts.browserUrl,
       // Task decisions open the team-only Tasks console; a public install
       // shows the message without a link into it.
 
@@ -139,7 +131,6 @@ export const createToastDialogSlice: StateCreator<State, [], [], ToastDialogSlic
     };
     const entry: NotificationEntry = {
       id, ts: Date.now(), message: t.message, kind: t.kind, icon: t.icon, paneId: t.paneId,
-      browserUrl: t.browserUrl,
       workflowTaskId: t.workflowTaskId,
     };
     set((s) => {

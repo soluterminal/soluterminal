@@ -645,9 +645,11 @@ export interface ScheduleAgent {
   defaultCron: string;
 }
 
-// Internal browser tile — renders an iframe at `url`. State (url, title)
-// lives in the store's `browsers` map; the layout tree just references
-// by `browserId`. This mirrors how terminal panes work.
+// Preview tile — renders a sandboxed iframe of `service` at `url`. State
+// (url, service) lives in the store's `browsers` map; the layout tree just
+// references by `browserId`. This mirrors how terminal panes work. A saved
+// tile without a service (from before the preview-only tile) shows an
+// "Open in browser" message instead of the page.
 export interface BrowserInfo {
   id: string;       // "browser_xxx"
   url: string;
@@ -821,7 +823,8 @@ export interface Health {
   webVersion?: string;
   webSourceSha?: string;
   // Build provenance; channel is "preview" for the owner's follow-main builds.
-  build?: { channel?: string };
+  // flavor is the build this daemon binary is (daemon/update_flavor.go).
+  build?: { channel?: string; flavor?: 'public' | 'team' };
   // Which backend the daemon runs as ("wsl"|"host"|"win"|"dual") and its
   // platform ("windows-amd64"/"linux-amd64") — from GET /api/health. Absent
   // on older daemons. Used by the StatusBar backend chip.

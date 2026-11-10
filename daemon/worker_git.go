@@ -35,6 +35,44 @@ type workerGitProof struct {
 	Paths map[string]string `json:",omitempty"`
 }
 
+// workerGitNewDirt lists, sorted, the dirty paths in proof that are not
+// byte-identical to the baseline: all of them when there is no baseline or it
+// has no per-path digests. Empty when proof has no per-path digests.
+func workerGitNewDirt(proof workerGitProof, baseline *workerGitProof) []string {
+	var names []string
+	for path, digest := range proof.Paths {
+		if baseline == nil || baseline.Paths[path] != digest {
+			names = append(names, path)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// workerGitNamePaths names up to three paths for a lead's notice, then how
+// many more. A file name is untrusted text: control and format characters
+// become "?", and each name is cut to 60 characters.
+func workerGitNamePaths(paths []string) string {
+	shown := make([]string, 0, 3)
+	for _, path := range paths[:min(3, len(paths))] {
+		r := []rune(strings.Map(func(c rune) rune {
+			if hiddenOrControlRune(c) {
+				return '?'
+			}
+			return c
+		}, path))
+		if len(r) > 60 {
+			r = append(r[:59], '…')
+		}
+		shown = append(shown, string(r))
+	}
+	text := strings.Join(shown, ", ")
+	if more := len(paths) - len(shown); more > 0 {
+		text += fmt.Sprintf(" +%d more", more)
+	}
+	return text
+}
+
 // workerGitMaxDirtyPaths bounds the per-path digests kept in a pane's saved
 // origin. A checkout with more dirty paths keeps only the whole digest.
 const workerGitMaxDirtyPaths = 2000
@@ -65,6 +103,10 @@ type workerGitStart struct {
 	Cwd       string         `json:"cwd"`
 	Proof     workerGitProof `json:"proof"`
 	Worktrees []string       `json:"worktrees"`
+	// ExcludeSHA is the sha256 of the repository's info/exclude at spawn
+	// ("" when it had none or it could not be read). Later checks honour
+	// the file only while it still has this hash (ST-60).
+	ExcludeSHA string `json:"excludeSha,omitempty"`
 }
 
 // Worker git runs through hardenedGitCommand (git_env.go), the environment
@@ -127,7 +169,8 @@ func workerGitCachedPublishedHead(ctx context.Context, cwd, head string) bool {
 }
 
 func captureWorkerGitStart(ctx context.Context, cwd string) *workerGitStart {
-	proof, why := workerGitCleanPushed(ctx, cwd)
+	exclude, excludeSHA := workerGitReadExclude(ctx, cwd)
+	proof, why := workerGitInspectWith(ctx, cwd, true, workerGitInspectOptions{Exclude: exclude, SkipLinkedWorktrees: true})
 	if why != "" && why != "uncommitted work" && why != "unpushed work" {
 		return nil
 	}
@@ -135,7 +178,165 @@ func captureWorkerGitStart(ctx context.Context, cwd string) *workerGitStart {
 	if err != nil {
 		return nil
 	}
-	return &workerGitStart{Cwd: cwd, Proof: proof, Worktrees: paths}
+	return &workerGitStart{Cwd: cwd, Proof: proof, Worktrees: paths, ExcludeSHA: excludeSHA}
+}
+
+// workerGitExcludeMax bounds the info/exclude a worker check will honour.
+const workerGitExcludeMax = 64 << 10
+
+// workerGitInspectOptions widen what the archive checks accept as already
+// accounted for (ST-60). Worktree removal never uses them.
+type workerGitInspectOptions struct {
+	// Exclude is the repository's info/exclude, already verified unchanged
+	// since spawn; nil keeps local rules omitted.
+	Exclude []byte
+	// SkipLinkedWorktrees leaves out untracked directory entries that are
+	// registered, live linked worktrees of the same repository. Those are
+	// inspected on their own (new worktrees) or predate the worker.
+	SkipLinkedWorktrees bool
+}
+
+func workerGitCommonDir(ctx context.Context, cwd string) string {
+	common, err := workerGitRun(ctx, cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil || !filepath.IsAbs(common) {
+		return ""
+	}
+	return filepath.Clean(common)
+}
+
+// workerGitReadExclude reads the repository's info/exclude as a regular file
+// (no symlink) of at most workerGitExcludeMax bytes, with its sha256. A missing,
+// unreadable or oversized file gives nil and "": local rules stay omitted.
+func workerGitReadExclude(ctx context.Context, cwd string) ([]byte, string) {
+	common := workerGitCommonDir(ctx, cwd)
+	if common == "" {
+		return nil, ""
+	}
+	raw, err := workerGitReadRegular(filepath.Join(common, "info", "exclude"), workerGitExcludeMax)
+	if err != nil {
+		return nil, ""
+	}
+	sum := sha256.Sum256(raw)
+	return raw, hex.EncodeToString(sum[:])
+}
+
+// workerGitReadRegular reads path only when it is itself a regular file, never
+// a symlink, on every platform: openUserFile refuses final symlinks on Unix
+// but follows them on Windows, so the opened file must be the one Lstat saw.
+func workerGitReadRegular(path string, max int64) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	raw, opened, err := readUserFile(path, max)
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("%s changed while it was read", path)
+	}
+	return raw, nil
+}
+
+// workerGitArchiveOptions are the options for an archive check of cwd: the
+// repository's info/exclude only when cwd shares the start checkout's
+// repository and the file is byte-identical to the one hashed at spawn.
+func workerGitArchiveOptions(ctx context.Context, cwd string, start *workerGitStart) workerGitInspectOptions {
+	// Without a start baseline new worktrees are not inspected on their own,
+	// so a skipped linked worktree would go unchecked: keep the strict rule.
+	if start == nil {
+		return workerGitInspectOptions{}
+	}
+	// Both widenings hold only inside the start checkout's own repository:
+	// only its worktrees are enumerated and inspected on their own, and only
+	// its exclude file was hashed at spawn. Any other repository is strict.
+	common := workerGitCommonDir(ctx, cwd)
+	if common == "" || common != workerGitCommonDir(ctx, start.Cwd) {
+		return workerGitInspectOptions{}
+	}
+	opts := workerGitInspectOptions{SkipLinkedWorktrees: true}
+	if start.ExcludeSHA == "" {
+		return opts
+	}
+	if raw, sha := workerGitReadExclude(ctx, cwd); sha == start.ExcludeSHA {
+		opts.Exclude = raw
+	}
+	return opts
+}
+
+// workerGitLiveWorktrees is the set of linked worktrees git lists for the
+// repository at cwd that are not prunable, by cleaned path.
+func workerGitLiveWorktrees(ctx context.Context, cwd string) map[string]bool {
+	out, err := hardenedGitCommand(ctx, cwd, "worktree", "list", "--porcelain", "-z").Output()
+	if err != nil {
+		return nil
+	}
+	live := map[string]bool{}
+	path, prunable, first := "", false, true
+	flush := func() {
+		if path != "" && !prunable && !first {
+			live[filepath.Clean(path)] = true
+		}
+		if path != "" {
+			first = false // the first entry is the main worktree
+		}
+		path, prunable = "", false
+	}
+	for _, item := range strings.Split(string(out), "\x00") {
+		switch {
+		case item == "":
+			flush()
+		case strings.HasPrefix(item, "worktree "):
+			flush()
+			path = strings.TrimPrefix(item, "worktree ")
+		case item == "prunable" || strings.HasPrefix(item, "prunable "):
+			prunable = true
+		}
+	}
+	flush()
+	return live
+}
+
+// workerGitIsLinkedWorktree reports whether dir, an untracked directory entry
+// of a checkout, is a registered live linked worktree of the repository whose
+// common dir is common: a real directory with no symlink on its path, listed
+// by git worktree list and not prunable, whose .git file points into
+// common/worktrees/<name>, whose entry's gitdir points back at dir/.git.
+func workerGitIsLinkedWorktree(dir, common string, live map[string]bool) bool {
+	dir = filepath.Clean(dir)
+	if common == "" || !live[dir] {
+		return false
+	}
+	if st, err := os.Lstat(dir); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	if real, err := filepath.EvalSymlinks(dir); err != nil || real != dir {
+		return false
+	}
+	link, err := workerGitReadRegular(filepath.Join(dir, ".git"), 4096)
+	if err != nil {
+		return false
+	}
+	admin, ok := strings.CutPrefix(strings.TrimSpace(string(link)), "gitdir: ")
+	if !ok || !filepath.IsAbs(admin) {
+		return false
+	}
+	admin = filepath.Clean(admin)
+	if filepath.Dir(admin) != filepath.Join(common, "worktrees") {
+		return false
+	}
+	back, err := workerGitReadRegular(filepath.Join(admin, "gitdir"), 4096)
+	if err != nil {
+		return false
+	}
+	target := strings.TrimSpace(string(back))
+	if target != "" && !filepath.IsAbs(target) {
+		target = filepath.Join(admin, target)
+	}
+	return target != "" && filepath.Clean(target) == filepath.Join(dir, ".git")
 }
 
 // No mapping from a newly created linked worktree to a pane exists in Git.
@@ -146,12 +347,21 @@ func workerGitForArchive(ctx context.Context, snap PaneSnapshot, live string) (s
 	if snap.Origin != nil {
 		baseline = snap.Origin.WorkerGit
 	}
-	proof, why := workerGitCleanPushed(ctx, snap.Cwd)
+	proof, why := workerGitCleanPushedWith(ctx, snap.Cwd, workerGitArchiveOptions(ctx, snap.Cwd, baseline))
 	if baseline != nil && baseline.Cwd == snap.Cwd && workerGitDirtWithinBaseline(proof, baseline.Proof) && (why == "uncommitted work" || why == "unpushed work") {
 		// An unrelated clean commit must not make the person's unchanged dirt
 		// become worker work. A changed HEAD still needs publication proof.
 		if proof.Head == baseline.Proof.Head || workerGitCachedPublishedHead(ctx, snap.Cwd, proof.Head) {
 			why = ""
+		}
+	}
+	if why == "uncommitted work" {
+		var base *workerGitProof
+		if baseline != nil && baseline.Cwd == snap.Cwd {
+			base = &baseline.Proof
+		}
+		if names := workerGitNewDirt(proof, base); len(names) > 0 {
+			why += " (" + workerGitNamePaths(names) + ")"
 		}
 	}
 	if why != "" {
@@ -166,7 +376,7 @@ func workerGitForArchive(ctx context.Context, snap PaneSnapshot, live string) (s
 	}
 	if liveRoot != "" && liveRoot != workerGitRoot(ctx, snap.Cwd) {
 		live = liveRoot
-		p, reason := workerGitCleanPushed(ctx, live)
+		p, reason := workerGitCleanPushedWith(ctx, live, workerGitArchiveOptions(ctx, live, baseline))
 		if reason != "" {
 			return "", reason + " (worker process cwd)"
 		}
@@ -181,7 +391,7 @@ func workerGitForArchive(ctx context.Context, snap PaneSnapshot, live string) (s
 			if slices.Contains(baseline.Worktrees, path) || path == snap.Cwd {
 				continue
 			}
-			p, reason := workerGitCleanPushed(ctx, path)
+			p, reason := workerGitCleanPushedWith(ctx, path, workerGitArchiveOptions(ctx, path, baseline))
 			if reason != "" {
 				return "", reason + " (new worktree: " + path + ")"
 			}
@@ -201,10 +411,20 @@ func workerGitCleanPushed(ctx context.Context, cwd string) (workerGitProof, stri
 	return workerGitInspect(ctx, cwd, true)
 }
 
+func workerGitCleanPushedWith(ctx context.Context, cwd string, opts workerGitInspectOptions) (workerGitProof, string) {
+	return workerGitInspectWith(ctx, cwd, true, opts)
+}
+
 // workerGitInspect proves a checkout clean, and when published, its HEAD
 // pushed. The merged close inspects without publication: a squash-merged
 // branch whose remote ref was pruned is clean but has no containing ref.
 func workerGitInspect(ctx context.Context, cwd string, published bool) (workerGitProof, string) {
+	return workerGitInspectWith(ctx, cwd, published, workerGitInspectOptions{})
+}
+
+// workerGitInspectWith is workerGitInspect with opts; zero opts is the strict
+// check (worktree removal always uses that).
+func workerGitInspectWith(ctx context.Context, cwd string, published bool, opts workerGitInspectOptions) (workerGitProof, string) {
 	run := func(args ...string) (string, error) {
 		out, err := hardenedGitCommand(ctx, cwd, args...).Output()
 		return strings.TrimSpace(string(out)), err
@@ -266,8 +486,9 @@ func workerGitInspect(ctx context.Context, cwd string, published bool) (workerGi
 	// against a private Git directory with no driver definitions, even if the
 	// worker concurrently edits its config or attributes. Metadata-only
 	// commands above/below never run drivers. Local info/exclude rules are
-	// deliberately omitted (conservative retention).
-	out, err := hardenedGitStatusView(ctx, locations[0], locations[1], locations[2], parts[0], "--untracked-files=all")
+	// omitted (conservative retention) unless opts.Exclude carries the
+	// verified, unchanged-since-spawn copy.
+	out, err := hardenedGitStatusViewExclude(ctx, locations[0], locations[1], locations[2], parts[0], opts.Exclude, "--untracked-files=all")
 	status := strings.TrimSpace(string(out))
 	if err != nil {
 		return workerGitProof{}, "worktree status cannot be verified"
@@ -277,8 +498,9 @@ func workerGitInspect(ctx context.Context, cwd string, published bool) (workerGi
 		// file. Bind the baseline to index entries and actual bytes, without
 		// executing diff/clean drivers or following symlinks.
 		h := sha256.New()
-		h.Write(out)
 		var total int64
+		var common string
+		var live map[string]bool
 		hashBuffer := make([]byte, 64<<10)
 		// Each dirty path also gets its own digest (its status code, index
 		// entry and bytes), so a shared checkout's baseline can tell dirt
@@ -294,10 +516,23 @@ func workerGitInspect(ctx context.Context, cwd string, published bool) (workerGi
 			if len(entry) < 4 {
 				return workerGitProof{}, "worktree status cannot be verified"
 			}
+			if opts.SkipLinkedWorktrees && entry[:2] == "??" && strings.HasSuffix(entry, "/") {
+				if live == nil {
+					common = workerGitCommonDir(ctx, locations[2])
+					live = workerGitLiveWorktrees(ctx, locations[2])
+				}
+				if workerGitIsLinkedWorktree(filepath.Join(locations[2], strings.TrimSuffix(entry[3:], "/")), common, live) {
+					continue
+				}
+			}
+			h.Write([]byte(entry + "\x00"))
 			ph := sha256.New()
 			ph.Write([]byte(entry[:2] + "\x00"))
 			w := io.MultiWriter(h, ph)
 			w.Write([]byte(indexByPath[entry[3:]]))
+			unreadable := func() string {
+				return "worktree status cannot be verified (cannot read " + workerGitNamePaths([]string{entry[3:]}) + ")"
+			}
 			path := filepath.Join(locations[2], entry[3:])
 			st, err := os.Lstat(path)
 			if os.IsNotExist(err) && strings.Contains(entry[:2], "D") {
@@ -305,34 +540,43 @@ func workerGitInspect(ctx context.Context, cwd string, published bool) (workerGi
 				continue
 			}
 			if err != nil {
-				return workerGitProof{}, "worktree status cannot be verified"
+				return workerGitProof{}, unreadable()
 			}
 			fmt.Fprintf(w, "%s\x00%s\x00%d\x00", entry[3:], st.Mode(), st.Size())
 			if st.Mode()&os.ModeSymlink != 0 {
 				target, err := os.Readlink(path)
 				if err != nil {
-					return workerGitProof{}, "worktree status cannot be verified"
+					return workerGitProof{}, unreadable()
 				}
 				w.Write([]byte(target))
 			} else {
 				f, info, err := openUserFile(path, -1)
 				if err != nil {
-					return workerGitProof{}, "worktree status cannot be verified"
+					return workerGitProof{}, unreadable()
 				}
 				n, err := workerGitHashFile(ctx, w, f, info, hashBuffer)
 				f.Close()
 				total += n
-				if err != nil || ctx.Err() != nil || total > 64<<20 {
+				if total > 64<<20 {
+					return workerGitProof{}, "worktree status cannot be verified (over 64 MiB of dirty files)"
+				}
+				if ctx.Err() != nil {
 					return workerGitProof{}, "worktree status cannot be verified"
+				}
+				if err != nil {
+					return workerGitProof{}, unreadable()
 				}
 			}
 			paths[entry[3:]] = hex.EncodeToString(ph.Sum(nil))
 		}
-		proof.Dirty = hex.EncodeToString(h.Sum(nil))
-		if len(paths) <= workerGitMaxDirtyPaths {
-			proof.Paths = paths
+		// Only skipped linked worktrees: nothing of this checkout is dirty.
+		if len(paths) > 0 {
+			proof.Dirty = hex.EncodeToString(h.Sum(nil))
+			if len(paths) <= workerGitMaxDirtyPaths {
+				proof.Paths = paths
+			}
+			return proof, "uncommitted work"
 		}
-		return proof, "uncommitted work"
 	}
 	if !remoteContained {
 		ahead, err := run("rev-list", "--count", "@{upstream}..HEAD")
@@ -916,7 +1160,7 @@ func workerGitCheckouts(ctx context.Context, snap PaneSnapshot, calls []workerTo
 		if _, seen := proofs[path]; seen {
 			continue
 		}
-		proof, why := workerGitInspect(ctx, path, false)
+		proof, why := workerGitInspectWith(ctx, path, false, workerGitArchiveOptions(ctx, path, snap.Origin.WorkerGit))
 		// The start checkout may keep dirt it already had when the worker
 		// started (a shared primary checkout, ST-60); anything new or changed
 		// there, and any dirt elsewhere, still keeps the worker open.

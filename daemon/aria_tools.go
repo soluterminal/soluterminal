@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -194,22 +195,114 @@ func (a *Aria) toolListPorts(paneID string, onlyPanes bool) string {
 	return string(b)
 }
 
+// openBrowserRefusal is what an agent hears for any URL that is not one of its
+// panes' services: the preview tile shows only those, and other sites belong
+// in the person's own browser.
+const openBrowserRefusal = "open_browser opens only a service your panes are running, as listed by list_ports " +
+	"(e.g. http://localhost:5173, or its preview path /api/proxy/5173~…/). %s is not one of them. " +
+	"For any other site, give the user the link to open in their system browser."
+
 // toolOpenBrowser publishes the open-browser UI event — every connected
-// client opens (or retargets) its in-app browser tile at the URL. This is
-// the "show the user" half of list_ports: discovery names the server, this
-// puts it on their screen. No confirm dialog: it writes nothing, runs
-// nothing, and the result is fully visible and closable in one click.
+// client opens (or retargets) its preview tile at one of the panes' own
+// services. This is the "show the user" half of list_ports: discovery names
+// the server, this puts it on their screen. It accepts only a pane-owned,
+// listed service, given as its URL or its proxy preview path, and sends the
+// matched port with the event so each client routes it to the right machine
+// and backend. No confirm dialog: it writes nothing, runs nothing, and the
+// result is fully visible and closable in one click.
 func (a *Aria) toolOpenBrowser(rawURL string) string {
 	if a.uiBus == nil {
 		return "error: ui bus unavailable"
 	}
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return "error: url must be absolute http(s), e.g. http://localhost:5173"
+	if a.ports == nil {
+		return "error: port registry unavailable"
 	}
-	a.uiBus.publish(uiEvent{Type: "open-browser", URL: parsed.String(), Ts: time.Now().UnixMilli()})
-	b, _ := json.Marshal(map[string]any{"ok": true, "opened": parsed.String()})
+	shown := strings.TrimSpace(rawURL)
+	if shown == "" {
+		shown = "an empty url"
+	}
+	if len(shown) > 200 {
+		shown = shown[:200] + "…"
+	}
+	port, friendly := matchServiceURL(a.ports.List(), rawURL)
+	if port == nil {
+		return "error: " + fmt.Sprintf(openBrowserRefusal, shown)
+	}
+	a.uiBus.publish(uiEvent{Type: "open-browser", URL: friendly, Port: port, Ts: time.Now().UnixMilli()})
+	b, _ := json.Marshal(map[string]any{"ok": true, "opened": friendly})
 	return string(b)
+}
+
+// matchServiceURL finds the pane-owned, listed service raw names and returns
+// it with the service's localhost URL for raw's path, query and fragment. raw
+// is either that URL (http(s), a loopback host or the listener's own address,
+// the service's port and scheme) or a proxy preview path ending in
+// /api/proxy/<port>~<selector>/…, relative or absolute, with any routing
+// prefix in front.
+func matchServiceURL(ports []*Port, raw string) (*Port, string) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.User != nil || u.Opaque != "" {
+		return nil, ""
+	}
+	if u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https" {
+		return nil, ""
+	}
+	listed := func(p *Port) bool {
+		return p != nil && p.PaneID != "" && localhostURLForPort(p) != ""
+	}
+	var match *Port
+	rest := u.Path
+	if i := strings.Index(u.Path, "/api/proxy/"); i >= 0 {
+		seg := u.Path[i+len("/api/proxy/"):]
+		if j := strings.IndexByte(seg, '/'); j >= 0 {
+			rest = seg[j:]
+			seg = seg[:j]
+		} else {
+			rest = "/"
+		}
+		for _, p := range ports {
+			if listed(p) && p.PreviewPath != "" && p.PreviewPath == "/api/proxy/"+seg+"/" {
+				match = p
+				break
+			}
+		}
+	} else if u.Scheme != "" && u.Host != "" {
+		host := strings.Trim(u.Hostname(), "[]")
+		portText := u.Port()
+		if portText == "" {
+			portText = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+		}
+		loopback := host == "localhost" || host == "127.0.0.1" || host == "::1"
+		for _, p := range ports {
+			if !listed(p) || strconv.Itoa(int(p.Port)) != portText {
+				continue
+			}
+			scheme := p.Scheme
+			if scheme == "" {
+				scheme = "http"
+			}
+			if scheme != u.Scheme || (!loopback && host != p.Addr) {
+				continue
+			}
+			// Prefer the listener on the address family the URL names.
+			if match == nil || (host == "::1") == (p.Proto == "tcp6") {
+				match = p
+			}
+		}
+	}
+	if match == nil {
+		return nil, ""
+	}
+	q := u.Query()
+	q.Del("access_token") // never carry a sign-in token or proxy pass along
+	out := localhostURLForPort(match) + rest
+	if enc := q.Encode(); enc != "" {
+		out += "?" + enc
+	}
+	if u.Fragment != "" {
+		out += "#" + u.EscapedFragment()
+	}
+	return match, out
 }
 
 // toolCloseBrowser is open_browser's inverse: publish the close-browser UI

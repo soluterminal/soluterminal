@@ -13,7 +13,7 @@ import { SchedulesSection } from './sidebar/SchedulesSection';
 import { sidebarSectionSlot } from '../extensions';
 import { SectionHeader } from './sidebar/SectionHeader';
 import { createWorkspacePaneTreeSelector, withoutRemovedWorkspacePanes } from '../lib/workspacePaneTree';
-import { IconGlobe, IconPlus } from './ui/icons';
+import { IconGlobe } from './ui/icons';
 import { WorkspaceSection } from './sidebar/WorkspaceSection';
 import { UsagePage } from './UsagePage';
 import type { WorkspaceDropTarget } from './sidebar/WorkspaceSection';
@@ -656,19 +656,8 @@ export function Sidebar({
               title="Services"
               count={serviceCount || undefined}
               subtitle="Web apps in this workspace"
-              className="section-header--compact-extra"
               collapsed={!isOpen('ports')}
               onToggle={() => toggleMiddle('ports')}
-              extra={
-                <>
-                  <button
-                    className="port-new-browser"
-                    title="Open a new browser tile (any URL — use the address bar)"
-                    aria-label="New Tile"
-                    onClick={() => useStore.getState().openBrowserHere('')}
-                  ><IconPlus size={12} /><span className="section-extra-label">New Tile</span></button>
-                </>
-              }
             />
             {isOpen('ports') && <PortPanel />}
           </div>

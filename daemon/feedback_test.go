@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -26,9 +27,6 @@ func TestDaemonFeedbackValidation(t *testing.T) {
 	a := &apiServer{}
 	if w := postDaemonFeedback(t, a, feedbackReq{Type: "rant", Title: "x", Body: "y", IncludeSnapshot: boolPtr(false)}); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad type: status = %d", w.Code)
-	}
-	if w := postDaemonFeedback(t, a, feedbackReq{Type: "bug", Title: "  ", Body: "y", IncludeSnapshot: boolPtr(false)}); w.Code != http.StatusBadRequest {
-		t.Fatalf("empty title: status = %d", w.Code)
 	}
 	if w := postDaemonFeedback(t, a, feedbackReq{Type: "bug", Title: "t", Body: "  ", IncludeSnapshot: boolPtr(false)}); w.Code != http.StatusBadRequest {
 		t.Fatalf("empty body: status = %d", w.Code)
@@ -95,8 +93,8 @@ func TestDaemonFeedbackForwardsRedacted(t *testing.T) {
 	if got.Context.ShellVersion != "0.0.771" || got.Context.ShellPlatform != "linux" {
 		t.Fatalf("shell context not gathered server-side: %+v", got.Context)
 	}
-	if got.Context.MachineID != "machine-1" || got.Context.MachineName != "Dev Laptop" {
-		t.Fatalf("machine context not gathered from claim: %+v", got.Context)
+	if got.Context.MachineID != "machine-1" {
+		t.Fatalf("machine ID not gathered from claim: %+v", got.Context)
 	}
 	if got.Context.CaptureKind != feedbackCaptureNone {
 		t.Fatalf("capture kind = %q, want %q", got.Context.CaptureKind, feedbackCaptureNone)
@@ -110,50 +108,8 @@ func TestDaemonFeedbackForwardsRedacted(t *testing.T) {
 	if strings.Contains(got.Body, "sk-ant-api03-AbCdEf0123456789ZyXwVu") {
 		t.Fatalf("secret leaked off the daemon: %q", got.Body)
 	}
-	if !strings.Contains(got.Body, "[REDACTED]") {
+	if !strings.Contains(got.Body, "[redacted: token]") {
 		t.Fatalf("expected redaction in forwarded body: %q", got.Body)
-	}
-}
-
-func TestDaemonFeedbackRelaysAttachmentCounts(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"ok":true,"number":9,"url":"https://x/issues/9","attachmentsStored":2,"attachmentsFailed":1}`)
-	}))
-	defer srv.Close()
-
-	a := &apiServer{ver: "0.0.770"}
-	a.cloudBase = srv.URL
-	a.cloudToken = "tok"
-
-	w := postDaemonFeedback(t, a, feedbackReq{
-		Type:            "bug",
-		Title:           "garble",
-		Body:            "something is wrong",
-		IncludeSnapshot: boolPtr(false),
-		ClientVersion:   "0.0.770",
-	})
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-	}
-	var resp struct {
-		OK                bool   `json:"ok"`
-		Number            int    `json:"number"`
-		URL               string `json:"url"`
-		AttachmentsStored *int   `json:"attachmentsStored"`
-		AttachmentsFailed *int   `json:"attachmentsFailed"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode resp: %v", err)
-	}
-	if !resp.OK || resp.Number != 9 {
-		t.Fatalf("unexpected resp: %+v", resp)
-	}
-	if resp.AttachmentsStored == nil || *resp.AttachmentsStored != 2 {
-		t.Fatalf("attachmentsStored not relayed: %+v", resp.AttachmentsStored)
-	}
-	if resp.AttachmentsFailed == nil || *resp.AttachmentsFailed != 1 {
-		t.Fatalf("attachmentsFailed not relayed: %+v", resp.AttachmentsFailed)
 	}
 }
 
@@ -320,5 +276,47 @@ func TestDaemonFeedbackSnapshotDefaultsOff(t *testing.T) {
 			got.Context.LogsRequested == nil || *got.Context.LogsRequested {
 			t.Fatalf("%s: requested flags = %v / %v, want false", name, got.Context.SnapshotRequested, got.Context.LogsRequested)
 		}
+	}
+}
+
+func TestDaemonFeedbackSharedRulesBeforeTransport(t *testing.T) {
+	var got feedbackSubmission
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = io.WriteString(w, `{"ok":true,"number":7}`)
+	}))
+	defer srv.Close()
+	feedbackPairingCodes.remember("WARMFK", time.Now().Add(time.Minute))
+	a := &apiServer{cloudBase: srv.URL, cloudToken: "fake-machine-token"}
+	w := postDaemonFeedback(t, a, feedbackReq{Type: "bug", Title: "Contact fake@example.invalid", Body: "I saw WARMFK and password=fake;tail", IncludeSnapshot: boolPtr(false)})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	if got.Title != "Contact [redacted: email]" || got.Body != "I saw [redacted: code] and password=[redacted: token]" {
+		t.Fatal("shared privacy rules must run before transport")
+	}
+}
+
+func TestDaemonFeedbackReplySharedRulesBeforeTransport(t *testing.T) {
+	var got struct {
+		Number int64  `json:"number"`
+		Text   string `json:"text"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+	feedbackPairingCodes.remember("FARMWK", time.Now().Add(time.Minute))
+	a := &apiServer{cloudBase: srv.URL, cloudToken: "fake-machine-token"}
+	payload := `{"number":7,"text":"I saw FARMWK and password=fake&tail"}`
+	r := httptest.NewRequest("POST", "/api/feedback/reply", strings.NewReader(payload))
+	w := httptest.NewRecorder()
+	a.handleFeedbackReply(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	if got.Number != 7 || got.Text != "I saw [redacted: code] and password=[redacted: token]" {
+		t.Fatal("reply must be redacted on the device before transport")
 	}
 }

@@ -11,7 +11,7 @@ import { SidebarCustomizer } from './sidebar/SidebarCustomizer';
 import { AppearanceTab } from './settings/AppearanceTab';
 import { PanesTab } from './settings/PanesTab';
 import { DevicesTab } from './settings/DevicesTab';
-import { AccountTab, useAccountTabVisible } from './settings/AccountTab';
+import { AccountTab } from './settings/AccountTab';
 import { NotificationsVoiceTab, useNotificationsVoiceVisible } from './settings/NotificationsVoiceTab';
 import { PrivacySecurityTab } from './settings/PrivacySecurityTab';
 import { PhoneEncryptionSetting, privateRelayCandidateInView } from './settings/RemoteDevicesSetting';
@@ -50,7 +50,6 @@ export function SettingsModal() {
   const close = useSettings((s) => s.closeSettings);
   const isMobile = useIsMobileDevice();
   const team = useOperatorFeatures();
-  const accountVisible = useAccountTabVisible();
   const notificationsVisible = useNotificationsVoiceVisible();
   // Tabs registered by optional features (extensions.ts), each placed after
   // a core tab. The list is fixed for the page's lifetime, so the hook order
@@ -78,7 +77,8 @@ export function SettingsModal() {
   const phoneEncryption = isMobile && privateRelayCandidateInView() !== null;
   const shown = (key: SettingsTab): boolean => {
     switch (key) {
-      case 'account': return !isMobile && accountVisible;
+      // Presentation mode applies to every desktop install, so Account always shows.
+      case 'account': return !isMobile;
       case 'notifications': return !isMobile && notificationsVisible;
       case 'devices': return !isMobile;
       case 'privacy': return !isMobile || phoneEncryption;

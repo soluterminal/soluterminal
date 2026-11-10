@@ -30,11 +30,10 @@ const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
   agents: [],
   credentials: [
     'Provider accounts', 'Runtime API keys',
-    'Hide identities (screen share)',
   ],
   team: [],
   devices: [
-    'Desktop app', 'Phone access', 'Launch on startup', 'Automatic updates',
+    'Presentation mode', 'Desktop app', 'Phone access', 'Launch on startup', 'Automatic updates',
     'Desktop app restarts', 'Send an anonymous daily check-in',
     'Let Claude Code and Codex use SoluTerminal',
   ],

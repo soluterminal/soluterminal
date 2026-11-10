@@ -118,7 +118,7 @@ func TestWorkerGitChecksNewWorktrees(t *testing.T) {
 func TestWorkerGitNoBaselineKeepsConservativeBehavior(t *testing.T) {
 	cwd := archiveRepo(t)
 	putCapabilityFile(t, filepath.Join(cwd, "tracked.txt"), "unknown edits\n")
-	if _, why := workerGitForArchive(context.Background(), PaneSnapshot{Cwd: cwd}, ""); why != "uncommitted work" {
+	if _, why := workerGitForArchive(context.Background(), PaneSnapshot{Cwd: cwd}, ""); why != "uncommitted work (tracked.txt)" {
 		t.Fatal(why)
 	}
 }
@@ -220,7 +220,7 @@ func TestWorkerGitPushedCommitDoesNotAdoptExistingDirt(t *testing.T) {
 		t.Fatal("pushed work attributed unchanged initial dirt to worker:", why)
 	}
 	putCapabilityFile(t, filepath.Join(cwd, "tracked.txt"), "worker edits existing dirty file\n")
-	if _, why := workerGitForArchive(context.Background(), snap, ""); why != "uncommitted work" {
+	if _, why := workerGitForArchive(context.Background(), snap, ""); why != "uncommitted work (tracked.txt)" {
 		t.Fatal("new edits to initial dirt ignored:", why)
 	}
 }

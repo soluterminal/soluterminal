@@ -145,3 +145,39 @@ func TestReattachPaintNeverAddressesBelowClientBottom(t *testing.T) {
 		}
 	}
 }
+
+// A client that writes the replay at replay-start's cols parses it at the
+// model's width, whatever term_cols it announced; the repaint must be lined up
+// at that width. Simulated at a narrower announced width, the 100-column line
+// wraps, the cursor lands two rows lower, and the shifted paint overwrites the
+// prompt row.
+func TestReattachPaintAlignsAtReplayWidth(t *testing.T) {
+	raw := []byte("A\r\n" + strings.Repeat("X", 100) + "\r\nprompt$ ")
+	model := grid.New(220, 30)
+	defer func() { _ = model.Close() }()
+	model.Feed(raw)
+	snap := model.Snapshot()
+
+	opts := subOptions{termCols: 40, termRows: 39, replayWidth: true}
+	if got := reattachAlignCols(opts, snap.Cols); got != 220 {
+		t.Fatalf("align cols = %d, want the replay width 220", got)
+	}
+	if got := reattachPaintRowOffset(reattachAlignCols(opts, snap.Cols), 39, raw, snap); got != 0 {
+		t.Fatalf("offset at the replay width = %d, want 0", got)
+	}
+	rows := clientScreenAfterReattach(t, raw, 220, 30, 220, 39)
+	if rows[0] != "A" || rows[1] != strings.Repeat("X", 100) || rows[2] != "prompt$" {
+		t.Fatalf("client screen after reattach: %q", rows[:4])
+	}
+}
+
+// Older clients write the replay at the size they announced, so their repaint
+// is still lined up at term_cols.
+func TestReattachAlignColsOlderClientUsesTermCols(t *testing.T) {
+	if got := reattachAlignCols(subOptions{termCols: 40, termRows: 39}, 220); got != 40 {
+		t.Fatalf("align cols = %d, want term_cols 40", got)
+	}
+	if got := reattachAlignCols(subOptions{termCols: 40, termRows: 39, replayWidth: true}, 0); got != 40 {
+		t.Fatalf("unknown model width: align cols = %d, want term_cols 40", got)
+	}
+}

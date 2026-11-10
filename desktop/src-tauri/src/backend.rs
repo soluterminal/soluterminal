@@ -197,12 +197,25 @@ const WSL_PROBE_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 /// wsl.exe writes its own messages as UTF-16LE, which a plain UTF-8 read
 /// leaves with a NUL after every letter, so no substring would ever match.
+/// Errors relayed from inside the distro start with a kernel log level such
+/// as `<3>`, which means nothing to the person reading the dialog.
 #[cfg(any(windows, test))]
 fn wsl_output_text(stdout: &[u8], stderr: &[u8]) -> String {
     let mut text = crate::daemon::decode_wsl_listing(stdout);
     text.push('\n');
     text.push_str(&crate::daemon::decode_wsl_listing(stderr));
+    let text: String = text.split_inclusive('\n').map(strip_log_level).collect();
     text.trim().to_string()
+}
+
+/// `<3>WSL (23 - Relay) ERROR: …` → `WSL (23 - Relay) ERROR: …`.
+#[cfg(any(windows, test))]
+fn strip_log_level(line: &str) -> &str {
+    let Some(rest) = line.strip_prefix('<') else { return line };
+    match rest.find('>') {
+        Some(end @ 1..=3) if rest[..end].bytes().all(|b| b.is_ascii_digit()) => &rest[end + 1..],
+        _ => line,
+    }
 }
 
 /// Only what WSL says outright. Anything else needs the distro listing.
@@ -835,6 +848,17 @@ mod first_run_tests {
         assert_eq!(classify_wsl_error(&update), Some(WslStatus::NeedsUpdate));
         let none = wsl_output_text(&utf16le("This has no installed distributions.\r\n"), b"");
         assert_eq!(classify_wsl_error(&none), Some(WslStatus::NoDistro));
+    }
+
+    #[test]
+    fn a_relayed_error_loses_its_log_level() {
+        let text = wsl_output_text(
+            b"<3>WSL (23 - Relay) ERROR: CreateProcessCommon:875: execvpe(true) failed: No such file or directory\n",
+            b"",
+        );
+        assert_eq!(text, "WSL (23 - Relay) ERROR: CreateProcessCommon:875: execvpe(true) failed: No such file or directory");
+        assert_eq!(wsl_output_text(&utf16le("<html> is not a level\r\n"), b""), "<html> is not a level");
+        assert_eq!(wsl_output_text(&utf16le("first\r\n<4>second\r\n"), b""), "first\r\nsecond");
     }
 
     #[test]

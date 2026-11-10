@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -50,7 +53,35 @@ func TestLocalPreviewDrainSurvivesStablePollAndRemainsBounded(t *testing.T) {
 	}
 }
 
+// serveUnpausedControl points the updater at a local, signed, unpaused
+// control file. Without it ApplyLocal fetches the real one from GitHub, and
+// an outage there (or a real operator pause) fails these tests closed before
+// the checks they are about ever run.
+func serveUnpausedControl(t *testing.T) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(UpdateControl{Schema: 1, Paused: false})
+	sig := []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(priv, body)))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/update-control.json":
+			w.Write(body)
+		case "/update-control.json.sig":
+			w.Write(sig)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("SOLU_UPDATE_MANIFEST_PUBKEY", base64.StdEncoding.EncodeToString(pub))
+	t.Setenv("SOLU_UPDATE_CONTROL_URL", srv.URL+"/update-control.json")
+}
+
 func TestLocalPreviewChangedCandidateAndTerminalErrorClearOldDrain(t *testing.T) {
+	serveUnpausedControl(t)
 	u := NewUpdater("1.0.0", "", "", nil, nil)
 	u.restartGate = new(atomic.Bool)
 	inflight := 1
@@ -98,6 +129,7 @@ func writeLocalBuild(t *testing.T, dataDir string, mode os.FileMode) (string, st
 // A local build goes through the same guarded swap as a release: the busy
 // gate, version ordering and hash verification all apply.
 func TestApplyLocalUsesTheGuardedSwap(t *testing.T) {
+	serveUnpausedControl(t)
 	data := t.TempDir()
 	path, sum := writeLocalBuild(t, data, 0o755)
 	bin := filepath.Join(t.TempDir(), "solud")
@@ -143,6 +175,7 @@ func applyLocalRequest(t *testing.T, a *apiServer, body string, mutate func(*htt
 }
 
 func TestApplyLocalHandlerOnlyAcceptsOwnerLocalBuilds(t *testing.T) {
+	serveUnpausedControl(t)
 	data := t.TempDir()
 	path, sum := writeLocalBuild(t, data, 0o755)
 	gate := new(atomic.Bool)

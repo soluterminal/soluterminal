@@ -3,14 +3,14 @@ import type { ToastPosition } from '../store';
 import { TopbarPopover } from './TopbarPopover';
 import { isTauri } from '../voice';
 import { alertDialog } from '../lib/dialog';
-import { IconBell, IconBellOff, IconVolume, IconShare } from './ui/icons';
+import { IconSliders, IconShare } from './ui/icons';
 import { useAccountFeatures } from '../entitlements';
 import { IOS_BLOCKED_NOTIFICATIONS_HELP, IOS_ENABLE_NOTIFICATIONS_HELP, IOS_PUSH_HINT, isIosDevice, needsHomeScreenForPush } from '../lib/iosPush';
 
-// The alerts bell — now a notification center as well as the alert-channel
-// controls. All three original controls ("🔔/🔕" permission toggle, push "test"
-// send, and the voice-alert-mode select) answered "how does this app get my
-// attention?"; the bell now also lets you REVIEW what already got it — a session
+// Notification settings (the sliders button) — a notification center as well
+// as the alert-channel controls. All three original controls ("🔔/🔕"
+// permission toggle, push "test" send, and the voice-alert-mode select)
+// answered "how does this app get my attention?"; it now also lets you REVIEW what already got it — a session
 // log of every toast, so an alert you missed isn't lost when it auto-dismisses.
 
 async function requestToggle(next: boolean): Promise<boolean> {
@@ -88,21 +88,19 @@ export function AlertsMenu() {
   const revealPane = useStore((s) => s.revealPane);
   const tauri = isTauri();
   // Phone push rides the cloud, so its test tool needs a free account.
-  // Without one the bell still drives in-page and desktop notifications.
+  // Without one the menu still drives in-page and desktop notifications.
   const push = useAccountFeatures();
   const iosHint = push && !tauri && needsHomeScreenForPush();
 
-  // Trigger icon reflects the strongest alerting channel currently
-  // active: voice mode on the desktop (audible) ranks above the silent
-  // notify toggle; disabled everywhere → bell-off.
+  // One fixed glyph and name: the button is the way into notification
+  // settings, not a readout of them. It used to swap between a speaker, a
+  // bell and a crossed-out bell, which read as three different controls and
+  // was easy to confuse with the attention bell next door. The "on" tint
+  // still says whether anything will reach you.
   // Chime plays everywhere; spoken clips only in the desktop app.
   const voiceOn = voiceAlertMode === 'chime' || (tauri && voiceAlertMode !== 'off');
   const alertsOn = voiceOn || notifyEnabled;
-  const TriggerIcon = voiceOn ? IconVolume : notifyEnabled ? IconBell : IconBellOff;
-  const triggerTitle =
-    voiceOn ? `Alerts & sounds — on (${voiceAlertMode === 'chime' ? 'chime' : 'voice'})`
-    : notifyEnabled ? 'Alerts & sounds — notifications on'
-    : 'Alerts & sounds — off';
+  const triggerTitle = 'Notification settings';
 
   const closeFromInside = () => {
     document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -119,10 +117,10 @@ export function AlertsMenu() {
           className={`chrome-btn${alertsOn ? ' chrome-btn-on' : ''}`}
           onClick={toggle}
           title={unread > 0 ? `${triggerTitle} — ${unread} new` : triggerTitle}
-          aria-label={unread > 0 ? `Alerts, ${unread} new` : 'Alerts'}
+          aria-label={unread > 0 ? `${triggerTitle}, ${unread} new` : triggerTitle}
           aria-expanded={open}
         >
-          <TriggerIcon />
+          <IconSliders />
           {unread > 0 && (
             <span className="chrome-btn-badge" aria-hidden="true">
               {unread > 9 ? '9+' : unread}

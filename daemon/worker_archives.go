@@ -107,10 +107,11 @@ type workerArchiveState struct {
 	checked          map[string]time.Time
 	flagged          map[string]string // pane id → the retention already flagged to its lead
 	merged           map[string]workerMergedSeen
-	beforeCommit     func()             // test-only race seam; nil in production
-	beforeGitRecheck func()             // test-only slow-proof seam; nil in production
-	teardown         func(*Pane) error  // test-only failure seam; nil in production
-	liveCwd          func(*Pane) string // test-only process-cwd seam; nil in production
+	decisions        map[string]workerArchiveDecision // pane id → the latest archive check outcome
+	beforeCommit     func()                           // test-only race seam; nil in production
+	beforeGitRecheck func()                           // test-only slow-proof seam; nil in production
+	teardown         func(*Pane) error                // test-only failure seam; nil in production
+	liveCwd          func(*Pane) string               // test-only process-cwd seam; nil in production
 	context          context.Context
 }
 
@@ -268,24 +269,85 @@ func (a *apiServer) loadWorkerReadsLocked(s *workerArchiveState) {
 // a prompt submitted then makes a newer turn or a busy agent. A box that
 // cannot be read proves nothing, and the worker stays open.
 func workerFinalAfterRestart(p *Pane, codex bool) bool {
-	if atomic.LoadInt64(&p.LastInputMs) != 0 || p.lastHumanInputMs.Load() != 0 || p.inputRevision.Load() != 0 {
-		return false
-	}
-	if p.computeStateCached() != StateIdle {
-		return false
+	return workerRestartFinalBlock(p, codex) == ""
+}
+
+// workerRestartFinalBlock is why workerFinalAfterRestart does not hold, or ""
+// when it does. The reasons name the condition so a kept worker can say why.
+func workerRestartFinalBlock(p *Pane, codex bool) string {
+	switch {
+	case p.lastHumanInputMs.Load() != 0:
+		return "a key was pressed in the pane since the restart"
+	case atomic.LoadInt64(&p.LastInputMs) != 0 || p.inputRevision.Load() != 0:
+		return "the pane had input since the restart"
+	case p.computeStateCached() != StateIdle:
+		return "the agent is not idle"
 	}
 	p.mu.Lock()
 	msg := p.currentUnsentMessageLocked()
 	p.mu.Unlock()
 	if msg != nil || p.putBackReceipt() != nil {
-		return false
+		return "an agent message is waiting in or was put back into the input box"
 	}
 	screen, blanked, ok := draftGuardScreen(p)
 	if !ok {
-		return false
+		return "the input box cannot be read (no screen)"
 	}
 	draft, known := composerDraft(typedComposerScreen(screen, blanked, codex), codex)
-	return known && draft == ""
+	if !known {
+		return "the input box cannot be read on screen"
+	}
+	if draft != "" {
+		return "the input box has a draft"
+	}
+	return ""
+}
+
+// workerArchiveDecision is the archive check's latest outcome for one finished
+// worker: why it stays open, or "archived". Only the daemon's own check writes
+// it; /api/worker-queue shows it and the log records each change (ST-60).
+type workerArchiveDecision struct {
+	Reason string    `json:"reason"`
+	Since  time.Time `json:"since"`
+	At     time.Time `json:"at"`
+}
+
+func (a *apiServer) noteWorkerArchiveDecision(id, reason string, now time.Time) {
+	if reason == "" {
+		return
+	}
+	s := a.workerArchives()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.decisions == nil {
+		s.decisions = map[string]workerArchiveDecision{}
+	}
+	prev, seen := s.decisions[id]
+	if seen && prev.Reason == reason {
+		prev.At = now
+		s.decisions[id] = prev
+		return
+	}
+	s.decisions[id] = workerArchiveDecision{Reason: reason, Since: now, At: now}
+	log.Printf("worker archive %s: %s", id, reason)
+	// Closed panes stop being checked: drop records not refreshed for a day.
+	for other, d := range s.decisions {
+		if now.Sub(d.At) > 24*time.Hour {
+			delete(s.decisions, other)
+		}
+	}
+}
+
+// workerArchiveDecisions is a copy of the latest decisions for live panes.
+func (a *apiServer) workerArchiveDecisions() map[string]workerArchiveDecision {
+	s := a.workerArchives()
+	s.mu.Lock()
+	out := make(map[string]workerArchiveDecision, len(s.decisions))
+	for id, d := range s.decisions {
+		out[id] = d
+	}
+	s.mu.Unlock()
+	return out
 }
 
 // workerMergedSeen is when a worker's final reply and Git proof were first
@@ -853,14 +915,19 @@ func (a *apiServer) archiveFinishedWorkers(now time.Time) {
 	q.mu.Lock()
 	enabled := q.settings.WorkerAutoArchive
 	var ids []string
-	if enabled {
-		for _, r := range q.requests {
-			if r.Info.State == "finished" && r.PaneID != "" {
-				ids = append(ids, r.PaneID)
-			}
+	for _, r := range q.requests {
+		if r.Info.State == "finished" && r.PaneID != "" {
+			ids = append(ids, r.PaneID)
 		}
 	}
 	q.mu.Unlock()
+	if !enabled {
+		// No check runs while it is off; say so instead of a stale reason.
+		for _, id := range ids {
+			a.noteWorkerArchiveDecision(id, "auto-archive is off", now)
+		}
+		ids = nil
+	}
 	s := a.workerArchives()
 	if !s.operation.TryLock() {
 		return
@@ -901,6 +968,10 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		a.clearWorkerRetention(p.ID)
 		return
 	}
+	// decision is why this check leaves the worker open ("archived" when it
+	// closes), recorded for /api/worker-queue and the log (ST-60).
+	decision := ""
+	defer func() { a.noteWorkerArchiveDecision(p.ID, decision, now) }()
 	reply := a.paneLatestReply(p)
 	key := workerReplyKey(reply)
 	q := a.workers()
@@ -914,15 +985,28 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	// writer counter. A final turn from before the restart counts only while
 	// the pane shows nothing that could have followed it (ST-60).
 	beforeRestart := reply.CompletedAt.Before(started)
-	afterRestart := key != "" && beforeRestart && workerFinalAfterRestart(p, reply.Agent == agentCodex)
+	restartBlock := ""
+	if key != "" && beforeRestart {
+		restartBlock = workerRestartFinalBlock(p, reply.Agent == agentCodex)
+	}
+	afterRestart := key != "" && beforeRestart && restartBlock == ""
 	final := key != "" && (!beforeRestart || afterRestart) && !reply.CompletedAt.After(now)
 	noInput := atomic.LoadInt64(&p.LastInputMs) == 0 || atomic.LoadInt64(&p.LastInputMs) < reply.CompletedAt.UnixMilli()
 	if !enabled || key == "" || !noInput {
+		switch {
+		case !enabled:
+			decision = "auto-archive is off"
+		case key == "":
+			decision = "no finished reply in its transcript"
+		default:
+			decision = "the pane had input after its final reply"
+		}
 		a.clearWorkerRetention(p.ID)
 		return
 	}
 	// Transient non-idle observations do not mean retained work vanished.
 	if p.computeStateCached() != StateIdle && snap.Status != PaneExited {
+		decision = "the agent is not idle"
 		return
 	}
 	s := a.workerArchives()
@@ -940,6 +1024,10 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	}
 	s.mu.Unlock()
 	if storageErr != nil || pending {
+		decision = "an archive of this pane is already pending"
+		if storageErr != nil {
+			decision = "archive storage cannot be used: " + storageErr.Error()
+		}
 		return
 	}
 	if baseContext == nil {
@@ -958,6 +1046,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	cancel()
 	a.observeWorkerPublication(p.ID, reason, now)
 	if snap.Status == PaneExited {
+		decision = "the pane has exited"
 		if prior, known := a.retainedWorker(p.ID); reason == "" && known && !strings.Contains(prior.Reason, "final reply unread by lead") && !strings.HasPrefix(prior.Reason, "archive ") {
 			a.clearWorkerRetention(p.ID)
 		}
@@ -970,14 +1059,14 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	// before a restart counts, once the box proves empty). It needs no publication
 	// proof: a squash-merged branch whose remote ref was pruned has no
 	// containing ref, yet its content is on the branch.
-	merged, ownWorktree, checkouts := false, "", ""
+	merged, landed, ownWorktree, checkouts := false, false, "", ""
 	var calls []workerToolCall // the worker's own tool calls, read once per check
 	worked := transcriptCwd(reply.Path)
 	if snap.Origin.WorkerGit != nil && final {
 		ctx, cancel := context.WithTimeout(baseContext, 8*time.Second)
 		calls = workerTranscriptCalls(ctx, reply.Path)
 		checkouts = workerGitCheckouts(ctx, snap, calls, live, worked)
-		landed := checkouts != "" && workerGitMerged(ctx, snap, checkouts, calls, worked, live)
+		landed = checkouts != "" && workerGitMerged(ctx, snap, checkouts, calls, worked, live)
 		if landed {
 			ownWorktree, _ = workerOwnWorktree(ctx, snap, worked, checkouts, calls)
 			if ownWorktree == "" {
@@ -990,6 +1079,15 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		a.workerMergedDue(p.ID, "", false, grace, now)
 	}
 	if !final {
+		switch {
+		case restartBlock != "":
+			decision = "its final reply is from before the daemon restarted and " + restartBlock
+		default:
+			decision = "its final reply is not complete yet"
+		}
+		if reason != "" {
+			decision = reason + "; " + decision
+		}
 		// Losing ephemeral read receipts at restart is not evidence of a new
 		// unread result. Preserve known notices, but do not re-flag a silent or
 		// dismissed clean worker merely because its old final cannot archive.
@@ -1008,6 +1106,17 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	}
 	allowed, flag := workerArchiveAllowed(true, key != "", read || merged, noInput, reason == "" || merged)
 	if !allowed {
+		var why []string
+		if reason != "" {
+			why = append(why, reason)
+		}
+		if !read {
+			why = append(why, "final reply unread by lead")
+		}
+		if landed {
+			why = append(why, "merged; closes after the grace period")
+		}
+		decision = strings.Join(why, "; ")
 		if flag {
 			if beforeRestart && !read {
 				// A reply from before the restart with no receipt: the receipt
@@ -1054,6 +1163,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	if workspace == "" {
 		workspace = snap.Origin.Workspace
 	}
+	decision = "archive failed: the archive folder cannot be made"
 	archiveID, err := randomID()
 	if err != nil {
 		return
@@ -1068,8 +1178,12 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			_ = os.RemoveAll(dir)
 		}
 	}()
+	decision = "archive failed: the transcript cannot be copied"
 	source, _, err := openUserFile(reply.Path, 128<<20)
 	if err != nil {
+		if errors.Is(err, errUserFileTooLarge) {
+			decision = "archive failed: the transcript is over 128 MiB"
+		}
 		return
 	}
 	defer source.Close()
@@ -1091,6 +1205,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	if s.beforeGitRecheck != nil {
 		s.beforeGitRecheck()
 	}
+	decision = "archive stopped: the Git proof changed during the archive"
 	if merged {
 		ctx, cancel = context.WithTimeout(baseContext, 8*time.Second)
 		fresh := workerGitCheckouts(ctx, p.Snapshot(), calls, a.workerLiveCwd(p), transcriptCwd(reply.Path))
@@ -1106,6 +1221,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			return
 		}
 	}
+	decision = "archive stopped: input, a new reply or a state change arrived during the archive"
 	var entry workerArchiveEntry
 	committed := false
 	// Once committed under the writer fence, input refuses the old process;
@@ -1145,6 +1261,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		err = a.saveWorkerArchivesLocked(s, append(append([]workerArchiveEntry(nil), s.entries...), entry))
 		s.mu.Unlock()
 		if err != nil {
+			decision = "archive failed: the archive index cannot be saved: " + err.Error()
 			return
 		}
 		p.workerArchiving.Store(true)
@@ -1154,6 +1271,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	if !committed {
 		return
 	}
+	decision = "archive failed: it stopped after the archive was recorded"
 	if a.ws == nil {
 		p.workerArchiving.Store(false)
 		return
@@ -1164,6 +1282,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 			keep = false
 		}
 		p.workerArchiving.Store(false)
+		decision = "archive failed: the layout could not be saved"
 		a.flagWorkerLead(a.workerNoticeLead(snap.ID, snap.Origin), p.ID, "archive layout persistence failed")
 		return
 	}
@@ -1178,11 +1297,13 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		if restored && a.discardWorkerArchive(archiveID) == nil {
 			keep = false
 		}
+		decision = "archive failed: the worker process did not shut down"
 		a.flagWorkerLead(a.workerNoticeLead(snap.ID, snap.Origin), p.ID, "archive process shutdown failed")
 		return
 	}
 	if a.panes != nil {
 		if err = a.panes.Remove(p.ID); err != nil {
+			decision = "archive failed: the saved pane record could not be removed"
 			a.flagWorkerLead(a.workerNoticeLead(snap.ID, snap.Origin), p.ID, "archive pane-store cleanup failed")
 			return
 		}
@@ -1198,8 +1319,10 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	err = a.saveWorkerArchivesLocked(s, next)
 	s.mu.Unlock()
 	if err != nil {
+		decision = "archive failed: the archive could not be marked ready: " + err.Error()
 		return
 	}
+	decision = "archived"
 	var release func()
 	q.mu.Lock()
 	for _, r := range q.requests {

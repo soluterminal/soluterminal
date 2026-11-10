@@ -303,7 +303,7 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
           aria-label={`Copy ${paneAgentLabel} ${paneAgent === 'codex' ? 'thread' : 'session'} id ${conversationID}`}
           title={copiedResume
             ? 'Copied!'
-            : `${paneAgentLabel} resume ready — click to copy ${paneAgent === 'codex' ? 'thread' : 'session'} id\n${conversationID}`}
+            : `Copy the ${paneAgentLabel} ${paneAgent === 'codex' ? 'thread' : 'session'} id — use it to resume this conversation\n${conversationID}`}
           onMouseDownCapture={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
           onClick={(e) => {
@@ -311,7 +311,9 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
             void copySessionId();
           }}
         >
-          {copiedResume ? 'copied ✓' : 'resume'}
+          {/* The chip copies; it never resumes anything itself, so its label
+              says what a click does. */}
+          {copiedResume ? 'Copied ✓' : 'Copy ID'}
         </button></Detail>
       )}
       </>}

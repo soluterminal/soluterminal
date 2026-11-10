@@ -306,7 +306,7 @@ describe('PaneHeader Claude resume badge', () => {
         onToggleZoom={vi.fn()}
       />,
     );
-    expect(screen.getByText('resume')).toHaveAttribute('aria-label', 'Copy Codex thread id thread-codex-1');
+    expect(screen.getByText('Copy ID')).toHaveAttribute('aria-label', 'Copy Codex thread id thread-codex-1');
   });
 
   it('shows the same pill for a shell-launched Codex after discovery', () => {
@@ -330,7 +330,7 @@ describe('PaneHeader Claude resume badge', () => {
         onToggleZoom={vi.fn()}
       />,
     );
-    expect(screen.getByText('resume')).toHaveAttribute('aria-label', 'Copy Codex thread id thread-shell-1');
+    expect(screen.getByText('Copy ID')).toHaveAttribute('aria-label', 'Copy Codex thread id thread-shell-1');
   });
 
   it('uses the Muse session id for a resumable Muse pane', () => {
@@ -354,7 +354,7 @@ describe('PaneHeader Claude resume badge', () => {
         onToggleZoom={vi.fn()}
       />,
     );
-    expect(screen.getByText('resume')).toHaveAttribute('aria-label', 'Copy Muse session id muse-session-1');
+    expect(screen.getByText('Copy ID')).toHaveAttribute('aria-label', 'Copy Muse session id muse-session-1');
   });
 
   it('renders a compact click-to-copy resume badge with the full id in its tooltip', () => {
@@ -379,13 +379,16 @@ describe('PaneHeader Claude resume badge', () => {
       />,
     );
 
-    // Compact label (no shortened id baked into the visible text)…
-    const badge = screen.getByText('resume');
+    // Compact label that says what a click does (it copies; it does not
+    // resume anything), with no shortened id baked into the visible text…
+    const badge = screen.getByText('Copy ID');
+    expect(screen.queryByText('resume')).toBeNull();
     // …but the full id is recoverable via the tooltip + aria-label.
     expect(badge).toHaveAttribute(
       'title',
       expect.stringContaining('5e6473fa-90f1-4c60-bdf7-690a6dcc61be'),
     );
+    expect(badge.getAttribute('title')).toMatch(/^Copy the Claude session id/);
     expect(badge).toHaveAttribute(
       'aria-label',
       'Copy Claude session id 5e6473fa-90f1-4c60-bdf7-690a6dcc61be',
@@ -415,7 +418,7 @@ describe('PaneHeader Claude resume badge', () => {
         onToggleZoom={vi.fn()}
       />,
     );
-    expect(screen.queryByText('resume')).toBeNull();
+    expect(screen.queryByText('Copy ID')).toBeNull();
   });
 });
 

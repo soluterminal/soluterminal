@@ -56,8 +56,8 @@ export const REBINDABLE_ACTIONS: RebindableAction[] = [
   },
   {
     id: 'browser.new',
-    label: 'Toggle browser',
-    hint: 'Alt+B — open the built-in browser; Alt+B again closes it. Inside a terminal, Alt+B moves back a word instead.',
+    label: 'Toggle preview',
+    hint: 'Alt+B — preview a service your panes are running; Alt+B again closes it. Inside a terminal, Alt+B moves back a word instead.',
     defaultCombo: 'alt+b',
   },
   {
@@ -76,8 +76,9 @@ export const REBINDABLE_ACTIONS: RebindableAction[] = [
   // keyboard action. comboFromEvent drops Shift for letter keys, so
   // Ctrl+Shift+R can never serialize to "ctrl+shift+r" — the binding was
   // permanently dead. Ctrl+Shift+R is now an explicit "reload app" handler in
-  // App.tsx. Force redraw remains available via the pane context menu (it fixes
-  // Codex ghost/duplicate cells after a stress resize or workspace switch).
+  // App.tsx. The forced redraw remains available via the pane menu's "Fix
+  // display" (realign, then redraw — fixes Codex ghost/duplicate cells after a
+  // stress resize or workspace switch).
   {
     id: 'edit.commandLine',
     label: 'Edit current line in $EDITOR',

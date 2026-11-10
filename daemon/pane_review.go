@@ -125,7 +125,7 @@ func reviewHeadline(r *PaneReview) string {
 	case "request-changes":
 		return fmt.Sprintf("%s reviewed: %d to fix", who, r.MustFix)
 	case "comment":
-		return who + " reviewed: needs your decision"
+		return who + " reviewed: has questions"
 	default:
 		return "The review could not run"
 	}

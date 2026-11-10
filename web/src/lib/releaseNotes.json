@@ -1,4 +1,17 @@
 {
+  "0.0.1241": [
+    "After Claude Code or Codex installs, a card now stays at the top with a Start button for each one until you start your first agent.",
+    "The welcome tour has a Skip tour button on its first slide, which also says what the daily check-in sends.",
+    "Send feedback now shows exactly what will be sent before you send it, with a box for each part. Pane text and app logs are off unless you tick them. Not signed in? Copy the report or email it instead.",
+    "Websites now open in your usual browser. The preview tile (Alt+B) is for your agents' own running apps.",
+    "Panes now fix their own display. If one still looks wrong, use Fix display in the pane's menu.",
+    "Click the version in the status bar to see your plan, build and channel. Presentation mode (Settings › Account) hides your email in the sidebar and account settings for screenshots and videos.",
+    "Fixed: text could look garbled after switching workspaces.",
+    "New file tiles now get an equal share of space. Thanks to arifrhm for this contribution (#22).",
+    "When a finished worker pane stays open, its notice now names the files keeping it open.",
+    "When you send a message another agent left waiting in a pane, SoluTerminal now checks it's exactly the text you were shown and refuses if it changed.",
+    "Clearer labels in the top bar, status bar and pane headers, and Sign out now asks first."
+  ],
   "0.0.1240": [
     "Security and stability fixes.",
     "New installs now install updates by themselves when nothing is running (Settings › Devices & updates › Automatic updates: Install when idle). If yours is set to Notify me, SoluTerminal asks you once whether to turn this on, and your answer stays. Required security updates still install either way. Agents can’t change this setting through SoluTerminal’s tools; it changes only in Settings or in that question.",

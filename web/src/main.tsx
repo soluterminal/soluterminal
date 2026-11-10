@@ -5,7 +5,7 @@ import { isPreviewBuild } from './previewBoot';
 import { isPreviewAcceptanceHost } from './previewAcceptanceShell';
 import { loadEnterGapConfig, onRoutingScopeChange, setBackend, ROUTER_RESTART_EVENT, routerRestartNeeded } from './api';
 import { isRouterMode } from './dualBackend';
-import { loadRouterPreviewOrigin, ROUTER_RESTART_NOTICE } from './lib/portBrowser';
+import { loadDaemonPreviewOrigin, loadRouterPreviewOrigin, loadShellPreviewGate, ROUTER_RESTART_NOTICE } from './lib/portBrowser';
 import { useStore } from './store';
 import { installLifecycleDebugGlobal, lifecycleLog } from './debug';
 import { installEmbedBridge, isEmbedded } from './embed';
@@ -19,38 +19,6 @@ const App = React.lazy(() => import('./App'));
 const CloudGate = React.lazy(() =>
   import('./components/CloudGate').then((m) => ({ default: m.CloudGate })),
 );
-const PopoutBrowser = React.lazy(() =>
-  import('./components/PopoutBrowser').then((m) => ({ default: m.PopoutBrowser })),
-);
-
-
-// Popout-window mode. Two signals, in order of preference:
-//   (1) URL hash — openExternalWindow puts the popout config in the
-//       navigate URL's fragment, which survives every redirect (auth
-//       gate, router mode) because browsers re-attach the fragment to
-//       the Location target. This is the primary detection path.
-//   (2) window.__SOLU_POPOUT__ global — Rust init_script injection.
-//       Kept as a fallback for debugging, but some WebView2 configs
-//       don't run initialization_script reliably for child windows;
-//       relying on it alone leaves the popout stuck showing the raw
-//       target URL full-screen with no chrome (the 2026-04-25 bug).
-type SoluPopoutConfig = { url: string; title?: string; parentLabel?: string };
-
-function readPopoutFromHash(): SoluPopoutConfig | null {
-  const raw = window.location.hash.startsWith('#')
-    ? window.location.hash.slice(1)
-    : window.location.hash;
-  if (!raw) return null;
-  const params = new URLSearchParams(raw);
-  if (params.get('popout') !== '1') return null;
-  const url = params.get('popout_url');
-  if (!url) return null;
-  return {
-    url,
-    title: params.get('popout_title') ?? undefined,
-    parentLabel: params.get('popout_label') ?? undefined,
-  };
-}
 
 function readViewFromHash(): 'system' | null {
   const raw = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash;
@@ -59,29 +27,16 @@ function readViewFromHash(): 'system' | null {
   return view === 'system' ? view : null;
 }
 
-const popoutConfig: SoluPopoutConfig | null =
-  readPopoutFromHash() ??
-  (() => {
-    const g = (window as unknown as { __SOLU_POPOUT__?: SoluPopoutConfig }).__SOLU_POPOUT__;
-    return g && typeof g.url === 'string' && g.url.length > 0 ? g : null;
-  })();
-const isPopout = !!popoutConfig;
 // A page that replaces the whole app at its own path (standalonePages.ts),
 // such as the owner-only /admin/metrics. It does its own sign-in check.
-const standalonePage = isPopout ? null : standalonePageFor(window.location.pathname);
+const standalonePage = standalonePageFor(window.location.pathname);
 const StandalonePage = standalonePage ? React.lazy(standalonePage.load) : null;
 // The website's "Get started" and "Sign in" open the hosted app with ?intent= and
 // a first-touch tag. Keep them for this tab and clean the address bar before
 // anything logs or shares the URL.
-if (!isPopout) captureArrival();
+captureArrival();
 const initialView = readViewFromHash();
 if (initialView === 'system') useStore.getState().setSystemPageOpen(true);
-
-// Expose the resolved config on window so PopoutBrowser reads one
-// source regardless of whether it came from hash or init_script.
-if (popoutConfig) {
-  (window as unknown as { __SOLU_POPOUT__?: SoluPopoutConfig }).__SOLU_POPOUT__ = popoutConfig;
-}
 
 // In dual-backend router mode the webview is served by `solud router`
 // and expects API calls under /b/wsl/* or /b/win/*. The `b=<backend>`
@@ -108,6 +63,12 @@ if (isRouterMode()) {
     }
   });
 }
+
+// Without a router, the desktop app frames previews on the daemon's own
+// preview origin (lib/portBrowser.ts), and only in a shell new enough to keep
+// that origin out of its capabilities; both are no-ops elsewhere.
+void loadShellPreviewGate();
+void loadDaemonPreviewOrigin();
 
 // Start daemon timing reads only after preview transport and initial backend
 // routing are ready. Reload when a cloud machine or router backend changes.
@@ -265,7 +226,7 @@ if (typeof __SOLU_LOCAL_PREVIEW__ !== 'undefined' && __SOLU_LOCAL_PREVIEW__) {
   document.body.insertBefore(notice, rootEl);
   rootEl.style.height = 'calc(100% - 28px)';
 }
-if (isPreviewBuild && !isPopout && isPreviewAcceptanceHost(window.location.hostname)) {
+if (isPreviewBuild && isPreviewAcceptanceHost(window.location.hostname)) {
   // Exercise the candidate's actual UI. A placeholder with similarly named
   // headings cannot supply product acceptance evidence. previewBoot answers
   // reads from capture fixtures and rejects writes before any network call.
@@ -286,9 +247,6 @@ ReactDOM.createRoot(rootEl).render(
       <React.Suspense fallback={null}>
         {StandalonePage ? (
           <StandalonePage />
-        ) : isPopout ? (
-          <PopoutBrowser />
-
         ) : (
           <CloudGate>
             <App />

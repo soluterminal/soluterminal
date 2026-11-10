@@ -13,6 +13,7 @@ import { useFocusTrap } from '../useFocusTrap';
 import { useDraggableDialog } from '../useDraggableDialog';
 import { TaskReportView } from '../ScheduleHistoryDialog';
 import { FeedbackComposer } from './FeedbackComposer';
+import { openFeedback, type FeedbackPrefill } from '../../lib/feedbackReport';
 import './inbox.css';
 import { useUnsentInput } from '../../lib/unsentInput';
 
@@ -39,7 +40,7 @@ type Sel =
   | { kind: 'report'; scheduleId: string; runAt: string }
   | { kind: 'thread'; number: number }
   | { kind: 'agentreport'; id: string; runId: string; logFile?: string; body?: string }
-  | { kind: 'compose' }
+  | { kind: 'compose'; prefill?: FeedbackPrefill }
   | null;
 
 export function openInbox(view?: 'feed' | 'compose', thread?: number) {
@@ -264,6 +265,13 @@ const EVENT_LABEL: Record<string, string> = {
   'filed': 'Report filed',
   'needs-info': 'Needs your info',
   'fixed': 'Fixed',
+  'received': 'Received',
+  'triaged': 'Looking into it',
+  'known': 'Known issue',
+  'answered': 'Answered',
+  'closed': 'Closed',
+  'not-planned': 'Closed · not planned',
+  'cant-reproduce': "Closed · can't reproduce",
   'reply': 'You replied',
 };
 
@@ -340,9 +348,6 @@ function ThreadView({ number }: { number: number }) {
     }
   }
 
-  const lastState = [...(thread?.events ?? [])].reverse().find((e) => e.event !== 'reply')?.event;
-  const fixed = lastState === 'fixed';
-
   return (
     <>
       <div className="inbox-scroll inbox-thread" ref={scrollRef}>
@@ -364,16 +369,16 @@ function ThreadView({ number }: { number: number }) {
                 )}
               </div>
             ))}
-            {fixed && (
-              <div className="inbox-thread-done">
-                This report is fixed — the fix ships in the next update. Something
-                still off? File a new report from “New”.
-              </div>
-            )}
+
           </>
         )}
       </div>
-      {thread && !fixed && (
+      {thread?.state === 'closed' && (
+        <div className="inbox-reply">
+          <button type="button" className="primary" onClick={() => openFeedback({ body: `Follow-up to #${thread.number}` })}>Send a follow-up</button>
+        </div>
+      )}
+      {thread?.state === 'open' && (
         <div className="inbox-reply">
           <textarea
             value={replyText}
@@ -577,6 +582,10 @@ function InboxWindow({ sel, setSel, target, clearTarget, onClose }: {
             {sel?.kind === 'compose' && (
               <div className="inbox-scroll is-flush">
                 <FeedbackComposer
+                  // A new "Report this" while the form is open starts it
+                  // again from the saved draft plus the new error.
+                  key={sel.prefill?.body ?? ''}
+                  prefill={sel.prefill}
                   onDone={onClose}
                   onCancel={() => setSel(null)}
                 />
@@ -606,12 +615,12 @@ export function InboxHost() {
   useEffect(() => {
     const onOpen = (e: Event) => {
       const detail = (e as CustomEvent).detail as {
-        view?: 'feed' | 'compose'; thread?: number; target?: InboxTarget;
+        view?: 'feed' | 'compose'; thread?: number; target?: InboxTarget; prefill?: FeedbackPrefill;
       } | undefined;
       const sel: Sel = detail?.thread
         ? { kind: 'thread', number: detail.thread }
         : detail?.view === 'compose'
-          ? { kind: 'compose' }
+          ? { kind: 'compose', prefill: detail.prefill }
           : null;
       setState({ open: true, sel, target: detail?.target ?? null });
     };

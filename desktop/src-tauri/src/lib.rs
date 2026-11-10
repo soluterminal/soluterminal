@@ -3,10 +3,9 @@
 
 mod autostart;
 mod backend;
-mod browser;
-mod browser_pane;
 mod daemon;
 mod daemon_health;
+mod shell_ping;
 mod wsl_network;
 #[cfg(any(windows, test))]
 mod wsl_update;
@@ -139,14 +138,8 @@ pub fn run() {
             shell_update::app_process_id,
             shell_update::reveal_shell_installer,
             this_computer_update::desktop_update_this_computer,
-            browser::open_external_window,
             workspace_window::open_workspace_window,
-            browser_pane::browser_pane_ping,
-            browser_pane::browser_pane_create,
-            browser_pane::browser_pane_set_bounds,
-            browser_pane::browser_pane_navigate,
-            browser_pane::browser_pane_close,
-            browser_pane::browser_pane_set_visible,
+            shell_ping::browser_pane_ping,
         ])
         .setup(|app| {
             let started_by_autostart = autostart::consume_autostart_arg(
@@ -265,10 +258,9 @@ pub fn run() {
             // to tray instead of exiting. User can fully quit via the
             // tray menu. Mirrors Slack / Discord / Tailscale.
             //
-            // Secondary windows (pop-out browser windows labelled
-            // `browser_*`) must close normally — otherwise clicking
-            // their X leaves a hidden zombie window the user can't
-            // dismiss.
+            // Secondary windows (workspace windows) must close
+            // normally — otherwise clicking their X leaves a hidden
+            // zombie window the user can't dismiss.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     // Persist geometry before hiding to tray.
@@ -899,7 +891,7 @@ fn finish_startup(
             // Previously this toggled visibility, but that broke
             // the common "close app, re-open from tray" flow
             // when the main window was already visible behind
-            // something else (e.g. a browser popout took focus):
+            // something else (e.g. another window took focus):
             // is_visible() returned true, tray-click would then
             // HIDE main, and the user saw nothing. Toggle via
             // tray also fought with native child webviews that

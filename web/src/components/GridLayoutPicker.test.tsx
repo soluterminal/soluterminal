@@ -16,6 +16,11 @@ it('counts the tiles the overview shows, not hidden workers', () => {
   useStore.setState({ panes, layout, workspaces: [{ name: 'Project', layout, paneIds: ids } as Workspace], activeWorkspace: 'Project',
     activeBackend: null, workspaceView: null, workspaceAllPanes: {}, paneLayoutMode: 'free', mainPresentation: { kind: 'workspace' } });
   render(<GridLayoutPicker />);
-  fireEvent.click(screen.getByRole('button', { name: 'Open multiple panes' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Layout: arrange or add panes' }));
   expect(screen.getByText('2 panes now — hover to add or rearrange')).toBeTruthy();
+});
+
+it('says what the grid button is for in its tooltip', () => {
+  render(<GridLayoutPicker />);
+  expect(screen.getByRole('button', { name: 'Layout: arrange or add panes' })).toHaveAttribute('title', 'Layout: arrange or add panes');
 });

@@ -28,3 +28,14 @@ export function useHideIdentities(): [boolean, (value: boolean) => void] {
 	const update = useCallback((value: boolean) => setHideIdentities(value), []);
 	return [hidden, update];
 }
+
+/**
+ * Presentation mode (Settings › Account) is this preference: for screenshots
+ * and videos it hides the account email in the sidebar, Settings › Account and
+ * the command palette, hides the status-bar badge (and operator chips), and
+ * masks pane account names. Other pages and terminal text are not covered.
+ * It changes nothing else, unlike the personal view.
+ */
+export function usePresentationMode(): boolean {
+	return useHideIdentities()[0];
+}

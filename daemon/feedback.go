@@ -2,12 +2,10 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -24,6 +22,14 @@ import (
 // raw pane bytes or raw logs, so nothing unredacted can leave the machine. The
 // outbound shape mirrors cloud.FeedbackSubmission by JSON tag (the daemon and
 // cloud are separate modules — same arrangement as crashReportPayload).
+//
+// What we'll send: POST /api/feedback/preview returns exactly the context,
+// pane text and logs a submit would carry, already redacted, so the form can
+// show them before anything leaves. The form sends the previewed text back
+// (the user may have deleted lines); the daemon redacts it again (idempotent)
+// and forwards that instead of capturing anew. It never needs cloud
+// credentials, so signed-out and unpaired computers get the same preview for
+// Copy report / Email it.
 
 const (
 	feedbackMaxTitle         = 200
@@ -31,34 +37,29 @@ const (
 	feedbackMaxSnapshotLines = 40
 	feedbackMaxSnapshotBytes = 16 << 10
 
-	feedbackMaxAttachments           = 3
-	feedbackMaxAttachmentBytes       = 5 << 20
-	feedbackMaxAttachmentNameLen     = 200
-	feedbackMaxAttachmentsTotalBytes = 15 << 20
-
 	feedbackCaptureNone     = "none"
 	feedbackCapturePaneText = "pane_text"
 	feedbackCaptureLogsOnly = "logs_only"
 )
 
 type feedbackReq struct {
-	Type            string                  `json:"type"` // "bug" | "idea" | "question"
-	Title           string                  `json:"title"`
-	Body            string                  `json:"body"`
-	PaneID          string                  `json:"paneId"`          // optional; active pane to snapshot
-	IncludeSnapshot *bool                   `json:"includeSnapshot"` // default false: pane text and logs only when asked
-	ClientVersion   string                  `json:"clientVersion"`   // low-trust; label/meta only
-	Attachments     []feedbackAttachmentReq `json:"attachments,omitempty"`
-}
-
-// feedbackAttachmentReq is an inbound image from the web client. Data is
-// standard base64 of the raw bytes, with no "data:...;base64," prefix (the
-// daemon strips one defensively anyway). Untrusted: name/mime/size are all
-// re-validated and the bytes are re-measured server-side.
-type feedbackAttachmentReq struct {
-	Name string `json:"name"`
-	Mime string `json:"mime"`
-	Data string `json:"data"`
+	Type   string `json:"type"` // "bug" | "idea" | "question"
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	PaneID string `json:"paneId"` // optional; the pane whose text to send
+	// IncludeSnapshot sends the pane's recent text. Default false: pane text
+	// and logs go only when asked.
+	IncludeSnapshot *bool `json:"includeSnapshot"`
+	// IncludeLogs sends recent app logs. Nil follows IncludeSnapshot: older
+	// clients had one box for both.
+	IncludeLogs *bool `json:"includeLogs"`
+	// Snapshot and Logs are the previewed text the user saw and may have
+	// trimmed. Nil captures now (older clients). Ignored unless included.
+	Snapshot      *string `json:"snapshot"`
+	Logs          *string `json:"logs"`
+	ClientVersion string  `json:"clientVersion"` // low-trust; label/meta only
+	// Screenshots are not forwarded until private storage exists (ST-103 D3):
+	// any attachments a client sends are dropped here, for every account.
 }
 
 // feedbackSubmission mirrors cloud.FeedbackSubmission (same JSON shape).
@@ -71,21 +72,11 @@ type feedbackSubmission struct {
 	Snapshot string                `json:"snapshot"`
 	Logs     string                `json:"logs"`
 	Context  feedbackSubmitContext `json:"context"`
-
-	Attachments []feedbackAttachment `json:"attachments,omitempty"`
 }
 
-// feedbackAttachment mirrors cloud.FeedbackAttachment (same JSON tags). Bytes
-// is the daemon-MEASURED decoded length (len of the decoded raw bytes), not a
-// client-supplied value. Data is the prefix-stripped base64, forwarded
-// verbatim — images are NEVER passed through redactSensitive.
-type feedbackAttachment struct {
-	Name  string `json:"name"`
-	Mime  string `json:"mime"`
-	Bytes int    `json:"bytes"`
-	Data  string `json:"data"`
-}
-
+// feedbackSubmitContext is the "App and system details" row of the form's
+// preview, field for field. The computer's name is not sent: the machine ID
+// identifies it.
 type feedbackSubmitContext struct {
 	AppVersion        string `json:"appVersion"`
 	DaemonVersion     string `json:"daemonVersion"`
@@ -97,7 +88,6 @@ type feedbackSubmitContext struct {
 	OS                string `json:"os"`
 	Arch              string `json:"arch"`
 	MachineID         string `json:"machineId"`
-	MachineName       string `json:"machineName"`
 	PaneID            string `json:"paneId"`
 	CaptureKind       string `json:"captureKind"`
 	SnapshotRequested *bool  `json:"snapshotRequested,omitempty"`
@@ -111,20 +101,94 @@ var feedbackAllowedTypes = map[string]bool{"bug": true, "idea": true, "question"
 
 var feedbackHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
+// feedbackCapture is what a report carries besides what the user typed.
+type feedbackCapture struct {
+	snapshot, logs                   string
+	snapshotRequested, logsRequested bool
+}
+
+// feedbackGather resolves the pane text and logs for a preview or a submit:
+// the previewed text when the client sends it, otherwise a fresh capture.
+// Either way the result is redacted and within the size limits.
+func (a *apiServer) feedbackGather(req feedbackReq) feedbackCapture {
+	includePane := req.IncludeSnapshot != nil && *req.IncludeSnapshot
+	includeLogs := includePane
+	if req.IncludeLogs != nil {
+		includeLogs = *req.IncludeLogs
+	}
+	c := feedbackCapture{snapshotRequested: includePane && req.PaneID != "", logsRequested: includeLogs}
+	if c.snapshotRequested {
+		if req.Snapshot != nil {
+			c.snapshot = feedbackBoundSnapshot(*req.Snapshot)
+		} else {
+			c.snapshot = a.feedbackPaneSnapshot(req.PaneID)
+		}
+	}
+	if c.logsRequested {
+		logs := recentLogContext() // already redacted at capture (logring.go)
+		if req.Logs != nil {
+			logs = *req.Logs
+		}
+		c.logs = feedbackBoundLogs(logs)
+	}
+	return c
+}
+
+func (a *apiServer) feedbackContext(clientVersion, paneID string, c feedbackCapture) feedbackSubmitContext {
+	captureKind := feedbackCaptureNone
+	if c.snapshotRequested {
+		captureKind = feedbackCapturePaneText
+	} else if c.logsRequested {
+		captureKind = feedbackCaptureLogsOnly
+	}
+	// The pane ID goes only with its text.
+	if !c.snapshotRequested {
+		paneID = ""
+	}
+	return feedbackSubmitContext{
+		AppVersion:        a.ver,
+		DaemonVersion:     a.ver,
+		ClientVersion:     strings.TrimSpace(clientVersion),
+		ShellVersion:      a.liveShellVersion(),
+		ShellPlatform:     a.shellPlatform,
+		BackendID:         a.backendID,
+		Platform:          a.shellPlatform,
+		OS:                runtime.GOOS,
+		Arch:              runtime.GOARCH,
+		MachineID:         a.feedbackMachineID(),
+		PaneID:            paneID,
+		CaptureKind:       captureKind,
+		SnapshotRequested: feedbackBoolPtr(c.snapshotRequested),
+		SnapshotCaptured:  feedbackBoolPtr(c.snapshot != ""),
+		LogsRequested:     feedbackBoolPtr(c.logsRequested),
+		LogsCaptured:      feedbackBoolPtr(c.logs != ""),
+	}
+}
+
+// feedbackTitle is the report's title: the one typed, else the first
+// non-empty line of the body.
+func feedbackTitle(title, body string) string {
+	if t := strings.TrimSpace(title); t != "" {
+		return t
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
 func (a *apiServer) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	var req feedbackReq
 	if !decodeJSON(w, r, &req, defaultJSONBodyBytes) {
 		return
 	}
 	req.Type = strings.TrimSpace(strings.ToLower(req.Type))
-	req.Title = strings.TrimSpace(req.Title)
 	req.Body = strings.TrimSpace(req.Body)
+	req.Title = feedbackTitle(req.Title, req.Body)
 	if !feedbackAllowedTypes[req.Type] {
 		http.Error(w, "type must be bug, idea, or question", http.StatusBadRequest)
-		return
-	}
-	if req.Title == "" {
-		http.Error(w, "title required", http.StatusBadRequest)
 		return
 	}
 	if req.Body == "" {
@@ -132,94 +196,18 @@ func (a *apiServer) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Attachments are LENIENT: a bad image (unsupported MIME, undecodable,
-	// oversize, over-count) is skipped, never a 4xx — the text report always
-	// forwards. The web client-side validation is the hard UX gate. Images are
-	// never run through redactSensitive.
-	var attachments []feedbackAttachment
-	var attachmentsTotal int
-	for _, att := range req.Attachments {
-		if len(attachments) >= feedbackMaxAttachments {
-			break
-		}
-		ext := pastedImageExt(att.Mime)
-		if ext == "" {
-			continue // unsupported MIME
-		}
-		stripped := feedbackStripDataURL(att.Data)
-		raw, err := base64.StdEncoding.DecodeString(stripped)
-		if err != nil {
-			continue // undecodable base64
-		}
-		if len(raw) == 0 || len(raw) > feedbackMaxAttachmentBytes {
-			continue
-		}
-		if attachmentsTotal+len(raw) > feedbackMaxAttachmentsTotalBytes {
-			break // aggregate guard reached
-		}
-		attachmentsTotal += len(raw)
-		attachments = append(attachments, feedbackAttachment{
-			Name:  feedbackClamp(filepath.Base(att.Name), feedbackMaxAttachmentNameLen),
-			Mime:  att.Mime,
-			Bytes: len(raw),
-			Data:  stripped,
-		})
-	}
-
-	// Pane text and logs leave the computer only when the request asks for
-	// them. The composer's box starts unticked; a client that omits the field
-	// (an older or third-party one) must not send them silently.
-	include := req.IncludeSnapshot != nil && *req.IncludeSnapshot
-	snapshot := ""
-	logs := ""
-	snapshotRequested := include && req.PaneID != ""
-	logsRequested := include
-	if include {
-		if req.PaneID != "" {
-			snapshot = a.feedbackPaneSnapshot(req.PaneID)
-		}
-		logs = recentLogContext() // already redacted at capture (logring.go)
-	}
-	captureKind := feedbackCaptureNone
-	if snapshotRequested {
-		captureKind = feedbackCapturePaneText
-	} else if logsRequested {
-		captureKind = feedbackCaptureLogsOnly
-	}
-	snapshotCaptured := snapshot != ""
-	logsCaptured := logs != ""
-	machineID, machineName := a.feedbackMachineIdentity()
-
+	capture := a.feedbackGather(req)
 	sub := feedbackSubmission{
 		Schema:   1,
 		Channel:  "inapp",
 		Type:     req.Type,
-		Title:    redactSensitive(feedbackClamp(req.Title, feedbackMaxTitle)),
-		Body:     redactSensitive(feedbackClamp(req.Body, feedbackMaxBody)),
-		Snapshot: snapshot,
-		Logs:     logs,
-		Context: feedbackSubmitContext{
-			AppVersion:        a.ver,
-			DaemonVersion:     a.ver,
-			ClientVersion:     strings.TrimSpace(req.ClientVersion),
-			ShellVersion:      a.liveShellVersion(),
-			ShellPlatform:     a.shellPlatform,
-			BackendID:         a.backendID,
-			Platform:          a.shellPlatform,
-			OS:                runtime.GOOS,
-			Arch:              runtime.GOARCH,
-			MachineID:         machineID,
-			MachineName:       machineName,
-			PaneID:            req.PaneID,
-			CaptureKind:       captureKind,
-			SnapshotRequested: feedbackBoolPtr(snapshotRequested),
-			SnapshotCaptured:  feedbackBoolPtr(snapshotCaptured),
-			LogsRequested:     feedbackBoolPtr(logsRequested),
-			LogsCaptured:      feedbackBoolPtr(logsCaptured),
-			SubmittedAt:       time.Now().UTC().Format(time.RFC3339),
-		},
-		Attachments: attachments,
+		Title:    redactFeedback(feedbackClamp(req.Title, feedbackMaxTitle)),
+		Body:     redactFeedback(feedbackClamp(req.Body, feedbackMaxBody)),
+		Snapshot: capture.snapshot,
+		Logs:     capture.logs,
+		Context:  a.feedbackContext(req.ClientVersion, req.PaneID, capture),
 	}
+	sub.Context.SubmittedAt = time.Now().UTC().Format(time.RFC3339)
 
 	base, token := a.cloudCreds()
 	if base == "" || token == "" {
@@ -261,11 +249,9 @@ func (a *apiServer) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var out struct {
-		OK                bool   `json:"ok"`
-		Number            int    `json:"number"`
-		URL               string `json:"url"`
-		AttachmentsStored *int   `json:"attachmentsStored"`
-		AttachmentsFailed *int   `json:"attachmentsFailed"`
+		OK     bool   `json:"ok"`
+		Number int    `json:"number"`
+		URL    string `json:"url"`
 		// Queued: the cloud kept the report to file once GitHub accepts it.
 		Queued bool `json:"queued"`
 	}
@@ -274,16 +260,31 @@ func (a *apiServer) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	if out.Queued {
 		respJSON["queued"] = true
 	}
-	if out.AttachmentsStored != nil {
-		respJSON["attachmentsStored"] = *out.AttachmentsStored
-	}
-	if out.AttachmentsFailed != nil {
-		respJSON["attachmentsFailed"] = *out.AttachmentsFailed
-	}
 	writeJSON(w, http.StatusOK, respJSON)
 }
 
-func (a *apiServer) feedbackMachineIdentity() (machineID, machineName string) {
+// handleFeedbackPreview returns what a submit with the same choices would
+// send, redacted: the details, the pane text and logs, and the typed title and
+// body. Local only (no cloud call), so it works signed out and unpaired.
+func (a *apiServer) handleFeedbackPreview(w http.ResponseWriter, r *http.Request) {
+	var req feedbackReq
+	if !decodeJSON(w, r, &req, defaultJSONBodyBytes) {
+		return
+	}
+	body := strings.TrimSpace(req.Body)
+	capture := a.feedbackGather(req)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"title":    redactFeedback(feedbackClamp(feedbackTitle(req.Title, body), feedbackMaxTitle)),
+		"body":     redactFeedback(feedbackClamp(body, feedbackMaxBody)),
+		"snapshot": capture.snapshot,
+		"logs":     capture.logs,
+		"context":  a.feedbackContext(req.ClientVersion, req.PaneID, capture),
+	})
+}
+
+// claimMachineIdentity reads this computer's ID and (redacted) name from its
+// claim. The local support bundle shows both; feedback sends only the ID.
+func (a *apiServer) claimMachineIdentity() (machineID, machineName string) {
 	if a == nil || strings.TrimSpace(a.dataDir) == "" {
 		return "", ""
 	}
@@ -291,7 +292,12 @@ func (a *apiServer) feedbackMachineIdentity() (machineID, machineName string) {
 	if err != nil || c == nil {
 		return "", ""
 	}
-	return strings.TrimSpace(c.MachineID), redactSensitive(strings.TrimSpace(c.MachineName))
+	return strings.TrimSpace(c.MachineID), redactFeedback(strings.TrimSpace(c.MachineName))
+}
+
+func (a *apiServer) feedbackMachineID() string {
+	id, _ := a.claimMachineIdentity()
+	return id
 }
 
 func feedbackBoolPtr(v bool) *bool { return &v }
@@ -305,11 +311,34 @@ func (a *apiServer) feedbackPaneSnapshot(paneID string) string {
 	if !ok {
 		return ""
 	}
-	stripped := feedbackTailLines(stripANSI(p.buffer.Snapshot()), feedbackMaxSnapshotLines)
-	if len(stripped) > feedbackMaxSnapshotBytes {
-		stripped = stripped[len(stripped)-feedbackMaxSnapshotBytes:]
+	return feedbackBoundSnapshot(stripANSI(p.buffer.Snapshot()))
+}
+
+// feedbackBoundSnapshot keeps the last feedbackMaxSnapshotLines lines,
+// redacted, then at most feedbackMaxSnapshotBytes. Redacting before the byte
+// cut means a cut can't split a secret past its pattern, and a second pass
+// over the previewed text changes nothing.
+func feedbackBoundSnapshot(s string) string {
+	return feedbackTailBytes(redactFeedback(feedbackTailLines(s, feedbackMaxSnapshotLines)), feedbackMaxSnapshotBytes)
+}
+
+// feedbackBoundLogs is the log-tail twin: redacted, then the newest
+// crashRecentLogBytes.
+func feedbackBoundLogs(s string) string {
+	return feedbackTailBytes(redactFeedback(strings.TrimRight(s, "\n")), crashRecentLogBytes)
+}
+
+// feedbackTailBytes keeps the newest max bytes of s, starting on a whole
+// UTF-8 character so a re-sent preview round-trips byte for byte.
+func feedbackTailBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
 	}
-	return redactSensitive(stripped)
+	s = s[len(s)-max:]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return s
 }
 
 // feedbackTailLines returns the last n lines of s (trailing blank lines
@@ -324,22 +353,6 @@ func feedbackTailLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
-}
-
-// feedbackStripDataURL defensively removes an optional "data:...;base64,"
-// prefix from a base64 string. The web client is supposed to send raw base64,
-// but a stray data-URL prefix would otherwise corrupt the decode.
-func feedbackStripDataURL(s string) string {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "data:") {
-		if i := strings.Index(s, ";base64,"); i >= 0 {
-			return s[i+len(";base64,"):]
-		}
-		if i := strings.Index(s, ","); i >= 0 {
-			return s[i+1:]
-		}
-	}
-	return s
 }
 
 // feedbackClamp trims s to at most max bytes without splitting a UTF-8 rune: if
@@ -402,9 +415,19 @@ func (a *apiServer) handleFeedbackReply(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "feedback needs a cloud connection — pair this machine first", http.StatusServiceUnavailable)
 		return
 	}
-	payload, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	// The reply is redacted here, on the device, like the report itself; the
+	// cloud's pass is a backstop.
+	var reply struct {
+		Number int64  `json:"number"`
+		Text   string `json:"text"`
+	}
+	if !decodeJSON(w, r, &reply, 64<<10) {
+		return
+	}
+	reply.Text = redactFeedback(reply.Text)
+	payload, err := json.Marshal(reply)
 	if err != nil {
-		http.Error(w, "read failed", http.StatusBadRequest)
+		http.Error(w, "encode failed", http.StatusInternalServerError)
 		return
 	}
 	httpReq, err := http.NewRequestWithContext(r.Context(), "POST", base+"/api/feedback/reply", bytes.NewReader(payload))

@@ -1,12 +1,20 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { api } from '../api';
+import { api, ApiError } from '../api';
 import { useStore } from '../store';
 import type { PaneInfo } from '../types';
 import { UnsentMessageChip } from './UnsentMessageChip';
 
+// The digest itself is pinned in lib/textSha256.test.ts; here a stand-in
+// shows which string the chip hashed.
+const hashing = vi.hoisted(() => ({ secure: true }));
+vi.mock('../lib/textSha256', () => ({
+  canHashText: () => hashing.secure,
+  textSha256: async (text: string) => `sha256(${text})`,
+}));
+
 const pane = { id: 'p1', unsentMessage: { id: 'receipt', sender: '#5 Claude' } } as PaneInfo;
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); hashing.secure = true; });
 
 it.each(['send', 'clear'] as const)('binds %s to the displayed pane and receipt', async (action) => {
   const act = vi.spyOn(api, 'actOnUnsentMessage').mockResolvedValue({ outcome: action === 'clear' ? 'cleared' : 'submitted' });
@@ -65,7 +73,82 @@ it('shows the whole text of a message the pane was never given before Send types
   fireEvent.click(screen.getByRole('button', { name: 'Send…' }));
   await waitFor(() => expect(asked).toHaveLength(2));
   asked[1].resolve(true);
-  await waitFor(() => expect(act).toHaveBeenCalledExactlyOnceWith('p3', 'r3', 'send'));
+  await waitFor(() => expect(act).toHaveBeenCalledExactlyOnceWith('p3', 'r3', 'send', `sha256(${text})`));
+});
+
+type Asked = { message: string; resolve: (v: unknown) => void };
+function captureDialogs(): Asked[] {
+  const asked: Asked[] = [];
+  useStore.setState({ openDialog: ((req: Asked) => { asked.push(req); }) as never });
+  return asked;
+}
+
+it('sends the hash of exactly the text the dialog showed, non-ASCII included', async () => {
+  const act = vi.spyOn(api, 'actOnUnsentMessage').mockResolvedValue({ outcome: 'submitted' });
+  useStore.setState({ refreshPanes: vi.fn().mockResolvedValue(undefined) });
+  const asked = captureDialogs();
+  const text = 'echo café ✓ 日本 🚀  two spaces';
+  render(<UnsentMessageChip pane={{ id: 'p3', unsentMessage: { id: 'r3', sender: '#5 Claude', notTyped: true, text } } as PaneInfo} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Send…' }));
+  await waitFor(() => expect(asked).toHaveLength(1));
+  const shown = asked[0].message.slice(asked[0].message.indexOf('\n\n') + 2);
+  expect(shown).toBe(text);
+  asked[0].resolve(true);
+  await waitFor(() => expect(act).toHaveBeenCalledExactlyOnceWith('p3', 'r3', 'send', `sha256(${shown})`));
+});
+
+it('sends no hash with Discard, or with Send on a put-back message', async () => {
+  const act = vi.spyOn(api, 'actOnUnsentMessage').mockResolvedValue({ outcome: 'cleared' });
+  useStore.setState({ refreshPanes: vi.fn().mockResolvedValue(undefined) });
+  const { unmount } = render(<UnsentMessageChip pane={{ id: 'p2', unsentMessage: { id: 'r2', sender: '#5 Claude', notTyped: true, text: 'make test' } } as PaneInfo} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+  await waitFor(() => expect(act).toHaveBeenCalledExactlyOnceWith('p2', 'r2', 'clear'));
+  unmount();
+  act.mockResolvedValue({ outcome: 'submitted' });
+  render(<UnsentMessageChip pane={{ id: 'p7', unsentMessage: { id: 'r7', sender: '@a', putBack: true } } as PaneInfo} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await waitFor(() => expect(act).toHaveBeenLastCalledWith('p7', 'r7', 'send'));
+});
+
+it.each([
+  ['unsent_text_changed', "The message changed or wasn't shown; review it again"],
+  ['unsent_text_unconfirmed', "The message changed or wasn't shown; review it again. Update SoluTerminal to send this message."],
+])('shows the %s refusal and reviews the refreshed text again', async (code, error) => {
+  const body = { code, error, ...(code === 'unsent_text_unconfirmed' ? { update: true } : {}) };
+  const act = vi.spyOn(api, 'actOnUnsentMessage').mockRejectedValueOnce(new ApiError(409, JSON.stringify(body), body)).mockResolvedValue({ outcome: 'submitted' });
+  const toast = vi.fn();
+  const refresh = vi.fn().mockResolvedValue(undefined);
+  useStore.setState({ toast, refreshPanes: refresh });
+  const asked = captureDialogs();
+  const before = { id: 'p4', unsentMessage: { id: 'r4', sender: '#5 Claude', notTyped: true, text: 'make test' } } as PaneInfo;
+  const { rerender } = render(<UnsentMessageChip pane={before} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Send…' }));
+  await waitFor(() => expect(asked).toHaveLength(1));
+  asked[0].resolve(true);
+  await waitFor(() => expect(toast).toHaveBeenCalledWith(error, expect.objectContaining({ kind: 'warn', action: expect.objectContaining({ label: 'Review again' }) })));
+  expect(refresh).toHaveBeenCalled();
+  // The refresh brought the receipt as it is now; Review again shows that.
+  rerender(<UnsentMessageChip pane={{ id: 'p4', unsentMessage: { id: 'r5', sender: '#5 Claude', notTyped: true, text: 'make clean' } } as PaneInfo} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send…' })).not.toBeDisabled());
+  toast.mock.calls.at(-1)![1].action.run();
+  await waitFor(() => expect(asked).toHaveLength(2));
+  expect(asked[1].message).toContain('make clean');
+  expect(asked[1].message).not.toContain('make test');
+  asked[1].resolve(true);
+  await waitFor(() => expect(act).toHaveBeenLastCalledWith('p4', 'r5', 'send', 'sha256(make clean)'));
+});
+
+it('refuses Send on a page without Web Crypto, showing no dialog and sending nothing', async () => {
+  hashing.secure = false;
+  const act = vi.spyOn(api, 'actOnUnsentMessage');
+  const toast = vi.fn();
+  useStore.setState({ toast });
+  const asked = captureDialogs();
+  render(<UnsentMessageChip pane={{ id: 'p6', unsentMessage: { id: 'r6', sender: '#5 Claude', notTyped: true, text: 'make test' } } as PaneInfo} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Send…' }));
+  await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('secure page'), { kind: 'warn' }));
+  expect(asked).toHaveLength(0);
+  expect(act).not.toHaveBeenCalled();
 });
 
 it('offers Send or Discard for a message a busy pane was never given', async () => {

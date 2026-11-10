@@ -15,14 +15,13 @@ import { IOS_ADD_TO_HOME_SCREEN_STEPS, isIosDevice } from '../lib/iosPush';
 // explicit button is the recommended pattern for 2026-era PWAs —
 // installability-aware and user-initiated.
 //
-// The button also doubles as a diagnostic. It renders in four
-// visible states so the user (and us, debugging remotely) can tell
-// exactly where the installability pipeline is stuck:
-//   - prompt-ready         → "⤓ Install" (active)
-//   - sw-missing           → "⤓ SW not registered" (warn)
-//   - criteria-not-met     → "⤓ Install…" (dim, tooltip explains)
+// A tap always does something (F-011): with a prompt in hand it opens
+// the browser's install dialog; without one — never offered, already
+// used, or refused — it opens the browser's own install steps, since
+// phones never show a hover tooltip. The pipeline state stays readable
+// in data-diagnostic for remote debugging.
 // Hidden entirely inside Tauri and installed PWA windows — both are
-// already app contexts, so an installed-state badge is redundant.
+// already app contexts — and once the app is installed (F-012).
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
@@ -41,6 +40,22 @@ type InstallUiState =
   | { kind: 'prompt-ready' }
   | { kind: 'sw-missing'; sw: SwStatus }
   | { kind: 'criteria-not-met'; sw: SwStatus };
+
+export const INSTALL_LABEL = 'Install app';
+export const INSTALL_HELP_TITLE = 'Install SoluTerminal as an app';
+export const INSTALL_STEPS_ANDROID = "Open your browser's menu and tap Install app (it may say Add to Home screen).";
+export const INSTALL_STEPS_FIREFOX = "Open Firefox's menu ⋮ and tap Install (it may say Add to Home screen).";
+export const INSTALL_STEPS_DESKTOP =
+  "Click the install icon at the right end of the address bar, or open the browser's menu and choose Install " +
+  'SoluTerminal (in Edge: Apps → Install this site as an app).';
+export const INSTALL_THEN = 'Then open SoluTerminal from its new icon. It opens full screen, without the browser bar.';
+
+const PROMPT_STASH = '__SOLU_INSTALL_PROMPT__';
+
+function installSteps(): string {
+  if (isFirefox()) return INSTALL_STEPS_FIREFOX;
+  return /Android/i.test(navigator.userAgent) ? INSTALL_STEPS_ANDROID : INSTALL_STEPS_DESKTOP;
+}
 
 function isTauri(): boolean {
   return !!(window as unknown as { __SOLU_TAURI__?: boolean }).__SOLU_TAURI__;
@@ -82,6 +97,7 @@ export function InstallButton() {
   // Stable across renders so we can tell "never fired" vs. "fired and
   // consumed". Shown in the diagnostic tooltip.
   const [promptFiredAt, setPromptFiredAt] = useState<number | null>(null);
+  const [installed, setInstalled] = useState(false);
 
   useEffect(() => {
     if (isTauri()) return;
@@ -114,9 +130,9 @@ export function InstallButton() {
     };
     const onInstalled = () => {
       // User finished installing via any path (our button, the
-      // browser's own menu, etc.). Clear the deferred prompt so the
-      // button disappears for this session.
+      // browser's own menu, etc.): the button disappears for this session.
       setDeferred(null);
+      setInstalled(true);
     };
 
     window.addEventListener('beforeinstallprompt', onBeforeInstall as EventListener);
@@ -165,7 +181,7 @@ export function InstallButton() {
   const ui: InstallUiState = (() => {
     if (isTauri()) return { kind: 'hidden' };
     if (!isMobile) return { kind: 'hidden' };
-    if (isStandalone()) return { kind: 'hidden' };
+    if (isStandalone() || installed) return { kind: 'hidden' };
     if (isIosDevice()) return { kind: 'ios-help' };
     if (deferred) return { kind: 'prompt-ready' };
     if (sw === 'missing' || sw === 'unsupported') return { kind: 'sw-missing', sw };
@@ -174,29 +190,20 @@ export function InstallButton() {
 
   if (ui.kind === 'hidden') return null;
 
-  async function onClick() {
-    if (!deferred) return;
-    try {
-      await deferred.prompt();
-      await deferred.userChoice;
-    } catch {
-      /* prompt() throws if already invoked; swallow and clear */
-    }
+  // A prompt works once: whatever the person chose, the next tap shows the
+  // steps, and a remount must not pick the used one up again.
+  async function openPrompt(): Promise<boolean> {
+    const prompt = deferred;
     setDeferred(null);
-  }
-
-  if (ui.kind === 'prompt-ready') {
-    return (
-      <button
-        type="button"
-        className="install-btn"
-        onClick={onClick}
-        title="Install soluterminal as an app on your device"
-        aria-label="Install app"
-      >
-        ⤓ Install
-      </button>
-    );
+    const w = window as unknown as Record<string, Event | undefined>;
+    if (w[PROMPT_STASH] === prompt) delete w[PROMPT_STASH];
+    if (!prompt) return false;
+    try {
+      await prompt.prompt();
+      return true;
+    } catch {
+      return false; // already used, or the browser refused it
+    }
   }
 
   if (ui.kind === 'ios-help') {
@@ -225,43 +232,38 @@ export function InstallButton() {
     );
   }
 
-  // Diagnostic states: show a dim pill with a detailed tooltip so the
-  // user (and us, debugging over the phone) can see exactly WHERE the
-  // pipeline is stuck. Clicking copies the diagnostic string to the
-  // clipboard so the user can paste it back to us.
   const diag = [
     `state: ${ui.kind}`,
-    `sw: ${ui.sw}`,
+    `sw: ${ui.kind === 'prompt-ready' ? sw : ui.sw}`,
     `display: ${isStandalone() ? 'standalone' : 'browser'}`,
     `beforeinstallprompt: ${promptFiredAt ? 'fired@' + new Date(promptFiredAt).toLocaleTimeString() : 'never'}`,
     `ua: ${typeof navigator !== 'undefined' ? navigator.userAgent : ''}`,
   ].join(' | ');
 
-  const firefox = isFirefox();
-  const label = ui.kind === 'sw-missing'
-    ? '⤓ SW not ready'
-    : firefox ? '⤓ Install via menu' : '⤓ Install…';
-  const tooltip = ui.kind === 'sw-missing'
-    ? `Service worker not registered (${ui.sw}). PWA install requires an active SW — something failed during registration. Tap to copy diagnostic.`
-    : firefox
-      ? `Firefox installs PWAs from its own menu, not via an in-page prompt. Open the URL bar three-dot menu and tap "Install" (or "Add to Home Screen" on older builds). If the menu item isn't shown, clear site data for this origin and reload. Tap to copy diagnostic.`
-      : `Chrome hasn't offered install yet. Common reasons: (1) engagement heuristic — tap around and revisit; (2) site was previously dismissed (~90 day cooldown); (3) already installed at the OS level. Tap to copy diagnostic.`;
-
-  async function copyDiag() {
-    try {
-      await navigator.clipboard?.writeText(diag);
-    } catch { /* silent */ }
-  }
-
   return (
-    <button
-      type="button"
-      className={`install-btn diagnostic ${ui.kind === 'sw-missing' ? 'warn' : 'dim'}`}
-      onClick={copyDiag}
-      title={tooltip + '\n\n' + diag}
-      aria-label={label}
+    <TopbarPopover
+      align="right"
+      trigger={({ open, toggle }) => (
+        <button
+          type="button"
+          className={ui.kind === 'prompt-ready' ? 'install-btn' : 'install-btn diagnostic dim'}
+          onClick={() => {
+            if (open || ui.kind !== 'prompt-ready') { toggle(); return; }
+            // A prompt that won't open falls back to the steps at once.
+            void openPrompt().then((shown) => { if (!shown) toggle(); });
+          }}
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          data-diagnostic={diag}
+        >
+          {INSTALL_LABEL}
+        </button>
+      )}
     >
-      {label}
-    </button>
+      <div className="install-help" role="dialog" aria-label={INSTALL_HELP_TITLE}>
+        <p>{installSteps()}</p>
+        <p>{INSTALL_THEN}</p>
+      </div>
+    </TopbarPopover>
   );
 }

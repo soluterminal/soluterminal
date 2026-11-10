@@ -5,6 +5,7 @@ import { IconHelp } from './ui/icons';
 import { useStore } from '../store';
 import { openInSystemBrowser } from '../tauri-browser';
 import { SITE_HELP_URL } from '../lib/siteLinks';
+import { openFeedback } from '../lib/feedbackReport';
 
 // The top-bar "?" — a small help menu rather than straight into the full
 // shortcut sheet, which is a lot to land on for someone new. The "?" key still
@@ -21,7 +22,7 @@ interface Item {
   hint?: string;
   shortcut?: string;
   quiet?: boolean;
-  run: () => void;
+  run: (event?: Event) => void;
 }
 
 function MenuList({ items, close }: { items: Item[]; close: (refocus?: boolean) => void }) {
@@ -69,9 +70,9 @@ function MenuList({ items, close }: { items: Item[]; close: (refocus?: boolean) 
             tabIndex={-1}
             className={`help-menu-item${it.quiet ? ' is-quiet' : ''}`}
             title={it.hint}
-            onClick={() => {
+            onClick={(e) => {
               close(false);
-              it.run();
+              it.run(e.nativeEvent);
             }}
           >
             <span>{it.label}</span>
@@ -99,7 +100,7 @@ export function HelpMenu({ onOpenGettingStarted, onOpenShortcuts }: Props) {
       id: 'help',
       label: 'Help ↗',
       hint: 'Open the help pages in your browser',
-      run: () => { void openInSystemBrowser(SITE_HELP_URL); },
+      run: (event) => { void openInSystemBrowser(SITE_HELP_URL, event); },
     },
     ...(onOpenShortcuts
       ? [{
@@ -113,7 +114,7 @@ export function HelpMenu({ onOpenGettingStarted, onOpenShortcuts }: Props) {
       id: 'feedback',
       label: 'Send feedback',
       hint: 'Report a problem or share an idea',
-      run: () => useStore.getState().setFeedbackOpen(true),
+      run: () => openFeedback(),
     },
     {
       id: 'bundle',

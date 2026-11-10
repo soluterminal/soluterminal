@@ -33,6 +33,7 @@ vi.mock('./store', () => ({
 }));
 
 import { scheduleClaudeRecheck, CLAUDE_RECHECK_BACKOFF_MS } from './claudeBootstrap';
+import { agentNextStepPending } from './lib/agentNextStep';
 
 function status(over: Partial<{
   claudeChecked: boolean; claudeInstalled: boolean; claudeVersion: string; claudeAuthed: boolean;
@@ -51,6 +52,7 @@ describe('scheduleClaudeRecheck', () => {
     refreshDaemonHealth.mockClear();
     routerMode = false;
     storeActiveBackend = null;
+    window.localStorage.clear();
   });
   afterEach(() => {
     // Supersede any loop the test left running, THEN drop fake timers.
@@ -76,6 +78,19 @@ describe('scheduleClaudeRecheck', () => {
     // Done → no further polling no matter how long we wait.
     await vi.advanceTimersByTimeAsync(20 * 60_000);
     expect(claudeRecheck).toHaveBeenCalledTimes(2);
+    // The lasting start card is armed for this side.
+    expect(agentNextStepPending('local')).toBe(true);
+  });
+
+  it('arms no start card from a sign-in watch or an unfinished install', async () => {
+    claudeRecheck.mockResolvedValue(status({ claudeInstalled: true, claudeAuthed: true }));
+    scheduleClaudeRecheck('login');
+    await vi.advanceTimersByTimeAsync(CLAUDE_RECHECK_BACKOFF_MS[0]);
+    expect(agentNextStepPending('local')).toBe(false);
+    claudeRecheck.mockResolvedValue(status());
+    scheduleClaudeRecheck('install');
+    await vi.advanceTimersByTimeAsync(CLAUDE_RECHECK_BACKOFF_MS[0]);
+    expect(agentNextStepPending('local')).toBe(false);
   });
 
   it('chains install → login watch when the install lands unauthenticated', async () => {
@@ -152,5 +167,8 @@ describe('scheduleClaudeRecheck', () => {
     await vi.advanceTimersByTimeAsync(CLAUDE_RECHECK_BACKOFF_MS[0]);
     expect(claudeRecheck).toHaveBeenLastCalledWith('wsl');
     expect(claudeRecheck).toHaveBeenCalledTimes(2);
+    // The start card belongs to the side that was installed.
+    expect(agentNextStepPending('wsl')).toBe(true);
+    expect(agentNextStepPending('win')).toBe(false);
   });
 });

@@ -136,12 +136,41 @@ export function sendEmbedReady(version?: string): void {
   send('ready', { protocolVersion: 3, windowIdentity: active.windowId, ...(version ? { version } : {}) });
 }
 
+// The host opens open-url in the person's signed-in browser as their own
+// click, so only a person's gesture may send one. A caller that has the event
+// passes it and must have a trusted click (xterm activates links on mouseup),
+// or Enter or Space on the control. Callers without an event fall back to
+// transient user activation, which any recent keypress in the frame also
+// grants, so pass the event wherever there is one.
+function personGesture(event?: Event): boolean {
+  if (event) {
+    if (!event.isTrusted) return false;
+    if (event.type === 'click') return true;
+    if (event.type === 'mouseup') return (event as MouseEvent).button === 0;
+    return event.type === 'keydown' && ['Enter', ' '].includes((event as KeyboardEvent).key);
+  }
+  return navigator.userActivation?.isActive === true;
+}
+
+export const EMBED_OPEN_REFUSED = 'To open this in your browser, click Open in browser or the link itself.';
+
+// The store imports this module, so load it only when a refusal needs a toast.
+function refuseOpen(): void {
+  void import('./store').then(({ useStore }) => {
+    useStore.getState().toast(EMBED_OPEN_REFUSED, { kind: 'warn' });
+  }).catch(() => { /* no toast surface */ });
+}
+
 // Send browser URLs as clicked; userinfo is never needed for an external link.
-export function openEmbedUrl(raw: string): boolean {
+export function openEmbedUrl(raw: string, triggerEvent?: Event): boolean {
   if (!isEmbedded()) return false;
   try {
     const url = new URL(raw, window.location.href);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return false;
+    if (!personGesture(triggerEvent)) {
+      refuseOpen();
+      return false;
+    }
     send('open-url', { url: url.href });
     return true;
   } catch { return false; }
@@ -216,7 +245,7 @@ export function installEmbedBridge(onTheme: (theme: Theme) => void): () => void 
     const anchor = target instanceof Element ? target.closest('a[target="_blank"]') : null;
     if (!(anchor instanceof HTMLAnchorElement) || !/^https?:$/.test(anchor.protocol)) return;
     event.preventDefault();
-    openEmbedUrl(anchor.href);
+    openEmbedUrl(anchor.href, event);
   };
   window.addEventListener('keydown', onKeydown, true);
   window.addEventListener('message', onMessage);

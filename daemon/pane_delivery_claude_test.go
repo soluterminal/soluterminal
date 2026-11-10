@@ -487,7 +487,19 @@ func TestClaudeSwallowedEnterIsPressedOnceMore(t *testing.T) {
 	}
 }
 
+// postUnsentAction acts as a current client would: Send carries the hash of
+// the receipt's text it showed.
 func postUnsentAction(t *testing.T, p *Pane, id, action string, who ...callerKind) *httptest.ResponseRecorder {
+	t.Helper()
+	body := map[string]string{"id": id, "action": action}
+	if msg := p.Snapshot().UnsentMessage; msg != nil && msg.ID == id && action == "send" {
+		body["textSha256"] = unsentTextSha256(msg.Text)
+	}
+	b, _ := json.Marshal(body)
+	return postUnsentBody(t, p, string(b), who...)
+}
+
+func postUnsentBody(t *testing.T, p *Pane, body string, who ...callerKind) *httptest.ResponseRecorder {
 	t.Helper()
 	kind := callerHuman
 	if len(who) > 0 {
@@ -496,7 +508,7 @@ func postUnsentAction(t *testing.T, p *Pane, id, action string, who ...callerKin
 	prev := identifyCallerHook
 	identifyCallerHook = func(*http.Request) callerIdentity { return callerIdentity{Kind: kind} }
 	defer func() { identifyCallerHook = prev }()
-	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"id":"`+id+`","action":"`+action+`"}`))
+	req := httptest.NewRequest("POST", "/", strings.NewReader(body))
 	req.SetPathValue("id", p.ID)
 	rec := httptest.NewRecorder()
 	(&apiServer{mgr: testManagerWithPane(p)}).actOnUnsentMessage(rec, req)

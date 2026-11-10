@@ -8,6 +8,7 @@ import { chipStateFor, isDesktopShell, usePhoneAccessStatus } from '../../cloudP
 import { getAutostartStatus, setAutostart, type AutostartStatus } from '../../tauri-browser';
 import { SettingsCheck, SettingsGroup, SettingsRow } from './SettingsRow';
 import type { UpdateAutoApplyMode } from '../../types';
+import { readDisplayFixTelemetry } from '../../lib/displayFixTelemetry';
 
 // Settings › Devices & updates. Account, voice and the privacy and security
 // groups moved to their own tabs (AccountTab, NotificationsVoiceTab,
@@ -191,6 +192,27 @@ export function DevicesTab() {
         </SettingsRow>
       )}
     </SettingsGroup>
+    <DisplayFixCounts />
     </>
+  );
+}
+
+// Diagnostics: how often this device used the manual display fixes since panes
+// started healing themselves (ST-82). Read from this browser only; the counts
+// never leave the machine. Read once per open — Settings is modal, so nothing
+// can press a fix while it's showing.
+function DisplayFixCounts() {
+  const [counts] = useState(readDisplayFixTelemetry);
+  return (
+    <SettingsGroup title="Diagnostics">
+      <SettingsRow
+        label="Display fixes used"
+        hint={`Counted on this device only, since ${new Date(counts.firstAt).toLocaleDateString()}. Nothing is sent anywhere.`}
+      >
+        <span className="settings-status">
+          Alt+R {counts.altR} · Command palette {counts.palette} · Fix display {counts.fixDisplay}
+        </span>
+      </SettingsRow>
+    </SettingsGroup>
   );
 }

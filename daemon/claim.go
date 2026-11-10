@@ -98,6 +98,35 @@ func SaveClaim(dataDir string, c *Claim) error {
 	return writeFileAtomicSynced(claimFilePath(dataDir), b, 0o600)
 }
 
+// staleClaimTempAge leaves alone a temp file a concurrent `solud --claim` may
+// still be writing; SaveClaim renames its own within milliseconds.
+const staleClaimTempAge = time.Minute
+
+// removeStaleClaimTemps deletes the .claim.json.tmp-* files a SaveClaim cut
+// off by a power loss leaves behind. Each may hold a machine token, and no
+// later save reuses its random name, so nothing else ever removes it. Called
+// at start-up once this daemon owns dataDir. Returns how many it removed.
+func removeStaleClaimTemps(dataDir string, now time.Time) int {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), claimTempPrefix) || !e.Type().IsRegular() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) < staleClaimTempAge {
+			continue
+		}
+		if os.Remove(filepath.Join(dataDir, e.Name())) == nil {
+			removed++
+		}
+	}
+	return removed
+}
+
 // claimStartResult is the parsed POST /api/claim/start response: a
 // human-facing code, the daemon-only secret used to poll for acceptance,
 // and the TTL in seconds.
@@ -134,6 +163,8 @@ func startClaim(ctx context.Context, relayURL string) (claimStartResult, error) 
 	if err := json.Unmarshal(startResp, &out); err != nil {
 		return out, fmt.Errorf("claim start: parse: %w", err)
 	}
+	// Remember the human-facing code for feedback redaction, never the secret.
+	feedbackPairingCodes.rememberClaim(out.Code, out.TTLSec, time.Now())
 	return out, nil
 }
 

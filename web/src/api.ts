@@ -2898,8 +2898,10 @@ export interface FeedbackReport {
   number: number;
   title: string;
   filedAt: string;
-  status: 'new' | 'triaged' | 'needs-info' | 'in-progress' | 'fix-drafted' | 'fixed' | 'unknown';
-  ask?: string; // the triage bot's specific request, present when needs-info
+  status: 'received' | 'triaged' | 'needs-info' | 'known' | 'answered' | 'fix-merged' | 'fixed' | 'not-planned' | 'cant-reproduce' | 'closed' | 'unknown';
+  message: string;
+  fixedIn?: string;
+  ask?: string; // one exact approved template selected by ask:* label
 }
 
 // Reporter loop: one feedback-pipeline EVENT for the in-app inbox (cloud
@@ -2908,7 +2910,8 @@ export interface FeedbackReport {
 export interface FeedbackEvent {
   number: number;
   title: string;
-  event: 'needs-info' | 'fixed';
+  event: 'received' | 'triaged' | 'needs-info' | 'known' | 'answered' | 'fixed' | 'not-planned' | 'cant-reproduce' | 'closed';
+  fixedIn?: string;
   message: string;
   at: string;
   readAt?: string;
@@ -2921,6 +2924,7 @@ export interface FeedbackThreadEvent {
   at: string;
 }
 export interface FeedbackThread {
+  state?: 'open' | 'closed' | 'unknown'; // absent on old servers: replies stay hidden
   number: number;
   title: string;
   filedAt: string;
@@ -2930,34 +2934,59 @@ export interface FeedbackThread {
 // In-app feedback (bug / idea / question). The client sends only intent; the
 // daemon gathers + redacts context and forwards to the cloud, which files a
 // GitHub issue. See daemon/feedback.go + cloud/feedback.go.
-export interface FeedbackAttachment {
-  name: string;
-  mime: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
-  // RAW base64 (no "data:...;base64," prefix); the daemon measures + forwards it.
-  data: string;
-}
-
 export interface FeedbackReq {
   type: 'bug' | 'idea' | 'question';
+  /** Empty: the daemon uses the first line of the body. */
   title: string;
   body: string;
   paneId?: string;
+  /** Send the pane's recent text. */
   includeSnapshot?: boolean;
+  /** Send recent app logs. */
+  includeLogs?: boolean;
+  /** The previewed (and possibly trimmed) text; sent instead of a new capture. */
+  snapshot?: string;
+  logs?: string;
   clientVersion?: string;
-  attachments?: FeedbackAttachment[];
 }
 
 export interface FeedbackResult {
   ok: boolean;
   number: number;
   url: string;
-  // How many attachments the daemon/cloud actually committed vs skipped
-  // (bad MIME / oversize / over-count / commit failure are lenient — the
-  // text report still files). Optional so older responses still parse.
-  attachmentsStored?: number;
-  attachmentsFailed?: number;
   // The cloud kept the report and files it once GitHub accepts it.
   queued?: boolean;
+}
+
+/** The "App and system details" a report carries (daemon feedbackSubmitContext). */
+export interface FeedbackContext {
+  appVersion: string;
+  daemonVersion: string;
+  clientVersion: string;
+  shellVersion: string;
+  shellPlatform: string;
+  backendID: string;
+  platform: string;
+  os: string;
+  arch: string;
+  machineId: string;
+  paneId: string;
+  captureKind: string;
+  snapshotRequested?: boolean;
+  snapshotCaptured?: boolean;
+  logsRequested?: boolean;
+  logsCaptured?: boolean;
+}
+
+/** What a submit with the same choices would send, redacted on this computer
+ *  (POST /api/feedback/preview). Needs no account, so Copy report and Email it
+ *  use it too. */
+export interface FeedbackPreview {
+  title: string;
+  body: string;
+  snapshot: string;
+  logs: string;
+  context: FeedbackContext;
 }
 
 // ── Agents cockpit (operator-only) ───────────────────────────────────────────
@@ -4012,6 +4041,12 @@ const coreApi = {
     if (!res.ok) throw new Error(`feedback status: ${res.status}`);
     return res.json();
   },
+  feedbackPreview: (body: Omit<FeedbackReq, 'type'>) =>
+    apiFetch('/api/feedback/preview', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(j<FeedbackPreview>),
   submitFeedback: (body: FeedbackReq) =>
     apiFetch('/api/feedback', {
       method: 'POST',
@@ -4101,14 +4136,6 @@ const coreApi = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ cols, rows }),
     }).then(j<void>),
-
-  // Force a clean repaint on the pane's running TUI. Same op as the
-  // WS {type:"redraw"} message — fires the daemon's full screen
-  // clear + size-bump dance. Called by loadWorkspace after mount on
-  // every claude/codex pane to scrub back-buffer vs emulator
-  // divergence picked up while streaming during the workspace switch.
-  redrawPane: (id: string) =>
-    apiFetch(`/api/panes/${id}/redraw`, { method: 'POST' }).then(j<void>),
 
   renamePane: (id: string, title: string, scope?: RoutingScope) =>
     workflowFetch(scope, `/api/panes/${id}/rename`, {
@@ -4571,7 +4598,7 @@ const coreApi = {
   // PTY sizing is now ownership-based (see Pane.ownerSubID in
   // daemon/pane.go). No per-request flag needed — first-to-connect
   // auto-claims, later clients send {type:"claim"} to take over.
-  wsUrl: (id: string, cols: number, rows: number, modeOrOpts?: 'grid' | { mode?: 'grid'; skipReplay?: boolean; since?: number; epoch?: number; mobile?: boolean; scope?: RoutingScope; visible?: boolean; retirementViewerId?: string; termCols?: number; termRows?: number }) => {
+  wsUrl: (id: string, cols: number, rows: number, modeOrOpts?: 'grid' | { mode?: 'grid'; skipReplay?: boolean; since?: number; epoch?: number; mobile?: boolean; scope?: RoutingScope; visible?: boolean; retirementViewerId?: string; termCols?: number; termRows?: number; replayWidth?: boolean }) => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const mode = typeof modeOrOpts === 'string' ? modeOrOpts : modeOrOpts?.mode;
     const skipReplay = typeof modeOrOpts === 'object' ? !!modeOrOpts.skipReplay : false;
@@ -4590,6 +4617,9 @@ const coreApi = {
     // the daemon lines its reattach repaint up with it (no duplicated tail).
     if (typeof modeOrOpts === 'object' && modeOrOpts.termCols && modeOrOpts.termRows) {
       url += `&term_cols=${modeOrOpts.termCols}&term_rows=${modeOrOpts.termRows}`;
+      // This client writes a full replay at the width replay-start reports,
+      // so the daemon lines its repaint up at that width, not term_cols.
+      if (modeOrOpts.replayWidth) url += `&replay_width=1`;
     }
     if (mode === 'grid') url += `&mode=grid`;
     if (skipReplay) url += `&skip_replay=1`;
@@ -5176,11 +5206,13 @@ const coreApi = {
   dismissAsk: (askId: string) =>
     apiFetch(`/api/asks/${encodeURIComponent(askId)}/dismiss`, { method: 'POST' }).then(j<{ ok: boolean }>),
 
-  actOnUnsentMessage: (id: string, messageId: string, action: 'send' | 'clear' | 'keep') =>
+  /** textSha256: Send of a message the pane was never given carries the hash
+   *  of the text the person was shown (lib/textSha256.ts). */
+  actOnUnsentMessage: (id: string, messageId: string, action: 'send' | 'clear' | 'keep', textSha256?: string) =>
     apiFetch(`/api/panes/${id}/unsent-message`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: messageId, action }),
+      body: JSON.stringify(textSha256 ? { id: messageId, action, textSha256 } : { id: messageId, action }),
     }).then(j<{ outcome: 'submitted' | 'cleared' | 'partly_cleared' | 'kept' | 'left_in_composer' | 'sent_unconfirmed' | 'queued' }>),
 
   submitPaneMessage: (id: string, text: string) =>

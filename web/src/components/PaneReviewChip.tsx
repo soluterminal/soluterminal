@@ -23,7 +23,9 @@ export function reviewChip(r: PaneReview): { label: string; tone: 'ok' | 'warn' 
   switch (r.verdict) {
     case 'approve': return { label: '✓ Reviewed', tone: 'ok' };
     case 'request-changes': return { label: `${r.mustFix || 1} to fix`, tone: 'warn' };
-    case 'comment': return { label: 'Needs your decision', tone: 'warn' };
+    // On hold: the reviewer asked questions instead of approving or listing
+    // fixes. Named for what it is, so it isn't read as a pane prompt.
+    case 'comment': return { label: 'Review: questions', tone: 'warn' };
     default: return { label: 'Review failed', tone: 'muted' };
   }
 }
@@ -35,7 +37,7 @@ export function reviewSummary(r: PaneReview): string {
   switch (r.verdict) {
     case 'approve': return `${who} reviewed${whose}: approved`;
     case 'request-changes': return `${who} reviewed${whose}: ${r.mustFix} to fix`;
-    case 'comment': return `${who} reviewed${whose}: needs your decision`;
+    case 'comment': return `${who} reviewed${whose}: has questions`;
     default: return 'The review could not run';
   }
 }

@@ -1,6 +1,8 @@
 // Public website links shown inside the app. Kept in one place so the
 // privacy page and contact address match the site (website/site.config.json).
 export const SITE_PRIVACY_URL = 'https://soluterminal.com/privacy/';
+// The privacy page's paragraph on feedback, linked from the feedback form.
+export const SITE_PRIVACY_FEEDBACK_URL = 'https://soluterminal.com/privacy/#feedback';
 // The help pages, opened from the top-bar "?" menu.
 export const SITE_HELP_URL = 'https://soluterminal.com/help/';
 // The recovery steps for a person who lost every approved browser or app.

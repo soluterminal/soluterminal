@@ -38,6 +38,27 @@ const STILL_APPROVED =
 const CODES_DIFFER =
   "The codes don't match, so nothing was changed: someone may be intercepting the connection. On the computer, " +
   'remove this browser in Settings → Privacy & security → Remote devices, and don\'t approve it there.';
+// The computer keeps a request whose code was shown and refuses another for
+// the same key (daemon errDevicePendingKept). The code covers this browser's
+// one-time nonce, which a reload loses, so it can't be shown again; the
+// computer's own copy of the code is never shown, since it comes through the
+// relay and comparing it with itself would prove nothing.
+export const REQUEST_WAITING =
+  'A request from this browser is already waiting. Remove it in Settings → Privacy & security → Remote ' +
+  "devices, then ask again. If you've already approved another device, remove it from that device.";
+
+function requestWaiting(e: unknown): boolean {
+  if (!(e instanceof ApiError) || e.status !== 409) return false;
+  const body = e.body as { error?: unknown } | undefined;
+  return body?.error === 'request_waiting';
+}
+
+// The server's sentence when it sent one, never the raw response body.
+function errorText(e: unknown): string {
+  const body = e instanceof ApiError ? (e.body as { message?: unknown } | undefined) : undefined;
+  if (typeof body?.message === 'string') return body.message;
+  return e instanceof Error ? e.message : String(e);
+}
 
 function browserName(): string {
   const ua = navigator.userAgent;
@@ -188,7 +209,7 @@ export function DeviceApprovalPrompt() {
     } catch (e) {
       if (current !== generation.current) return;
       setPhase('error');
-      setError(String(e));
+      setError(requestWaiting(e) ? REQUEST_WAITING : `Couldn't ask for approval: ${errorText(e)}`);
     }
   };
   const compareAgain = () => void request(true);
@@ -216,7 +237,7 @@ export function DeviceApprovalPrompt() {
           showing the same code:
         </div>
         <div style={{ marginTop: 12, fontFamily: 'var(--font-mono, monospace)', fontSize: 18, letterSpacing: 1 }}>
-          {code || (phase === 'ask' ? 'Shown after you ask' : '…')}
+          {code || (phase === 'ask' ? 'Shown after you ask' : phase === 'error' ? '' : '…')}
           {code && <span style={{ marginLeft: 8, fontSize: 12 }}>V{codeVersion}</span>}
         </div>
         {waiting && (
@@ -229,16 +250,16 @@ export function DeviceApprovalPrompt() {
           </div>
         )}
         {phase === 'identity-changed' && (
-          <div className="settings-error" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>{IDENTITY_CHANGED}</div>
+          <div className="settings-error" role="alert" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>{IDENTITY_CHANGED}</div>
         )}
         {phase === 'still-approved' && (
-          <div className="settings-error" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>{STILL_APPROVED}</div>
+          <div className="settings-error" role="alert" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>{STILL_APPROVED}</div>
         )}
         {phase === 'codes-differ' && (
           <div className="settings-error" role="alert" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>{CODES_DIFFER}</div>
         )}
         {phase === 'error' && (
-          <div className="settings-error" style={{ marginTop: 10, fontSize: 12 }}>Couldn't ask for approval: {error}</div>
+          <div className="settings-error" role="alert" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>{error}</div>
         )}
         <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8, marginTop: 14 }}>
           <button type="button" onClick={close} style={{ fontSize: 12, padding: '4px 12px' }}>

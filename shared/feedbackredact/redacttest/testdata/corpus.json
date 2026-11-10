@@ -1,0 +1,592 @@
+[
+  {
+    "name": "safe versions and paths",
+    "input": "SoluTerminal 0.0.1241 linux amd64 README.md web/src/App.tsx:42 main.main() HTTP 200",
+    "want": "SoluTerminal 0.0.1241 linux amd64 README.md web/src/App.tsx:42 main.main() HTTP 200"
+  },
+  {
+    "name": "safe ordinary text",
+    "input": "The app froze when I opened the terminal. Please keep my draft.",
+    "want": "The app froze when I opened the terminal. Please keep my draft."
+  },
+  {
+    "name": "provider sk-ant-",
+    "input": "sk-ant-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider sk-proj-",
+    "input": "sk-proj-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider sk-",
+    "input": "sk-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider ghp_",
+    "input": "ghp_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider gho_",
+    "input": "gho_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider ghu_",
+    "input": "ghu_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider ghs_",
+    "input": "ghs_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider ghr_",
+    "input": "ghr_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider github_pat_",
+    "input": "github_pat_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider xoxb-",
+    "input": "xoxb-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider xoxa-",
+    "input": "xoxa-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider xoxp-",
+    "input": "xoxp-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider xoxr-",
+    "input": "xoxr-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider xoxs-",
+    "input": "xoxs-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider xapp-",
+    "input": "xapp-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider xoxe-",
+    "input": "xoxe-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider sk_live_",
+    "input": "sk_live_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider rk_live_",
+    "input": "rk_live_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider npm_",
+    "input": "npm_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider glpat-",
+    "input": "glpat-{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "provider hf_",
+    "input": "hf_{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "google",
+    "input": "AIza{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "aws",
+    "input": "AKIA{{fake16upper}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "telegram",
+    "input": "123456789:{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "discord",
+    "input": "{{fake24}}.{{fake6}}.{{fake27}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "discord mfa",
+    "input": "mfa.{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "jwt",
+    "input": "eyJhbGciOiJub25lIn0.eyJleHAiOjF9.c2ln",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "opaque",
+    "input": "{{fake35}}",
+    "want": "[redacted: token]"
+  },
+  {
+    "name": "bearer short",
+    "input": "Bearer fake-short",
+    "want": "Bearer [redacted: token]"
+  },
+  {
+    "name": "password",
+    "input": "DB_PASSWORD=fake-short",
+    "want": "DB_PASSWORD=[redacted: token]"
+  },
+  {
+    "name": "quoted spaces",
+    "input": "password=\"fake short value\"",
+    "want": "password=\"[redacted: token]\""
+  },
+  {
+    "name": "env key",
+    "input": "SIGNING_KEY=fake/short+value",
+    "want": "SIGNING_KEY=[redacted: token]"
+  },
+  {
+    "name": "json",
+    "input": "{\"access_token\":\"fake-short\",\"password\":\"fake short\",\"account_id\":\"fake-id\",\"ok\":true}",
+    "want": "{\"access_token\":\"[redacted: token]\",\"password\":\"[redacted: token]\",\"account_id\":\"[redacted: token]\",\"ok\":true}"
+  },
+  {
+    "name": "url credentials",
+    "input": "https://fake-user:fake-secret@localhost/path",
+    "want": "https://[redacted: token]/path"
+  },
+  {
+    "name": "query token",
+    "input": "https://example.invalid/?token=fake-short&safe=yes",
+    "want": "https://example.invalid/?token=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query access_token",
+    "input": "https://example.invalid/?access_token=fake-short&safe=yes",
+    "want": "https://example.invalid/?access_token=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query sig",
+    "input": "https://example.invalid/?sig=fake-short&safe=yes",
+    "want": "https://example.invalid/?sig=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query X-Amz-Signature",
+    "input": "https://example.invalid/?X-Amz-Signature=fake-short&safe=yes",
+    "want": "https://example.invalid/?X-Amz-Signature=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query X-Goog-Signature",
+    "input": "https://example.invalid/?X-Goog-Signature=fake-short&safe=yes",
+    "want": "https://example.invalid/?X-Goog-Signature=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query code",
+    "input": "https://example.invalid/?code=fake-short&safe=yes",
+    "want": "https://example.invalid/?code=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query state",
+    "input": "https://example.invalid/?state=fake-short&safe=yes",
+    "want": "https://example.invalid/?state=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query refresh_token",
+    "input": "https://example.invalid/?refresh_token=fake-short&safe=yes",
+    "want": "https://example.invalid/?refresh_token=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query client_secret",
+    "input": "https://example.invalid/?client_secret=fake-short&safe=yes",
+    "want": "https://example.invalid/?client_secret=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query X-Amz-Credential",
+    "input": "https://example.invalid/?X-Amz-Credential=fake-short&safe=yes",
+    "want": "https://example.invalid/?X-Amz-Credential=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "query X-Amz-Security-Token",
+    "input": "https://example.invalid/?X-Amz-Security-Token=fake-short&safe=yes",
+    "want": "https://example.invalid/?X-Amz-Security-Token=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "curl headers",
+    "input": "curl -H 'Authorization: Basic fake-short' -H 'Cookie: sid=fake; other=fake' https://example.invalid",
+    "want": "curl -H 'Authorization: [redacted: header]' -H 'Cookie: [redacted: header]' https://example.invalid"
+  },
+  {
+    "name": "authorization line",
+    "input": "Authorization: Bearer fake-short\nAccept: text/plain",
+    "want": "Authorization: [redacted: header]\nAccept: text/plain"
+  },
+  {
+    "name": "cookie",
+    "input": "Cookie: sid=fake; other=fake",
+    "want": "Cookie: [redacted: header]"
+  },
+  {
+    "name": "password prompt",
+    "input": "Password:\nfake-short\nnext",
+    "want": "Password:\n[redacted: password]\nnext"
+  },
+  {
+    "name": "passphrase prompt",
+    "input": "Enter passphrase for key '/tmp/fake':\nfake short\nnext",
+    "want": "Enter passphrase for key '/tmp/fake':\n[redacted: password]\nnext"
+  },
+  {
+    "name": "private key RSA",
+    "input": "{{pem_begin_RSA}}\nTHIS IS A FAKE KEY\n{{pem_end_RSA}}",
+    "want": "[redacted: private key]"
+  },
+  {
+    "name": "private key EC",
+    "input": "{{pem_begin_EC}}\nTHIS IS A FAKE KEY\n{{pem_end_EC}}",
+    "want": "[redacted: private key]"
+  },
+  {
+    "name": "private key OPENSSH",
+    "input": "{{pem_begin_OPENSSH}}\nTHIS IS A FAKE KEY\n{{pem_end_OPENSSH}}",
+    "want": "[redacted: private key]"
+  },
+  {
+    "name": "private key ",
+    "input": "{{pem_begin_NONE}}\nTHIS IS A FAKE KEY\n{{pem_end_NONE}}",
+    "want": "[redacted: private key]"
+  },
+  {
+    "name": "truncated private key",
+    "input": "{{pem_begin_OPENSSH}}\nFAKE ONLY",
+    "want": "[redacted: private key]"
+  },
+  {
+    "name": "email",
+    "input": "write fake.person+test@example.invalid please",
+    "want": "write [redacted: email] please"
+  },
+  {
+    "name": "prompt",
+    "input": "fakeuser@fakehost:~/project$ pwd",
+    "want": "[redacted: host]:~/project$ pwd"
+  },
+  {
+    "name": "ip 192.0.2.1",
+    "input": "peer=192.0.2.1",
+    "want": "peer=[redacted: ip]"
+  },
+  {
+    "name": "ip 127.0.0.1",
+    "input": "peer=127.0.0.1",
+    "want": "peer=[redacted: ip]"
+  },
+  {
+    "name": "ip 2001:db8::1",
+    "input": "peer=2001:db8::1",
+    "want": "peer=[redacted: ip]"
+  },
+  {
+    "name": "ip ::1",
+    "input": "peer=::1",
+    "want": "peer=[redacted: ip]"
+  },
+  {
+    "name": "ip ::",
+    "input": "peer=::",
+    "want": "peer=[redacted: ip]"
+  },
+  {
+    "name": "ip ::ffff:192.0.2.1",
+    "input": "peer=::ffff:192.0.2.1",
+    "want": "peer=[redacted: ip]"
+  },
+  {
+    "name": "ip fe80::1%eth0",
+    "input": "peer=fe80::1%eth0",
+    "want": "peer=[redacted: ip]"
+  },
+  {
+    "name": "ip port",
+    "input": "http://192.0.2.1:8080/path",
+    "want": "http://[redacted: ip]:8080/path"
+  },
+  {
+    "name": "bracket ipv6",
+    "input": "http://[2001:db8::1]:8080/path",
+    "want": "http://[[redacted: ip]]:8080/path"
+  },
+  {
+    "name": "ip sentence",
+    "input": "Address 192.0.2.1.",
+    "want": "Address [redacted: ip]."
+  },
+  {
+    "name": "home /home/fakeuser",
+    "input": "/home/fakeuser/project/file.go",
+    "want": "~/project/file.go"
+  },
+  {
+    "name": "home /Users/FakeUser",
+    "input": "/Users/FakeUser/project/file.go",
+    "want": "~/project/file.go"
+  },
+  {
+    "name": "home /mnt/c/Users/FakeUser",
+    "input": "/mnt/c/Users/FakeUser/project/file.go",
+    "want": "~/project/file.go"
+  },
+  {
+    "name": "home C:/Users/FakeUser",
+    "input": "C:/Users/FakeUser/project/file.go",
+    "want": "~/project/file.go"
+  },
+  {
+    "name": "windows home",
+    "input": "C:\\Users\\FakeUser\\project\\file.go",
+    "want": "~\\project\\file.go"
+  },
+  {
+    "name": "wsl unc",
+    "input": "\\\\wsl.localhost\\Ubuntu\\home\\fakeuser\\file.go",
+    "want": "~\\file.go"
+  },
+  {
+    "name": "wsl legacy unc",
+    "input": "\\\\wsl$\\Ubuntu\\home\\fakeuser\\file.go",
+    "want": "~\\file.go"
+  },
+  {
+    "name": "root path",
+    "input": "/root/project/file.go",
+    "want": "~/project/file.go"
+  },
+  {
+    "name": "bare root",
+    "input": "/root",
+    "want": "~"
+  },
+  {
+    "name": "root boundary",
+    "input": "/rooted/project",
+    "want": "/rooted/project"
+  },
+  {
+    "name": "code pairing code",
+    "input": "pairing code=F2",
+    "want": "pairing code=[redacted: code]"
+  },
+  {
+    "name": "code device code",
+    "input": "device code=F2",
+    "want": "device code=[redacted: code]"
+  },
+  {
+    "name": "code verification code",
+    "input": "verification code=F2",
+    "want": "verification code=[redacted: code]"
+  },
+  {
+    "name": "code pairing_code",
+    "input": "pairing_code=F2",
+    "want": "pairing_code=[redacted: code]"
+  },
+  {
+    "name": "code user_code",
+    "input": "user_code=F2",
+    "want": "user_code=[redacted: code]"
+  },
+  {
+    "name": "code claim_code",
+    "input": "claim_code=F2",
+    "want": "claim_code=[redacted: code]"
+  },
+  {
+    "name": "text pairing",
+    "input": "Pairing code is FAKEAB",
+    "want": "Pairing code is [redacted: code]"
+  },
+  {
+    "name": "json device",
+    "input": "{\"device_code\":\"f\",\"safe\":true}",
+    "want": "{\"device_code\":\"[redacted: code]\",\"safe\":true}"
+  },
+  {
+    "name": "bare comparison",
+    "input": "ABCD-EF23-GH45-JK67",
+    "want": "[redacted: code]"
+  },
+  {
+    "name": "legacy markers",
+    "input": "password=[REDACTED] Cookie: [REDACTED]",
+    "want": "password=[REDACTED] Cookie: [REDACTED]"
+  },
+  {
+    "name": "new markers",
+    "input": "password=[redacted: token] Authorization: [redacted: header]",
+    "want": "password=[redacted: token] Authorization: [redacted: header]"
+  },
+  {
+    "name": "untrusted marker text",
+    "input": "[redacted: fake@example.invalid]",
+    "want": "[redacted: [redacted: email]]"
+  },
+  {
+    "name": "multiline secrets",
+    "input": "token=fake\npassword=fake\nnext",
+    "want": "token=[redacted: token]\npassword=[redacted: token]\nnext"
+  },
+  {
+    "name": "bare digit claim",
+    "input": "FAKE23",
+    "want": "[redacted: code]"
+  },
+  {
+    "name": "all-letter safe word",
+    "input": "README CHANGE",
+    "want": "README CHANGE"
+  },
+  {
+    "name": "short unrelated number",
+    "input": "HTTP 200 at line 123456",
+    "want": "HTTP 200 at line 123456"
+  },
+  {
+    "name": "private key with existing marker",
+    "input": "{{pem_begin_OPENSSH}}\nFAKE[REDACTED]SHORT\n{{pem_end_OPENSSH}}",
+    "want": "[redacted: private key][REDACTED][redacted: private key]"
+  },
+  {
+    "name": "header with existing marker",
+    "input": "Cookie: [redacted: token]; second=fake-short",
+    "want": "Cookie: [redacted: token][redacted: header]"
+  },
+  {
+    "name": "safe all-letter control words",
+    "input": "README ACCEPT STATUS CHANGE 0.0.1241 README.md web/src/App.tsx",
+    "want": "README ACCEPT STATUS CHANGE 0.0.1241 README.md web/src/App.tsx"
+  },
+  {
+    "name": "labelled claim plain text",
+    "input": "Claim code is FAKEAB",
+    "want": "Claim code is [redacted: code]"
+  },
+  {
+    "name": "labelled pairing URL",
+    "input": "https://example.invalid/?pairing_code=F2&safe=yes",
+    "want": "https://example.invalid/?pairing_code=[redacted: code]&safe=yes"
+  },
+  {
+    "name": "labelled claim JSON",
+    "input": "{\"claim_code\":\"F\"}",
+    "want": "{\"claim_code\":\"[redacted: code]\"}"
+  },
+  {
+    "name": "labelled device URL",
+    "input": "https://example.invalid/?device_code=D2&safe=yes",
+    "want": "https://example.invalid/?device_code=[redacted: code]&safe=yes"
+  },
+  {
+    "name": "unquoted password punctuation &",
+    "input": "DB_PASSWORD=obviously-fake&tail",
+    "want": "DB_PASSWORD=[redacted: token]"
+  },
+  {
+    "name": "unquoted password punctuation ,",
+    "input": "DB_PASSWORD=obviously-fake,tail",
+    "want": "DB_PASSWORD=[redacted: token]"
+  },
+  {
+    "name": "unquoted password punctuation ;",
+    "input": "DB_PASSWORD=obviously-fake;tail",
+    "want": "DB_PASSWORD=[redacted: token]"
+  },
+  {
+    "name": "unquoted password punctuation {",
+    "input": "DB_PASSWORD=obviously-fake{tail",
+    "want": "DB_PASSWORD=[redacted: token]"
+  },
+  {
+    "name": "unquoted password punctuation }",
+    "input": "DB_PASSWORD=obviously-fake}tail",
+    "want": "DB_PASSWORD=[redacted: token]"
+  },
+  {
+    "name": "unquoted password punctuation <",
+    "input": "DB_PASSWORD=obviously-fake<tail",
+    "want": "DB_PASSWORD=[redacted: token]"
+  },
+  {
+    "name": "unquoted password punctuation >",
+    "input": "DB_PASSWORD=obviously-fake>tail",
+    "want": "DB_PASSWORD=[redacted: token]"
+  },
+  {
+    "name": "quoted JSON punctuation",
+    "input": "{\"password\":\"fake&tail;more\",\"safe\":true}",
+    "want": "{\"password\":\"[redacted: token]\",\"safe\":true}"
+  },
+  {
+    "name": "prefixed URL secret",
+    "input": "https://example.invalid/?DB_PASSWORD=fake;tail&safe=yes",
+    "want": "https://example.invalid/?DB_PASSWORD=[redacted: token]&safe=yes"
+  },
+  {
+    "name": "tcp IPv4 error",
+    "input": "dial tcp 192.0.2.1:443: connect",
+    "want": "dial tcp [redacted: ip]:443: connect"
+  },
+  {
+    "name": "colon IPv4 label",
+    "input": "IP:192.0.2.1",
+    "want": "IP:[redacted: ip]"
+  },
+  {
+    "name": "IPv4 arrow",
+    "input": "a:51234->192.0.2.1",
+    "want": "a:51234->[redacted: ip]"
+  },
+  {
+    "name": "colon IPv6 label",
+    "input": "IP:2001:db8::1",
+    "want": "IP:[redacted: ip]"
+  },
+  {
+    "name": "IPv6 arrow",
+    "input": "a:51234->2001:db8::1",
+    "want": "a:51234->[redacted: ip]"
+  },
+  {
+    "name": "IPv6 punctuation",
+    "input": "Address 2001:db8::1:",
+    "want": "Address [redacted: ip]:"
+  },
+  {
+    "name": "known code shape false positives",
+    "input": "SHA256 SHA384 SHA224 AES256 BASE64",
+    "want": "[redacted: code] [redacted: code] [redacted: code] [redacted: code] [redacted: code]"
+  }
+]

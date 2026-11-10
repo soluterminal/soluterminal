@@ -209,3 +209,24 @@ describe('lead and worker items', () => {
     expect(names()).toEqual([]);
   });
 });
+
+describe('PaneContextMenu Fix display', () => {
+  it('offers one Fix display item in place of Realign display and Force redraw', () => {
+    const fix = vi.fn();
+    renderMenu({}, { onFixDisplay: fix });
+    expect(screen.queryByRole('menuitem', { name: 'Realign display' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Force redraw' })).toBeNull();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Fix display' }));
+    expect(fix).toHaveBeenCalledTimes(1);
+  });
+  it('hides it on native, exited or unwired panes', () => {
+    const native = renderMenu({}, { isNative: true, onFixDisplay: vi.fn() });
+    expect(screen.queryByRole('menuitem', { name: 'Fix display' })).toBeNull();
+    native.unmount();
+    const exited = renderMenu({ status: 'exited' }, { onFixDisplay: vi.fn() });
+    expect(screen.queryByRole('menuitem', { name: 'Fix display' })).toBeNull();
+    exited.unmount();
+    renderMenu({});
+    expect(screen.queryByRole('menuitem', { name: 'Fix display' })).toBeNull();
+  });
+});

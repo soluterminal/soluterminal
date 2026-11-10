@@ -1,12 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability granted to the main window. The wizard uses dialog plugin to show the pair code, opener to launch the cloud URL in the user's browser, and notification for Windows Action Center alerts. The `remote.urls` block is critical: our frontend is served from the local solud daemon (not bundled with Tauri), so capabilities only apply to that remote origin if we list it here — without this, every plugin:* invocation from JS is silently denied by the ACL.",
+  "description": "Capability granted to the main window. The wizard uses dialog plugin to show the pair code, opener to launch the cloud URL in the user's browser, and notification for Windows Action Center alerts. The `remote.urls` block is critical: our frontend is served from the local solud daemon (not bundled with Tauri), so capabilities only apply to that remote origin if we list it here — without this, every plugin:* invocation from JS is silently denied by the ACL. List only the exact origins the app's windows load (daemon::APP_ADDRS and the hosted cloud), never a wildcard: capability_tests.rs enforces it.",
   "webviews": ["main"],
   "remote": {
     "urls": [
-      "http://127.0.0.1:*",
-      "http://localhost:*",
+      "http://127.0.0.1:8787",
+      "http://127.0.0.1:18787",
+      "http://127.0.0.1:28787",
+      "http://127.0.0.1:38787",
       "https://soluterminal-cloud.onrender.com"
     ]
   },
@@ -35,13 +37,7 @@
     "allow-exit-for-update",
     "allow-reveal-shell-installer",
     "allow-global-hotkey-owned",
-    "allow-open-external-window",
     "allow-open-workspace-window",
-    "allow-browser-pane-ping",
-    "allow-browser-pane-create",
-    "allow-browser-pane-set-bounds",
-    "allow-browser-pane-navigate",
-    "allow-browser-pane-close",
-    "allow-browser-pane-set-visible"
+    "allow-browser-pane-ping"
   ]
 }

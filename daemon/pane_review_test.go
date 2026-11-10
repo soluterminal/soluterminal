@@ -31,7 +31,7 @@ func TestReviewHeadlineNamesTheReviewerAndOutcome(t *testing.T) {
 	}{
 		{PaneReview{Verdict: "approve", Reviewer: agentCodex}, "Codex reviewed: approved"},
 		{PaneReview{Verdict: "request-changes", Reviewer: agentClaude, MustFix: 2}, "reviewed: 2 to fix"},
-		{PaneReview{Verdict: "comment", Reviewer: agentCodex}, "needs your decision"},
+		{PaneReview{Verdict: "comment", Reviewer: agentCodex}, "has questions"},
 		{PaneReview{Verdict: "error"}, "could not run"},
 	} {
 		if got := reviewHeadline(&tc.r); !strings.Contains(got, tc.want) {

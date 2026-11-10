@@ -7,7 +7,8 @@ import { useShellUpdate } from '../lib/useCloudShellUpdate';
 import { installerUpdate } from '../lib/installerUpdate';
 import { toggleScrollDiag } from '../scrollDiag';
 import { VersionPopover } from './VersionPopover';
-import { isPreviewVersion, usePreviewChannel } from '../lib/previewChannel';
+import { useVersionIdentity } from '../lib/useVersionIdentity';
+import { openFeedback } from '../lib/feedbackReport';
 import { ReleasePopover } from './ReleasePopover';
 import { PanesPopover } from './PanesPopover';
 import { PortsPopover } from './PortsPopover';
@@ -26,6 +27,8 @@ import './statusbarChips.css';
 import { deriveUpdateHoldPresentation, type Health, type ReleaseCheck } from '../types';
 import type { ReleaseTrainStatus } from '../api';
 import { PLAIN_SYSTEM_AREA } from './system/systemPlain';
+import { usePresentationMode } from '../lib/hideIdentities';
+import { workspacePaneIds } from '../lib/workspaceView';
 
 const HEALTH_SHOW_OFFLINE_AFTER_MS = 30000;
 
@@ -166,7 +169,10 @@ export function systemReasonDetail(system: SystemSummary): string | undefined {
 }
 
 function SystemChip({ health }: { health: Health | null }) {
-  const team = useOperatorFeatures();
+  // Presentation mode shows the public chip: operator reasons (daemon CPU,
+  // engine, host disk paths) stay off a shared screen.
+  const presenting = usePresentationMode();
+  const team = useOperatorFeatures() && !presenting;
   const setOpen = useStore((s) => s.setSystemPageOpen);
   const reported = health?.system;
   const system = reported && !team ? systemWithoutWorkflow(reported) : reported;
@@ -214,25 +220,12 @@ function ConnChip() {
   const machines = useCloud((s) => s.machines);
   if (mode === 'detecting') return null;
   // Dedup vs the top-left context pill, which already states hosting (⚡ Local).
-  // In pure local mode this chip would just repeat that, so hide it. It earns
-  // its space only in cloud mode, where it says something the pill can't:
-  // whether this client is relayed to a remote machine (☁ name) or wired
-  // directly to a local daemon.
-  if (mode !== 'cloud') return null;
+  // The chip earns its space only when this client is relayed through the
+  // cloud to a machine (☁ name). A direct connection (local mode, or cloud
+  // mode wired straight to this machine's daemon) would repeat the pill, so
+  // it shows nothing.
+  if (mode !== 'cloud' || isLocal) return null;
 
-  const relayed = !isLocal;
-  if (!relayed) {
-    return (
-      <>
-        <span className="statusbar-sep">·</span>
-        <Tooltip label="Local hosting — connected directly to the daemon on this machine" side="top">
-          <span className="statusbar-conn is-local">
-            local
-          </span>
-        </Tooltip>
-      </>
-    );
-  }
   const machine = machines.find((m) => m.id === selectedMachineId);
   const name = machine?.name || 'cloud';
   return (
@@ -345,11 +338,13 @@ export function ReleaseChip({ health }: { health: Health | null }) {
 // Purely "what's running" now: the "does anything need me?" job moved to the
 // topbar attention bell (desktop) / MobileTabBar attention tab (mobile), so
 // this chip no longer flips to "N need you" — that was a second, redundant
-// alert for the same count. It reads "39 panes" with the running · exited
-// breakdown in the tooltip; click opens the popover for the pane list +
+// alert for the same count. It reads "4 here · 39 total": running panes in
+// this workspace (its pane tree, recovered workers included), then running
+// panes everywhere, with the exited
+// count in the tooltip; click opens the popover for the pane list +
 // exited-pane bulk cleanup.
 function PanesChip() {
-  const { running, exited } = useStore(
+  const { here, running, exited } = useStore(
     useShallow((s) => {
       let running = 0;
       let exited = 0;
@@ -357,14 +352,17 @@ function PanesChip() {
         if (s.panes[id].status === 'running') running++;
         else exited++;
       }
-      return { running, exited };
+      // The workspace's own panes, not just the layout's tiles: workers
+      // recovered beside their lead are shown without a saved tile.
+      const here = workspacePaneIds(s).filter((id) => s.panes[id]?.status === 'running').length;
+      return { here, running, exited };
     }),
   );
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement | null>(null);
 
-  const text = `${running} pane${running === 1 ? '' : 's'}`;
-  const title = `${running} running${exited > 0 ? ` · ${exited} exited` : ''} — click for details`;
+  const text = `${here} here · ${running} total`;
+  const title = `${here} running in this workspace · ${running} running in all${exited > 0 ? ` · ${exited} exited` : ''} — click for details`;
   const cls = 'statusbar-panes';
   return (
     <>
@@ -491,7 +489,7 @@ export function StatusBar() {
   const popoverSource = useStore((s) => s.versionPopoverSource);
   const setPopoverOpen = useStore((s) => s.setVersionPopoverOpen);
   const versionBtnRef = useRef<HTMLButtonElement | null>(null);
-  const preview = usePreviewChannel();
+  const identity = useVersionIdentity(health, updateStatus);
 
   // The clock advances only for an offline timer or a visible quiet-window
   // retry countdown; healthy idle status bars remain render-stable.
@@ -506,11 +504,19 @@ export function StatusBar() {
   }, [health, updateStatus?.workflowDeferred, holdPresentation.workflowBackoff,
     holdPresentation.workflowNextRetryMs]);
 
+  // Idle is the resting state and says nothing; the label appears only when
+  // the pane is doing something or waiting on you.
   const stateLabel = focusedState === 'awaiting-input'
     ? 'awaiting input'
     : focusedState === 'choice-prompt'
       ? 'approval needed'
-      : focusedState || (focusedStatus === 'exited' ? 'exited' : '—');
+      : focusedState === 'idle'
+        ? null
+        : focusedState || (focusedStatus === 'exited' ? 'exited' : null);
+  const focusedPath = focusedLiveCwd || focusedCwd || '';
+  // The pid is for whoever is debugging, so it rides in the path's tooltip
+  // rather than taking room in the bar.
+  const pathTooltip = [focusedPath, showFocusedPid ? `pid ${focusedPid}` : ''].filter(Boolean).join(' · ');
   const showOffline = !updating && !health && nowMs - lastOkMs >= HEALTH_SHOW_OFFLINE_AFTER_MS;
 
   return (
@@ -521,17 +527,15 @@ export function StatusBar() {
             <span className={`statusbar-dot state-${focusedState || 'idle'}`} />
             <span className="statusbar-strong">{focusedTitle || focusedFirstCmd || ''}</span>
             <span className="statusbar-sep">·</span>
-            <Tooltip label={focusedLiveCwd || focusedCwd || ''} side="top">
+            <Tooltip label={pathTooltip} side="top">
               <span className="statusbar-path">
-                {abbreviateHome(focusedLiveCwd || focusedCwd || '')}
+                {abbreviateHome(focusedPath)}
               </span>
             </Tooltip>
-            <span className="statusbar-sep">·</span>
-            <span className="statusbar-dim">{stateLabel}</span>
-            {showFocusedPid && (
+            {stateLabel && (
               <>
                 <span className="statusbar-sep">·</span>
-                <span className="statusbar-dim">pid {focusedPid}</span>
+                <span className="statusbar-dim">{stateLabel}</span>
               </>
             )}
           </>
@@ -615,6 +619,8 @@ export function StatusBar() {
                     : shellOnly
                     ? 'Desktop installer update available — click for details'
                     : `Update v${updateStatus?.latest} available — click for what's new`
+                  : identity.newerPreview
+                  ? 'A newer preview build is ready'
                   : 'Version and updates'
               }
               side="top"
@@ -623,6 +629,8 @@ export function StatusBar() {
                 ref={versionBtnRef}
                 type="button"
                 className={cls}
+                // Idle, the badge and dot are pictures: the name says them.
+                aria-label={!queued && !hasUpdate ? identity.label : undefined}
                 onClick={() => {
                   const next = !popoverOpen;
                   if (next) void refreshUpdateStatus();
@@ -645,10 +653,12 @@ export function StatusBar() {
                 ) : (
                   <>
                     v{health.version}
-                    {isPreviewVersion(health.version) && <span className="statusbar-preview-tag">PREVIEW</span>}
-                    {(preview?.newChanges ?? 0) > 0 && !preview?.job && (
-                      <span className="statusbar-preview-new" aria-label="A newer preview is ready" />
+                    {identity.badge && (
+                      <span className="statusbar-identity-badge" data-testid="statusbar-identity-badge" aria-hidden="true">
+                        {identity.badge}
+                      </span>
                     )}
+                    {identity.newerPreview && <span className="statusbar-preview-new" aria-hidden="true" />}
                   </>
                 )}
               </button>
@@ -687,9 +697,14 @@ export function StatusBar() {
             </Tooltip>
           </>
         )}
-        {/* Feedback moved to the topbar utility toolbar (grouped with the other
-            global actions); the footer is pure status now. Still reachable via
-            the Ctrl+K "Send feedback" command. */}
+        {/* Feedback sits beside the version, where a report starts ("which
+            version?"). Opens the form in the inbox. */}
+        <span className="statusbar-sep">·</span>
+        <Tooltip label="Send feedback" side="top">
+          <button type="button" className="statusbar-feedback" onClick={() => openFeedback()}>
+            Feedback
+          </button>
+        </Tooltip>
       </div>
     </div>
   );

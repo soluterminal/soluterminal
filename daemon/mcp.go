@@ -749,17 +749,19 @@ func mcpCoreTools() []mcpTool {
 		},
 		{
 			Name: "open_browser",
-			Description: "Open a URL in the user's in-app browser tile — the way to SHOW the user a " +
-				"running app instead of just naming it. Prefer the localhost URL from " +
-				"list_ports (e.g. after starting a dev server, or when the user asks to see " +
-				"what you built). http(s) only; the tile opens beside the user's focused " +
-				"pane on every connected client. close_browser dismisses it.",
+			Description: "Show the user one of their panes' running services in the in-app preview " +
+				"tile — the way to SHOW them an app you started instead of just naming it. " +
+				"Pass a service from list_ports: its url (e.g. http://localhost:5173, plus any " +
+				"path) or its preview path (/api/proxy/5173~…/). Anything else is refused: " +
+				"for any other site, give the user the link to open in their system browser. " +
+				"The tile opens beside the user's focused pane on every connected client. " +
+				"close_browser dismisses it.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"url": {
 						"type": "string",
-						"description": "Absolute http(s) URL to open, e.g. http://localhost:5173 from list_ports."
+						"description": "A listed service from list_ports: its url (http://localhost:5173/some/page) or its preview path."
 					}
 				},
 				"required": ["url"],
@@ -768,7 +770,7 @@ func mcpCoreTools() []mcpTool {
 		},
 		{
 			Name: "close_browser",
-			Description: "Close the user's in-app browser tile (the one open_browser opens — it's " +
+			Description: "Close the user's in-app preview tile (the one open_browser opens — it's " +
 				"single-instance). Use when the user asks to dismiss the preview, or to tidy " +
 				"up after showing something. No-op if the tile isn't open.",
 			InputSchema: json.RawMessage(`{
@@ -2309,12 +2311,12 @@ func (a *apiServer) mcpToolListPorts(args map[string]any) any {
 
 // mcpToolOpenBrowser is the "show the user" half of list_ports: discovery
 // names the dev server, this puts it on their screen. Reuses the ARIA
-// implementation, which validates http(s) and publishes the open-browser
-// UI event every connected client acts on (store.openBrowserHere — the
-// single browser tile navigates or opens). Mutation-policy-gated: it runs
-// nothing and writes nothing, but an agent steering what's on the user's
-// screen is still a capability read-only deployments should be able to
-// switch off.
+// implementation, which accepts only a pane-owned listed service and
+// publishes the open-browser UI event (with its port) every connected client
+// acts on (store.openBrowserHere — the single preview tile navigates or
+// opens). Mutation-policy-gated: it runs nothing and writes nothing, but an
+// agent steering what's on the user's screen is still a capability read-only
+// deployments should be able to switch off.
 func (a *apiServer) mcpToolOpenBrowser(args map[string]any) any {
 	if a.aria == nil {
 		return toolErr("browser control unavailable (aria not enabled)")

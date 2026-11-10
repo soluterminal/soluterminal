@@ -4,10 +4,11 @@ import { api, type ClaudeInstallSpec } from './api';
 import { refreshDaemonHealth } from './lib/useDaemonHealth';
 import { isRouterMode, activeBackendFromUrl, type BackendId } from './dualBackend';
 import { markSetupStarted } from './lib/setupActivity';
+import { setAgentNextStep } from './lib/agentNextStep';
 
 // Shared Claude-Code bootstrap actions — the install (guided curl|bash with a
 // disclosure confirm card) and sign-in flows. Extracted from SetupChecklist so
-// the always-on ClaudeInstallBanner reuses the EXACT same, already-reviewed
+// the always-on AgentSetupBanner reuses the EXACT same, already-reviewed
 // flow (no second copy to drift). Status reading lives with each caller: the
 // checklist force-probes on open; the banner reads the shared daemon-health
 // poll (useDaemonHealth) — both ultimately reflect the daemon's cached probe.
@@ -59,7 +60,11 @@ function scheduleRecheckLoop(kind: 'install' | 'login', backend: BackendId | nul
           const done = kind === 'install' ? st.claudeInstalled === true : st.claudeAuthed === true;
           if (!done) {
             step(i + 1);
-          } else if (kind === 'install' && st.claudeAuthed !== true) {
+            return;
+          }
+          // Installed: offer Start Claude Code until the first agent runs.
+          if (kind === 'install') setAgentNextStep(backend ?? 'local', true);
+          if (kind === 'install' && st.claudeAuthed !== true) {
             // Install landed but claude isn't signed in yet. The installer pane
             // drops to an interactive shell, and users often sign in right there
             // instead of clicking the banner's "Log in" — keep watching (same

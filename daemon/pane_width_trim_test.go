@@ -77,6 +77,30 @@ func TestSubscribeKeepsTailWhenWidthUnchanged(t *testing.T) {
 	}
 }
 
+// TestFullReplayReportsItsWidth guards the replay-start `cols` the client
+// writes the replay at: the PTY's width, not the narrower terminal the client
+// measured mid-layout and announced (term_cols).
+func TestFullReplayReportsItsWidth(t *testing.T) {
+	t.Parallel()
+	p := &Pane{
+		ID:        "pane-test",
+		Cols:      220,
+		Rows:      30,
+		buffer:    newTestRing(),
+		subs:      map[int64]*subEntry{},
+		replayEmu: grid.New(220, 30),
+	}
+	p.buffer.Write([]byte("HEAD\nWIDE_RAW_LINE\n"))
+	p.replayEmu.Feed([]byte("GRIDMARK\r\nCURSORROW"))
+
+	s := p.subscribeStream(220, 30, subModeFull, 0, subOptions{termCols: 40, termRows: 30})
+	defer s.cancel()
+
+	if s.replayCols != 220 {
+		t.Fatalf("replayCols = %d, want the PTY width 220", s.replayCols)
+	}
+}
+
 // TestCurrentWidthRunStart exercises the width-mark lookup directly.
 func TestCurrentWidthRunStart(t *testing.T) {
 	t.Parallel()

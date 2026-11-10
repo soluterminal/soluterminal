@@ -23,14 +23,11 @@ describe('AccountFooter System entry point', () => {
     expect(container.querySelector('.sidebar-footer-identity-row')).toBeNull();
   });
 
-  it('uses a distinct icon for System beside Usage', () => {
+  it('leaves System to the status bar on desktop once signed in', () => {
     useCloud.setState({ session: fakeSession });
     render(<AccountFooter onOpenUsage={vi.fn()} onOpenSystem={vi.fn()} />);
 
-    const usageIcon = screen.getByRole('button', { name: /open usage/i }).querySelector('svg');
-    const systemIcon = screen.getByRole('button', { name: /open system/i }).querySelector('svg');
-    expect(usageIcon).not.toBeNull();
-    expect(systemIcon).not.toBeNull();
-    expect(systemIcon?.innerHTML).not.toBe(usageIcon?.innerHTML);
+    expect(screen.getByRole('button', { name: /open usage/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /open system/i })).toBeNull();
   });
 });

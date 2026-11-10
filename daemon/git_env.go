@@ -413,6 +413,14 @@ func gitFetchCommand(ctx context.Context, dir, remote, refspec string) *exec.Cmd
 // concurrently. Local info/* rules are deliberately omitted. head is the
 // commit to compare against.
 func hardenedGitStatusView(ctx context.Context, objects, index, top, head string, args ...string) ([]byte, error) {
+	return hardenedGitStatusViewExclude(ctx, objects, index, top, head, nil, args...)
+}
+
+// hardenedGitStatusViewExclude is hardenedGitStatusView with exclude, when not
+// nil, written as the view's own info/exclude: bytes the caller has already
+// verified (worker archive: unchanged since spawn, ST-60), never a path into
+// the checkout. core.excludesFile and global excludes stay ignored.
+func hardenedGitStatusViewExclude(ctx context.Context, objects, index, top, head string, exclude []byte, args ...string) ([]byte, error) {
 	config, err := gitViewConfig(ctx, top)
 	if err != nil {
 		return nil, err
@@ -436,6 +444,14 @@ func hardenedGitStatusView(ctx context.Context, objects, index, top, head string
 	}
 	if err := os.WriteFile(filepath.Join(view, "config"), []byte(config), 0600); err != nil {
 		return nil, err
+	}
+	if exclude != nil {
+		if err := os.Mkdir(filepath.Join(view, "info"), 0700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(view, "info", "exclude"), exclude, 0600); err != nil {
+			return nil, err
+		}
 	}
 	if gitViewCreatedForTest != nil {
 		gitViewCreatedForTest(view)

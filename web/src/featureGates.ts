@@ -45,7 +45,7 @@ export const FEATURE_GATES: readonly FeatureGate[] = [
   { file: 'components/SmartApprovalsHint.tsx', flag: 'team', surface: 'Team smart-approval limits' },
   { file: 'components/Sidebar.tsx', flag: 'team', surface: 'Credentials section' },
   { file: 'components/sidebar/SidebarCustomizer.tsx', flag: 'team', surface: 'Credentials in the customiser' },
-  { file: 'components/ClaudeInstallBanner.tsx', flag: 'team', surface: '"Install status stays in Credentials" hint' },
+  { file: 'components/AgentSetupBanner.tsx', flag: 'team', surface: '"Install status stays in Credentials" hint' },
   { file: 'components/NewPaneDialog.tsx', flag: 'team', surface: 'Raw "claude --resume" chip' },
   { file: 'components/system/SystemPage.tsx', flag: 'team', surface: 'Engineering detail: versions, Go memory, storage producers, host storage, listener' },
 ];

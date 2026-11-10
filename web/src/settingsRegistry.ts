@@ -108,10 +108,10 @@ const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   defineSection('workflows.resources', 'workflows', 'Resource limits', 'Agent run slots and memory and disk floors.', { advanced: true, aliases: ['limit', 'disk', 'memory'] }),
   defineSection('credentials.accounts', 'credentials', 'Provider accounts', 'Sign in, re-authenticate and review provider accounts.', { aliases: ['sign in', 'login', 'account', 're-auth'] }),
   defineSection('credentials.keys', 'credentials', 'Runtime API keys', 'Local runtime API keys and tokens.', { aliases: ['api key', 'token'] }),
-  defineSection('credentials.privacy', 'credentials', 'Screen-share safety', 'Mask identities across operator surfaces.', { aliases: ['screen share', 'privacy', 'mask'] }),
   // Settings › Devices split into four tabs (2026-10-31); the three new tabs
   // are sections of the devices category so their links resolve exactly.
-  defineSection('devices.account', 'devices', 'Account', 'Sign-in, product emails and personal view.', { aliases: ['sign in', 'sign out', 'email'] }),
+  // Screen-share safety (hide identities) became Presentation mode here (ST-86).
+  defineSection('devices.account', 'devices', 'Account', 'Sign-in, product emails, personal view and Presentation mode.', { aliases: ['sign in', 'sign out', 'email', 'presentation'] }),
   defineSection('devices.notifications', 'devices', 'Notifications & voice', 'Voice dictation settings.', { aliases: ['voice', 'dictation', 'mic'] }),
   defineSection('devices.privacy', 'devices', 'Privacy & security', 'Agent permissions, remote devices, encryption, agent integration and telemetry.', { aliases: ['approve', 'permissions', 'remote', 'encryption', 'privacy'] }),
   defineSection('devices.pairing', 'devices', 'Pairing & desktop', 'Desktop installer, phone pairing and startup.', { aliases: ['phone', 'pair', 'qr'] }),
@@ -179,7 +179,7 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['workflows.resources', 'rotateCrashDumps', 'Rotate WSL crash dumps'],
   ['credentials.accounts', 'providerAccounts', 'Provider accounts', ['sign in', 'login', 'account', 're-auth']],
   ['credentials.keys', 'runtimeKeys', 'Runtime API keys', ['api key', 'token']],
-  ['credentials.privacy', 'hideIdentities', 'Hide identities (screen share)', ['screen share', 'privacy', 'mask']],
+  ['devices.account', 'presentationMode', 'Presentation mode', ['screen share', 'presentation', 'screenshot', 'video', 'hide email', 'mask']],
   ['devices.pairing', 'desktopApp', 'Desktop app'],
   ['devices.pairing', 'phoneAccess', 'Phone access', ['phone', 'pair', 'qr']],
   ['devices.pairing', 'launchStartup', 'Launch on startup'],
@@ -259,6 +259,9 @@ export const LEGACY_SECTION_TARGETS: Record<string, SettingsTarget> = {
   // Max heavy operations went with the task engine; old links open the section.
   'tasks.resourceLimits.maxHeavyOps': { category: 'workflows', section: 'workflows.resources' },
   'tasks.modelsFallbacks': { category: 'workflows', section: 'workflows.modelsFallbacks' },
+  // Hide identities became Presentation mode in Settings › Account.
+  'credentials.privacy': { category: 'devices', section: 'devices.account' },
+  'credentials.privacy.hideIdentities': { category: 'devices', section: 'devices.account', control: 'devices.account.presentationMode' },
 };
 
 const categoryIds = () => new Set(settingsCategories().map((item) => item.id));

@@ -8,7 +8,7 @@ import { activeBackendFromUrl, isRouterMode } from '../dualBackend';
 import { setupBannerHidden, hideSetupBanner } from '../lib/setupBannerPrefs';
 import { useStore } from '../store';
 
-// Always-on Muse-Code readiness banner — the parallel of ClaudeInstallBanner.
+// Always-on Muse-Code readiness banner — the parallel of AgentSetupBanner.
 // Surfaces the two states that dead-end Muse usage: not installed, and
 // installed-but-not-signed-in. Same scope rules: desktop-shell only
 // (install/login act on the LOCAL daemon — 403 over the relay); in cloud

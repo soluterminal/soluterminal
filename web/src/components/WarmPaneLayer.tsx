@@ -10,6 +10,13 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { Pane } from './Pane';
 import { PaneRecovery } from './PaneRecovery';
 
+// The pane type a "Report this" names: the agent when one runs, else the shell.
+function paneTypeLabel(p: TerminalViewSession['pane']): string {
+  if (p.hasClaude) return 'Claude';
+  if (p.hasCodex) return 'Codex';
+  return p.backend === 'win' ? 'PowerShell' : 'Terminal';
+}
+
 function TerminalPortal({ session }: { session: TerminalViewSession }) {
   useLayoutEffect(() => registerTerminalPortal(session.key), [session.key]);
   // Match Alt+1…9, which count the panes the grid shows; panes outside it
@@ -17,7 +24,7 @@ function TerminalPortal({ session }: { session: TerminalViewSession }) {
   const layout = useStore(workspaceViewLayout);
   const paneIndex = paneIdsInOrder(layout).indexOf(session.pane.id) + 1;
   return createPortal(
-    <ErrorBoundary label={`Pane ${session.pane.id}`}>
+    <ErrorBoundary label={`Pane ${session.pane.id}`} reportAs={paneTypeLabel(session.pane)}>
       {session.pane.recoveryError ? (
         <PaneRecovery pane={session.pane} />
       ) : (

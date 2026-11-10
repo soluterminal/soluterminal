@@ -134,6 +134,9 @@ type systemSample struct {
 	GoRuntimeMB              *float64
 	Goroutines               *int
 	DaemonCpuPct             *float64
+	// Cores is the machine's logical CPU count, the scale the daemon CPU
+	// warning is measured against.
+	Cores                    int
 	HostCpuPct               *float64
 	LoadAvg1                 *float64
 	MemTotalMB               *int64
@@ -371,6 +374,7 @@ func (s *systemSampler) sampleFast() {
 		}
 		next.SampledAt = now
 		next.Procfs = s.procfsAvailable()
+		next.Cores = runtime.NumCPU()
 		if s.deps.selfMemMB != nil {
 			next.DaemonRssMB = nil
 			if rss := s.deps.selfMemMB(); rss > 0 {
@@ -870,13 +874,24 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 	}
 	if s.DaemonCpuPct == nil {
 		raw["daemonCpu"] = "unknown"
-		text["daemonCpu"] = "daemon CPU: awaiting sample"
+		text["daemonCpu"] = "SoluTerminal CPU: awaiting sample"
 	} else {
+		// Measured in cores (100% of one core = 1.0) and judged against the
+		// whole machine: one busy core is nothing on a 16-core desktop but is
+		// the whole of a 1-core VM. The usual two-sample rule makes it a
+		// sustained ~30 s before the warning shows.
+		cores := max(1, s.Cores)
+		used := *s.DaemonCpuPct / 100
 		raw["daemonCpu"] = "ok"
-		if *s.DaemonCpuPct >= 60 {
+		if used >= daemonCPUWarnShare*float64(cores) {
 			raw["daemonCpu"] = "warn"
 		}
-		text["daemonCpu"] = "daemon CPU: " + formatSystemDecimal(*s.DaemonCpuPct) + "% sustained"
+		unit := " cores"
+		if formatSystemDecimal(used) == "1.0" {
+			unit = " core"
+		}
+		text["daemonCpu"] = "SoluTerminal CPU: " + formatSystemDecimal(used) + unit
+		detail["daemonCpu"] = "of " + systemCountPhrase(cores, "core", "cores") + " on this machine; warns when it holds " + formatSystemDecimal(daemonCPUWarnShare*float64(cores)) + " or more for about 30 s"
 		sampled["daemonCpu"] = true
 	}
 	for key, on := range map[string]bool{"engine": s.EngineWarn, "runtimes": s.RuntimesWarn, "automation": s.AutomationWarn, "cloud": s.CloudWarn} {
@@ -991,6 +1006,10 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 	}
 	return systemLevelsDTO{Overall: overall, Reason: reason, Reasons: reasons, Areas: cloneLevelMap(prev.Current)}, prev
 }
+
+// daemonCPUWarnShare is the share of the machine's cores the daemon may hold,
+// sustained, before the System chip warns: half of them.
+const daemonCPUWarnShare = 0.5
 
 // Thresholds for the Windows-disk alarm a person sees. They are deliberately
 // separate from the host-disk floor (max(100 GB, 5%) by default), which only

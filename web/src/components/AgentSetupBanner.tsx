@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { IconAlertTriangle, IconKey } from './ui/icons';
+import { IconAlertTriangle, IconKey, IconSparkle } from './ui/icons';
 import { api } from '../api';
 import { useDaemonHealth, refreshDaemonHealth } from '../lib/useDaemonHealth';
 import { isDesktopShell } from '../cloudPair';
@@ -9,9 +9,23 @@ import { setupBannerHidden, hideSetupBanner } from '../lib/setupBannerPrefs';
 import { useStore } from '../store';
 import { useTeamFeatures } from '../entitlements';
 import { sectionOffered } from './sidebar/sidebarSections';
+import { openCodexSignIn } from '../codexBootstrap';
+import { AGENT_NAMES, agentReadiness, startAgent, type StartableAgent } from '../agentStart';
+import { effectivePaneAgent } from '../lib/agentKind';
+import {
+  AGENT_NEXT_STEP_EVENT,
+  agentNextStepPending,
+  firstAgentStarted,
+  markFirstAgentStarted,
+} from '../lib/agentNextStep';
 
-// Always-on Claude-Code readiness banner — surfaces the two states that
-// dead-end a Claude pane: not installed, and installed-but-not-signed-in.
+// Always-on agent setup banner. First, the lasting next step after an agent
+// install: one start card for Claude Code and Codex that stays (a dismiss
+// lasts the session) until the first agent pane has run on this computer, then
+// never returns. The installer pane only says to open a new pane, the install
+// toasts last seconds, and the empty window's Start buttons vanish once any
+// pane is open. Otherwise, the two states that dead-end a Claude pane: not
+// installed, and installed-but-not-signed-in.
 //
 // WHY THIS EXISTS: the setup checklist (which also surfaces this) only opens on
 // FIRST RUN (localStorage `solu.seenChecklist`), and that flag survives a
@@ -28,7 +42,9 @@ import { sectionOffered } from './sidebar/sidebarSections';
 // state never fires on macOS: the daemon reports authed conservatively there
 // (Keychain creds aren't file-readable), so we never false-nag a signed-in Mac.
 
-type Need = 'install' | 'login' | null;
+type Need = 'start' | 'install' | 'login' | null;
+
+const START_ORDER: StartableAgent[] = ['claude', 'codex'];
 
 type BackendId = 'wsl' | 'win';
 
@@ -54,9 +70,19 @@ function healthBelongsToActiveBackend(
 
 // hidden: the setup checklist (or the welcome tour before it) is open and
 // already shows the same install / sign-in step.
-export function ClaudeInstallBanner({ hidden = false }: { hidden?: boolean } = {}) {
+export function AgentSetupBanner({ hidden = false }: { hidden?: boolean } = {}) {
   const { health } = useDaemonHealth();
   const storeActiveBackend = useStore((s) => s.activeBackend);
+  // Matches the daemon's check-in rule: a Claude Code or Codex pane, not the
+  // installer shell. An exited pane (e.g. a CLI that failed to launch) is not
+  // a start.
+  const agentRunning = useStore((s) =>
+    Object.values(s.panes).some((p) => {
+      if (p.status !== 'running') return false;
+      const agent = effectivePaneAgent(p);
+      return agent === 'claude' || agent === 'codex';
+    }),
+  );
   // An available Credentials section owns the install/status row.
   const team = useTeamFeatures();
   const activeBackend = activeBackendForBanner(storeActiveBackend);
@@ -69,6 +95,21 @@ export function ClaudeInstallBanner({ hidden = false }: { hidden?: boolean } = {
   const [dismissedKey, setDismissedKey] = useState<string | null>(null);
   const { installing, pendingInstall, startInstall, confirmInstall, cancelInstall, loginClaude } =
     useClaudeInstall({ onSpawn: (kind) => setDismissedKey(`${activeKey}:${kind}`) });
+  const [startPending, setStartPending] = useState(() => agentNextStepPending(activeKey));
+  const [starting, setStarting] = useState<StartableAgent | null>(null);
+  useEffect(() => {
+    const sync = () => setStartPending(agentNextStepPending(activeKey));
+    sync();
+    window.addEventListener(AGENT_NEXT_STEP_EVENT, sync);
+    return () => window.removeEventListener(AGENT_NEXT_STEP_EVENT, sync);
+  }, [activeKey]);
+
+  // The first agent pane retires the start card for good, on every side. It
+  // is recorded even with no card pending, so an install later on doesn't
+  // offer a first start to someone who has already run an agent.
+  useEffect(() => {
+    if (agentRunning && !firstAgentStarted()) markFirstAgentStarted();
+  }, [agentRunning]);
 
   const desktop = isDesktopShell();
 
@@ -102,26 +143,92 @@ export function ClaudeInstallBanner({ hidden = false }: { hidden?: boolean } = {
   // vice versa). The effect above forces a fresh recheck for the active side.
   if (!healthBelongsToActiveBackend(health, activeBackend)) return null;
 
+  // The start card offers each agent the daemon has seen installed on this
+  // side; one that went away again (uninstalled) has nothing to start.
+  const startable = START_ORDER.filter((agent) =>
+    agent === 'claude'
+      ? health?.claudeChecked === true && health?.claudeInstalled === true
+      : health?.codexChecked === true && health?.codexInstalled === true,
+  );
   // Only act once the daemon has actually probed (claudeChecked === true) — never
-  // a premature "not installed" during the boot-probe window. Order: install
-  // first (the harder blocker), then sign-in.
+  // a premature "not installed" during the boot-probe window. Order: the start
+  // card (an agent is ready to go), then install (the harder blocker), then
+  // sign-in.
   const need: Need =
-    health?.claudeChecked !== true
-      ? null
-      : health?.claudeInstalled === false
-        ? 'install'
-        : health?.claudeAuthed === false
-          ? 'login'
-          : null;
+    startPending && !agentRunning && startable.length > 0
+      ? 'start'
+      : health?.claudeChecked !== true
+        ? null
+        : health?.claudeInstalled === false
+          ? 'install'
+          : health?.claudeAuthed === false
+            ? 'login'
+            : null;
   const needKey = need ? `${activeKey}:${need}` : null;
   // Durable opt-out ("Don't show again") outranks every need. The Credentials
   // CLI row always shows install status, so hiding never strands reinstall —
   // and the row offers "Remind me" to bring the banner back.
-  if (!need || dismissedKey === needKey || setupBannerHidden('claude')) return null;
+  // The start card has no durable opt-out: it ends at the first agent start.
+  if (!need || dismissedKey === needKey) return null;
+  if (need !== 'start' && setupBannerHidden('claude')) return null;
 
   const dismiss = () => setDismissedKey(needKey);
   const dontShowAgain = () => { hideSetupBanner('claude'); setDismissedKey(needKey); };
   const backendLabel = activeBackendLabel(activeBackend);
+
+  if (need === 'start') {
+    // A signed-out agent gets its sign-in pane, which also starts it (the
+    // sign-in flows keep watching until the sign-in lands); otherwise the same
+    // start as the empty window's buttons.
+    const start = (agent: StartableAgent) => {
+      if (starting) return;
+      if (agentReadiness(agent, health, activeBackend) === 'signed-out') {
+        if (agent === 'claude') loginClaude();
+        else openCodexSignIn();
+        return;
+      }
+      setStarting(agent);
+      startAgent(agent)
+        .catch((e: unknown) => {
+          useStore.getState().toast(`Could not start ${AGENT_NAMES[agent]}: ${(e as Error).message}`, {
+            kind: 'error',
+            icon: '!',
+          });
+        })
+        .finally(() => setStarting(null));
+    };
+    return (
+      <div className="phone-access-banner" role="status">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flex: '1 1 auto', minWidth: 0 }}>
+          <span className="phone-access-banner-text">
+            <span aria-hidden><IconSparkle size={13} style={{ verticalAlign: '-2px' }} /></span> Next, start your first agent{backendLabel ? ` in ${backendLabel}` : ''}.
+          </span>
+          <span className="phone-access-banner-actions">
+            {startable.map((agent) => (
+              <button
+                key={agent}
+                type="button"
+                className="phone-access-banner-btn primary"
+                disabled={starting !== null}
+                onClick={() => start(agent)}
+              >
+                {starting === agent ? 'Starting…' : `Start ${AGENT_NAMES[agent]}`}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="phone-access-banner-btn ghost"
+              title="Hide for now (it comes back until you start an agent)"
+              aria-label="Dismiss"
+              onClick={dismiss}
+            >
+              ×
+            </button>
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="phone-access-banner" role="status">

@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { openFeedback } from '../lib/feedbackReport';
 
 // ErrorBoundary keeps a render-time crash inside the pane tree from
 // blanking the entire app. The realistic failure modes:
@@ -21,6 +22,10 @@ type Props = {
   // tell which boundary fired when there are several in the tree.
   label?: string;
   title?: string;
+  // reportAs names the pane type ("Codex", "Terminal") on a per-pane
+  // boundary; it adds "Report this", which opens the feedback form filled in
+  // with the pane type and the error.
+  reportAs?: string;
 };
 
 type State = {
@@ -43,6 +48,12 @@ export class ErrorBoundary extends Component<Props, State> {
     this.setState({ error: null });
   };
 
+  report = () => {
+    const error = this.state.error;
+    const message = error ? error.message || String(error) : '';
+    openFeedback({ type: 'bug', body: `The ${this.props.reportAs} pane stopped with an error: ${message}` });
+  };
+
   render() {
     if (this.state.error) {
       return (
@@ -54,9 +65,16 @@ export class ErrorBoundary extends Component<Props, State> {
           <div className="error-boundary-detail">
             {this.state.error.message || String(this.state.error)}
           </div>
-          <button type="button" className="secondary" onClick={this.reset}>
-            Try again
-          </button>
+          <div className="error-boundary-actions">
+            <button type="button" className="secondary" onClick={this.reset}>
+              Try again
+            </button>
+            {this.props.reportAs && (
+              <button type="button" className="secondary" onClick={this.report}>
+                Report this
+              </button>
+            )}
+          </div>
         </div>
       );
     }

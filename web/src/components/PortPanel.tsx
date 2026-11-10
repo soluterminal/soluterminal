@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { useStore } from '../store';
 import { api, currentPrefix, currentRoutingScope } from '../api';
 import type { Port } from '../types';
-import { openExternalWindow } from '../tauri-browser';
-import { browserAccessUrl, serviceTarget } from '../lib/portBrowser';
+import { openInSystemBrowser } from '../tauri-browser';
+import { serviceTarget, systemBrowserUrl } from '../lib/portBrowser';
 import {
   isWebService,
   portKey,
@@ -131,13 +131,18 @@ export function PortPanel() {
           const url = portUrl(p);
           const web = isWebService(p);
           const routed = remote || !!p.backend;
-          const allowed = web && (!routed || !!p.paneId);
+          // The preview tile shows only services the person's panes run; any
+          // web service can still open in their own browser.
+          const previewable = web && !!p.paneId;
+          const external = web && (!routed || !!p.paneId);
           const reason = !web
             ? p.webStatus === 'internal'
               ? 'Internal tool or TCP service; no web preview'
               : 'Listening; HTTP readiness has not been confirmed'
-            : routed && !p.paneId
-              ? `${remote ? 'Remote' : 'Backend'} preview requires a service started in a soluterminal pane`
+            : !p.paneId
+              ? routed
+                ? `${remote ? 'Remote' : 'Backend'} preview requires a service started in a soluterminal pane`
+                : 'Preview shows services started in a soluterminal pane; use Open in browser'
               : undefined;
           const cwd = (p.cwd || pane?.cwd || '').replace(/^\/home\/[^/]+/, '~');
           return (
@@ -182,41 +187,33 @@ export function PortPanel() {
                 <button
                   type="button"
                   className="port-action"
-                  disabled={!allowed}
+                  disabled={!previewable}
                   title={reason}
-                  onClick={() => st.openBrowserHere(url, undefined, undefined, target)}
+                  onClick={() => st.openBrowserHere(target)}
                 >
                   Open preview
                 </button>
                 <button
                   type="button"
                   className="port-action"
-                  disabled={!allowed}
-                  title={reason}
-                  onClick={() => {
-                    void browserAccessUrl(url, target)
-                      .then((access) => {
-                        if (access)
-                          return openExternalWindow(
-                            new URL(access, window.location.href).href,
-                            label,
-                          );
-                      })
-                      .then((opened) => {
-                        if (opened === false)
-                          st.toast('The browser could not open. Allow popups and try again.', {
-                            kind: 'warn',
-                          });
+                  disabled={!external}
+                  title={external ? 'Open in your browser' : reason}
+                  onClick={(e) => {
+                    const click = e.nativeEvent;
+                    void systemBrowserUrl(url, target, ports)
+                      .then((address) => {
+                        if (address) return openInSystemBrowser(address, click);
+                        st.toast('This service can’t be opened from here.', { kind: 'warn' });
                       })
                       .catch((error) =>
                         st.toast(
-                          error instanceof Error ? error.message : 'Could not prepare preview.',
+                          error instanceof Error ? error.message : 'Could not prepare the address.',
                           { kind: 'warn' },
                         ),
                       );
                   }}
                 >
-                  Open externally
+                  Open in browser
                 </button>
                 <button
                   type="button"

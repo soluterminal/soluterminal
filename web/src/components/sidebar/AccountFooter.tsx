@@ -1,12 +1,16 @@
 import { useState } from 'react';
 import { useCloud } from '../../cloud';
+import { usePersonalView } from '../../entitlements';
+import { usePresentationMode } from '../../lib/hideIdentities';
 import { useStore } from '../../store';
 import { AlertsMenu } from '../AlertsMenu';
 import { useIsMobileView } from '../useIsMobileView';
 import { useSettings } from '../../settings';
 import { api } from '../../api';
 import { AriaHeaderStatus } from './AriaHeaderStatus';
-import { IconClock, IconGauge, IconHelp, IconLayers, IconSettings, IconUser } from '../ui/icons';
+import { confirmSignOut } from '../../lib/confirmSignOut';
+import { IconClock, IconGauge, IconHelp, IconLayers, IconMessage, IconSettings, IconUser } from '../ui/icons';
+import { openFeedback } from '../../lib/feedbackReport';
 
 interface AccountFooterProps {
   onOpenHelp?: () => void;
@@ -26,14 +30,22 @@ export function AccountFooter({ onOpenHelp, onOpenUsage, onOpenSystem, onOpenSch
   const session = useCloud((s) => s.session);
   const signOut = useCloud((s) => s.signOut);
   const [busy, setBusy] = useState(false);
-  const email = session?.user?.email || '';
+  // Presentation mode (screenshots, videos) and the personal view keep the
+  // account email off screen; the row says "Signed in", so it does not jump.
+  const presentation = usePresentationMode();
+  const personal = usePersonalView();
+  const hideEmail = presentation || personal;
+  const email = hideEmail ? 'Signed in' : session?.user?.email || '';
   // The auto-approver's at-a-glance status (paused / fires in the last
   // hour + the reset action). Only shown when auto-approve is actually in
   // play — no "0/hr" noise for users who never touch it.
   const ariaActive = useStore((s) => s.ariaAutoFiresHr > 0 || s.ariaPaused
     || Object.values(s.panes).some((p) => p.autoMode === 'always' || p.autoMode === 'cautious'));
+  // Same confirmation as Settings › Account: signing out stops phone access,
+  // push and smart approvals, so a stray click here must not do it silently.
   const handle = async () => {
     if (busy) return;
+    if (!(await confirmSignOut())) return;
     setBusy(true);
     void signOut();
   };
@@ -49,7 +61,7 @@ export function AccountFooter({ onOpenHelp, onOpenUsage, onOpenSystem, onOpenSch
   return (
     <div
       className="sidebar-section sidebar-footer"
-      title={session ? `Signed in as ${email}` : undefined}
+      title={session ? (hideEmail ? 'Signed in' : `Signed in as ${email}`) : undefined}
     >
       {isMobile && (
         <div className="sidebar-footer-chrome">
@@ -104,6 +116,16 @@ export function AccountFooter({ onOpenHelp, onOpenUsage, onOpenSystem, onOpenSch
               <IconLayers size={16} />
             </button>
           )}
+          {/* Phones have no Help menu or status bar: the form's own entry. */}
+          <button
+            type="button"
+            className="chrome-btn"
+            onClick={() => openFeedback()}
+            title="Send feedback"
+            aria-label="Send feedback"
+          >
+            <IconMessage size={16} />
+          </button>
           <AlertsMenu />
         </div>
       )}
@@ -121,7 +143,7 @@ export function AccountFooter({ onOpenHelp, onOpenUsage, onOpenSystem, onOpenSch
           <IconUser size={16} className="sidebar-footer-identity-icon" />
           <span className="sidebar-footer-identity">{email}</span>
           {ariaActive && (
-            <span className="sidebar-footer-aria" title="Auto-approve status">
+            <span className="sidebar-footer-aria">
               <AriaHeaderStatus />
             </span>
           )}
@@ -139,9 +161,6 @@ export function AccountFooter({ onOpenHelp, onOpenUsage, onOpenSystem, onOpenSch
               title="Usage — spend, turns and sessions for this account"
               aria-label="Open usage"
             ><IconGauge size={14} strokeWidth={2.25} /></button>
-          )}
-          {onOpenSystem && !isMobile && (
-            <button type="button" className="iconbtn sidebar-footer-usage" onClick={onOpenSystem} title="System — resources and operational status" aria-label="Open System"><IconLayers size={14} strokeWidth={2.25} /></button>
           )}
           <button
             type="button"

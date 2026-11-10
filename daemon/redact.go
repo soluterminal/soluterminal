@@ -114,6 +114,9 @@ var (
 	reLongOpaque = regexp.MustCompile(`\b[A-Za-z0-9_-]{32,}\b`)
 )
 
+// Feedback preview/submit uses redactFeedback and the shared feedback rule set.
+// This legacy scrubber retains the log, crash and support-bundle contract.
+//
 // redactSensitive scrubs home-directory paths and token-shaped strings out of an
 // arbitrary string (a log line, a panic message, or a stack trace). Pure,
 // allocation-light, safe to call on every log line.

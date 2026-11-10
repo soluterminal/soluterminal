@@ -60,6 +60,9 @@ import { handleTerminalCopyKey } from '../lib/terminalClipboard';
 import { paneUnread } from '../lib/turnChip';
 import { planSelectionSend } from '../lib/selectionSend';
 import { replayPinTarget } from '../lib/replayPin';
+import { recordDisplayFix } from '../lib/displayFixTelemetry';
+import { createSettleRepaint } from '../lib/settleRepaint';
+import { watchDevicePixelRatio } from '../lib/dprWatch';
 import { createPaneInputOwnership, type PaneClaimReason } from '../lib/paneInputOwnership';
 import { CLAIM_FEEDBACK_TIMEOUT_MS, CLAIM_REGRAB_WINDOW_MS, claimAttempt, parseClaimDenied, reportClaimRefused } from '../lib/claimFeedback';
 
@@ -194,8 +197,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
   const unregisterRedrawer = (_id: string) => useStore.getState().unregisterRedrawer(key,registered.current['redrawer']);
   const registerRealigner = (_id: string, fn: Parameters<ReturnType<typeof useStore.getState>['registerRealigner']>[1]) => { registered.current['realigner'] = fn; useStore.getState().registerRealigner(key,fn); };
   const unregisterRealigner = (_id: string) => useStore.getState().unregisterRealigner(key,registered.current['realigner']);
-  const redrawPane = useStore((s) => s.redrawPane);
-  const realignPane = useStore((s) => s.realignPane);
+  const fixPaneDisplay = useStore((s) => s.fixPaneDisplay);
   const setPaneOwned = useStore((s) => s.setPaneOwned);
   const clearPaneOwnership = useStore((s) => s.clearPaneOwnership);
   const inputLocked = useStore((s) => s.paneOwnership[key] === false);
@@ -518,7 +520,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
     (debugWin.__soluTerms ??= new Map()).set(key, term);
 
     const fit = new FitAddon();
-    const weblinks = isEmbedded() ? new WebLinksAddon((_event, url) => { openEmbedUrl(url); }) : new WebLinksAddon();
+    const weblinks = isEmbedded() ? new WebLinksAddon((event, url) => { openEmbedUrl(url, event); }) : new WebLinksAddon();
     // Search addon powers "reveal match" from the cross-pane search in
     // CommandPalette. The addon runs against what xterm has in its own
     // scrollback (raw rendered text), not what the daemon returned, so
@@ -982,6 +984,17 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       });
     };
     const writeParsedSnapshotDisp = term.onWriteParsed(scheduleWriteParsedSnapshot);
+    // Settle repaint (#45): once output, scroll and resize have been quiet for
+    // a moment, repaint the visible rows once so the default renderer drops
+    // leftover, overlapping letters (worst on phones and scaled displays).
+    // Trailing debounce, so a burst of output never repaints mid-burst.
+    const settleRepaint = createSettleRepaint(() => {
+      if (disposed || !currentVisible()) return;
+      term.refresh(0, Math.max(0, term.rows - 1));
+    });
+    const settleWriteDisp = term.onWriteParsed(settleRepaint.poke);
+    const settleScrollDisp = term.onScroll(settleRepaint.poke);
+    const settleResizeDisp = term.onResize(settleRepaint.poke);
     const hostElForSnapshot = hostRef.current;
     const deferredMaybeSnapshot = () => requestAnimationFrame(maybeSnapshotIfIdle);
 
@@ -1116,6 +1129,8 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       const restoreToken = ++restoreSeq;
       pendingRestoreSeq = restoreToken;
       fit.fit();
+      // A fit that kept cols/rows can still move cell pixels (scaled display).
+      settleRepaint.poke();
       // Floor cols to a Claude-legible width (see MIN_PANE_COLS). No-op
       // unless the pane measured narrower than the floor.
       if (term.cols > 0 && term.cols < MIN_PANE_COLS) {
@@ -1778,8 +1793,6 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       pendingRestoreReconnect = false;
       setConnStatus(reconnectAttempt === 0 ? 'connecting' : 'reconnecting');
       const { cols, rows } = term;
-      // What the daemon will align its reattach repaint to (sent below).
-      const announcedTerm = { cols, rows };
       const connectRect = readUsableHostRect('ws-connect');
       // Attach-size seed: prefer the daemon's CURRENT PTY width over this
       // mount's fit. fit.fit() can measure the host mid-layout (warm-host
@@ -1817,6 +1830,15 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       const fitRows = connectRect && rows > 0 ? rows : lastGoodFit.rows;
       const connectCols = seedCols || fitCols;
       const connectRows = seedRows || fitRows;
+      // What the daemon will align its reattach repaint to (sent below), and
+      // the size a full replay is written at. The width is the PTY's, not this
+      // terminal's: the replayed bytes were produced at the PTY width, and
+      // written at any other width they wrap at the wrong column and the TUI's
+      // relative cursor moves land on the wrong cells. Right after a workspace
+      // switch this terminal's width is a mid-layout measurement (often the
+      // MIN_PANE_COLS floor), which left Claude panes garbled. The refit after
+      // the replay reflows the finished screen to the real size.
+      const announcedTerm = { cols: seedCols || cols, rows };
       // Make the settled refit() resend relative to the SEED, not this
       // mount's fit: if the real measured width differs from what we seeded
       // the daemon with, refit must push it. (Otherwise a correct mount fit
@@ -1867,7 +1889,8 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         since: skipRestoreReplay && ringOffset >= 0 ? ringOffset : undefined,
         epoch: skipRestoreReplay && ringOffset >= 0 ? ringEpoch : undefined,
         mobile: isMobileClient, scope:session.scope, visible:currentVisible(),
-        termCols: cols > 0 ? cols : undefined, termRows: rows > 0 ? rows : undefined,
+        termCols: announcedTerm.cols > 0 ? announcedTerm.cols : undefined, termRows: rows > 0 ? rows : undefined,
+        replayWidth: true,
         retirementViewerId: pane.role === 'task_owner' ? terminalRetirementViewerId() : undefined,
       });
       // A machine this device enrolled with wants the stream signed. Signing
@@ -1972,6 +1995,8 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       let replayActive = false;
       let replayResetReady = false;
       let replayIsResume = false;
+      // Width the daemon produced the pending full replay at (0: not sent).
+      let replayCols = 0;
       let replayFlushing = false;
       let replayRemaining = 0;
       let skipReplayRemaining = 0;
@@ -2038,7 +2063,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         const pinTarget = replayPinTarget(replayIsResume, announcedTerm, {
           cols: term.cols,
           rows: term.rows,
-        });
+        }, replayCols);
         if (pinTarget) {
           replayPin = pinTarget;
           lifecycleLog('pane.ws.replay-pin', {
@@ -2167,11 +2192,14 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           takeoverAttempt = claimAttempt();
           if (inputOwnership.claim('takeover') === 'failed') reportClaimRefused('unreachable', takeoverAttempt);
         });
-        // Redrawer fires {type:"redraw"} — user-triggered from the
-        // pane-header button or keybinding. Daemon-side this does
-        // a screen-clear + size-bump so Ratatui-based TUIs (codex)
-        // emit a fresh full frame after ghost cells appear post-
-        // resize / post-workspace-switch. Never auto-invoked.
+        // Redrawer fires {type:"redraw"} — user-triggered only, from the
+        // pane menu's "Fix display" (after its realign). Daemon-side this
+        // does a screen-clear + size-bump on alt-screen panes, or an
+        // emulator repaint on inline Codex panes, so Ratatui-based TUIs
+        // emit a fresh full frame after ghost cells appear post-resize /
+        // post-workspace-switch. Never auto-invoked: automatic paths ask
+        // for the lighter {type:"repaint"} instead (see the restore
+        // reconnect below, and docs/codex-linux-ghost-cells.md).
         //
         // term.reset() was added in v0.0.200 to address cross-click
         // inconsistency and then REMOVED in v0.0.202: the real
@@ -2186,10 +2214,17 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         // scrollback (that escape only clears visible cells).
         registerRedrawer(pane.id, () => {
           if (ws.readyState !== WebSocket.OPEN) return;
+          // On alt-screen, Redraw()'s bump dance ends by restoring the PTY to
+          // the INPUT OWNER's size (currentRedrawTarget), not the sizing
+          // election's. From a viewer that isn't the owner, that would undo
+          // the realign Fix display just did, so the realign stands alone
+          // there (non-owners already get a clear on every alt-screen resize).
+          if (term.buffer.active.type === 'alternate' && ownedRef.current !== true) return;
           ws.send(JSON.stringify({ type: 'redraw' }));
         });
         // Realigner fires the width self-heal on demand — user-triggered from
-        // the pane-header "Realign" button / keybinding, and by "Realign all".
+        // the pane menu's "Fix display", and by "Refresh view" (Alt+R, the
+        // command palette, the team top-bar button) on every visible pane.
         // Unlike redraw (repaint only, same width), this re-stamps active
         // sizing and force-resends the measured width, so it fixes a PTY-width
         // MISMATCH — the post-update / cross-device garble — not just ghost
@@ -2280,11 +2315,15 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           autoClaimConditional = true;
           ws.send(JSON.stringify({ type: 'claim', reason: 'adopt-unowned' }));
         }
+        // A restore reconnect skips the replay, so a Codex pane asks for a
+        // fresh emulator paint of its screen instead. That is {type:"repaint"}
+        // (RepaintGridFor: this viewer only, no-op on alt-screen), never the
+        // forced redraw, whose SIGWINCH bump dance stays user-only.
         if (skipRestoreReplay && hasCodexRef.current) {
           window.setTimeout(() => {
             if (disposed) return;
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'redraw' }));
+              ws.send(JSON.stringify({ type: 'repaint' }));
             }
           }, 50);
         }
@@ -2354,6 +2393,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
             const msg = JSON.parse(ev.data) as {
               type?: string; owned?: boolean; owner?: string; denied?: string; bytes?: number;
               offset?: number; epoch?: number; resume?: boolean; token?: string; expiresAtMs?: number; leaseMs?: number;
+              cols?: number;
             };
             if (msg.type === 'owner-retirement-probe') {
               if (typeof msg.token !== 'string') return;
@@ -2378,6 +2418,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
                 bytes: replayBytes,
                 resume: msg.resume === true,
                 offset: msg.offset,
+                cols: msg.cols,
                 skipRestoreReplay,
                 replaceReplay,
                 cloud: !!session.scope.prefix,
@@ -2460,6 +2501,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
                 // scroll-to-bottom had nothing to anchor on.
                 replayActive = true;
                 replayIsResume = false;
+                replayCols = typeof msg.cols === 'number' && msg.cols > 1 ? msg.cols : 0;
                 replayResetReady = !replace; // fresh terminal needs no reset
                 replayFlushing = false;
                 replayRemaining = replayBytes;
@@ -3113,6 +3155,15 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       if (disposed) return;
       scheduleRestoreRefit(source, /* force */ true);
     };
+    // Display-scale change (window moved to a monitor with another scale,
+    // OS scaling, browser zoom): cell metrics change with no host resize, so
+    // run the same forced realign a font change does. Hidden panes skip it
+    // here and realign on their own reattach/visibility paths.
+    const stopDprWatch = watchDevicePixelRatio(() => {
+      if (disposed || !currentVisible()) return;
+      restoreRepaintPending = hasCodexRef.current;
+      realign('dpr-change');
+    });
     fontRefitRef.current = () => {
       // Font settings reach parked warm panes too. Apply their options now,
       // but measure and report geometry only once their host is visible.
@@ -3354,6 +3405,11 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       hostElForSnapshot?.removeEventListener('keydown', deferredMaybeSnapshot);
       hostElForSnapshot?.removeEventListener('pointerdown', cancelRestoreOnPointer, true);
       writeParsedSnapshotDisp.dispose();
+      settleRepaint.dispose();
+      settleWriteDisp.dispose();
+      settleScrollDisp.dispose();
+      settleResizeDisp.dispose();
+      stopDprWatch();
       if (writeParsedSnapshotRaf) cancelAnimationFrame(writeParsedSnapshotRaf);
       if (writeParsedSnapshotInnerRaf) cancelAnimationFrame(writeParsedSnapshotInnerRaf);
       if (rebaselineRafOuter) cancelAnimationFrame(rebaselineRafOuter);
@@ -3589,15 +3645,11 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
             closeContextMenu();
             void setPaneContextPack(pane.id, '');
           }}
-          onRedraw={() => {
+          onFixDisplay={() => {
             if(!actionValid())return;
             closeContextMenu();
-            redrawPane(key);
-          }}
-          onRealign={() => {
-            if(!actionValid())return;
-            closeContextMenu();
-            realignPane(key);
+            recordDisplayFix('fixDisplay');
+            fixPaneDisplay(key);
           }}
           onRestartPane={() => {
             closeContextMenu();

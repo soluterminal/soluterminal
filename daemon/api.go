@@ -224,12 +224,15 @@ type apiServer struct {
 	updateSettings *updateSettingsStore
 	rollback       *updateRollbackStore
 
-	startT        time.Time
-	ver           string
-	addr          string
-	backendID     string
-	shellVersion  string
-	shellPlatform string
+	startT    time.Time
+	ver       string
+	addr      string
+	backendID string
+	// previewListener is this daemon's preview origin (preview_listener.go),
+	// nil when off or not started.
+	previewListener *previewListener
+	shellVersion    string
+	shellPlatform   string
 	// Where /api/update/apply-shell drops the downloaded installer.
 	// Same as main.go's --data flag; mirrored here so updateApplyShell
 	// has a stable per-user path to write into.
@@ -512,7 +515,6 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/update/settings", a.handleUpdateSettings)
 
 	mux.HandleFunc("POST /api/panes/{id}/resize", a.resizePane)
-	mux.HandleFunc("POST /api/panes/{id}/redraw", a.redrawPane)
 	mux.HandleFunc("POST /api/panes/{id}/rename", a.renamePane)
 	mux.HandleFunc("POST /api/panes/{id}/title", a.setPaneTitle)
 	mux.HandleFunc("POST /api/panes/{id}/title/generate", a.generatePaneTitle)
@@ -622,6 +624,7 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/feedback", a.handleFeedback)
 	mux.HandleFunc("GET /api/feedback/mine", a.handleFeedbackMine)
 	mux.HandleFunc("GET /api/feedback/status", a.handleFeedbackStatus)
+	mux.HandleFunc("POST /api/feedback/preview", a.handleFeedbackPreview)
 	mux.HandleFunc("POST /api/feedback/reply", a.handleFeedbackReply)
 	mux.HandleFunc("GET /api/feedback/inbox", a.handleFeedbackInbox)
 	mux.HandleFunc("POST /api/feedback/inbox/read", a.handleFeedbackInboxRead)
@@ -736,6 +739,9 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	// the PortRegistry currently sees. Any HTTP method (including WS
 	// upgrades) — hence the pattern without a verb prefix.
 	mux.HandleFunc("/api/proxy/", a.proxyPort)
+	// Where previews get an origin of their own on a desktop without a
+	// router (preview_listener.go).
+	mux.HandleFunc("GET /api/preview-origin", a.previewOrigin)
 
 	// Self-update — reports the current version + cached manifest
 	// (status), forces a fresh manifest fetch (check), and downloads +
@@ -2103,25 +2109,6 @@ func (a *apiServer) resizePane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = p.Resize(req.Cols, req.Rows)
-	w.WriteHeader(204)
-}
-
-// redrawPane runs the daemon's existing Pane.Redraw() (full clear +
-// scroll-up + size-bump dance) over HTTP. The same operation is
-// already wired through the WebSocket {type:"redraw"} message; the
-// HTTP variant exists so the browser can fire it without holding a
-// live WS subscription — specifically, loadWorkspace fires it on
-// every Claude/codex pane right after mount to nuke any back-buffer
-// vs cell-grid divergence accumulated while the pane was streaming
-// during the workspace-switch transition.
-func (a *apiServer) redrawPane(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	p, ok := a.mgr.Get(id)
-	if !ok {
-		http.Error(w, "not found", 404)
-		return
-	}
-	p.Redraw()
 	w.WriteHeader(204)
 }
 

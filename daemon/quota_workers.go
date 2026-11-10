@@ -763,13 +763,19 @@ func (a *apiServer) queuedWorkerSummaries() []mcpPaneSummary {
 // Includes running/finished workers as well as queued and terminal requests,
 // so a sidebar can follow queue_id to the eventual pane id.
 func (a *apiServer) workerQueueSnapshot() []map[string]any {
+	// Read before q.mu: the archive state's lock is never taken under it.
+	decisions := a.workerArchiveDecisions()
 	q := a.workers()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	out := []map[string]any{}
 	for _, r := range q.requests {
 		w := r.Info
-		out = append(out, map[string]any{"queue_id": w.ID, "id": r.PaneID, "worker": visibleWorkerInfo(&w), "callerPaneId": r.Caller, "leadPaneId": r.Lead, "workspace": r.Workspace, "position": q.positionLocked(r), "error": r.Error})
+		entry := map[string]any{"queue_id": w.ID, "id": r.PaneID, "worker": visibleWorkerInfo(&w), "callerPaneId": r.Caller, "leadPaneId": r.Lead, "workspace": r.Workspace, "position": q.positionLocked(r), "error": r.Error}
+		if d, ok := decisions[r.PaneID]; ok && r.PaneID != "" {
+			entry["archiveDecision"] = d
+		}
+		out = append(out, entry)
 	}
 	return out
 }

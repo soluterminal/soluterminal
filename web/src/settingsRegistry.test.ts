@@ -94,7 +94,7 @@ describe('settingsRegistry', () => {
     ['release train', 'workflows.automation', undefined],
     ['memory', 'workflows.resources', undefined],
     ['api key', 'credentials.keys', undefined],
-    ['screen share', 'credentials.privacy', undefined],
+    ['screen share', 'devices.account', 'devices.account.presentationMode'],
     ['phone', 'devices.pairing', undefined],
     ['update', 'devices.updates', undefined],
   ])('routes alias %s to %s', (query, section, firstControl) => {

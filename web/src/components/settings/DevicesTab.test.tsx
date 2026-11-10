@@ -383,3 +383,22 @@ describe('NotificationsVoiceTab feature sections', () => {
     expect(screen.getByText('VOICE_GROUP')).toBeInTheDocument();
   });
 });
+
+describe('DevicesTab display fix counts', () => {
+  it('shows the local manual-fix counts under Diagnostics', async () => {
+    const telemetry = await import('../../lib/displayFixTelemetry');
+    localStorage.clear();
+    telemetry.resetDisplayFixTelemetry();
+    telemetry.recordDisplayFix('altR');
+    telemetry.recordDisplayFix('altR');
+    telemetry.recordDisplayFix('fixDisplay');
+    try {
+      render(<DevicesTab />);
+      expect(screen.getByText('Diagnostics')).toBeInTheDocument();
+      expect(screen.getByText('Alt+R 2 · Command palette 0 · Fix display 1')).toBeInTheDocument();
+      expect(screen.getByText(/Nothing is sent anywhere/)).toBeInTheDocument();
+    } finally {
+      telemetry.resetDisplayFixTelemetry();
+    }
+  });
+});

@@ -316,8 +316,10 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 			automation: q.Get("automation") == "1",
 			// A view-only socket changes nothing, the terminal's size included.
 			viewOnly: viewOnlyQuiet,
-			termCols:   termCols,
-			termRows:   termRows,
+			termCols: termCols,
+			termRows: termRows,
+			// The client writes a full replay at replay-start's cols.
+			replayWidth: q.Get("replay_width") == "1",
 		})
 		snapshot, ch, ctrl := s.snapshot, s.ch, s.ctrl
 		updateSize, updateVisibility, isOwner := s.updateSize, s.updateVisibility, s.isOwner
@@ -395,13 +397,20 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 		// baseline update and ignore the empty replay — harmless.
 		if mode != subModeNone {
 			clean := stripTerminalQuerySequences(snapshot)
-			meta, _ := json.Marshal(map[string]any{
+			start := map[string]any{
 				"type":   "replay-start",
 				"bytes":  len(clean),
 				"offset": s.cutOffset,
 				"epoch":  ringEpochMs,
 				"resume": s.resumed,
-			})
+			}
+			// The width the replay was produced at. Written at any other
+			// width it wraps at the wrong column and the TUI's relative
+			// cursor moves land on the wrong cells.
+			if s.replayCols > 0 {
+				start["cols"] = s.replayCols
+			}
+			meta, _ := json.Marshal(start)
 			if err := conn.WriteMessage(websocket.TextMessage, meta); err != nil {
 				_ = conn.Close()
 				return
@@ -608,9 +617,9 @@ func handleWS(m *Manager, policy ...func(*http.Request) wsInputPolicy) http.Hand
 					if viewOnly("redraw") {
 						continue
 					}
-					// User-triggered "force redraw". Fires only when
-					// the user clicks the pane-header button or hits
-					// the keybinding — never automatic. Ratatui-based
+					// User-triggered "force redraw". Fires only from
+					// the pane menu's "Fix display" — never automatic
+					// (automatic repairs send "repaint"). Ratatui-based
 					// TUIs (codex) sometimes leave ghost / duplicate
 					// cells after a stress-resize or workspace
 					// switch-back; manually dragging the splitter

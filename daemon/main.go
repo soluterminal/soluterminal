@@ -380,6 +380,9 @@ func main() {
 	// respawns panes. A second daemon on the same data directory exits here.
 	dataDirOwner := dataDirLockHolder{Addr: *addr, Backend: *backendID, Version: version}
 	dataDirLockHeld = claimDataDirForBoot(*dataDir, dataDirOwner)
+	if n := removeStaleClaimTemps(*dataDir, time.Now()); n > 0 {
+		log.Printf("claim: removed %d unfinished claim.json save(s) left by an interrupted write", n)
+	}
 	sweepProviderConfigsAtStartup(daemonStarted)
 	// Bound now, while no other goroutine runs, because its mode comes from
 	// the umask at bind time; published once this process owns the data
@@ -1908,6 +1911,15 @@ func main() {
 		if api.storage != nil {
 			go api.storage.runSampler(ctx, 5*time.Minute)
 		}
+	}
+
+	// A preview origin of this daemon's own, for desktops without a router
+	// (preview_listener.go). Additional: the routes above are unchanged.
+	if pl, err := api.startPreviewListener(*backendID, portFromAddr(*addr)); err != nil {
+		log.Printf("preview listener: %v", err)
+	} else {
+		api.previewListener = pl
+		log.Printf("previews on %s%s", pl.origin, pl.prefix)
 	}
 
 	for _, listener := range listeners {

@@ -8,6 +8,7 @@ import {
 } from 'soluvoice';
 import { useStore } from '../store';
 import { api } from '../api';
+import type { VoiceContextCheck } from '../private/voice.api';
 import { aggregateVoiceSegments, type VoiceSegmentResult } from './voiceHistory';
 import { isNoSpeech, trimVoiceContext, utf8Bytes, validateVoiceUpload, VoiceRequestError } from './voiceRequest';
 import { withBusyRetry } from './voiceBusyRetry';
@@ -83,6 +84,7 @@ const ALLOWANCE_STOP = 'Your daily voice allowance limits this recording. Record
 /** One bounded serial pipeline. No settings are read again to build requests. */
 export function segmentRequest(
   snapshot: Pick<StartSession, 'language' | 'context' | 'deferCleanup'>,
+  contextCheck?: VoiceContextCheck,
 ) {
   const language = snapshot.language;
   const context = trimVoiceContext(snapshot.context);
@@ -94,6 +96,7 @@ export function segmentRequest(
             filename: 'audio.wav',
             language,
             context: snapshot.deferCleanup ? undefined : context,
+            contextCheck,
             deferCleanup: snapshot.deferCleanup,
             signal: s,
           }),
@@ -111,7 +114,7 @@ export function segmentRequest(
     // it never patches a terminal or re-uploads successful audio.
     try {
       const cleaned = await withBusyRetry(
-        (s) => api.cleanupVoice(res.text, { context, language, signal: s }),
+        (s) => api.cleanupVoice(res.text, { context, contextCheck, language, signal: s }),
         signal,
         { bounded: true },
       );
@@ -207,7 +210,8 @@ export class VoiceSessionController {
   start(options: StartSession): boolean {
     if (this.state) return false;
     const epoch = ++this.epoch;
-    this.options = { ...options, request: options.request ?? segmentRequest(options) };
+    // The policy check runs alongside mic start-up (see startVoiceContextCheck).
+    this.options = { ...options, request: options.request ?? segmentRequest(options, api.startVoiceContextCheck()) };
     this.progressAt = 0;
     this.parts = [];
     this.busy = false;

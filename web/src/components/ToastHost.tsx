@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { useStore } from '../store';
 import type { ToastKind } from '../store';
 import {
@@ -59,7 +59,6 @@ export function ToastHost() {
   const toasts = useStore((s) => s.toasts);
   const dismissToast = useStore((s) => s.dismissToast);
   const revealPane = useStore((s) => s.revealPane);
-  const openBrowserHere = useStore((s) => s.openBrowserHere);
   const toastPosition = useStore((s) => s.toastPosition);
 
   // Top-right toasts must clear the top chrome (topbar, plus any banner in the
@@ -125,21 +124,19 @@ export function ToastHost() {
       style={isTop ? { top: topOffset } : undefined}
     >
       {toasts.map((t) => {
-        const clickable = !!t.action || !!t.paneId || !!t.browserUrl;
+        const clickable = !!t.action || !!t.paneId;
         const iconNode = resolveToastIcon(t.icon, t.kind);
-        const activateToast = () => {
+        const activateToast = (e: ReactMouseEvent) => {
           // Navigable toast -> reveal the referenced pane (loads its
           // workspace if needed, adopts from Background, or just
-          // focuses if already in the current layout) — or open the
-          // referenced URL in the browser tile (dev-server preview) —
-          // before dismissing. Non-navigable toasts just dismiss.
-          if (t.action) t.action.run();
+          // focuses if already in the current layout) — before
+          // dismissing. Non-navigable toasts just dismiss.
+          if (t.action) t.action.run(e.nativeEvent);
           else if (t.paneId) void revealPane(t.paneId);
-          else if (t.browserUrl) openBrowserHere(t.browserUrl);
           dismissToast(t.id);
         };
-        const title = t.action ? t.action.label : t.paneId ? 'Go to the pane' : t.browserUrl ? 'Open the preview' : 'Dismiss notification';
-        const label = t.action ? t.action.label : t.paneId ? 'Go to pane' : t.browserUrl ? 'Open preview' : 'Dismiss notification';
+        const title = t.action ? t.action.label : t.paneId ? 'Go to the pane' : 'Dismiss notification';
+        const label = t.action ? t.action.label : t.paneId ? 'Go to pane' : 'Dismiss notification';
         return (
           <button
             type="button"

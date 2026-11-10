@@ -113,6 +113,13 @@ pub const DUAL_WIN_ADDR: &str = "127.0.0.1:38787";
 /// The single-backend daemon address (Windows-only / host-native modes).
 const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:8787";
 
+/// Every local address the app's windows load: the single-backend daemon, the
+/// WSL byte proxy, the Dual router, and the Dual host daemon (loaded directly
+/// when the router can't start). The capabilities' remote.urls list exactly
+/// these (plus the hosted cloud); capability_tests.rs keeps the two in step.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const APP_ADDRS: [&str; 4] = [DEFAULT_DAEMON_ADDR, "127.0.0.1:18787", "127.0.0.1:28787", DUAL_WIN_ADDR];
+
 #[cfg_attr(not(windows), allow(dead_code))]
 const GIB: u64 = 1024 * 1024 * 1024;
 

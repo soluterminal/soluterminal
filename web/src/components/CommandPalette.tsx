@@ -17,13 +17,15 @@ import { REBINDABLE_ACTIONS } from '../keybindings';
 import type { PaneAutoMode } from '../types';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { roleConvertAllowed, slotList, type PaletteAction } from '../extensions';
-import { operatorFeaturesAllowed, useEntitlements } from '../entitlements';
+import { operatorFeaturesAllowed, useEntitlements, usePersonalView } from '../entitlements';
+import { useHideIdentities } from '../lib/hideIdentities';
 import { confirmConvertPaneRole } from './usePaneContextMenu';
 import { restartPaneFlow } from '../lib/paneRestart';
 import { useSettings } from '../settings';
 import { useCloud } from '../cloud';
 import { usePointerMoved } from './usePointerMoved';
 import { AGENT_NAMES, startAgent, type StartableAgent } from '../agentStart';
+import { recordDisplayFix } from '../lib/displayFixTelemetry';
 
 // One-stop palette. Three modes share the same modal shell:
 //
@@ -90,6 +92,7 @@ function scoreAction(q: string, a: Action): number | null {
   const keywords = (a.keywords || '').toLowerCase();
   const haystack = `${label} ${category} ${keywords}`;
 
+  if (a.aliases?.some((w) => w === query || (query.length >= 4 && w.startsWith(query)))) return -1;
   if (label.startsWith(query)) return 0;
   // A match at the start of any word ("set" → "Open Settings") ranks next.
   if (label.includes(` ${query}`)) return 0.5;
@@ -290,6 +293,12 @@ export function CommandPalette({
 
   // --- Actions mode -------------------------------------------------
 
+  // Presentation mode and the personal view keep the email out of the Sign out
+  // hint; subscribing rebuilds the actions when either flips while open.
+  const [hideIdentities] = useHideIdentities();
+  const personalView = usePersonalView();
+  const hideEmail = hideIdentities || personalView;
+
   const actions = useMemo<Action[]>(() => {
     const st = useStore.getState();
     const cloud = useCloud.getState();
@@ -364,7 +373,9 @@ export function CommandPalette({
       ...(signedIn ? [{
         id: 'account.signOut',
         label: 'Sign out',
-        hint: cloud.session?.user?.email ? `Signed in as ${cloud.session.user.email}` : 'Signed in',
+        hint: cloud.session?.user?.email && !hideEmail
+          ? `Signed in as ${cloud.session.user.email}`
+          : 'Signed in',
         category: 'Account',
         keywords: 'log out logout sign out account',
         run: async () => {
@@ -383,7 +394,7 @@ export function CommandPalette({
         category: 'View',
         keywords: 'realign garbled redraw repaint refresh fix text misaligned',
         shortcut: 'Alt+R',
-        run: () => { onClose(); useStore.getState().realignAllPanes(); },
+        run: () => { onClose(); recordDisplayFix('palette'); useStore.getState().realignAllPanes(); },
       },
       {
         id: 'pane.new',
@@ -846,7 +857,8 @@ export function CommandPalette({
       }
     }
 
-    // Feedback sits last so an empty palette doesn't open on it.
+    // Feedback sits last so an empty palette doesn't open on it, but it
+    // ranks first for the words people type when something is wrong.
     list.push(
       {
         id: 'feedback.report',
@@ -854,6 +866,7 @@ export function CommandPalette({
         hint: 'Report a bug or share an idea',
         category: 'Help',
         keywords: 'bug feedback issue report idea problem suggestion request',
+        aliases: ['bug', 'report', 'problem', 'issue', 'idea', 'feedback'],
         run: () => { onClose(); onOpenFeedback(); },
       }
     );
@@ -882,7 +895,7 @@ export function CommandPalette({
       !(a.id === 'view.theme' && hostTheme));
     // `open` in the deps re-snapshots panes each time the palette opens
     // — see the unread-surface block above for why we don't subscribe.
-  }, [open, hostTheme, recentlyClosedPanes, focusedPaneId, focusedPaneCwd, focusEnabled, isFocusedNative, isFocusedAgentCapable, focusedAgentLabel, isFocusedAutoApproveCapable, focusedAutoMode, focusedAutoLocked, workspaces, wsOrder, activeWorkspace, onClose, onOpenHelp, onOpenNewPane, onOpenBroadcast, onOpenFeedback]);
+  }, [open, hideEmail, hostTheme, recentlyClosedPanes, focusedPaneId, focusedPaneCwd, focusEnabled, isFocusedNative, isFocusedAgentCapable, focusedAgentLabel, isFocusedAutoApproveCapable, focusedAutoMode, focusedAutoLocked, workspaces, wsOrder, activeWorkspace, onClose, onOpenHelp, onOpenNewPane, onOpenBroadcast, onOpenFeedback]);
 
   const actionHits = useMemo(() => {
     if (mode !== 'actions') return [];

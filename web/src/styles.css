@@ -1594,16 +1594,14 @@ input:focus, select:focus, textarea:focus {
   isolation: isolate;
 }
 
-/* Connection chip (see StatusBar's ConnChip) — cloud vs local hosting.
-   Local is deliberately quiet (dim text, the default case); cloud tints
-   accent so a relayed session is recognizably different at a glance. */
+/* Connection chip (see StatusBar's ConnChip) — shown only when this client is
+   relayed through the cloud to a machine; a direct connection shows nothing. */
 .statusbar-conn {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   white-space: nowrap;
 }
-.statusbar-conn.is-local { color: var(--fg-dim); }
 /* Cloud hosting = calm violet (matches the context pill), NOT accent — accent is
    reserved for "needs attention" so a remote environment never reads as an alert. */
 .statusbar-conn.is-cloud { color: var(--host-cloud); }
@@ -2605,7 +2603,7 @@ button.section-header-toggle:hover:not(:disabled) {
   border-color: transparent;
   color: var(--fg);
 }
-/* The ARIA fire count (e.g. 140/hr) shown in the account row should read like the
+/* The ARIA fire count (e.g. 140 auto-approved/hr) shown in the account row should read like the
    statusbar's numeric text — sans, 11px, tabular figures, no pill fill — not the
    heavier 10px mono chip it uses in the ARIA section header. */
 .sidebar-footer-aria .aria-cap {
@@ -3120,6 +3118,10 @@ body.mobile-approval-visible .approval-actions { display: none; }
 }
 .error-boundary-state button {
   align-self: flex-start;
+}
+.error-boundary-actions {
+  display: flex;
+  gap: 8px;
 }
 /* Root boundary (main.tsx): fills the window instead of leaving it blank. */
 .root-error-shell {
@@ -6442,21 +6444,6 @@ ul.release-train-events li { margin: 0; }
   user-select: none;
 }
 .port-filter-toggle input { margin: 0; cursor: pointer; }
-.port-new-browser {
-  font-size: 10px;
-  padding: 2px 6px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  color: var(--fg);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.port-new-browser:hover {
-  background: var(--accent-2);
-  border-color: var(--accent-2);
-  color: var(--accent-fg);
-}
 .port-row-main {
   display: flex;
   align-items: baseline;
@@ -6548,26 +6535,11 @@ ul.release-train-events li { margin: 0; }
 .mcp-dot-alive { background: #3aa856; }
 .mcp-dot-dead { background: #d25a5a; }
 
-/* Internal browser tile — reuses the .pane skeleton for consistent
+/* Preview tile — reuses the .pane skeleton for consistent
    focused/border/activity treatment; overrides just what's different. */
 .browser-pane .browser-toolbar {
   gap: 4px;
   padding: 4px 8px;
-}
-.browser-pane .browser-url {
-  flex: 1;
-  min-width: 0;
-  padding: 2px 6px;
-  font-size: 11px;
-  font-family: 'SF Mono','Menlo',monospace;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-}
-.browser-pane .browser-url:focus {
-  outline: none;
-  border-color: var(--accent-2);
 }
 .browser-pane .browser-body {
   background: #ffffff; /* iframes can show white pages, avoid black-on-black */
@@ -6579,130 +6551,35 @@ ul.release-train-events li { margin: 0; }
   border: 0;
   display: block;
 }
-/* Start page: shown while the tile has no URL. */
-.browser-pane .browser-body:has(.browser-start) { background: var(--bg-1); overflow: auto; }
-.browser-start {
-  max-width: 520px;
-  margin: 0 auto;
-  padding: 32px 20px;
+/* A slow page keeps loading under its message (the rule above would show it). */
+.browser-pane .browser-body iframe[hidden] { display: none; }
+/* Shown instead of a blank tile when the page can't be shown here. */
+.browser-pane .browser-body:has(.browser-fallback) { background: var(--bg-1); }
+.browser-fallback {
+  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  font-family: var(--font-sans);
-  color: var(--fg);
-}
-.browser-start-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
-.browser-start-label {
-  font-size: var(--text-label);
-  color: var(--fg-dim);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-wide);
-}
-.browser-start-input {
-  font: inherit;
-  font-size: var(--text-body);
-  padding: 8px 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-strong);
-  background: var(--bg-2);
-  color: var(--fg);
-}
-.browser-start-input:focus { outline: none; border-color: var(--accent-2); }
-.browser-start-empty { font-size: var(--text-small); color: var(--fg-dim); margin: 0; line-height: var(--leading-snug); }
-.browser-start-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.browser-start-port {
-  width: 100%;
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: var(--bg-2);
-  color: var(--fg);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.browser-start-port:hover { background: var(--bg-3); border-color: var(--border-strong); }
-.browser-start-port-num { font-family: var(--mono); font-size: var(--text-small); color: var(--accent); }
-.browser-start-port-label { font-size: var(--text-small); color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* Popout browser window. Same toolbar + body chrome as .browser-pane
-   but fills the whole Tauri window with no pane border / focus ring,
-   since there's only one "pane" in a popout.
-
-   Absolute positioning instead of flex so the toolbar strip is
-   deterministic and can't be collapsed by any layout race. The
-   Windows native child webview (positioned at y=POPOUT_TOOLBAR_HEIGHT
-   via browser_pane_create) paints above React DOM, so if this toolbar
-   ever shrank to 0px the webview would cover its slot and the user
-   couldn't reach the address bar. */
-.popout-root {
-  position: fixed;
-  inset: 0;
-  background: var(--bg);
-  color: var(--fg);
-  overflow: hidden;
-}
-.popout-toolbar {
-  /* Height mirrored by POPOUT_TOOLBAR_HEIGHT in PopoutBrowser.tsx,
-     which uses the constant as a fallback when the body's
-     getBoundingClientRect hasn't settled yet. If you tweak this, bump
-     the TS constant too. position:fixed (not absolute) so the strip
-     is anchored to the viewport directly — absolute had a reported
-     case of the strip being covered by the OS-level child webview on
-     certain Windows DPI configurations, even though logically the
-     body's top:44px placement should have kept it clear. */
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 44px;
-  display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  border-bottom: 1px solid var(--accent-2);
-  background: var(--bg-2);
-  /* Very high z — native webview still paints above DOM within its
-     own rect, but this ensures the toolbar wins any same-layer
-     contests and is visually distinguishable if the webview rect ever
-     goes wrong (diagnostic: if the accent border disappears, the
-     webview is overlapping this strip). */
-  z-index: var(--z-update-overlay);
-  box-sizing: border-box;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  color: var(--fg);
 }
-.popout-toolbar .browser-url {
+.browser-fallback-title { margin: 0; font-size: var(--text-body); font-weight: 600; }
+.browser-fallback-detail { margin: 0; max-width: 46ch; font-size: var(--text-small); color: var(--fg-dim); line-height: var(--leading-snug); overflow-wrap: anywhere; }
+.browser-fallback-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.browser-pane .browser-service {
   flex: 1;
   min-width: 0;
-  padding: 3px 8px;
-  font-size: 12px;
-  font-family: 'SF Mono','Menlo',monospace;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-}
-.popout-toolbar .browser-url:focus {
-  outline: none;
-  border-color: var(--accent-2);
-}
-.popout-body {
-  position: absolute;
-  top: 44px;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: #ffffff;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: var(--text-small);
+  color: var(--fg-dim);
 }
-.popout-body iframe {
-  width: 100%;
-  height: 100%;
-  border: 0;
-  display: block;
-}
+.browser-pane .browser-open-external { white-space: nowrap; }
 
 /* File viewer tile — same pane chrome; specific body styling for the
    line-by-line read/edit layout. */
@@ -10033,7 +9910,7 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
    knob moves; only the section list grows/shrinks. */
 :root { --ui-scale: 1; }
 .sidebar-content { zoom: var(--ui-scale); }
-/* Auto-fire count indicator. Shows "N/hr": auto-approvals in the
+/* Auto-fire count indicator. Shows "N auto-approved/hr": auto-approvals in the
    rolling hour. Informational — there is no hourly cap. */
 .aria-cap {
   font-family: 'SF Mono', 'Menlo', monospace;
@@ -10097,6 +9974,21 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
   border-radius: 10px;
 }
 .statusbar-version:hover {
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+/* The Feedback button shares the version chip's quiet footprint. */
+.statusbar-feedback {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 1px 6px;
+  color: var(--fg-dim);
+  font: inherit;
+  cursor: pointer;
+  border-radius: 10px;
+}
+.statusbar-feedback:hover,
+.statusbar-feedback:focus-visible {
   background: var(--bg-elev);
   color: var(--fg);
 }
@@ -10189,6 +10081,12 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
 .vp-verdict-warn {
   color: var(--warn);
   font-weight: 700;
+}
+.vp-identity {
+  margin-bottom: 6px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 .vp-summary {
   margin-top: 2px;
@@ -15581,16 +15479,19 @@ textarea.ap-setup-input {
 .diff-turn-btn:disabled { opacity: 0.4; cursor: default; }
 .diff-turn-pos { font-size: 11px; color: var(--fg-dim); font-variant-numeric: tabular-nums; padding: 0 2px; }
 
-/* Preview / Stable channel (PreviewChannelSection, status-bar tag). */
-.statusbar-preview-tag {
+/* Preview / Stable channel (PreviewChannelSection) and the status-bar
+   identity badge (PREVIEW, TEAM or PRO): one quiet outline word beside the
+   version, never a filled pill. */
+.statusbar-identity-badge {
   margin-left: 6px;
-  padding: 0 5px;
+  padding: 0 4px;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  letter-spacing: 0.05em;
+  line-height: 14px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in srgb, var(--fg-dim) 45%, transparent);
 }
 .statusbar-preview-new {
   display: inline-block;

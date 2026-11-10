@@ -43,9 +43,16 @@ describe('api.wsUrl terminal size', () => {
     expect(url.searchParams.get('term_rows')).toBe('39');
   });
   it('omits the terminal size when it is unknown', () => {
-    const url = new URL(api.wsUrl('pane_1', 120, 30, { termCols: 0, termRows: 0 }));
+    const url = new URL(api.wsUrl('pane_1', 120, 30, { termCols: 0, termRows: 0, replayWidth: true }));
     expect(url.searchParams.has('term_cols')).toBe(false);
     expect(url.searchParams.has('term_rows')).toBe(false);
+    expect(url.searchParams.has('replay_width')).toBe(false);
+  });
+  it('says the replay is written at its own width only when asked', () => {
+    const url = new URL(api.wsUrl('pane_1', 220, 30, { termCols: 220, termRows: 39, replayWidth: true }));
+    expect(url.searchParams.get('replay_width')).toBe('1');
+    const old = new URL(api.wsUrl('pane_1', 220, 30, { termCols: 220, termRows: 39 }));
+    expect(old.searchParams.has('replay_width')).toBe(false);
   });
 });
 

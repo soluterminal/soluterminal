@@ -20,7 +20,8 @@ vi.mock('./store', () => ({
   }),
 }));
 
-import { scheduleCodexRecheck, openCodexSignIn, CODEX_RECHECK_BACKOFF_MS, CODEX_LOGIN_PANE_TITLE, codexNextStepPending } from './codexBootstrap';
+import { scheduleCodexRecheck, openCodexSignIn, CODEX_RECHECK_BACKOFF_MS, CODEX_LOGIN_PANE_TITLE } from './codexBootstrap';
+import { agentNextStepPending } from './lib/agentNextStep';
 
 function status(over: Partial<{ codexInstalled: boolean; codexAuthed: boolean }> = {}) {
   return { codexChecked: true, codexInstalled: false, codexVersion: '', codexAuthed: false, ...over };
@@ -60,8 +61,8 @@ describe('scheduleCodexRecheck', () => {
     expect(message).toContain('Codex is installed');
     expect(message).toContain('new pane');
     expect(opts.action.label).toBe('Log in');
-    // The lasting banner is armed too.
-    expect(codexNextStepPending('local')).toBe(true);
+    // The lasting start card is armed too.
+    expect(agentNextStepPending('local')).toBe(true);
 
     // Now in the login loop.
     await vi.advanceTimersByTimeAsync(CODEX_RECHECK_BACKOFF_MS[0]);
