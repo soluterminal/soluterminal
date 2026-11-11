@@ -8,13 +8,15 @@ vi.mock('../useIsMobileView', async (importOriginal) => ({
 }));
 
 describe('AccountFooter on a phone', () => {
-  it('has Send feedback, which opens the feedback form', () => {
+  it('has a Send feedback row with its name on it, which opens the feedback form', () => {
     const opened = vi.fn();
     const onOpen = (e: Event) => opened((e as CustomEvent).detail);
     window.addEventListener('solu:open-inbox', onOpen);
     try {
       render(<AccountFooter onOpenHelp={() => {}} />);
-      fireEvent.click(screen.getByRole('button', { name: 'Send feedback' }));
+      const row = screen.getByRole('button', { name: 'Send feedback' });
+      expect(row).toHaveTextContent('Send feedback');
+      fireEvent.click(row);
       expect(opened).toHaveBeenCalledWith(expect.objectContaining({ view: 'compose' }));
     } finally {
       window.removeEventListener('solu:open-inbox', onOpen);

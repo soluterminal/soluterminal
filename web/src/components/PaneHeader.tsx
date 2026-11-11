@@ -1,6 +1,6 @@
 import { isTemporaryWorkspaceView } from '../lib/workspaceView';
 import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type DragEventHandler, type MouseEvent as ReactMouseEvent, type SetStateAction, type ReactNode } from 'react';
-import { IconMaximize, IconMinimize } from './ui/icons';
+import { IconMinimize } from './ui/icons';
 import type { PaneInfo } from '../types';
 import { useStore } from '../store';
 import { confirmClosePane } from './usePaneContextMenu';
@@ -30,7 +30,9 @@ import {
 import { ModeSwitchConfirm, PaneModeToggle } from './native/NativeEventViews';
 import { Tooltip } from './Tooltip';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
-import { paneAgentRssMB } from '../lib/agentMemory';
+import { useAgentMemoryPill } from '../lib/useAgentMemoryPill';
+import { AgentMemoryPill } from './AgentMemoryChip';
+import { paneTitleHint } from '../lib/altHeld';
 
 // Shared explainer copy for the renderer toggle. Surfaced as the group
 // tooltip in the header AND mirrored in the command-palette entry so the
@@ -77,6 +79,8 @@ interface PaneHeaderProps {
   // Open the pane context menu — the ⋯ button and right-click share this. Owned
   // by the parent (Pane.tsx), which holds the menu state. Absent ⇒ no ⋯ button.
   onOpenMenu?: (e: ReactMouseEvent) => void;
+  // Restart the agent in place; offered by the memory pill when memory is unusual.
+  onRestartPane?: () => void;
 }
 
 // A direct/foreground Codex pane can enter Focus before its first message:
@@ -136,11 +140,6 @@ function paneStatusClass(pane: PaneInfo, connStatus: ConnStatus) {
   return connStatus;
 }
 
-// memLabel formats sampled agent RSS (MB) for the memory chip: GB above 1024.
-function memLabel(mb: number) {
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
-}
-
 export function PaneHeader({
   pane, ownerPresentation = false, actionGuard = ()=>true,
   paneIndex,
@@ -161,6 +160,7 @@ export function PaneHeader({
   onToggleZoom,
   onSwitchMode,
   onOpenMenu,
+  onRestartPane,
 }: PaneHeaderProps) {
   const paneMovesAllowed = useStore(s => !isTemporaryWorkspaceView(s.workspaceView));
   const isMobileView = useIsMobileView();
@@ -168,7 +168,7 @@ export function PaneHeader({
   const headerRef = useRef<HTMLDivElement>(null);
   const combineMessage = useStore(s => !isMobileView && messageSharesOrigin(pane, s.panes));
   const paneAgentLabel = agentLabel(effectivePaneAgent(pane));
-  const agentMemMB = paneAgentRssMB(pane);
+  const memory = useAgentMemoryPill(pane, isMobileView);
 
   return (
     <div
@@ -219,7 +219,7 @@ export function PaneHeader({
           onDoubleClick={(e) => e.stopPropagation()}
         />
       ) : (
-        <Tooltip label="Double-click to rename">
+        <Tooltip label={paneTitleHint(paneIndex)}>
           <span
             className="pane-title"
             onDoubleClick={(e) => {
@@ -256,31 +256,30 @@ export function PaneHeader({
       </HeaderAttention>
       <div className="pane-actions">
         <PaneDetail priority={DETAIL_PRIORITY.mode}><PaneModeControl pane={pane} onSwitchMode={onSwitchMode} /></PaneDetail>
-        {/* Agent memory readout (display-only on Term): the selected provider's
-            resident RAM, sampled ~60s. No tap-to-restart here — Term reclaims
-            via Ctrl+C + resume or reopen
-            (one-tap restart lives in Focus mode). Amber when heavy. */}
-        {agentMemMB > 0 && (
-          <PaneDetail priority={DETAIL_PRIORITY.memory}><Tooltip label={`Agent memory ${memLabel(agentMemMB)}. To reclaim: Ctrl+C to exit the agent then resume, or use Restart pane in the ⋯ menu.`}>
-            <span
-              className={`iconbtn pane-mem-chip readonly${agentMemMB >= 500 ? ' heavy' : ''}`}
-              aria-label={`Agent memory ${memLabel(agentMemMB)}`}
-            >
-              {memLabel(agentMemMB)}
-            </span>
-          </Tooltip></PaneDetail>
+        {/* Agent memory: hidden until unusual, then "1.8 GB · Restart?"
+            (AgentMemoryChip.tsx). An unusual reading ranks with auto-approve
+            so it is the last detail to fold into +N. */}
+        {memory.show && (
+          <PaneDetail priority={memory.unusual ? DETAIL_PRIORITY.memoryUnusual : DETAIL_PRIORITY.memory}>
+            <AgentMemoryPill
+              memory={memory}
+              onRestart={onRestartPane && pane.status === 'running' ? () => { if (actionGuard()) onRestartPane(); } : undefined}
+            />
+          </PaneDetail>
         )}
-        {canZoom && (
-          <PaneDetail priority={DETAIL_PRIORITY.maximise}><Tooltip label={isZoomed ? 'Restore layout (Alt+Z)' : 'Maximise pane (Alt+Z)'}>
+        {/* Maximise lives in the pane menu (and Alt+Z, and a double-click on
+            the header). The header shows only the way back, while maximised. */}
+        {canZoom && isZoomed && !isMobileView && (
+          <PaneDetail priority={DETAIL_PRIORITY.maximise}><Tooltip label="Restore layout (Alt+Z)">
             <button
               className="iconbtn pane-zoom-btn"
-              aria-label={isZoomed ? 'Restore pane' : 'Maximise pane'}
+              aria-label="Restore pane"
               onClick={(e) => {
                 e.stopPropagation();
                 onToggleZoom();
               }}
               onDoubleClick={(e) => e.stopPropagation()}
-            >{isZoomed ? <IconMinimize size={13} /> : <IconMaximize size={13} />}<span className="pane-zoom-label">{isZoomed ? 'Restore layout' : 'Maximise pane'}</span></button>
+            ><IconMinimize size={13} /><span className="pane-zoom-label">Restore layout</span></button>
           </Tooltip></PaneDetail>
         )}
         {onOpenMenu && (

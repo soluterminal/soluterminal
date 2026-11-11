@@ -125,15 +125,21 @@ func TestAskPaneSendsWaitsAndReturnsOnlyTheReply(t *testing.T) {
 	// real one does. (It used to answer on a 300 ms timer: under -race and
 	// load, ask_pane could take its before-sending baseline after that
 	// reply was written, and then the reply read as the previous turn's.)
+	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus()}
 	replyAfterSubmit(t, p, "review my change", func() {
+		if n := a.collabInflight.Load(); n != 1 {
+			t.Errorf("inflight during send = %d, want 1", n)
+		}
 		now := time.Now()
 		f, _ := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o600)
 		defer f.Close()
 		fmt.Fprintln(f, claudeLine("user", now, `"promptSource":"typed","message":{"role":"user","content":"review my change"}`))
 		fmt.Fprintln(f, claudeLine("assistant", now, `"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Looks good apart from the loop."}]}`))
 	})
-	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus()}
 	text, isErr := mcpResultText(t, a.mcpToolAskPane(map[string]any{"pane_id": "pane_claude", "text": "review my change", "timeout_seconds": 10.0}, "pane_caller"))
+	if n := a.collabInflight.Load(); n != 0 {
+		t.Fatalf("inflight after ask = %d", n)
+	}
 	if isErr {
 		t.Fatal(text)
 	}

@@ -168,7 +168,7 @@ describe('auto-approve chip menu', () => {
     const onHeaderDown = vi.fn();
     render(
       <div onClick={onHeaderClick} onDoubleClick={onHeaderDouble} onMouseDown={onHeaderDown}>
-        <PaneHeaderBadges pane={pane} paneIndex={1} />
+        <PaneHeaderBadges pane={{ ...pane, autoMode: 'always' }} paneIndex={1} />
       </div>,
     );
     const btn = screen.getByRole('button', { name: /^Auto-approve:/ });

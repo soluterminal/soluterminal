@@ -7,7 +7,6 @@ import { useStore } from '../store';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { formatNextFire } from '../lib/cron';
 import { api } from '../api';
-import { copyToClipboard } from '../lib/clipboard';
 
 import { PaneAgentStaleDot } from './PaneAgentStaleDot';
 import { PaneCredentialBadge, paneAccountStatus } from './PaneCredentialBadge';
@@ -99,7 +98,7 @@ function AutoApprovingChip({ pane }: { pane: PaneInfo }) {
 
 // NextScheduleChip surfaces "a scheduled prompt is coming up for THIS pane" in
 // the pane's own title bar. You can create one straight from the pane's
-// right-click menu ("Create schedule…"), but until now nothing on the pane said
+// right-click menu ("New automation…"), but until now nothing on the pane said
 // one existed — you had to go find it in the Schedules sidebar.
 //
 // Reads the store's already-live `schedules` (bootstrap + the `schedules-changed`
@@ -199,9 +198,9 @@ interface PaneHeaderBadgesProps {
   section?: 'index' | 'details' | 'attention';
 }
 
-// The #index / auto-approval / resume badge cluster shared by the terminal
+// The #index / role / auto-approval badge cluster shared by the terminal
 // (PaneHeader) and native (NativePane) headers so the two stay in lockstep.
-// All three badges live inside a draggable header, so each escapes drag-start
+// The badges live inside a draggable header, so each escapes drag-start
 // via stopPropagation + onMouseDownCapture (mirrors the mode toggle).
 // Only the split desktop sections collapse into +N; the combined (phone and
 // Focus) header keeps its own tiers. Module-level so the type stays stable.
@@ -211,16 +210,7 @@ function Detail({ section, priority, children }: { section?: string; priority: n
 
 export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section }: PaneHeaderBadgesProps) {
   const accountWarning = paneAccountStatus(pane, account => account || 'unknown')?.tone === 'warn';
-  const toast = useStore((s) => s.toast);
-
-  const [copiedResume, setCopiedResume] = useState(false);
   const paneAgent = effectivePaneAgent(pane) ?? (pane.codexThreadId ? 'codex' : pane.claudeSessionId ? 'claude' : null);
-  const paneAgentLabel = agentLabel(paneAgent);
-  const conversationID = paneAgent === 'codex'
-    ? pane.codexThreadId
-    : paneAgent === 'muse'
-      ? pane.museSessionId
-      : pane.claudeSessionId;
   const packBase = pane.contextPack?.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? pane.contextPack;
   const packStatus = pane.contextPackStatus ?? 'injected';
   const packTitle = pane.contextPack ? {
@@ -230,21 +220,10 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
     missing: `Context pack ${packBase} not found at spawn — pane started unbriefed.`,
   }[packStatus] : '';
 
-  const copySessionId = async () => {
-    const id = conversationID;
-    if (!id) return;
-    if (await copyToClipboard(id)) {
-      setCopiedResume(true);
-      window.setTimeout(() => setCopiedResume(false), 1200);
-      toast('Session id copied', { kind: 'success', ttlMs: 1800 });
-    } else {
-      toast('Copy failed — clipboard unavailable', { kind: 'warn' });
-    }
-  };
-
-
   return (
     <>
+      {/* Shown only while Alt is held (lib/altHeld.ts, styles.css); the title's
+          tooltip carries the number the rest of the time. */}
       {(!section || section === 'index') && paneIndex > 0 && (
         <span
           className="pane-index-badge"
@@ -286,37 +265,17 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
       {section === 'attention' && accountWarning && <PaneCredentialBadge pane={pane} />}
       {(!section || section === 'attention') && <PaneAgentStaleDot pane={pane} />}
       {(!section || section === 'details') && <>
-      {/* Opens a three-option menu; never changes the mode on its own, and
-          Always approve asks first (PaneAutoModeChip). */}
-      {(showAutoMode || pane.neverAutoAnswer) && <Detail section={section} priority={DETAIL_PRIORITY.autoMode}><PaneAutoModeChip pane={pane} /></Detail>}
+      {/* Only when it says something: auto-approve on, or locked off. Manual is
+          the default and reads as nothing; the pane menu turns it on. Opens a
+          three-option menu; never changes the mode on its own, and Always
+          approve asks first (PaneAutoModeChip). */}
+      {((showAutoMode && !!pane.autoMode) || pane.neverAutoAnswer) && <Detail section={section} priority={DETAIL_PRIORITY.autoMode}><PaneAutoModeChip pane={pane} /></Detail>}
       {/* AFTER the auto badge: the transient chip reads as a status hanging off
           the control it belongs to, and — because it mounts/unmounts mid-turn —
           appearing to the badge's RIGHT never shoves the badge sideways under
           the cursor mid-click. */}
       </>}
       {(!section || section === 'attention') && showAutoMode && <AutoApprovingChip pane={pane} />}
-      {(!section || section === 'details') && <>
-      {conversationID && pane.resumeReady && (
-        <Detail section={section} priority={DETAIL_PRIORITY.resume}><button
-          type="button"
-          className={`pane-resume-badge${copiedResume ? ' copied' : ''}`}
-          aria-label={`Copy ${paneAgentLabel} ${paneAgent === 'codex' ? 'thread' : 'session'} id ${conversationID}`}
-          title={copiedResume
-            ? 'Copied!'
-            : `Copy the ${paneAgentLabel} ${paneAgent === 'codex' ? 'thread' : 'session'} id — use it to resume this conversation\n${conversationID}`}
-          onMouseDownCapture={(e) => e.stopPropagation()}
-          onDoubleClick={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            void copySessionId();
-          }}
-        >
-          {/* The chip copies; it never resumes anything itself, so its label
-              says what a click does. */}
-          {copiedResume ? 'Copied ✓' : 'Copy ID'}
-        </button></Detail>
-      )}
-      </>}
     </>
   );
 }

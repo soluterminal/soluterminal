@@ -4,8 +4,20 @@ import type { AgentReport } from '../api';
 import { setExtensionsForTests } from '../extensions';
 import { Topbar } from './Topbar';
 import { useEntitlements } from '../entitlements';
+import { useStore } from '../store';
+import { __resetFeedbackInboxForTests } from '../lib/useFeedbackInbox';
+import type { Schedule } from '../types';
+
+function schedule(kind: Schedule['kind']): Schedule {
+  return {
+    id: `s-${kind}`, name: 'Morning digest', kind, enabled: true, createdAt: '2026-07-01T00:00:00Z',
+    fireCount: 0, skipCount: 0, errorCount: 0,
+  } as Schedule;
+}
 
 afterEach(() => {
+  useStore.setState({ schedules: [] });
+  __resetFeedbackInboxForTests([]);
   setExtensionsForTests(null);
   useEntitlements.setState({ loaded: false, team: false, operator: false, account: false });
   delete (window as unknown as { __SOLU_TAURI__?: unknown }).__SOLU_TAURI__;
@@ -44,6 +56,49 @@ describe('Topbar window controls', () => {
     expect(
       [...controls!.querySelectorAll('button')].map((button) => button.getAttribute('aria-label')),
     ).toEqual(['New window', 'Minimize', 'Maximize', 'Close']);
+  });
+});
+
+describe('Topbar Inbox button', () => {
+  it('is hidden on the desktop while the Inbox has nothing and nothing can reach it', () => {
+    useStore.setState({ schedules: [schedule('prompt')] });
+    render(<Topbar onOpenHelp={() => {}} />);
+    expect(screen.queryByRole('button', { name: /^Inbox/ })).toBeNull();
+  });
+
+  it('shows once an automation that runs an agent exists, before its first report', () => {
+    useStore.setState({ schedules: [schedule('task')] });
+    render(<Topbar onOpenHelp={() => {}} />);
+    expect(screen.getByRole('button', { name: /^Inbox/ })).toBeInTheDocument();
+  });
+
+  it('shows for a feedback update, read or not', () => {
+    __resetFeedbackInboxForTests([{
+      number: 42, title: 'Paste fails on Windows', event: 'received',
+      message: "Thanks, we've got it. Report #42 is with the team.",
+      at: '2026-11-10T08:00:00Z', readAt: '2026-11-10T08:00:00Z',
+    }]);
+    render(<Topbar onOpenHelp={() => {}} />);
+    const inbox = screen.getByRole('button', { name: /^Inbox/ });
+    expect(inbox.querySelector('.topbar-inbox-badge')).toBeNull();
+  });
+
+  // Phones reach the form from the drawer's "Send feedback" row now, so an
+  // empty Inbox hides there too, and shows like the desktop's once it can hold
+  // something.
+  it('on phones, hides while empty and shows once the Inbox can hold something', () => {
+    const width = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    try {
+      const { unmount } = render(<Topbar onOpenHelp={() => {}} />);
+      expect(screen.queryByRole('button', { name: /^Inbox/ })).toBeNull();
+      unmount();
+      useStore.setState({ schedules: [schedule('task')] });
+      render(<Topbar onOpenHelp={() => {}} />);
+      expect(screen.getByRole('button', { name: /^Inbox/ })).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    }
   });
 });
 

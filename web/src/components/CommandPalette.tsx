@@ -593,7 +593,7 @@ export function CommandPalette({
       {
         id: 'view.activity',
         label: 'Show activity…',
-        hint: 'Cross-pane feed of state changes, tool calls, schedule fires',
+        hint: 'Cross-pane feed of state changes, tool calls, automation runs',
         category: 'View',
         keywords: 'activity feed dashboard log history orchestration timeline',
         run: () => {

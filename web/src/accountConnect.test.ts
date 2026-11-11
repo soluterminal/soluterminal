@@ -5,6 +5,8 @@ import {
   askToConnectAfterSignIn,
   connectPromptPending,
   connectThisComputer,
+  connectThisComputerAfterWarning,
+  CONNECT_DECLINED_BEFORE,
   CONNECT_DECLINED_TOAST,
   CONNECT_LATER_TOAST,
   CONNECT_PROMPT_BODY,
@@ -89,6 +91,58 @@ describe('askToConnectAfterSignIn', () => {
       cancelLabel: 'Not now',
     });
     expect(bodies).toEqual([{ force: false, check: true }, { force: true }]);
+  });
+
+  // The feedback form's "Connect this computer" (@secure): the warning first,
+  // Cancel focused; Cancel changes nothing, and only a check is ever sent.
+  describe('connectThisComputerAfterWarning', () => {
+    it('Cancel leaves the pairing untouched: one check, no connect', async () => {
+      signedIn();
+      const { bodies } = daemon([{ status: 'available' }]);
+      const dialog = answerDialog(false);
+      expect(await connectThisComputerAfterWarning('connected!')).toBe(false);
+      dialog.restore();
+      expect(dialog.opened).toHaveLength(1);
+      expect(dialog.opened[0]).toMatchObject({
+        title: CONNECT_PROMPT_TITLE,
+        message: CONNECT_PROMPT_BODY,
+        confirmLabel: 'Connect this PC',
+        focusCancel: true,
+      });
+      expect(bodies).toEqual([{ force: false, check: true }]);
+    });
+
+    it('says the person chose not to connect before, and connects only on Connect this PC', async () => {
+      signedIn();
+      const { bodies } = daemon([{ status: 'declined' }, { status: 'connecting' }]);
+      const dialog = answerDialog(true);
+      expect(await connectThisComputerAfterWarning('connected!')).toBe(true);
+      dialog.restore();
+      expect(dialog.opened[0].message).toBe(`${CONNECT_PROMPT_BODY} ${CONNECT_DECLINED_BEFORE}`);
+      expect(bodies).toEqual([{ force: false, check: true }, { force: true }]);
+      expect(useStore.getState().toasts.at(-1)?.message).toBe('connected!');
+    });
+
+    it('asks nothing when the computer is already connected', async () => {
+      signedIn();
+      const { bodies } = daemon([{ status: 'connected' }]);
+      const dialog = answerDialog(true);
+      expect(await connectThisComputerAfterWarning('connected!')).toBe(true);
+      dialog.restore();
+      expect(dialog.opened).toHaveLength(0);
+      expect(bodies).toEqual([{ force: false, check: true }]);
+    });
+
+    it('signed out: offers Sign in and sends nothing', async () => {
+      const spy = vi.spyOn(globalThis, 'fetch');
+      useCloud.setState({ session: null, isLocal: true });
+      const dialog = answerDialog(true);
+      expect(await connectThisComputerAfterWarning('connected!')).toBe(false);
+      dialog.restore();
+      expect(dialog.opened).toHaveLength(0);
+      expect(spy).not.toHaveBeenCalled();
+      expect(useStore.getState().toasts.at(-1)?.action?.label).toBe('Sign in');
+    });
   });
 
   it('remembers the Not now button on the daemon', async () => {

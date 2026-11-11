@@ -2431,6 +2431,14 @@ function apiFetchScoped(scope: RoutingScope, path: string, init?: RequestInit): 
   return isLocalTarget(target) ? withLocalProofRetry(scope.backendPrefix, send) : send();
 }
 
+// False when the restart target pinned below is not the backend the window is
+// showing: Dual with the Windows workspace selected. A surface that shows the
+// selected backend's own numbers must not offer the restart there, because it
+// would restart the other service.
+export function backgroundServiceIsSelectedBackend(): boolean {
+  return !isRouterMode() || backendPrefix !== '/b/win';
+}
+
 // A restart request is sent once, without the generic stale-proof retry. Pin
 // the local target for capability, mutation and health, including Dual's WSL
 // backend even while the Windows workspace is selected.
@@ -2948,6 +2956,8 @@ export interface FeedbackReq {
   snapshot?: string;
   logs?: string;
   clientVersion?: string;
+  /** The person's own earlier report this one follows up; the cloud checks it. */
+  followUpOf?: number;
 }
 
 export interface FeedbackResult {
@@ -2969,8 +2979,13 @@ export interface FeedbackContext {
   platform: string;
   os: string;
   arch: string;
+  /** Newer daemons on Windows, or in WSL. */
+  windowsBuild?: string;
   machineId: string;
   paneId: string;
+  /** With pane text only: "Terminal" or "Focus", and the agent it runs. */
+  paneKind?: string;
+  paneAgent?: string;
   captureKind: string;
   snapshotRequested?: boolean;
   snapshotCaptured?: boolean;
@@ -3121,6 +3136,9 @@ export interface AgentsFixAgent {
   nextRunAt?: string | null;
   stale?: boolean;
   stuck?: { issue: number; pr?: number; reason?: string }[] | null;
+  // The last run's own error line; the daemon scrubs and clamps it. Absent on
+  // older daemons and when the run recorded no error.
+  lastError?: string | null;
 }
 
 // One PR the babysitter handled in its LAST run. `url` is rebuilt by the
@@ -3196,6 +3214,11 @@ export interface GithubAppStatus {
   // Repo list temporarily unknown (GitHub unreachable) — connection itself
   // still stands.
   reposError?: string;
+  // Repositories on the installation that agents do not act on yet (added
+  // since the connect, or the connection must be confirmed again): the
+  // owner confirms on GitHub to include them. repos/repoCount leave them out.
+  needsReproof?: boolean;
+  unprovenRepoCount?: number;
 }
 
 // --- Agent bootstrap (in-app zero-terminal setup for built-in agents) ------
@@ -4092,13 +4115,25 @@ const coreApi = {
     return j<GithubAppStatus>(r);
   },
 
-  // Finish a connect that started from GitHub's side (no signed state): the
-  // logged-in user explicitly claims the installation id.
-  githubAppClaim: (installationId: number) =>
-    apiFetch('/api/github/app/claim', {
+  // Connect an installation to the signed-in account, in two calls. Both go
+  // straight to SoluTerminal on the web with the person's own session token
+  // (never through a machine): connecting GitHub is theirs to do. This one
+  // names the installation: the answer is GitHub's authorize URL to send the
+  // browser to (GitHub confirms the person administers the installation), or
+  // the status itself when the installation is already this account's.
+  githubAppClaim: (installationId: number, sessionToken: string) =>
+    fetch('/api/github/app/claim', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${sessionToken}` },
       body: JSON.stringify({ installationId }),
+    }).then(j<GithubAppStatus & { authorizeUrl?: string }>),
+
+  // The second call: what GitHub sent the browser back with.
+  githubAppClaimFinish: (code: string, state: string, sessionToken: string) =>
+    fetch('/api/github/app/claim', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${sessionToken}` },
+      body: JSON.stringify({ code, state }),
     }).then(j<GithubAppStatus>),
 
   /**

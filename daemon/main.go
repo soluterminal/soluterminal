@@ -1027,19 +1027,6 @@ func main() {
 	// If so this arms a machine-local required-update floor that undoes the
 	// downgrade on the next check (see updater_downgrade.go).
 	updater.DetectExternalDowngrade()
-	// Server-side update-safety gate: a non-forced Apply is refused (409) while
-	// any Focus/native pane is mid-turn — the Focus turn's control loop lives in
-	// this process, so a swap would degrade it, while terminal turns ride out a
-	// swap untouched. Same predicate family as the DTO's agentMidTurn, so the
-	// client's defer-while-busy watcher and this gate agree by construction.
-	updater.busyCheck = func() (bool, string, string) {
-		for _, p := range mgr.List() {
-			if p.Kind == "native" && p.IsAgentWorking() {
-				return true, "a Focus pane is mid-turn (pane " + p.ID + ")", p.ID
-			}
-		}
-		return false, "", ""
-	}
 	// Drain workflow model invocations before a non-forced swap. The gate is
 	// two-phase: WINDOW-ARMED pauses new admissions while draining between
 	// Apply attempts (the updater defers after 10m and reopens admission), then LEASE-HELD
@@ -1079,6 +1066,14 @@ func main() {
 		shellPlatform:      *shellPlatform,
 		dataDir:            *dataDir,
 	}
+	// Terminal turns survive a daemon swap. Protect volatile collaboration
+	// state and, until removal lands, in-process Focus turns.
+	updater.busyCheck = api.updateBusy
+	updater.restartLossCounts = func() (int, int, int64) {
+		held, receipts := api.serviceLossCounts()
+		return held, receipts, api.collabInflight.Load()
+	}
+
 	boot.api, boot.updater = api, updater
 	runBootSteps(bootServer, boot)
 	mgr.SetCredentialSelection(api.credentialAccount)
@@ -1293,6 +1288,7 @@ func main() {
 	paneAutoNamer.Store(&autoNamer)
 	workflowHandler := api.apiHandler(mux)
 	shinoqueTokens := &shinoqueTokenCache{}
+	shinoqueTokens.discovery.bridge = newPlatformShinoqueRelayBridge()
 	api.shinoqueTokens = shinoqueTokens
 
 	srv := &http.Server{
@@ -2153,8 +2149,10 @@ func logMiddleware(h http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: 200}
 		h.ServeHTTP(rec, r)
-		// Suppress high-frequency successful polls.
-		if r.Method == "GET" && rec.status < 400 && quietPollPaths[r.URL.Path] {
+		// Suppress high-frequency successful polls, and the core's 10 s relay
+		// key pushes, which log their own changes.
+		if rec.status < 400 && (r.Method == "GET" && quietPollPaths[r.URL.Path] ||
+			r.Method == "POST" && r.URL.Path == shinoqueRelayKeyPath) {
 			return
 		}
 		log.Printf("%s %s %d %s", r.Method, r.URL.Path, rec.status, time.Since(start))

@@ -1,12 +1,15 @@
 import { useStore } from '../store';
-import { openInboxAt } from '../components/inbox/InboxPanel';
+import { openInbox, openInboxAt } from '../components/inbox/InboxPanel';
+import { markFeedbackEventRead } from './useFeedbackInbox';
 
 // Push notifications carry their target in the paneId slot (pusher.go):
-// a real pane id, "sched:<scheduleId>" for an automation, or
-// "agent:<agentId>" for a managed agent. Pane ids are revealed by the caller;
-// this routes the other two, which used to wait 10 s for a pane named
-// "agent:…" that never exists.
+// a real pane id, "sched:<scheduleId>" for an automation,
+// "agent:<agentId>" for a managed agent, or "feedback:<reportNumber>" for an
+// update on a report the person sent (cloud/feedback_loop.go). Pane ids are
+// revealed by the caller; this routes the others, which used to wait 10 s for
+// a pane named "agent:…" that never exists.
 //
+// - A feedback tap opens the Inbox on that report's thread and marks it read.
 // - An agent tap opens the Inbox on that agent's pending decision.
 // - A task automation's tap opens the Inbox on its newest report.
 // - Any other automation (a prompt typed into a pane, a built-in agent) has
@@ -43,8 +46,28 @@ function routeSchedule(id: string) {
   }, SCHEDULE_WAIT_MS);
 }
 
+const INBOX_TAP_PREFIXES = ['sched:', 'agent:', 'feedback:'];
+
+/** True for a target routeNotificationTap handles (not a pane id). */
+export function isInboxTapTarget(target: string): boolean {
+  return INBOX_TAP_PREFIXES.some((p) => target.startsWith(p));
+}
+
 /** Routes a non-pane notification target. Returns false for a pane id. */
 export function routeNotificationTap(target: string): boolean {
+  if (target.startsWith('feedback:')) {
+    const raw = target.slice('feedback:'.length);
+    const number = /^[1-9]\d*$/.test(raw) ? Number(raw) : 0;
+    if (number > 0) {
+      openInbox('feed', number);
+      // Opening the thread is reading it, the same as picking its row.
+      markFeedbackEventRead(number);
+    } else {
+      // No report to show (the admin alert carries 0): the feed itself.
+      openInbox();
+    }
+    return true;
+  }
   if (target.startsWith('sched:')) {
     routeSchedule(target.slice('sched:'.length));
     return true;
@@ -54,4 +77,23 @@ export function routeNotificationTap(target: string): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * The service worker's messages about a tapped notification, for a window
+ * where the app is mounted. Before it hands over a target that any window can
+ * show, the worker asks which windows are listening (sw.js tapReady); the
+ * answer on the port is what tells it this one can.
+ */
+export function onServiceWorkerTapMessage(e: MessageEvent): void {
+  const d = e.data as { type?: string; paneId?: string } | null;
+  if (!d) return;
+  if (d.type === 'solu:notification-tap-ready') {
+    e.ports[0]?.postMessage('ready');
+    return;
+  }
+  if (d.type !== 'solu:notification-tap' || !d.paneId) return;
+  if (routeNotificationTap(d.paneId)) return;
+  const st = useStore.getState();
+  if (st.panes[d.paneId]) void st.revealPane(d.paneId);
 }

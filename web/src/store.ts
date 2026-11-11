@@ -97,10 +97,8 @@ export function resolveTerminalTheme(s: {
 
 const CURRENT_WS = '_current';
 
-// A daemon update (swap) jumbles a NATIVE pane that's mid-turn — the stream-json
-// reattach can't cleanly rejoin a half-streamed message — while terminal panes recover
-// via PTY redraw. So applyUpdate holds the swap only while a native turn is genuinely
-// active, then retries normally so every daemon-side safety gate is re-evaluated.
+// Desktop shell restarts also close the UI; they still wait for native turns.
+// Daemon swaps use their own server gate for volatile collaboration state.
 export function nativePaneBusy(panes: Record<string, PaneInfo>): boolean {
   return Object.values(panes).some((p) => p.kind === 'native' && p.agentMidTurn === true);
 }
@@ -113,7 +111,6 @@ const DEFERRED_UPDATE_POLL_MS = 4000;
 let deferredUpdateRetryTimer: number | null = null;
 let deferredUpdateRetryGeneration = 0;
 let deferredUpdateRetryVersion: string | undefined;
-let deferredUpdateRetryTick = 0;
 
 export function cancelDeferredUpdateRetry() {
   deferredUpdateRetryGeneration += 1;
@@ -139,7 +136,6 @@ function queueDeferredUpdate(next: UpdateHold, auto: boolean) {
   const announce = !sameUpdate;
 
   cancelDeferredUpdateRetry();
-  if (!sameUpdate) deferredUpdateRetryTick = 0;
   deferredUpdateRetryVersion = version;
   useStore.setState({ deferredUpdate: hold });
 
@@ -188,25 +184,15 @@ function queueDeferredUpdate(next: UpdateHold, auto: boolean) {
       return;
     }
 
-    deferredUpdateRetryTick += 1;
-    if (current.cause === 'focus' && nativePaneBusy(get().panes)) {
-      if (deferredUpdateRetryTick % 5 === 0) {
-        await get().refreshPanes();
-        current = get().deferredUpdate;
-        if (!current) return;
-      }
-      if (nativePaneBusy(get().panes)) {
-        queueDeferredUpdate(current, current.auto);
-        return;
-      }
-    } else if (current.cause !== 'focus') {
-      await get().refreshUpdateStatus();
-      current = get().deferredUpdate;
-      if (!current) return;
-      if (current.workflowNextRetryMs && current.workflowNextRetryMs > Date.now()) {
-        queueDeferredUpdate(current, current.auto);
-        return;
-      }
+    // The daemon owns the busy predicate, including held deliveries and open
+    // ask/wait calls that pane DTOs cannot represent. Always retry normally;
+    // agentMidTurn must not extend its bounded collaboration grace.
+    await get().refreshUpdateStatus();
+    current = get().deferredUpdate;
+    if (!current) return;
+    if (current.workflowNextRetryMs && current.workflowNextRetryMs > Date.now()) {
+      queueDeferredUpdate(current, current.auto);
+      return;
     }
 
     // An unattended swap held for other work also waits out text typed in a
@@ -848,7 +834,7 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   loadRecoverySettings: () => Promise<void>;
   setRecoveryResumeMode: (mode: RecoveryResumeMode) => Promise<void>;
   // Per-install self-update preference. 'when-idle' lets refreshUpdateStatus
-  // auto-apply the daemon swap once no native pane is mid-turn (see
+  // auto-apply the daemon swap through the server safety gates (see
   // maybeAutoApplyUpdate); 'off' keeps the notify-then-click banner. New installs
   // start on 'when-idle'; older ones keep their choice and are asked once.
   updateSettings: UpdateSettings | null;
@@ -993,6 +979,10 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   setCopyOnSelect: (v: boolean) => void;
   middleClickPaste: boolean;
   setMiddleClickPaste: (v: boolean) => void;
+  // The pane header's agent memory pill shows only when memory is unusual;
+  // this shows it always, as a plain readout. Persisted per-browser. Default off.
+  alwaysShowAgentMemory: boolean;
+  setAlwaysShowAgentMemory: (v: boolean) => void;
   // The prompt-history strip at the top of Claude panes (both renderers).
   // Presentational client toggle, persisted per-browser. Default on.
   showPromptHistory: boolean;
@@ -2996,6 +2986,7 @@ function readBoolPref(key: string): boolean {
 
 const copyOnSelectDefault: boolean = readBoolPref(COPY_ON_SELECT_KEY);
 const middleClickPasteDefault: boolean = readBoolPref(MIDDLE_CLICK_PASTE_KEY);
+const ALWAYS_SHOW_AGENT_MEMORY_KEY = 'solu.alwaysShowAgentMemory';
 
 // The prompt-history strip at the top of Claude panes (PaneLastPrompt, both
 // renderers). Absent key → on (the long-standing behavior); '0' hides it.
@@ -3662,6 +3653,13 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
   setMiddleClickPaste: (v) => {
     try { localStorage.setItem(MIDDLE_CLICK_PASTE_KEY, v ? '1' : '0'); } catch {}
     set({ middleClickPaste: v });
+  },
+  alwaysShowAgentMemory: (() => {
+    try { return localStorage.getItem(ALWAYS_SHOW_AGENT_MEMORY_KEY) === '1'; } catch { return false; }
+  })(),
+  setAlwaysShowAgentMemory: (v) => {
+    try { localStorage.setItem(ALWAYS_SHOW_AGENT_MEMORY_KEY, v ? '1' : '0'); } catch {}
+    set({ alwaysShowAgentMemory: v });
   },
   showPromptHistory: showPromptHistoryDefault,
   setShowPromptHistory: (v) => {
@@ -5252,7 +5250,7 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     // A REQUIRED update (the daemon is below the operator's min_daemon_version
     // floor) force-enables the when-idle behavior even for "Notify me" users:
     // the swap is seamless, and the alternative is the blocking modal. Same
-    // safety gate either way — never over a mid-turn native pane.
+    // server safety gate either way.
     if (st.updateSettings?.autoApply !== 'when-idle' && !s?.required) return;
     // `available` already reflects the daemon's staged-rollout + kill-switch
     // gating (suppressed when blocked), so we inherit that for free.
@@ -5269,7 +5267,7 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     const stamp = readAutoApplyStamp();
     if (stamp && stamp.version === v && Date.now() - stamp.at < AUTO_APPLY_RETRY_COOLDOWN_MS) return;
     writeAutoApplyStamp({ version: v, at: Date.now() });
-    // auto:true — applyUpdate holds (never forces) behind a mid-turn native pane.
+    // auto:true — applyUpdate retries the daemon gate without forcing.
     // Swallow rejections: this is the unattended path, so a refusal (daemon
     // already mid-swap, another device won the race, network blip) gets no
     // toast — the stamp cooldown retries on a later poll if it mattered.
@@ -5521,23 +5519,8 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       return;
     }
 
-    // The local gate is responsive UI, not an authority boundary. After it
-    // settles the retry stays non-forced so the daemon can enforce workflow
-    // drain and re-check both gates immediately before the swap.
-    if (!opts?.force && nativePaneBusy(get().panes)) {
-      const paneId = nativeBusyPaneId(get().panes);
-      queueDeferredUpdate({
-        cause: 'focus',
-        since: Date.now(),
-        auto,
-        paneId,
-        reason: paneId
-          ? `a Focus pane is mid-turn (pane ${paneId})`
-          : 'a Focus pane is mid-turn',
-      }, auto);
-      return;
-    }
-
+    // The daemon protects volatile collaboration state and bounds its hold.
+    // Pane agentMidTurn cannot determine whether a daemon swap is safe.
     // Only the explicit override clears a hold before admission. Normal retries
     // retain the same mounted hold while the server answers, allowing a Focus →
     // workflow transition to update in place without a blank frame.

@@ -6,18 +6,18 @@ import { createPortal, flushSync } from 'react-dom';
 // PaneDetail names its own rank so the order is reviewable in one place.
 export const DETAIL_PRIORITY = {
   autoMode: 1,    // what the pane may do unattended; changes what you must watch
-  role: 2,        // orchestrator / task owner: who this pane is in the squad
-  credential: 3,  // which account pays for the pane
-  schedule: 4,    // a prompt is about to fire
-  review: 5,      // verdict on the pane's work
-  message: 6,     // message from the lead (also carries the origin when combined)
-  identity: 7,    // @handle and working-on; the title usually says the same
-  origin: 8,      // who started the pane
-  mode: 9,        // renderer toggle (only on panes that need a way back)
-  pack: 10,       // context-pack status, informational
-  resume: 11,     // copy the session id; also in the pane menu
-  memory: 12,     // display-only RSS readout
-  maximise: 13,   // Alt+Z and double-clicking the header do the same
+  memoryUnusual: 2, // agent memory past the usual; offers a restart
+  role: 3,        // orchestrator / task owner: who this pane is in the squad
+  credential: 4,  // which account pays for the pane
+  schedule: 5,    // a prompt is about to fire
+  review: 6,      // verdict on the pane's work
+  message: 7,     // message from the lead (also carries the origin when combined)
+  identity: 8,    // @handle and working-on; the title usually says the same
+  origin: 9,      // who started the pane
+  mode: 10,       // renderer toggle (only on panes that need a way back)
+  pack: 11,       // context-pack status, informational
+  memory: 12,     // the readout "Always show agent memory" adds
+  maximise: 13,   // the way back while maximised; Alt+Z does the same
   workerNotice: 14, // quiet lead housekeeping, first to move into details
 } as const;
 

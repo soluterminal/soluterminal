@@ -44,11 +44,22 @@ func TestFleetUpdateStatusReasons(t *testing.T) {
 		{"swapped", "restart-pending", func(u *Updater) { u.swapped = true }},
 		{"applying", "applying", func(u *Updater) { u.applying = true }},
 		{"busy", "busy", func(u *Updater) {
-			u.busyCheck = func() (bool, string, string) { return true, "private reason", "private pane" }
+			u.busyCheck = func() *updateBusyError {
+				return &updateBusyError{cause: updateBusyCauseCollaboration, reason: "private reason", paneID: "private pane"}
+			}
+		}},
+		{"busy-grace-expired", "", func(u *Updater) {
+			u.busyCheck = func() *updateBusyError {
+				return &updateBusyError{cause: updateBusyCauseCollaboration, reason: "private reason", paneID: "private pane"}
+			}
+			u.busySince = time.Now().Add(-updateBusyGrace)
+			u.busyLastObserved = time.Now()
 		}},
 		{"busy-without-candidate", "", func(u *Updater) {
 			u.status.Available = false
-			u.busyCheck = func() (bool, string, string) { return true, "", "" }
+			u.busyCheck = func() *updateBusyError {
+				return &updateBusyError{cause: updateBusyCauseCollaboration, reason: "", paneID: ""}
+			}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

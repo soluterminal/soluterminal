@@ -5,17 +5,18 @@ import { useStore } from '../../store';
 import { useEntitlements } from '../../entitlements';
 import { SystemPage } from './SystemPage';
 
-const mocks=vi.hoisted(()=>({engineAvailable:true,activation:vi.fn().mockResolvedValue([]),snapshot:{status:null as SystemStatus|null,error:null as null|string,polling:false},refresh:vi.fn(),hostRefresh:vi.fn().mockResolvedValue({available:true}),usage:vi.fn().mockResolvedValue(null)}));
+const mocks=vi.hoisted(()=>({selectedBackend:true,capability:vi.fn().mockResolvedValue({supported:true,pid:1}),restart:vi.fn().mockResolvedValue(undefined),engineAvailable:true,activation:vi.fn().mockResolvedValue([]),snapshot:{status:null as SystemStatus|null,error:null as null|string,polling:false},refresh:vi.fn(),hostRefresh:vi.fn().mockResolvedValue({available:true}),usage:vi.fn().mockResolvedValue(null)}));
 
 vi.mock('../../lib/useSystemStatus',()=>({SYSTEM_POLL_MS:10_000,useSystemStatus:()=>({...mocks.snapshot,lastOkMs:0}),refreshSystemStatus:mocks.refresh}));
 vi.mock('../../lib/useDaemonHealth',async(importOriginal)=>{const actual=await importOriginal<typeof import('../../lib/useDaemonHealth')>();return {...actual,useDaemonHealth:()=>({health:{version:'1'}})};});
 vi.mock('../../lib/useNow',()=>({useNow:()=>Date.parse('2026-01-01T00:00:10Z')}));
-vi.mock('../../api',async(importOriginal)=>{const actual=await importOriginal<typeof import('../../api')>();return {...actual,api:{...actual.api,ccUsageSummaryCached:mocks.usage,hostStorageRefresh:mocks.hostRefresh,workflowActivation:mocks.activation}};});
+vi.mock('../../lib/backgroundService',async(importOriginal)=>{const actual=await importOriginal<typeof import('../../lib/backgroundService')>();return {...actual,backgroundServiceCapability:mocks.capability,restartBackgroundService:mocks.restart};});
+vi.mock('../../api',async(importOriginal)=>{const actual=await importOriginal<typeof import('../../api')>();return {...actual,backgroundServiceIsSelectedBackend:()=>mocks.selectedBackend,api:{...actual.api,ccUsageSummaryCached:mocks.usage,hostStorageRefresh:mocks.hostRefresh,workflowActivation:mocks.activation}};});
 
 function fixture():SystemStatus{return {sampledAt:'2026-01-01T00:00:00Z',treeSampledAt:'2026-01-01T00:00:00Z',generatedAt:'2026-01-01T00:00:00Z',sampleIntervalSec:15,platform:{os:'linux',procfs:true},level:{overall:'warn',reason:'disk: 4.0 GB free',reasons:[],areas:{daemonMemory:'ok',hostMemory:'ok',disk:'warn',engine:'ok'}},daemon:{version:'1',webVersion:'1',backendID:'wsl',shellVersion:'1',pid:1,uptimeSec:10,startedAt:'',rssMB:512,goHeapMB:100,goroutines:10,cpuPct:2,memGuardMB:6144},host:{cores:8,cpuPct:4,loadAvg1:1,memTotalMB:8192,memAvailableMB:4096,memFloorMB:2048},footprint:{totalRssMB:1024,daemonRssMB:512,panesRssMB:512,workersRssMB:0,paneCount:1,workerCount:0,procs:3,cpuPct:2,complete:true},panes:[],workers:[],disk:{layer:'local',blockingLayer:'none',anyLow:false,host:null,path:'~/.solu',freeMB:4096,totalMB:10000,floorMB:2048,low:false,measuredAt:null,breakdown:null,breakdownAt:null,measuring:true,fresh:false,nextMeasureAfter:null,goCacheBytes:null,worktreesBytes:null},engine:{available:true,queue:{cap:4,running:1,runnable:0,capacityQueued:0,dependencyBlocked:0,overlapSerialized:0,awaitingApproval:0,quotaPaused:0,landingWait:0,resourceWait:0,heavyCap:2,heavyRunning:0,resourceDeferrals:0,memFloorMB:2048,diskFloorMB:2048,diskFreeMB:4096,diskLow:false,utilization:.25},runningInvocations:0,decide:2,gcLastSweepAt:null},runtimes:null,automation:{agents:{total:1,paused:0,running:0,blocked:0,errors24h:0,nextRunAt:null},schedules:{enabled:1,disabled:0,running:0,errors24h:0,nextFireAt:null},builtins:[],autonomy:{globalPaused:false,pausedCount:0}},surface:{addr:'127.0.0.1:8787',ports:{total:1,paneOwned:1},previews:{active:0},cloud:{configured:false,hasCreds:false,credsInvalid:false,relayState:'unconfigured'}},release:{running:'1',latest:'1',available:false,applying:false,lastSuccessMs:0,lastError:'',shellCurrent:'1',shellLatest:'1',shellAvailable:false,readiness:null}};}
 
-beforeEach(()=>{mocks.engineAvailable=true;useEntitlements.setState({loaded:true,tier:'team',team: true, operator: true,account:true});});
-afterEach(()=>{mocks.snapshot={status:null,error:null,polling:false};useStore.setState({});vi.clearAllMocks();});
+beforeEach(()=>{mocks.engineAvailable=true;mocks.selectedBackend=true;useEntitlements.setState({loaded:true,tier:'team',team: true, operator: true,account:true});});
+afterEach(()=>{delete (Element.prototype as {scrollIntoView?:unknown}).scrollIntoView;mocks.snapshot={status:null,error:null,polling:false};useStore.setState({});vi.clearAllMocks();});
 describe('SystemPage',()=>{
   it('keeps System services visible without polling workflow activation when shelved',()=>{
     mocks.engineAvailable=false;
@@ -122,6 +123,60 @@ describe('SystemPage',()=>{
     for (const jargon of [/solud/,/Go heap/,/guard accounting/,/ext4\.vhdx/,/VHDX/,/RUNBOOK/,/host-storage/,/~\/\.solu/,/engine floor/,/Listener/,/Previews/,/Storage producers/,/Go build cache/,/Usage capture needs cloud pairing/,/Usage · 7 days/,/workers/]) {
       expect({jargon:String(jargon),found:jargon.test(text)}).toEqual({jargon:String(jargon),found:false});
     }
+  });
+  it('shows operators the background service CPU and one restart button',async()=>{
+    const status=fixture();
+    status.daemon.cpuPct=420;
+    status.level={overall:'warn',reason:'Background service CPU: 4.2 cores',reasons:[{key:'daemonCpu',level:'warn',text:'Background service CPU: 4.2 cores'}],areas:{daemonCpu:'warn'}};
+    mocks.snapshot={status,error:null,polling:false};
+    const scrolled:Element[]=[];
+    Element.prototype.scrollIntoView=function(){scrolled.push(this);};
+    render(<SystemPage onClose={()=>{}}/>);
+    // Service CPU is the headline, so its card comes into view.
+    expect(scrolled.map((el)=>el.querySelector('h3')?.textContent)).toEqual(['Background service']);
+    expect(screen.getByText('Background service')).toBeInTheDocument();
+    expect(screen.getByText('4.2 of 8 cores')).toBeInTheDocument();
+    const restart=await screen.findByRole('button',{name:'Restart background service'});
+    expect(screen.getByText('This is SoluTerminal itself, not your panes. A restart keeps your panes running, and they reconnect.')).toBeInTheDocument();
+    fireEvent.click(restart);
+    expect(mocks.restart).toHaveBeenCalledOnce();
+  });
+  it('keeps the background service card off the public page',()=>{
+    useEntitlements.setState({loaded:true,tier:'none',team: false, operator: false,account:false});
+    const status=fixture();
+    status.daemon.cpuPct=420;
+    mocks.snapshot={status,error:null,polling:false};
+    render(<SystemPage onClose={()=>{}}/>);
+    expect(screen.queryByText('Background service')).toBeNull();
+    expect(screen.queryByRole('button',{name:'Restart background service'})).toBeNull();
+    expect(mocks.capability).not.toHaveBeenCalled();
+  });
+  it('hides restart where it is not supported',async()=>{
+    mocks.capability.mockResolvedValueOnce({supported:false,pid:1});
+    mocks.snapshot={status:fixture(),error:null,polling:false};
+    const scrollIntoView=vi.fn();
+    Element.prototype.scrollIntoView=scrollIntoView;
+    render(<SystemPage onClose={()=>{}}/>);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(screen.getByText('0.0 of 8 cores')).toBeInTheDocument();
+    expect(screen.getByText('This is SoluTerminal itself, not your panes.')).toBeInTheDocument();
+    await vi.waitFor(()=>expect(mocks.capability).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(screen.queryByRole('button',{name:'Restart background service'})).toBeNull();
+  });
+  it('offers no restart when the page shows the Windows service, which the restart would not reach',async()=>{
+    mocks.selectedBackend=false;
+    const status=fixture();
+    status.daemon.cpuPct=420;
+    status.level={overall:'warn',reason:'Background service CPU: 4.2 cores',reasons:[{key:'daemonCpu',level:'warn',text:'Background service CPU: 4.2 cores'}],areas:{daemonCpu:'warn'}};
+    mocks.snapshot={status,error:null,polling:false};
+    render(<SystemPage onClose={()=>{}}/>);
+    expect(screen.getByText('4.2 of 8 cores')).toBeInTheDocument();
+    await vi.waitFor(()=>expect(mocks.capability).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(screen.queryByRole('button',{name:'Restart background service'})).toBeNull();
+    expect(screen.getByText('This is SoluTerminal itself, not your panes.')).toBeInTheDocument();
+    expect(mocks.restart).not.toHaveBeenCalled();
   });
   it('explains a missing sampler to strangers without kill-switch names',()=>{
     useEntitlements.setState({loaded:true,tier:'none',team: false, operator: false,account:false});

@@ -16,6 +16,7 @@ export function DialogHost() {
   const inputRef = useRef<HTMLInputElement>(null);
   const selectRef = useRef<HTMLSelectElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
 
   // Keyboard-modal, not just visually modal: Tab must not walk into the app
@@ -37,6 +38,8 @@ export function DialogHost() {
         }
       } else if (dialog.kind === 'select') {
         selectRef.current?.focus();
+      } else if (dialog.focusCancel && cancelRef.current) {
+        cancelRef.current.focus();
       } else {
         confirmRef.current?.focus();
       }
@@ -115,7 +118,7 @@ export function DialogHost() {
         )}
         <div className="app-dialog-actions">
           {!isAlert && (
-            <button type="button" className="app-dialog-btn" onClick={onCancel}>
+            <button ref={cancelRef} type="button" className="app-dialog-btn" onClick={onCancel}>
               {cancelLabel}
             </button>
           )}

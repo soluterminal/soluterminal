@@ -1,8 +1,9 @@
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { api } from '../../api';
-import type { CCUsageSummary } from '../../api';
+import { api, backgroundServiceIsSelectedBackend } from '../../api';
+import type { CCUsageSummary, SystemStatus } from '../../api';
+import { backgroundServiceCapability, restartBackgroundService, useBackgroundService } from '../../lib/backgroundService';
 import { useDaemonHealth } from '../../lib/useDaemonHealth';
 import { useNow } from '../../lib/useNow';
 import { SYSTEM_POLL_MS, refreshSystemStatus, useSystemStatus } from '../../lib/useSystemStatus';
@@ -35,6 +36,42 @@ function SystemPageState({ title, detail, onClose }: { title: string; detail: st
       <h3>{title}</h3>
       <p>{detail}</p>
     </div>
+  );
+}
+
+// The background service's own CPU and the one thing a person can do about it.
+// This is the number the footer's "Background service CPU" chip warns on: the
+// service alone, not the panes it runs. Operator-only, like the chip.
+function BackgroundServiceCard({ status }: { status: SystemStatus }) {
+  const [supported, setSupported] = useState(false);
+  const { pending, message, error } = useBackgroundService();
+  useEffect(() => {
+    let active = true;
+    void backgroundServiceCapability().then((s) => { if (active) setSupported(s.supported); }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+  const cpu = status.daemon.cpuPct;
+  const cores = status.host.cores;
+  const reasons = status.level.reasons ?? [];
+  const busy = reasons.some((r) => r.key === 'daemonCpu' && (r.level === 'warn' || r.level === 'critical'));
+  // When service CPU is the page's headline, the person came for this card
+  // (the footer chip says so): bring it into view once.
+  const headline = busy && reasons.find((r) => r.text === status.level.reason)?.key === 'daemonCpu';
+  const cardRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (headline) cardRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [headline]);
+  // The restart always goes to this computer's main service. With the Windows
+  // workspace selected the CPU above is the Windows service's, so offer nothing.
+  const canRestart = supported && backgroundServiceIsSelectedBackend();
+  return (
+    <article className="system-card" ref={cardRef}>
+      <h3>Background service</h3>
+      <div className="system-rows"><div><span>{busy && <><RunStatusGlyph visual="attention" /> </>}CPU</span><span>{cpu == null ? '—' : `${(cpu / 100).toFixed(1)}${cores > 0 ? ` of ${cores}` : ''} core${cores === 1 ? '' : 's'}`}</span></div></div>
+      <p className="system-muted">This is SoluTerminal itself, not your panes.{canRestart && ' A restart keeps your panes running, and they reconnect.'}</p>
+      {canRestart && <button type="button" className="system-deep-link" disabled={pending} onClick={() => void restartBackgroundService()}>{pending ? 'Restarting…' : 'Restart background service'}</button>}
+      {message && <p className={error ? 'system-error-text' : 'system-muted'} role={error ? 'alert' : 'status'}>{message}</p>}
+    </article>
   );
 }
 
@@ -190,9 +227,10 @@ function SystemPageBody({ onClose }: Props) {
       <section className="system-grid" aria-label="Moving parts">
 
         {team && <article className="system-card"><h3>Crew & runtimes</h3><div className="system-rows">{(status.runtimes ?? []).map((runtime) => <div key={runtime.id}><span><RunStatusGlyph visual={runtime.status === 'healthy' ? 'ok' : runtime.status === 'unknown' ? 'neutral' : 'attention'} /> {runtime.id}</span><span>{runtime.status}{runtime.cooldownUntilEpoch ? ` · cooldown ${untilLabel(runtime.cooldownUntilEpoch * 1000, now)}` : ''}</span></div>)}</div>{!status.runtimes?.length && <p>Runtime health unavailable.</p>}</article>}
-        {team && <article className="system-card"><h3>Automation</h3>{status.automation.autonomy.globalPaused && <div className="system-neutral-banner">Autonomy paused</div>}<p>{automationLine(status)}</p><div className="system-stat-line"><span>Errors 24h <b>{status.automation.schedules.errors24h}</b></span><span>Built-ins <b>{builtinsPresent}/{status.automation.builtins.length} present · {builtinsRunning} running</b></span></div><div className="system-rows"><div><span>Next schedule</span><span>{untilLabel(status.automation.schedules.nextFireAt, now)}</span></div></div><div className="system-card-actions"><button type="button" className="system-deep-link" onClick={() => { useStore.getState().setAgentsPanelOpen(true); onClose(); }}>Agents status</button><button type="button" className="system-deep-link" onClick={() => { revealSidebar('schedules'); onClose(); }}>Schedules</button></div></article>}
+        {team && <article className="system-card"><h3>Automation</h3>{status.automation.autonomy.globalPaused && <div className="system-neutral-banner">Autonomy paused</div>}<p>{automationLine(status)}</p><div className="system-stat-line"><span>Errors 24h <b>{status.automation.schedules.errors24h}</b></span><span>Built-ins <b>{builtinsPresent}/{status.automation.builtins.length} present · {builtinsRunning} running</b></span></div><div className="system-rows"><div><span>Next automation</span><span>{untilLabel(status.automation.schedules.nextFireAt, now)}</span></div></div><div className="system-card-actions"><button type="button" className="system-deep-link" onClick={() => { useStore.getState().setAgentsPanelOpen(true); onClose(); }}>Agents status</button><button type="button" className="system-deep-link" onClick={() => { revealSidebar('schedules'); onClose(); }}>Schedules</button></div></article>}
         {detail ? <article className="system-card"><h3>Surface</h3><div className="system-rows"><div><span>Listener</span><span>{status.surface.addr || '—'}</span></div><div><span>Ports</span><span>{status.surface.ports.paneOwned} pane-owned / {status.surface.ports.total} total</span></div><div><span>Previews</span><span>{status.surface.previews.active} active</span></div><div><span>Cloud relay</span><span><RunStatusGlyph visual={status.surface.cloud.relayState === 'online' ? 'ok' : status.surface.cloud.configured ? 'attention' : 'neutral'} /> {status.surface.cloud.relayState}</span></div></div>{ports.slice(0, 4).map((port) => <p className="system-muted" key={`${port.proto}:${port.port}`}>:{port.port} · {port.process}{port.paneId ? ' · pane-owned' : ''}</p>)}<button type="button" className="system-deep-link" onClick={() => { useSettings.getState().openSettings('devices'); onClose(); }}>Devices & cloud</button></article> : <article className="system-card"><h3>Connections</h3><div className="system-rows"><div><span>Local servers</span><span>{status.surface.ports.total}{status.surface.ports.paneOwned ? ` · ${status.surface.ports.paneOwned} from your sessions` : ''}</span></div><div><span>Phone &amp; browser access</span><span><RunStatusGlyph visual={status.surface.cloud.relayState === 'online' ? 'ok' : status.surface.cloud.configured ? 'attention' : 'neutral'} /> {plainRelayState(status.surface.cloud.relayState)}</span></div></div>{ports.slice(0, 4).map((port) => <p className="system-muted" key={`${port.proto}:${port.port}`}>:{port.port} · {port.process}</p>)}<button type="button" className="system-deep-link" onClick={() => { useSettings.getState().openSettings('devices'); onClose(); }}>Devices &amp; cloud</button></article>}
         {team ? <article className="system-card"><h3>Release & update</h3><p>{releaseLine(status)}</p><div className="system-rows"><div><span>Daemon</span><span>{status.release.running} → {status.release.latest || status.release.running}</span></div><div><span>Shell</span><span>{status.release.shellCurrent || '—'} → {status.release.shellLatest || status.release.shellCurrent || '—'}</span></div>{status.release.workflowDeferState && <div><span>Workflow update</span><span>{status.release.workflowDeferState === 'backoff' ? `deferred · retry ${untilLabel(status.release.workflowNextRetryMs, now)}` : `draining · ${status.release.workflowInflight ?? 0} in flight`}{status.release.workflowDeferAttempts ? ` · attempt ${status.release.workflowDeferAttempts}` : ''}</span></div>}<div><span>Last successful check</span><span>{status.release.lastSuccessMs ? ageLabel(status.release.lastSuccessMs, now) : '—'}</span></div><div><span>Release train</span><span>{status.release.train ? `${status.release.train.enabled ? 'on' : 'off'} · ${status.release.train.phase}` : '—'}</span></div></div>{status.release.lastError && <p className="system-error-text">{status.release.lastError}</p>}<button type="button" className="system-deep-link" onClick={() => { useStore.getState().setVersionPopoverOpen(true); onClose(); }}>Open update status</button></article> : <article className="system-card"><h3>Updates</h3><div className="system-rows"><div><span>SoluTerminal</span><span>{status.release.running} → {status.release.latest || status.release.running}</span></div><div><span>Last successful check</span><span>{status.release.lastSuccessMs ? ageLabel(status.release.lastSuccessMs, now) : '—'}</span></div></div>{status.release.lastError && <p className="system-error-text">{UPDATE_CHECK_FAILED}</p>}<button type="button" className="system-deep-link" onClick={() => { useStore.getState().setVersionPopoverOpen(true); onClose(); }}>Open update status</button></article>}
+        {team && <BackgroundServiceCard status={status} />}
       </section>
 
       {showUsage && <section className="system-usage">

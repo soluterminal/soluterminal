@@ -3576,6 +3576,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         onToggleZoom={() => {if(actionValid() && !ownerPresentation) toggleZoom(pane.id);}}
         onSwitchMode={(kind) => { if(actionValid() && !ownerPresentation) void switchPaneMode(pane.id, kind); }}
         onOpenMenu={openContextMenu}
+        onRestartPane={() => { if (actionValid()) void restartPaneFlow(pane.id,{scope:session.scope,valid:captureSessionGesture(session)}); }}
       />}
 
       {/* Wrap the flag-memo + last-prompt rows so mobile can take them out of
@@ -3619,6 +3620,12 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           }}
           onSplitDown={ctxMenuActions.splitDown}
           onClonePane={ctxMenuActions.clonePane}
+          onToggleZoom={canZoom && !ownerPresentation && !isMobileView ? () => {
+            if(!actionValid() || ownerPresentation)return;
+            closeContextMenu();
+            toggleZoom(pane.id);
+          } : undefined}
+          isZoomed={isZoomed}
           onMoveToWorkspace={pane.role !== 'task_owner' ? ctxMenuActions.moveToWorkspace : undefined}
           onNewSession={ctxMenuActions.newSession}
           onCreateSchedule={ctxMenuActions.createSchedule}
@@ -3628,6 +3635,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           onUnflag={ctxMenuActions.unflag}
           onFlagForAttention={ctxMenuActions.flagForAttention}
           onRename={ctxMenuActions.rename}
+          onCopySessionId={ctxMenuActions.copySessionId}
           onEditIdentity={() => {
             if(!actionValid())return;
             closeContextMenu();

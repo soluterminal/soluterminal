@@ -9,7 +9,7 @@ import { useSettings } from '../../settings';
 import { api } from '../../api';
 import { AriaHeaderStatus } from './AriaHeaderStatus';
 import { confirmSignOut } from '../../lib/confirmSignOut';
-import { IconClock, IconGauge, IconHelp, IconLayers, IconMessage, IconSettings, IconUser } from '../ui/icons';
+import { IconClock, IconFeedback, IconGauge, IconHelp, IconLayers, IconSettings, IconUser } from '../ui/icons';
 import { openFeedback } from '../../lib/feedbackReport';
 
 interface AccountFooterProps {
@@ -91,8 +91,8 @@ export function AccountFooter({ onOpenHelp, onOpenUsage, onOpenSystem, onOpenSch
               type="button"
               className="chrome-btn"
               onClick={onOpenSchedules}
-              title="Schedules — scheduled runs and their reports"
-              aria-label="Schedules"
+              title="Automations — scheduled runs and their reports"
+              aria-label="Automations"
             >
               <IconClock size={16} />
             </button>
@@ -116,17 +116,17 @@ export function AccountFooter({ onOpenHelp, onOpenUsage, onOpenSystem, onOpenSch
               <IconLayers size={16} />
             </button>
           )}
-          {/* Phones have no Help menu or status bar: the form's own entry. */}
-          <button
-            type="button"
-            className="chrome-btn"
-            onClick={() => openFeedback()}
-            title="Send feedback"
-            aria-label="Send feedback"
-          >
-            <IconMessage size={16} />
-          </button>
           <AlertsMenu />
+        </div>
+      )}
+      {/* Phones have no Help menu or status bar, so the form gets a row with
+          its name on it. Its icon is not the Inbox's speech bubble. */}
+      {isMobile && (
+        <div className="sidebar-footer-feedback-row">
+          <button type="button" onClick={() => openFeedback()}>
+            <IconFeedback size={16} />
+            <span>Send feedback</span>
+          </button>
         </div>
       )}
       {!isMobile && !session && onOpenSystem && (

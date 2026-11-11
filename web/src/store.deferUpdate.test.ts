@@ -94,9 +94,11 @@ describe('typed deferred updates', () => {
     expect(useStore.getState().deferredUpdate?.cause).toBe('workflow');
   });
 
-  it('retries a settled Focus hold without force and transitions in place to workflow', async () => {
+  it('retries a server hold despite agentMidTurn and transitions in place to workflow', async () => {
     const deadline = Date.now() + 10 * 60_000;
-    const applySpy = vi.spyOn(api, 'applyUpdate').mockRejectedValue(
+    const applySpy = vi.spyOn(api, 'applyUpdate').mockRejectedValueOnce(
+      new ApiError(409, 'collaboration', { busy: true, cause: 'collaboration', reason: 'a pane has a held delivery' }),
+    ).mockRejectedValue(
       new ApiError(409, 'workflow drain', {
         busy: true,
         cause: 'workflow',
@@ -113,11 +115,12 @@ describe('typed deferred updates', () => {
 
     await useStore.getState().applyUpdate();
     const since = useStore.getState().deferredUpdate?.since;
-    expect(useStore.getState().deferredUpdate).toMatchObject({ cause: 'focus', paneId: 'focus1' });
-    expect(applySpy).not.toHaveBeenCalled();
+    expect(useStore.getState().deferredUpdate).toMatchObject({ cause: 'unknown', reason: 'a pane has a held delivery' });
+    expect(applySpy).toHaveBeenCalledWith(false);
+    vi.spyOn(api, 'getUpdateStatus').mockResolvedValue(status({ latest: '2.0.0', available: true }));
 
     useStore.setState({
-      panes: { focus1: pane({ id: 'focus1', kind: 'native', agentMidTurn: false }) },
+      panes: { focus1: pane({ id: 'focus1', kind: 'native', agentMidTurn: true }) },
     });
     await vi.advanceTimersByTimeAsync(4000);
     unsubscribe();
@@ -126,6 +129,19 @@ describe('typed deferred updates', () => {
     expect(useStore.getState().deferredUpdate).toMatchObject({ cause: 'workflow', since });
     const firstHeld = observed.findIndex(Boolean);
     expect(observed.slice(firstHeld).every((value) => value !== null)).toBe(true);
+  });
+
+  it('keeps the temporary server Focus hold while its turn is active', async () => {
+    const applySpy = vi.spyOn(api, 'applyUpdate').mockRejectedValue(new ApiError(409, 'Focus busy', {
+      busy: true, cause: 'focus', paneId: 'focus1', reason: 'a Focus pane is mid-turn',
+    }));
+    vi.spyOn(api, 'getUpdateStatus').mockResolvedValue(status({ latest: '2.0.0', available: true }));
+    useStore.setState({ panes: { focus1: pane({ id: 'focus1', kind: 'native', agentMidTurn: true }) } });
+    await useStore.getState().applyUpdate({ auto: true });
+    expect(useStore.getState().deferredUpdate).toMatchObject({ cause: 'focus', paneId: 'focus1' });
+    await vi.advanceTimersByTimeAsync(11 * 60_000);
+    expect(useStore.getState().deferredUpdate?.cause).toBe('focus');
+    expect(applySpy.mock.calls.every(([force]) => force === false)).toBe(true);
   });
 
   it('bounds repeated 409/status events to one retry timer and never flashes applying', async () => {
@@ -193,23 +209,23 @@ describe('typed deferred updates', () => {
     expect(applySpy.mock.calls.some(([force]) => force === true)).toBe(false);
   });
 
-  it('an unattended swap held for a mid-turn pane also waits out text typed meanwhile', async () => {
-    const applySpy = vi.spyOn(api, 'applyUpdate').mockResolvedValue({ applying: false });
+  it('an unattended swap held by the daemon also waits out text typed meanwhile', async () => {
+    const applySpy = vi.spyOn(api, 'applyUpdate').mockRejectedValueOnce(new ApiError(409, 'held', { busy: true, cause: 'collaboration' })).mockResolvedValue({ applying: false });
     vi.spyOn(api, 'getUpdateStatus').mockResolvedValue(status({ latest: '2.0.0', available: true }));
     useStore.setState({ panes: { p: pane({ id: 'p', kind: 'native', agentMidTurn: true }) } });
     await useStore.getState().applyUpdate({ auto: true });
-    expect(useStore.getState().deferredUpdate?.cause).toBe('focus');
+    expect(useStore.getState().deferredUpdate?.cause).toBe('unknown');
 
     useStore.setState({ panes: { p: pane({ id: 'p', kind: 'native', agentMidTurn: false }) } });
     reportUnsentInput('reply', 'one more thing');
     try {
       await vi.advanceTimersByTimeAsync(4000 * 3);
-      expect(applySpy).not.toHaveBeenCalled();
-      expect(useStore.getState().deferredUpdate?.cause).toBe('focus');
+      expect(applySpy).toHaveBeenCalledTimes(1);
+      expect(useStore.getState().deferredUpdate?.cause).toBe('unknown');
 
       reportUnsentInput('reply', '');
       await vi.advanceTimersByTimeAsync(4000);
-      expect(applySpy).toHaveBeenCalledTimes(1);
+      expect(applySpy).toHaveBeenCalledTimes(2);
     } finally {
       resetUnsentInputForTests();
     }
@@ -336,7 +352,9 @@ describe('typed deferred updates', () => {
 
   it('does not re-announce cause flips within one queued update', async () => {
     const deadline = Date.now() + 10 * 60_000;
-    vi.spyOn(api, 'applyUpdate').mockRejectedValue(
+    vi.spyOn(api, 'applyUpdate').mockRejectedValueOnce(
+      new ApiError(409, 'collaboration', { busy: true, cause: 'collaboration' }),
+    ).mockRejectedValue(
       new ApiError(409, 'workflow drain', {
         busy: true, cause: 'workflow', workflowInflight: 2,
         workflowDeferDeadlineMs: deadline,
@@ -357,7 +375,7 @@ describe('typed deferred updates', () => {
       },
     });
     await vi.advanceTimersByTimeAsync(4000);
-    expect(useStore.getState().deferredUpdate?.cause).toBe('focus');
+    expect(useStore.getState().deferredUpdate?.cause).toBe('workflow');
     expect(useStore.getState().toasts).toHaveLength(toastCount);
 
     useStore.setState({ panes: {} });

@@ -139,6 +139,12 @@
       "approvedBy": "Benjamin",
       "date": "2026-11-09",
       "note": "Benjamin approved the 11-line set (\"notes 1241 yes\", typed in @cmo's pane, seen by @release-lead)."
+    },
+    "0.0.1242": {
+      "sha256": "b1481381b94561f6dc83f7f415cffdcced5e16418bddc60171566b2a5e583f68",
+      "approvedBy": "Benjamin",
+      "date": "2026-11-11",
+      "note": "Benjamin approved the 11-line set (\"notes 1242 yes\", typed in @release-lead's pane)."
     }
   }
 }

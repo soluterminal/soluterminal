@@ -16,6 +16,8 @@ export function PanesTab() {
   const setCopyOnSelect = useStore((s) => s.setCopyOnSelect);
   const middleClickPaste = useStore((s) => s.middleClickPaste);
   const setMiddleClickPaste = useStore((s) => s.setMiddleClickPaste);
+  const alwaysShowAgentMemory = useStore((s) => s.alwaysShowAgentMemory);
+  const setAlwaysShowAgentMemory = useStore((s) => s.setAlwaysShowAgentMemory);
   const leafCountInLayout = useStore((s) => {
     const l = s.layout;
     if (!l) return 0;
@@ -92,6 +94,17 @@ export function PanesTab() {
             checked={middleClickPaste}
             onChange={setMiddleClickPaste}
             hint="Middle mouse button pastes the current selection."
+          />
+        </SettingsGroup>
+      )}
+      {/* A phone shows the memory pill only when memory is unusual. */}
+      {!isMobile && (
+        <SettingsGroup title="Header">
+          <SettingsCheck
+            label="Always show agent memory"
+            checked={alwaysShowAgentMemory}
+            onChange={setAlwaysShowAgentMemory}
+            hint="Otherwise a pane shows its agent's memory only when it is unusually high or growing fast."
           />
         </SettingsGroup>
       )}

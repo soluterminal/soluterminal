@@ -2554,6 +2554,26 @@ button.section-header-toggle:hover:not(:disabled) {
   text-align: left;
 }
 .sidebar-footer-system-row button:hover { color: var(--fg); background: var(--bg-elev); }
+/* Phone drawer only: a named way in to the feedback form. Sized for a thumb. */
+.sidebar-footer-feedback-row {
+  padding: 2px 8px 6px;
+}
+.sidebar-footer-feedback-row button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 10px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  text-align: left;
+}
+.sidebar-footer-feedback-row button:hover { color: var(--fg); background: var(--bg-elev); }
+.sidebar-footer-feedback-row svg { flex: 0 0 auto; }
 .sidebar-footer-identity {
   flex: 1 1 auto;
   min-width: 0;
@@ -3144,6 +3164,22 @@ body.mobile-approval-visible .approval-actions { display: none; }
 }
 .root-error-actions button {
   align-self: auto;
+}
+/* What a crash report carries, listed before anything is sent. */
+.root-error-send {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.root-error-send ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.root-error-report {
+  max-height: 240px;
+  margin: 6px 0 0;
 }
 
 /* Cloud auth gate — compact, work-focused surfaces that match the
@@ -4008,18 +4044,30 @@ button.cloud-gate-inline-link {
    flex rule, so .pane-cwd (flex:1) stole all the space and the title starved
    first — backwards. */
 .pane-title { color: var(--fg); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; flex: 1 1 auto; min-width: 2.5rem; }
+/* The pane's Alt+N number. Hidden until Alt is held (lib/altHeld.ts), then laid
+   over the start of the row: out of flow, so holding Alt never moves the
+   title or the chips. With no offsets it sits where the row starts; the
+   top alignment keeps it on the first row when details wrap to a second. */
 .pane-index-badge {
+  display: none;
+  position: absolute;
+  z-index: 1;
+  align-self: flex-start;
+  margin-top: 2px;
+  /* Over the activity dot and the gap after it, not over the title. */
+  margin-left: -6px;
   font-family: 'SF Mono','Menlo',monospace;
   font-size: 10px;
   color: var(--fg-dim);
   background: var(--bg-3);
   border: 1px solid var(--border);
   border-radius: 3px;
-  padding: 0 4px;
+  padding: 0 3px;
   line-height: 14px;
-  flex-shrink: 0;
   user-select: none;
+  pointer-events: none;
 }
+:root[data-alt-held] .pane-index-badge { display: block; }
 .pane.focused .pane-index-badge { color: var(--accent); border-color: var(--accent-2); }
 /* Role identity chip (currently only "orch" — the orchestrator pane). Same
    metrics as the index badge; a calm accent tint marks it as an identity, not
@@ -4271,32 +4319,6 @@ button.cloud-gate-inline-link {
 .pane-automode-always:hover {
   background: color-mix(in srgb, var(--automode-always) 22%, transparent);
 }
-/* Resume badge — a click-to-copy button for the active provider's id. */
-.pane-resume-badge {
-  font-family: 'SF Mono','Menlo',monospace;
-  font-size: 10px;
-  color: var(--ok);
-  border: 1px solid color-mix(in srgb, var(--ok) 70%, transparent);
-  border-radius: 3px;
-  padding: 0 4px;
-  line-height: 14px;
-  flex-shrink: 0;
-  user-select: none;
-  background: color-mix(in srgb, var(--ok) 10%, transparent);
-  cursor: pointer;
-}
-.pane-resume-badge:hover {
-  border-color: var(--ok);
-  background: color-mix(in srgb, var(--ok) 20%, transparent);
-}
-.pane-resume-badge:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-.pane-resume-badge.copied {
-  border-color: var(--ok);
-  background: color-mix(in srgb, var(--ok) 24%, transparent);
-}
 /* Terminal/Native renderer toggle — a tiny segmented control in pane-actions.
    The native segment uses magenta/violet (--magenta) because blue/cyan/yellow/
    red/green already own status slots; this keeps the native indicator
@@ -4437,7 +4459,7 @@ button.cloud-gate-inline-link {
 /* Between fold tiers, middle chips yield to the title and fixed actions.
    Signals remain present; long labels clip instead of widening the row. */
 .pane-header > :is(.pane-status, .pane-turn-chip, .pane-unsent-message,
-  .pane-review, .pane-resume-badge, .pane-role-badge, .pane-schedule-chip,
+  .pane-review, .pane-role-badge, .pane-schedule-chip,
   .pane-account-chip, .pane-delegated-chip, .pane-delegated-pending-chip,
   .pane-automode-badge, .pane-autoapproving-chip) {
   flex-shrink: 1;
@@ -4535,8 +4557,6 @@ button.cloud-gate-inline-link {
   .pane-message-chip:not(.is-attention):not(.is-warn):not(.unread) { display: none; }
 }
 @container panehdr (max-width: 21rem) {
-  .pane-resume-badge,
-
   .pane-schedule-chip,
 
   .pane-delegated-chip:not(.is-attention),
@@ -8307,6 +8327,24 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
   margin: 3px 0 0 0;
   flex-shrink: 0;
   cursor: pointer;
+}
+.sched-toggle-none { width: 13px; height: 13px; cursor: default; }
+.sched-finished-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 6px 4px 2px;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+.sched-finished-head .linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
 }
 .sched-main { flex: 1; min-width: 0; overflow: hidden; }
 .sched-name {
@@ -15129,6 +15167,19 @@ h6.md-heading {
   color: var(--warn);
   font-size: 11px;
 }
+/* Why the agents are down, under the verdict, and the one action that fixes
+   it. The reason is UNTRUSTED text (the agent's own error line): it wraps and
+   never widens the panel. */
+.ap-why {
+  margin-top: 2px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.ap-verdict-action { margin-top: 8px; }
+.ap-verdict-action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
 /* Zone B queue rows. Titles are UNTRUSTED text — single line + ellipsis. */
 .ap-pr { margin-top: 6px; }
 .ap-pr:first-of-type { margin-top: 2px; }
@@ -16030,7 +16081,7 @@ span.tree-chevron { cursor: inherit; }
 .pane-header-managed .pane-actions .iconbtn { min-width: 0; min-height: 0; padding: 2px 6px; }
 .pane-needs-you { color: var(--warn); white-space: nowrap; background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
 .pane-header.pane-header-managed .pane-title { flex: 1 1 auto; min-width: 10ch; max-width: none; }
-.pane-header.pane-header-managed [data-pane-detail] :is(.pane-identity-chip, .pane-origin, .pane-origin-btn, .pane-message-chip, .pane-review-chip, .pane-account-chip, .pane-role-badge, .pane-pack-badge, .pane-resume-badge, .pane-schedule-chip, .pane-automode-badge, .pane-mem-chip, .pane-zoom-btn) {
+.pane-header.pane-header-managed [data-pane-detail] :is(.pane-identity-chip, .pane-origin, .pane-origin-btn, .pane-message-chip, .pane-review-chip, .pane-account-chip, .pane-role-badge, .pane-pack-badge, .pane-schedule-chip, .pane-automode-badge, .pane-mem-chip, .pane-zoom-btn) {
   display: inline-flex; flex-shrink: 0; min-width: max-content; max-width: none; overflow: visible; text-overflow: clip;
 }
 .pane-header-managed [data-pane-detail] .pane-identity-working-on { display: inline; overflow: visible; }
@@ -16057,11 +16108,9 @@ span.tree-chevron { cursor: inherit; }
 .pane-details-popover .pane-zoom-label { display: inline; margin-left: 6px; }
 /* Keep the established wide-header sequence even though attention shares
    a second row when details fold. display:contents preserves flex order. */
-.pane-header-managed .pane-index-badge { order: 1; }
 .pane-header-managed :is(.pane-role-badge, .pane-pack-badge, .pane-account-chip, .pane-schedule-chip) { order: 2; }
 .pane-header-managed :is(.pane-agent-stale-dot, .pane-automode-badge) { order: 3; }
 .pane-header-managed .pane-autoapproving-chip { order: 4; }
-.pane-header-managed .pane-resume-badge { order: 5; }
 .pane-header-managed :is(.pane-title, .pane-title-input) { order: 6; }
 .pane-header-managed .pane-identity-chip { order: 7; }
 .pane-header-managed :is(.pane-origin, .pane-origin-message) { order: 8; }

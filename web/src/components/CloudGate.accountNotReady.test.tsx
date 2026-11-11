@@ -47,7 +47,7 @@ describe('CloudGate: Account not ready', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(/^Copied\. Paste it into an email to hello@soluterminal\.com/);
 
     fireEvent.click(screen.getByRole('button', { name: 'Email it' }));
-    expect(mail.openMailDraft).toHaveBeenCalledWith(expect.stringMatching(/^mailto:hello@soluterminal\.com\?subject=SoluTerminal%20feedback&body=/));
+    expect(mail.openMailDraft).toHaveBeenCalledWith(expect.stringMatching(/^mailto:hello@soluterminal\.com\?subject=SoluTerminal%20feedback%20%C2%B7%20Bug%20%C2%B7%20web%20[^&]+&body=/));
 
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(signOut).toHaveBeenCalled();

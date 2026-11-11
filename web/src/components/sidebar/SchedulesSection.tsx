@@ -10,6 +10,7 @@ import { describeCron, formatNextFire } from '../../lib/cron';
 import { ScheduleHistoryDialog } from '../ScheduleHistoryDialog';
 import { useClampedMenuPosition } from '../useClampedMenuPosition';
 import { scheduleUnread } from '../../lib/scheduleUnread';
+import { finishedLabel, scheduleFinished, scheduleSpent } from '../../lib/scheduleFinished';
 import { RunStatusDot, RunStatusGlyph, scheduleRunVisual } from '../shared/runStatus';
 
 interface SchedulesSectionProps {
@@ -113,7 +114,9 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
 
   async function handleDelete(s: Schedule) {
     if (!(await confirmDialog({
-      message: `Delete schedule "${s.name}"?\n\nThe job will stop firing immediately.`,
+      // Deleting removes the automation and its run files; it does not stop a
+      // run that has already started.
+      message: `Delete automation "${s.name}"?\n\nIt will not run again, and its run history and reports are removed.${s.agentRunning ? ' The run going now is not stopped.' : ''}`,
       confirmLabel: 'Delete',
       danger: true,
     }))) return;
@@ -121,6 +124,24 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
       await deleteSchedule(s.id);
     } catch (e) {
       toast(`Delete failed: ${(e as Error).message}`, { kind: 'error', icon: '⚠' });
+    }
+  }
+
+  // Finished automations pile up (every one-time reminder leaves one), so one
+  // action removes them all. Deleting removes run history too; say so.
+  async function handleClearFinished(finished: Schedule[]) {
+    const n = finished.length;
+    if (!(await confirmDialog({
+      message: `Clear ${n} finished automation${n === 1 ? '' : 's'}?\n\nTheir run history and reports are removed too.`,
+      confirmLabel: 'Clear finished',
+      danger: true,
+    }))) return;
+    for (const s of finished) {
+      try {
+        await deleteSchedule(s.id);
+      } catch (e) {
+        toast(`Could not clear "${s.name}": ${(e as Error).message}`, { kind: 'error', icon: '⚠' });
+      }
     }
   }
 
@@ -159,13 +180,17 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
   // replaced by a newer one, so counting it kept the chip from reaching 0.
   // Its row still shows its own unread dot.
   const unreadCount = schedules.filter((s) => s.enabled && scheduleUnread(s)).length;
+  // Finished automations sit below the live ones and stay out of the header
+  // count: the count answers "how many things run here on their own".
+  const finished = schedules.filter((s) => scheduleFinished(s));
+  const live = schedules.filter((s) => !scheduleFinished(s));
 
   return (
     <div className="sidebar-section">
       <SectionHeader
         icon={<IconClock size={14} />}
         title="Automations"
-        count={schedules.length || undefined}
+        count={live.length || undefined}
         collapsed={collapsed}
         onToggle={onToggle}
         extra={
@@ -184,7 +209,7 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
             {hasFailingSchedule && (
               <RunStatusDot
                 visual="error"
-                title="A schedule's last run failed — open its history for details"
+                title="An automation's last run failed — open its history for details"
               />
             )}
             <button
@@ -207,7 +232,12 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
           {' '}such as a morning digest or a nightly test run, and Claude runs it on time.
         </div>
       )}
-      {!collapsed && schedules.map((s) => {
+      {!collapsed && [...live, ...finished].map((s) => {
+        const done = scheduleFinished(s);
+        const doneLabel = done ? finishedLabel(s) : null;
+        // Spent but its last run is still going: not finished yet, and nothing
+        // to resume either.
+        const lastRunGoing = !done && scheduleSpent(s);
         const isAgent = s.kind === 'agent';
         const isTask = s.kind === 'task';
         const isPrompt = !isAgent && !isTask;
@@ -226,19 +256,22 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
         const targetMissing = isPrompt && !target;
         const lastRun = s.runs?.[0];
         const snoozeActive = !!(s.snoozeUntil && new Date(s.snoozeUntil).getTime() > Date.now());
-        const nextLabel = !s.enabled
-          ? 'paused'
-          : s.agentRunning
+        const nextLabel = doneLabel
+          ?? (lastRunGoing
             ? 'running…'
-            : snoozeActive
-              ? 'snoozed'
-              : formatNextFire(s.nextFire);
+            : !s.enabled
+              ? 'paused'
+              : s.agentRunning
+                ? 'running…'
+                : snoozeActive
+                  ? 'snoozed'
+                  : formatNextFire(s.nextFire));
         const createdRel = relativeTime(new Date(s.createdAt).getTime());
         const lastFiredRel = s.lastFiredAt ? relativeTime(new Date(s.lastFiredAt).getTime()) : null;
         const fireBadge = s.fireCount > 0 ? `${s.fireCount}×` : 'not yet';
         const endHint = endConditionHint(s);
         const endHintTitle = s.runAt
-          ? 'One-time schedule — runs once then turns itself off'
+          ? 'One-time automation — runs once then turns itself off'
           : s.maxFires && s.maxFires > 0
             ? `Turns itself off after ${s.maxFires} successful runs (${s.fireCount}/${s.maxFires})`
             : s.until
@@ -263,7 +296,7 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
             : isTask
               ? `Claude task in ${shortCwd} · ${s.permission === 'edit' ? 'may edit files' : 'read & plan only'}${s.catchUp ? ' · catches up after downtime' : ''}${s.agentRunning ? ' · running now' : ''}`
               : `Target: ${targetLabel}`,
-          s.enabled ? `Next: ${s.nextFire ? new Date(s.nextFire).toLocaleString() : '—'}` : 'Paused',
+          s.enabled ? `Next: ${s.nextFire ? new Date(s.nextFire).toLocaleString() : '—'}` : done ? 'Finished' : lastRunGoing ? 'Last run still going' : 'Paused',
           `Created: ${createdRel} (${new Date(s.createdAt).toLocaleString()})`,
           `Ran: ${s.fireCount}${s.skipCount ? ` · Skipped: ${s.skipCount}` : ''}${s.errorCount ? ` · Errors: ${s.errorCount}` : ''}`,
           lastFiredRel ? `Last ran: ${lastFiredRel}` : 'Never ran',
@@ -275,8 +308,19 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
         ].filter(Boolean).join('\n');
         return (
           <Fragment key={s.id}>
+            {done && s.id === finished[0].id && (
+              <div className="sched-finished-head">
+                <span>Finished</span>
+                <button
+                  type="button"
+                  className="linklike"
+                  title="Remove every finished automation and its run history"
+                  onClick={() => void handleClearFinished(finished)}
+                >Clear finished</button>
+              </div>
+            )}
             <div
-              className={`sched-row ${s.enabled ? '' : 'disabled'} ${targetMissing ? 'target-missing' : ''}`}
+              className={`sched-row ${s.enabled ? '' : 'disabled'} ${done ? 'finished' : ''} ${targetMissing ? 'target-missing' : ''}`}
               title={tip}
               role="button"
               tabIndex={0}
@@ -297,22 +341,33 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                 setCtxMenu({ x: e.clientX, y: e.clientY, id: s.id });
               }}
             >
-              <input
-                type="checkbox"
-                checked={s.enabled}
-                onChange={() => handleToggle(s)}
-                title={s.enabled
-                  ? 'Pause this schedule (keep its config and counters)'
-                  : 'Resume this schedule'}
-                className="sched-toggle"
-              />
+              {done || lastRunGoing ? (
+                // Nothing to switch back on: a spent one-time is refused, and
+                // the others would stop again at once. The box keeps its space.
+                <span className="sched-toggle sched-toggle-none" aria-hidden="true" />
+              ) : (
+                <input
+                  type="checkbox"
+                  checked={s.enabled}
+                  onChange={() => handleToggle(s)}
+                  title={s.enabled
+                    ? 'Pause this automation (keep its settings and counters)'
+                    : 'Resume this automation'}
+                  className="sched-toggle"
+                />
+              )}
               <div className="sched-main">
                 <div className="sched-name">
                   {scheduleUnread(s) && (
                     <span className="sched-unread-dot" title="New report — click to read" aria-label="New report" />
                   )}
                   {s.name}
-                  {!s.enabled && (s.pausedReason ? (
+                  {doneLabel ? (
+                    <span
+                      className="sched-paused-tag"
+                      title="Finished — it has nothing left to run. Edit it to set a new time, or clear it."
+                    > · {doneLabel}</span>
+                  ) : !s.enabled && !lastRunGoing && (s.pausedReason ? (
                     <span
                       className="sched-paused-tag"
                       title={`Paused automatically: ${s.pausedReason}. Edit it to pick another pane, then turn it back on.`}
@@ -381,7 +436,7 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                     setCtxMenu({ x: r.left, y: r.bottom + 2, id: s.id });
                   }}
                   title="All actions (also on right-click)"
-                  aria-label="Schedule actions"
+                  aria-label="Automation actions"
                 >⋯</button>
               </div>
             </div>
@@ -412,10 +467,12 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                 onClick={() => { setCtxMenu(null); void handleSnooze(s); }}
               >Snooze next run</button>
             )}
-            <button
-              role="menuitem"
-              onClick={() => { setCtxMenu(null); void handleToggle(s); }}
-            >{s.enabled ? 'Pause' : 'Resume'}</button>
+            {!scheduleSpent(s) && (
+              <button
+                role="menuitem"
+                onClick={() => { setCtxMenu(null); void handleToggle(s); }}
+              >{s.enabled ? 'Pause' : 'Resume'}</button>
+            )}
             <button
               role="menuitem"
               onClick={() => { setCtxMenu(null); setDialog({ open: true, editing: s, fromPaneMenu: false }); }}

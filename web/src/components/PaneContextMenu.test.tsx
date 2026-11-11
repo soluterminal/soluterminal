@@ -54,6 +54,43 @@ describe('PaneContextMenu workspace moves', () => {
   });
 });
 
+describe('PaneContextMenu items moved out of the header', () => {
+  it('copies the session id of a pane that can be resumed', () => {
+    const copy = vi.fn();
+    renderMenu({ claudeSessionId: 'session-1', resumeReady: true }, { onCopySessionId: copy });
+    const item = screen.getByRole('menuitem', { name: 'Copy session ID' });
+    expect(item).toHaveAttribute('title', expect.stringContaining('session-1'));
+    fireEvent.click(item);
+    expect(copy).toHaveBeenCalledOnce();
+  });
+  it('calls a Codex conversation a thread', () => {
+    renderMenu({ cmd: ['codex'], agent: 'codex', codexThreadId: 'thread-1', resumeReady: true }, { isClaudePane: false, onCopySessionId: vi.fn() });
+    expect(screen.getByRole('menuitem', { name: 'Copy thread ID' })).toHaveAttribute('title', expect.stringContaining('thread-1'));
+  });
+  it('offers no copy until the conversation can be resumed', () => {
+    renderMenu({ claudeSessionId: 'session-1' }, { onCopySessionId: vi.fn() });
+    expect(screen.queryByRole('menuitem', { name: /Copy (session|thread) ID/ })).toBeNull();
+  });
+  it('maximises, and restores while maximised', () => {
+    const zoom = vi.fn();
+    const { unmount } = renderMenu({}, { onToggleZoom: zoom });
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Maximise pane/ }));
+    expect(zoom).toHaveBeenCalledOnce();
+    unmount();
+    renderMenu({}, { onToggleZoom: zoom, isZoomed: true });
+    expect(screen.getByRole('menuitem', { name: /^Restore layout/ })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /^Maximise pane/ })).toBeNull();
+  });
+  it('offers no Maximise where there is nothing to maximise over', () => {
+    renderMenu({});
+    expect(screen.queryByRole('menuitem', { name: /Maximise pane|Restore layout/ })).toBeNull();
+  });
+  it('keeps Maximise for a managed task owner', () => {
+    renderMenu({ role: 'task_owner' }, { managedOwner: true, onToggleZoom: vi.fn() });
+    expect(screen.getByRole('menuitem', { name: /^Maximise pane/ })).toBeInTheDocument();
+  });
+});
+
 describe('PaneContextMenu delegation announcements', () => {
   it('reflects the daemon-computed effective value', () => {
     renderMenu({ announceDelegation: true }, { onToggleAnnounceDelegation: () => {} });
@@ -88,10 +125,10 @@ describe('PaneContextMenu delegation announcements', () => {
 });
 
 describe('PaneContextMenu scheduling', () => {
-  it.each([true, false])('offers Create schedule for native=%s panes', (isNative) => {
+  it.each([true, false])('offers New automation for native=%s panes', (isNative) => {
     const onCreateSchedule = vi.fn();
     renderMenu({}, { isNative, onCreateSchedule });
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Create schedule…' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New automation…' }));
     expect(onCreateSchedule).toHaveBeenCalledTimes(1);
   });
 });

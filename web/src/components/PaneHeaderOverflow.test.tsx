@@ -13,7 +13,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('pane header details', () => {
   it('ranks details in the order the product owner approved', () => {
     const order = Object.entries(DETAIL_PRIORITY).sort((a, b) => a[1] - b[1]).map(([name]) => name);
-    expect(order).toEqual(['autoMode', 'role', 'credential', 'schedule', 'review', 'message', 'identity', 'origin', 'mode', 'pack', 'resume', 'memory', 'maximise', 'workerNotice']);
+    expect(order).toEqual(['autoMode', 'memoryUnusual', 'role', 'credential', 'schedule', 'review', 'message', 'identity', 'origin', 'mode', 'pack', 'memory', 'maximise', 'workerNotice']);
     expect(new Set(Object.values(DETAIL_PRIORITY)).size).toBe(order.length);
   });
 
@@ -113,7 +113,7 @@ describe('pane header details', () => {
       return <div ref={ref}><PaneHeaderOverflow headerRef={ref}>
         <span data-w="100">Title</span>
         <PaneDetail priority={DETAIL_PRIORITY.maximise}><button data-w="30">Maximise</button></PaneDetail>
-        <PaneDetail priority={DETAIL_PRIORITY.resume}><button data-w="60">Resume</button></PaneDetail>
+        <PaneDetail priority={DETAIL_PRIORITY.memory}><button data-w="60">Resume</button></PaneDetail>
         <div className="pane-header-attention"><span data-w="120">needs you</span></div>
         <PaneDetail priority={DETAIL_PRIORITY.credential}><span data-w="80">Credential</span></PaneDetail>
         <PaneDetail priority={DETAIL_PRIORITY.autoMode}><span data-w="70">Auto</span></PaneDetail>

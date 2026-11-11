@@ -8,6 +8,8 @@ import type { PaneInfo } from '../types';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { paneRunningWork } from '../lib/paneWork';
 import { clearOwnerURL } from '../lib/ownerView';
+import { copyToClipboard } from '../lib/clipboard';
+import { paneConversation } from '../lib/paneConversation';
 
 type PaneAutoMode = NonNullable<PaneInfo['autoMode']>;
 
@@ -218,6 +220,15 @@ export function usePaneContextMenu({
       setCtxMenu(null);
         setTitleDraft(pane.title);
         setEditingTitle(true);
+      },
+      copySessionId: async () => {
+        if (!actionGuard()) return;
+        setCtxMenu(null);
+        const conversation = paneConversation(pane);
+        if (!conversation) return;
+        const { toast } = useStore.getState();
+        if (await copyToClipboard(conversation.id)) toast(`${conversation.noun === 'thread' ? 'Thread' : 'Session'} ID copied`, { kind: 'success', ttlMs: 1800 });
+        else toast('Copy failed — clipboard unavailable', { kind: 'warn' });
       },
       convertRole: async () => {
         if(managedOwner) return;

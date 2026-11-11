@@ -112,7 +112,8 @@ function AccountNotReady({ onSignOut }: { onSignOut: () => void }) {
   const [note, setNote] = useState<string | null>(null);
   // Shown when the clipboard refuses, so the text can be selected by hand.
   const [showText, setShowText] = useState(false);
-  const text = accountNotReadyReportText(typeof __SOLU_WEB_VERSION__ === 'string' ? __SOLU_WEB_VERSION__ : 'dev');
+  const webVersion = typeof __SOLU_WEB_VERSION__ === 'string' ? __SOLU_WEB_VERSION__ : 'dev';
+  const text = accountNotReadyReportText(webVersion);
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text);
@@ -136,7 +137,7 @@ function AccountNotReady({ onSignOut }: { onSignOut: () => void }) {
         )}
         <div className="cloud-gate-actions">
           <button type="button" onClick={() => void copy()}>Copy report</button>
-          <button type="button" onClick={() => void openMailDraft(feedbackMailto(text).href)}>Email it</button>
+          <button type="button" onClick={() => void openMailDraft(feedbackMailto(text, 'bug', webVersion).href)}>Email it</button>
           <button type="button" onClick={onSignOut} className="primary cloud-gate-primary">Sign out</button>
         </div>
       </div>

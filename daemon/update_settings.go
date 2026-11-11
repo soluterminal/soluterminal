@@ -13,8 +13,8 @@ import (
 )
 
 // Per-install self-update preferences. `off` keeps the notify-then-click
-// flow; `when-idle` applies the daemon swap the moment it's safe (no
-// native/Focus pane mid-turn) — see the client's maybeAutoApplyUpdate +
+// flow; `when-idle` applies the daemon swap through a bounded collaboration
+// hold, temporary Focus compatibility, and the other server safety gates — see the client's maybeAutoApplyUpdate +
 // applyUpdate({auto}) and the daemon poll's runAutoApplyIfEligible.
 // Daemon-stored (not localStorage) so it's correctly scoped to the install and
 // survives a webview cache clear.

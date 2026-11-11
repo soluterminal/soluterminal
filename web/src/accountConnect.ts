@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useCloud } from './cloud';
 import { useEntitlements } from './entitlements';
 import { useStore } from './store';
-import { confirmOrDismissDialog } from './lib/dialog';
+import { confirmDialog, confirmOrDismissDialog } from './lib/dialog';
 
 // Connecting this computer to the signed-in free account. The cloud only
 // spends its voice and smart-approval allowance for an account that owns a
@@ -58,26 +58,63 @@ function refreshVerdictSoon(): void {
   window.setTimeout(() => { void useEntitlements.getState().load(); }, 4000);
 }
 
-/** Connect on demand (the mic's "Connect" action) and say what happened. */
-export async function connectThisComputerWithToast(): Promise<void> {
+const CONNECTED_FOR_VOICE = 'This computer is connected to your account. Try voice again in a few seconds.';
+
+/** Connect on demand (the mic's "Connect" action, the feedback form's
+ *  "Connect this computer") and say what happened. Resolves true once
+ *  connected or connecting. */
+export async function connectThisComputerWithToast(connected = CONNECTED_FOR_VOICE): Promise<boolean> {
   const toast = useStore.getState().toast;
   const result = await connectThisComputer({ force: true });
   switch (result.status) {
     case 'connecting':
     case 'connected':
-      toast('This computer is connected to your account. Try voice again in a few seconds.', { kind: 'info', ttlMs: 6000 });
+      toast(connected, { kind: 'info', ttlMs: 6000 });
       refreshVerdictSoon();
-      return;
+      return true;
     case 'signin':
       toast(result.message || 'Sign in to your free account first.', {
         kind: 'warn',
         action: { label: 'Sign in', run: () => useCloud.getState().requestSignIn() },
       });
-      return;
+      return false;
     default:
       toast(result.message || "Couldn't connect this computer.", { kind: 'warn', ttlMs: 8000 });
+      return false;
   }
 }
+
+/** Connect from a button whose label is about something else (the feedback
+ *  form's "Connect this computer"): the warning comes first, with Cancel
+ *  focused, and says so when the person chose not to connect before, because
+ *  force overrides that choice (@secure). Nothing is changed without Connect
+ *  this PC; the only call before it is a {check: true} probe. */
+export async function connectThisComputerAfterWarning(connected: string): Promise<boolean> {
+  const probe = await connectThisComputer({ check: true });
+  if (probe.status === 'connected' || probe.status === 'connecting') {
+    useStore.getState().toast(connected, { kind: 'info', ttlMs: 6000 });
+    return true;
+  }
+  if (probe.status === 'signin') {
+    useStore.getState().toast(probe.message || 'Sign in to your free account first.', {
+      kind: 'warn',
+      action: { label: 'Sign in', run: () => useCloud.getState().requestSignIn() },
+    });
+    return false;
+  }
+  const ok = await confirmDialog({
+    title: CONNECT_PROMPT_TITLE,
+    message: probe.status === 'declined' ? `${CONNECT_PROMPT_BODY} ${CONNECT_DECLINED_BEFORE}` : CONNECT_PROMPT_BODY,
+    confirmLabel: 'Connect this PC',
+    focusCancel: true,
+  });
+  if (!ok) return false;
+  return connectThisComputerWithToast(connected);
+}
+
+/** Added to the warning when this PC was disconnected or "Not now" was
+ *  chosen; the daemon stores both the same way (wording item 20). */
+export const CONNECT_DECLINED_BEFORE = 'You chose not to connect this PC earlier.';
 
 export const CONNECT_PROMPT_TITLE = 'Connect this PC to your account?';
 export const CONNECT_PROMPT_BODY =

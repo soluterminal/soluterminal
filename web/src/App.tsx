@@ -102,7 +102,7 @@ function focusPaneTextarea(paneId: string): void {
 
 import { Topbar } from './components/Topbar';
 import { ScheduleHistoryDeepLink } from './components/ScheduleHistoryDialog';
-import { routeNotificationTap } from './lib/notificationTap';
+import { isInboxTapTarget, onServiceWorkerTapMessage, routeNotificationTap } from './lib/notificationTap';
 import { InboxHost } from './components/inbox/InboxPanel';
 import { openFeedback } from './lib/feedbackReport';
 import { ScheduleDialogHost } from './components/ScheduleDialogHost';
@@ -165,6 +165,7 @@ import { RebuildBackoff } from './lib/rebuildBackoff';
 import { PRIVATE_RELAY_STATUS_EVENT } from './lib/privateRelay';
 import { installerUpdate } from './lib/installerUpdate';
 import { recordDisplayFix } from './lib/displayFixTelemetry';
+import { installAltHeld } from './lib/altHeld';
 
 const ActivityDialog = lazy(() =>
   import('./components/ActivityDialog').then((mod) => ({ default: mod.ActivityDialog })),
@@ -439,6 +440,8 @@ export default function App() {
       window.visualViewport?.removeEventListener('scroll', sync);
     };
   }, []);
+  // Pane headers show their #N while Alt is held.
+  useEffect(() => installAltHeld(), []);
   // Mirror uiScale onto <html> as a CSS variable so CSS can scale the
   // chrome (sidebar + topbar) via a single `zoom: var(--ui-scale)` rule.
   // Doesn't touch the panes — they have their own dedicated terminal
@@ -714,21 +717,26 @@ export default function App() {
     void bootstrap();
   }, [bootstrap]);
 
-  // ?github=<connected|requested|error|claim> arrival from the GitHub App
-  // install callback (cloud/github_app.go redirects here after GitHub's
-  // install screen). connected/requested/error are toast-and-strip;
-  // claim (an install started from github.com directly, no signed state)
-  // asks the signed-in user to explicitly finish the connection — identity
-  // must come from an in-app confirmation, never from the URL alone.
+  // ?github=<connected|requested|error|claim|finish> arrival from the GitHub
+  // App callbacks (cloud/github_app.go redirects here after GitHub's
+  // screens). connected/requested/error are toast-and-strip. claim (GitHub's
+  // install screen is done) asks the signed-in user to connect, then sends
+  // them to GitHub to confirm they administer the installation; finish is
+  // the way back, and posts GitHub's answer as the signed-in user. The URL
+  // alone never connects anything.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
     const gh = params.get('github');
     if (!gh) return;
     const installId = Number(params.get('installation_id'));
+    const ghCode = params.get('gh_code') ?? '';
+    const ghState = params.get('gh_state') ?? '';
     try {
       params.delete('github');
       params.delete('installation_id');
+      params.delete('gh_code');
+      params.delete('gh_state');
       const qs = params.toString();
       // Strip first, always: a refresh must never re-fire a toast or prompt.
       window.history.replaceState(
@@ -753,14 +761,43 @@ export default function App() {
           confirmLabel: 'Connect',
         });
         if (!ok) return;
+        const { githubConnectFailure, isGithubAuthorizeUrl, GITHUB_CONNECT_SIGN_IN } = await import('./lib/githubConnect');
+        const sessionToken = useCloud.getState().session?.access_token;
+        if (!sessionToken) {
+          toast(GITHUB_CONNECT_SIGN_IN, { kind: 'error', ttlMs: 10_000 });
+          return;
+        }
         try {
-          const s = await api.githubAppClaim(installId);
+          const s = await api.githubAppClaim(installId, sessionToken);
+          if (s.authorizeUrl) {
+            if (!isGithubAuthorizeUrl(s.authorizeUrl)) throw new Error('unexpected authorize url');
+            window.location.assign(s.authorizeUrl);
+            return;
+          }
           toast(
             `GitHub connected${typeof s.repoCount === 'number' ? ` — ${s.repoCount} repo${s.repoCount === 1 ? '' : 's'}` : ''}.`,
             { kind: 'success' },
           );
-        } catch {
-          toast('Could not finish the GitHub connection — try Connect GitHub again.', { kind: 'error' });
+        } catch (e) {
+          toast(githubConnectFailure(e), { kind: 'error', ttlMs: 10_000 });
+        }
+      })();
+    } else if (gh === 'finish' && ghCode && ghState) {
+      void (async () => {
+        const { githubConnectFailure, GITHUB_CONNECT_SIGN_IN } = await import('./lib/githubConnect');
+        const sessionToken = useCloud.getState().session?.access_token;
+        if (!sessionToken) {
+          toast(GITHUB_CONNECT_SIGN_IN, { kind: 'error', ttlMs: 10_000 });
+          return;
+        }
+        try {
+          const s = await api.githubAppClaimFinish(ghCode, ghState, sessionToken);
+          toast(
+            `GitHub connected${typeof s.repoCount === 'number' ? ` — ${s.repoCount} repo${s.repoCount === 1 ? '' : 's'}` : ''}.`,
+            { kind: 'success' },
+          );
+        } catch (e) {
+          toast(githubConnectFailure(e), { kind: 'error', ttlMs: 10_000 });
         }
       })();
     }
@@ -783,11 +820,12 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const paneId = params.get('pane');
     if (!paneId) return;
-    // Automation and agent pushes ride the same slot as "sched:<id>" /
-    // "agent:<id>" (pusher.go). A tap on "⏰ Morning digest" should land on
+    // Automation, agent and feedback pushes ride the same slot as
+    // "sched:<id>" / "agent:<id>" (pusher.go) / "feedback:<number>"
+    // (cloud/feedback_loop.go). A tap on "⏰ Morning digest" should land on
     // its Inbox report, not fizzle in the pane-poll below.
     // routeNotificationTap owns waiting for the item to load.
-    if (paneId.startsWith('sched:') || paneId.startsWith('agent:')) {
+    if (isInboxTapTarget(paneId)) {
       try {
         params.delete('pane');
         const qs = params.toString();
@@ -822,21 +860,14 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Notification tap while the app is ALREADY open at this machine. The SW
-  // can't hand a running page a new query param — it posts a message
-  // instead (sw v24). Same routing as the ?pane= arrival above: automation
-  // and agent ids open their Inbox item, pane ids get revealed.
+  // Notification tap while the app is ALREADY open. The SW can't hand a
+  // running page a new query param — it posts a message instead (sw v24).
+  // Same routing as the ?pane= arrival above: automation, agent and feedback
+  // ids open their Inbox item, pane ids get revealed.
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
-    const onMsg = (e: MessageEvent) => {
-      const d = e.data as { type?: string; paneId?: string } | null;
-      if (!d || d.type !== 'solu:notification-tap' || !d.paneId) return;
-      if (routeNotificationTap(d.paneId)) return;
-      const st = useStore.getState();
-      if (st.panes[d.paneId]) void st.revealPane(d.paneId);
-    };
-    navigator.serviceWorker.addEventListener('message', onMsg);
-    return () => navigator.serviceWorker.removeEventListener('message', onMsg);
+    navigator.serviceWorker.addEventListener('message', onServiceWorkerTapMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onServiceWorkerTapMessage);
   }, []);
 
   // Push-subscription liveness ping.

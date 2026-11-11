@@ -323,6 +323,9 @@ export function buildAmbientAppObjectResponses(healthVersion, now = Date.parse('
       available: false,
       applying: false,
     },
+    // The System page's background service card asks whether a restart is
+    // offered here. Fixtures model a machine where it is not.
+    '/api/service/restart': { supported: false, pid: 0 },
     '/api/recovery/settings': { resumeAfterRestart: 'manual' },
     '/api/native/settings': { promptSuggestions: false, defaultClaudeMode: '' },
     '/api/update/settings': { autoApply: 'off', shellAutoApply: 'off' },

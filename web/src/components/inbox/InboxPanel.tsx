@@ -5,7 +5,8 @@ import { api, type FeedbackThread } from '../../api';
 import { useStore } from '../../store';
 import { runPreview } from '../../lib/reportsFeed';
 import { INBOX_CAP, inboxCountLabel, inboxFeed, type InboxItem } from '../../lib/inboxFeed';
-import { useFeedbackInbox, markFeedbackEventRead } from '../../lib/useFeedbackInbox';
+import { useFeedbackInbox, markFeedbackEventRead, noteFeedbackSent } from '../../lib/useFeedbackInbox';
+import { refreshMyReports, useMyReports } from '../../lib/myReports';
 import { acknowledgeAllInboxReports, acknowledgeInboxReport, useInboxReports } from '../../extensions';
 import { renderReportMarkdown } from '../../lib/reportMarkdown';
 import { relativeTime } from '../sidebar/time';
@@ -13,7 +14,7 @@ import { useFocusTrap } from '../useFocusTrap';
 import { useDraggableDialog } from '../useDraggableDialog';
 import { TaskReportView } from '../ScheduleHistoryDialog';
 import { FeedbackComposer } from './FeedbackComposer';
-import { openFeedback, type FeedbackPrefill } from '../../lib/feedbackReport';
+import { FEEDBACK_THREAD_ERROR, feedbackReplyError, isFeedbackClosedReply, openFeedback, type FeedbackPrefill } from '../../lib/feedbackReport';
 import './inbox.css';
 import { useUnsentInput } from '../../lib/unsentInput';
 
@@ -38,7 +39,8 @@ import { useUnsentInput } from '../../lib/unsentInput';
 
 type Sel =
   | { kind: 'report'; scheduleId: string; runAt: string }
-  | { kind: 'thread'; number: number }
+  // sent: this report was sent from the form a moment ago.
+  | { kind: 'thread'; number: number; sent?: boolean }
   | { kind: 'agentreport'; id: string; runId: string; logFile?: string; body?: string }
   | { kind: 'compose'; prefill?: FeedbackPrefill }
   | null;
@@ -64,7 +66,7 @@ function selFor(it: InboxItem): Sel {
   if (it.report) {
     return { kind: 'report', scheduleId: it.report.schedule.id, runAt: it.report.run.at };
   }
-  if (it.feedback) return { kind: 'thread', number: it.feedback.number };
+  if (it.source === 'feedback' && it.number) return { kind: 'thread', number: it.number };
   if (it.agentReport) return { kind: 'agentreport', id: it.agentReport.agentId, runId: it.agentReport.runId, logFile: it.agentReport.logFile, body: it.agentReport.body };
   return null;
 }
@@ -74,7 +76,7 @@ function itemSelected(it: InboxItem, sel: Sel): boolean {
   if (sel.kind === 'report') {
     return !!it.report && it.report.schedule.id === sel.scheduleId && it.report.run.at === sel.runAt;
   }
-  if (sel.kind === 'thread') return !!it.feedback && it.feedback.number === sel.number;
+  if (sel.kind === 'thread') return it.source === 'feedback' && it.number === sel.number;
   if (sel.kind === 'agentreport') return !!it.agentReport && it.agentReport.agentId === sel.id && it.agentReport.runId === sel.runId;
   return false;
 }
@@ -136,6 +138,8 @@ function InboxRow({ it, isSel, onSelect }: {
         <span className="inbox-row-sub">
           {failed ? (
             <span className="inbox-badge inbox-badge-error">failed</span>
+          ) : it.status ? (
+            <ReportStatusChip word={it.status} />
           ) : it.needsYou ? (
             <span className="inbox-badge inbox-badge-needs">needs you</span>
           ) : it.feedback?.event === 'fixed' ? (
@@ -146,6 +150,13 @@ function InboxRow({ it, isSel, onSelect }: {
       </span>
     </button>
   );
+}
+
+// A report's status word (My reports): good news and asks keep the colours
+// the old badges had; the rest is neutral.
+function ReportStatusChip({ word }: { word: string }) {
+  const tone = word === 'Needs info' ? ' inbox-badge-needs' : word.startsWith('Fixed in ') ? ' inbox-badge-ok' : ' inbox-badge-status';
+  return <span className={`inbox-badge inbox-badge-chip${tone}`}>{word}</span>;
 }
 
 // ---------------------------------------------------------------- feed ----
@@ -203,7 +214,7 @@ function FeedView({ items, filter, setFilter, sel, onSelect }: {
   // adding a source doesn't require touching the render below.
   const present = ([
     { key: 'report', label: 'Reports' },
-    { key: 'feedback', label: 'Feedback' },
+    { key: 'feedback', label: 'My reports' },
     { key: 'agentreport', label: 'Agents' },
   ] as const).filter((s) => counts[s.key] > 0);
   const filterTabs: { key: Filter; label: string }[] = [
@@ -232,10 +243,8 @@ function FeedView({ items, filter, setFilter, sel, onSelect }: {
         {empty && (
           <div className="inbox-empty">
             <div className="inbox-empty-title">Nothing here yet</div>
-            <p>Automations that run an agent file a report every run. Try a
-            Morning digest from the Automations recipe shelf.</p>
-            <p>Feedback you send reports back here when it needs you or gets
-            fixed. Use “New” above to send one.</p>
+            <p>Reports from automations that run an agent show up here, and so
+            do updates on feedback you send. Use New above to send feedback.</p>
           </div>
         )}
         {pinned.length > 0 && (
@@ -306,10 +315,12 @@ function AgentReportReadView({ agentId, logFile, body }: { agentId: string; logF
     : <div className="report-md report-md-reader">{renderReportMarkdown(text)}</div>}</div>;
 }
 
-function ThreadView({ number }: { number: number }) {
+function ThreadView({ number, status }: { number: number; status?: string }) {
   const toast = useStore((s) => s.toast);
   const [thread, setThread] = useState<FeedbackThread | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  // Bumped by Try again: loads the same report once more.
+  const [attempt, setAttempt] = useState(0);
   const [replyText, setReplyText] = useState('');
   useUnsentInput(replyText);
   const [sending, setSending] = useState(false);
@@ -318,12 +329,13 @@ function ThreadView({ number }: { number: number }) {
   useEffect(() => {
     let alive = true;
     setThread(null);
-    setErr(null);
+    setFailed(false);
     api.feedbackThread(number)
       .then((t) => { if (alive) setThread(t); })
-      .catch((e) => { if (alive) setErr((e as Error).message || 'Could not load the conversation.'); });
+      .catch(() => { if (alive) setFailed(true); });
     return () => { alive = false; };
-  }, [number]);
+  }, [number, attempt]);
+  const tryAgain = () => setAttempt((n) => n + 1);
 
   // New content (load or reply) → show the latest.
   useEffect(() => {
@@ -337,12 +349,15 @@ function ThreadView({ number }: { number: number }) {
     setSending(true);
     try {
       await api.feedbackReply(number, text);
-      toast('Reply added — your report will re-triage automatically', { kind: 'success', icon: '✓' });
+      toast(`Reply added to report #${number}.`, { kind: 'success', icon: '✓' });
       setReplyText('');
       // Optimistic append; the server stored the same event.
       setThread((t) => t && ({ ...t, events: [...t.events, { event: 'reply', message: text, at: new Date().toISOString() }] }));
     } catch (e) {
-      toast(`Couldn't send reply: ${(e as Error).message || 'try again'}`, { kind: 'error', icon: '⚠', ttlMs: 5000 });
+      // Closed since it loaded: the follow-up button replaces the reply box
+      // and takes what was typed with it.
+      if (isFeedbackClosedReply(e)) setThread((t) => t && ({ ...t, state: 'closed' }));
+      toast(feedbackReplyError(e), { kind: 'error', icon: '⚠', ttlMs: 5000 });
     } finally {
       setSending(false);
     }
@@ -351,12 +366,18 @@ function ThreadView({ number }: { number: number }) {
   return (
     <>
       <div className="inbox-scroll inbox-thread" ref={scrollRef}>
-        {err && <div className="dialog-error">{err}</div>}
-        {!thread && !err && <div className="inbox-empty">Loading…</div>}
+        {failed && (
+          <div className="inbox-read-empty">
+            <p>{FEEDBACK_THREAD_ERROR}</p>
+            <p><button type="button" onClick={tryAgain}>Try again</button></p>
+          </div>
+        )}
+        {!thread && !failed && <div className="inbox-empty">Loading…</div>}
         {thread && (
           <>
             <div className="inbox-thread-head">
               <div className="inbox-thread-title">{thread.title}</div>
+              {status && <div className="inbox-thread-status"><ReportStatusChip word={status} /></div>}
               <div className="inbox-thread-sub">Report #{thread.number} · filed {relativeTime(new Date(thread.filedAt).getTime())}</div>
             </div>
             {thread.events.map((e, i) => (
@@ -373,9 +394,19 @@ function ThreadView({ number }: { number: number }) {
           </>
         )}
       </div>
+      {thread?.state === 'unknown' && (
+        <div className="inbox-reply inbox-reply-retry">
+          <span>{FEEDBACK_THREAD_ERROR}</span>
+          <button type="button" onClick={tryAgain}>Try again</button>
+        </div>
+      )}
       {thread?.state === 'closed' && (
         <div className="inbox-reply">
-          <button type="button" className="primary" onClick={() => openFeedback({ body: `Follow-up to #${thread.number}` })}>Send a follow-up</button>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => openFeedback({ body: replyText.trim(), followUpOf: thread.number })}
+          >Send a follow-up</button>
         </div>
       )}
       {thread?.state === 'open' && (
@@ -384,7 +415,7 @@ function ThreadView({ number }: { number: number }) {
             value={replyText}
             onChange={(e) => setReplyText(e.target.value)}
             rows={3}
-            placeholder="Add details — this goes straight into your report and re-triage runs automatically."
+            placeholder="Add details to this report: what you tried, what happened, your version."
             onKeyDown={(e) => {
               if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void sendReply(); }
             }}
@@ -416,10 +447,14 @@ function InboxWindow({ sel, setSel, target, clearTarget, onClose }: {
 }) {
   const schedules = useStore((s) => s.schedules);
   const feedback = useFeedbackInbox();
+  const myReports = useMyReports();
   const agentReports = useInboxReports();
   const isPhone = useIsPhone();
   const [filter, setFilter] = useState<Filter>('all');
-  const items = useMemo(() => inboxFeed(schedules, feedback, agentReports), [schedules, feedback, agentReports]);
+  const items = useMemo(
+    () => inboxFeed(schedules, feedback, agentReports, myReports),
+    [schedules, feedback, agentReports, myReports],
+  );
   const unread = useMemo(() => items.filter((i) => i.unread), [items]);
 
   // Settings' window contract: flex-centered by the backdrop, then pinned so
@@ -577,16 +612,29 @@ function InboxWindow({ sel, setSel, target, clearTarget, onClose }: {
                 onClose={onClose}
               />
             )}
-            {sel?.kind === 'thread' && <ThreadView number={sel.number} />}
+            {sel?.kind === 'thread' && sel.sent && (
+              <div className="inbox-thread-sent" role="status">
+                Report #{sel.number} sent. Updates on it will show up here.
+              </div>
+            )}
+            {sel?.kind === 'thread' && (
+              <ThreadView number={sel.number} status={items.find((i) => i.source === 'feedback' && i.number === sel.number)?.status} />
+            )}
             {sel?.kind === 'agentreport' && <AgentReportReadView key={`${sel.id}:${sel.runId}`} agentId={sel.id} logFile={sel.logFile} body={sel.body} />}
             {sel?.kind === 'compose' && (
               <div className="inbox-scroll is-flush">
                 <FeedbackComposer
                   // A new "Report this" while the form is open starts it
-                  // again from the saved draft plus the new error.
-                  key={sel.prefill?.body ?? ''}
+                  // again from the saved draft plus the new error; a
+                  // follow-up starts its own clean form.
+                  key={`${sel.prefill?.followUpOf ?? ''}:${sel.prefill?.body ?? ''}`}
                   prefill={sel.prefill}
                   onDone={onClose}
+                  onSent={(number) => {
+                    noteFeedbackSent(number);
+                    void refreshMyReports();
+                    setSel({ kind: 'thread', number, sent: true });
+                  }}
                   onCancel={() => setSel(null)}
                 />
               </div>

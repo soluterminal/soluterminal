@@ -177,8 +177,8 @@ func TestUpdateManagedWslPidFile(t *testing.T) {
 func TestApplyBusyGate(t *testing.T) {
 	u := NewUpdater("1.0.0", "", "", nil, nil)
 	u.restartGate = new(atomic.Bool)
-	u.busyCheck = func() (bool, string, string) {
-		return true, "a Focus pane is mid-turn (pane p1)", "p1"
+	u.busyCheck = func() *updateBusyError {
+		return &updateBusyError{cause: updateBusyCauseCollaboration, reason: "a pane has a held delivery (pane p1)", paneID: "p1"}
 	}
 
 	err := u.Apply(context.Background(), func(int) {}, false)
@@ -189,8 +189,8 @@ func TestApplyBusyGate(t *testing.T) {
 	if !strings.Contains(busy.reason, "pane p1") {
 		t.Fatalf("busy reason = %q, want the offending pane surfaced", busy.reason)
 	}
-	if busy.cause != updateBusyCauseFocus || busy.paneID != "p1" {
-		t.Fatalf("busy metadata = %+v, want focus cause + p1", busy)
+	if busy.cause != updateBusyCauseCollaboration || busy.paneID != "p1" {
+		t.Fatalf("busy metadata = %+v, want collaboration cause + p1", busy)
 	}
 
 	err = u.Apply(context.Background(), func(int) {}, true)
@@ -377,8 +377,8 @@ func TestRestartDaemonCapturedBinaryBootFailureKeepsPredecessorServing(t *testin
 func TestUpdateApplyHandler409(t *testing.T) {
 	u := NewUpdater("1.0.0", "", "", nil, nil)
 	u.restartGate = new(atomic.Bool)
-	u.busyCheck = func() (bool, string, string) {
-		return true, "a Focus pane is mid-turn (pane p9)", "p9"
+	u.busyCheck = func() *updateBusyError {
+		return &updateBusyError{cause: updateBusyCauseCollaboration, reason: "a pane has a held delivery (pane p9)", paneID: "p9"}
 	}
 	a := &apiServer{updater: u}
 
@@ -394,8 +394,8 @@ func TestUpdateApplyHandler409(t *testing.T) {
 		Reason string `json:"reason"`
 		PaneID string `json:"paneId"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || !body.Busy || body.Cause != updateBusyCauseFocus || body.PaneID != "p9" || !strings.Contains(body.Reason, "pane p9") {
-		t.Fatalf("409 body = %q (err=%v), want typed focus hold", rec.Body.String(), err)
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || !body.Busy || body.Cause != updateBusyCauseCollaboration || body.PaneID != "p9" || !strings.Contains(body.Reason, "pane p9") {
+		t.Fatalf("409 body = %q (err=%v), want typed collaboration hold", rec.Body.String(), err)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/update/apply?force=1", nil)

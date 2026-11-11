@@ -46,7 +46,7 @@ describe('PaneOriginButton', () => {
   });
 
   it('names schedules and other programs honestly', () => {
-    expect(originSummary({ source: 'schedule', at: 1 })).toBe('Started by a schedule');
+    expect(originSummary({ source: 'schedule', at: 1 })).toBe('Started by an automation');
     expect(originSummary({ source: 'api', at: 1 })).toBe('Started by another program');
   });
 

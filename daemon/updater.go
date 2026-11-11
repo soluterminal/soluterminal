@@ -344,19 +344,18 @@ type Updater struct {
 	// < 100. Read under mu.
 	machineID string
 
-	// busyCheck, when set (main.go wires it over the pane manager), reports
-	// whether applying an update RIGHT NOW would interrupt live agent work —
-	// concretely: any Focus/native pane mid-turn. A Focus turn's control loop
-	// (pending approvals, stream parse state) lives in THIS daemon process, so
-	// a swap mid-turn degrades the turn even though the detached agent + claude
-	// child survive; a terminal turn is daemon-independent and never blocks an
-	// update. Apply() consults it at entry AND immediately before the binary
-	// swap (a pane can go busy during the download); only the user's explicit
-	// force=true override bypasses it.
-	// The client keeps its own defer-while-busy watcher — this is the
-	// server-side backstop for curl/scripts/stale clients/no-open-tab. nil =
-	// no gate (tests, minimal setups). Set once at boot, before serving.
-	busyCheck func() (busy bool, reason string, paneID string)
+	// busyCheck reports volatile collaboration state that a restart would lose.
+	// Apply samples it at entry and before swapping; force bypasses it. The web
+	// retries this server gate; only the temporary Focus cause is unbounded.
+	// Set once at boot; nil means no gate in minimal setups and tests.
+	busyCheck func() *updateBusyError
+	// restartLossCounts samples volatile state immediately before a swap.
+	// Wired once at boot; nil in minimal setups.
+	restartLossCounts func() (held, receipts int, asks int64)
+	// busySince bounds a continuously observed collaboration hold. Both times
+	// are guarded by mu; sampling gaps between attempts start a fresh grace.
+	busySince        time.Time
+	busyLastObserved time.Time
 
 	// inflightCount, when set, reports open workflow model invocations. Apply()
 	// uses it to drain model workers before a non-forced binary swap. nil = no

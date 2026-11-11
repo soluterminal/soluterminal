@@ -55,8 +55,8 @@ func (u *Updater) Rollback(ctx context.Context, req rollbackRequest, exitFn func
 		return errors.New("rollback state unavailable")
 	}
 	if !req.Force {
-		if busy, reason, paneID := u.checkBusy(); busy {
-			return &updateBusyError{cause: updateBusyCauseFocus, reason: reason, paneID: paneID}
+		if busy := u.checkBusy(); busy != nil {
+			return busy
 		}
 	}
 	if !u.restartGate.CompareAndSwap(false, true) {
@@ -160,9 +160,9 @@ func (u *Updater) Rollback(ctx context.Context, req rollbackRequest, exitFn func
 	}
 
 	if !req.Force {
-		if busy, reason, paneID := u.checkBusy(); busy {
+		if busy := u.checkBusy(); busy != nil {
 			_ = os.Remove(candidatePath)
-			return &updateBusyError{cause: updateBusyCauseFocus, reason: reason, paneID: paneID}
+			return busy
 		}
 		if err := rollbackWorkloadCheck(u); err != nil {
 			_ = os.Remove(candidatePath)

@@ -25,6 +25,9 @@ export interface DialogRequest {
    *  another dialog resolve null instead of false, so the caller can tell a
    *  dismissal apart from the Cancel button. */
   distinguishDismiss?: boolean;
+  /** Confirm dialogs only: Cancel takes the focus, so Enter can't confirm a
+   *  step that is hard to take back. */
+  focusCancel?: boolean;
   resolve: (value: boolean | string | null) => void;
 }
 

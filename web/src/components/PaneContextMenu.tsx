@@ -6,6 +6,7 @@ import { useClampedMenuPosition } from './useClampedMenuPosition';
 import { agentFromCommand, effectivePaneAgent } from '../lib/agentKind';
 import { SmartApprovalsHint } from './SmartApprovalsHint';
 import { declaredPaneTeamKind } from '../lib/paneTeam';
+import { paneConversation } from '../lib/paneConversation';
 
 type PaneAutoMode = NonNullable<PaneInfo['autoMode']>;
 
@@ -24,6 +25,10 @@ interface PaneContextMenuProps {
   onSplitRightClaudeHere: () => void;
   onSplitDown: () => void;
   onClonePane: () => void;
+  // Maximise this pane, or restore the layout while it is maximised. Absent ⇒
+  // hidden (a lone pane, or a phone, has nothing to maximise over).
+  onToggleZoom?: () => void;
+  isZoomed?: boolean;
   onMoveToWorkspace?: () => void;
   onNewSession: () => void;
   onCreateSchedule: () => void;
@@ -44,6 +49,9 @@ interface PaneContextMenuProps {
   onUnflag: () => void;
   onFlagForAttention: () => void;
   onRename: () => void;
+  // Copy the id that resumes this pane's conversation. Shown once the pane
+  // has one. Absent ⇒ hidden.
+  onCopySessionId?: () => void;
   // Name, @handle and working-on line in one dialog. Absent ⇒ hidden.
   onEditIdentity?: () => void;
   // Supported hosts only: set or remove the orchestrator role. Respawns the
@@ -92,6 +100,8 @@ export function PaneContextMenu({
   onSplitRightClaudeHere,
   onSplitDown,
   onClonePane,
+  onToggleZoom,
+  isZoomed = false,
   onMoveToWorkspace,
   onNewSession,
   onCreateSchedule,
@@ -104,6 +114,7 @@ export function PaneContextMenu({
   onUnflag,
   onFlagForAttention,
   onRename,
+  onCopySessionId,
   onEditIdentity,
   onConvertRole,
   onSetTeamKind,
@@ -122,6 +133,7 @@ export function PaneContextMenu({
   const currentEffort = (pane.effort ?? '') as PaneEffort;
   const paneAgent = pane.kind === 'native' ? effectivePaneAgent(pane) : agentFromCommand(pane.cmd);
   const contextPackCapable = paneAgent === 'claude' || paneAgent === 'codex';
+  const conversation = paneConversation(pane);
   const packBase = pane.contextPack?.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? 'none';
   const { left, top } = useClampedMenuPosition(menuRef, { x, y });
 
@@ -192,8 +204,13 @@ export function PaneContextMenu({
         </button>
       )}
       <button role="menuitem" onClick={onNewSession}>New session…</button>
-      <button role="menuitem" onClick={onCreateSchedule}>Create schedule…</button>
+      <button role="menuitem" onClick={onCreateSchedule}>New automation…</button>
       </>}
+      {onToggleZoom && (
+        <button role="menuitem" onClick={onToggleZoom}>
+          {isZoomed ? 'Restore layout' : 'Maximise pane'} <kbd>Alt+Z</kbd>
+        </button>
+      )}
       <div className="pane-ctx-menu-sep" />
       <div className="pane-ctx-menu-label">{pane.neverAutoAnswer ? 'Auto-approve — locked' : 'Auto-approve'}</div>
       {AUTO_MODES.map((mode) => {
@@ -277,6 +294,15 @@ export function PaneContextMenu({
       {onEditIdentity && (
         <button role="menuitem" onClick={onEditIdentity} title="A handle to address this pane by, and what it is working on">
           Handle and working on…
+        </button>
+      )}
+      {onCopySessionId && conversation && (
+        <button
+          role="menuitem"
+          onClick={onCopySessionId}
+          title={`Use it to resume this conversation\n${conversation.id}`}
+        >
+          Copy {conversation.noun} ID
         </button>
       )}
       {!managedOwner && onConvertRole && pane.status === 'running' && pane.role !== 'task_owner' && (

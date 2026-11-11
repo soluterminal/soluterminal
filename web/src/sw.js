@@ -20,7 +20,8 @@
 // v29: force browser/PWA clients onto the terminal reader-mode autoscroll fix.
 // v30: the pane-mark app icon; icons are served stale-while-revalidate from
 //      this cache, so without a bump the old 2×2 grid lingers for a load.
-const SW_VERSION = 'solu-sw-v30';
+// v31: a tapped feedback notification reaches an already-open window.
+const SW_VERSION = 'solu-sw-v31';
 const APP_SHELL_CACHE = 'solu-shell-' + SW_VERSION;
 const NAVIGATION_NETWORK_TIMEOUT_MS = 10000;
 
@@ -331,7 +332,7 @@ self.addEventListener('push', (event) => {
     title = '⚠️ Schedule failed';
     body = rawTitle + (summary ? ` — ${summary}` : '') + machineLine;
   } else if (payload.state === 'schedule-fired') {
-    title = `⏰ ${rawTitle || 'Schedule'}`;
+    title = `⏰ ${rawTitle || 'Automation'}`;
     body = (summary || 'ran just now') + machineLine;
   } else if (payload.state === 'user-ask') {
     // New asks from agents (daemon asks_push.go): title = who is waiting
@@ -461,6 +462,39 @@ self.addEventListener('push', (event) => {
   })());
 });
 
+// How long a window gets to say the app is mounted there. A live page answers
+// in a few milliseconds; the wait has to stay well inside the second or so
+// browsers allow a notification click to focus or open a window.
+const TAP_READY_WAIT_MS = 400;
+
+// Resolves true when the window answers, i.e. the app (its listener in
+// lib/notificationTap.ts) is mounted there. A sign-in screen, the computer
+// picker and a standalone page never answer, and a tap posted to one is lost.
+function tapReady(client) {
+  return new Promise((resolve) => {
+    let timer = 0;
+    try {
+      const channel = new MessageChannel();
+      const done = (ok) => { clearTimeout(timer); channel.port1.close(); resolve(ok); };
+      channel.port1.onmessage = () => done(true);
+      timer = setTimeout(() => done(false), TAP_READY_WAIT_MS);
+      client.postMessage({ type: 'solu:notification-tap-ready' }, [channel.port2]);
+    } catch {
+      clearTimeout(timer);
+      resolve(false);
+    }
+  });
+}
+
+// The best window that answers: the focused one, then a visible one, then any.
+// Every window is asked at once, so the wait never adds up.
+function readyAppWindow(list) {
+  const rank = (c) => (c.focused ? 0 : c.visibilityState === 'visible' ? 1 : 2);
+  const windows = list.filter((c) => 'focus' in c).sort((a, b) => rank(a) - rank(b));
+  const asked = windows.map((c) => tapReady(c).then((ok) => (ok ? c : null)));
+  return asked.reduce((best, next) => best.then((found) => found || next), Promise.resolve(null));
+}
+
 // Re-focus an existing window when the user taps a notification.
 // If the notification carries machineId, route there first. Appends
 // ?pane=<paneId> when known so the app can focus that specific pane
@@ -472,6 +506,20 @@ self.addEventListener('notificationclick', (event) => {
   const paneQuery = data.paneId ? `?pane=${encodeURIComponent(data.paneId)}` : '';
   const machinePath = data.machineId ? `/m/${encodeURIComponent(data.machineId)}/` : '/';
   const targetPath = machinePath + paneQuery;
+
+  // No window can take the target as a message: load it from the URL.
+  const openAtTarget = (list) => {
+    for (const client of list) {
+      if ('focus' in client) {
+        // Navigate focused window if it exists but isn't at target.
+        if ('navigate' in client && targetPath !== '/') {
+          return client.navigate(targetPath).then(() => client.focus());
+        }
+        return client.focus();
+      }
+    }
+    if (self.clients.openWindow) return self.clients.openWindow(targetPath);
+  };
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
@@ -492,16 +540,20 @@ self.addEventListener('notificationclick', (event) => {
           }
         } catch { /* ignore malformed */ }
       }
-      for (const client of list) {
-        if ('focus' in client) {
-          // Navigate focused window if it exists but isn't at target.
-          if ('navigate' in client && targetPath !== '/') {
-            return client.navigate(targetPath).then(() => client.focus());
-          }
-          return client.focus();
-        }
+      // A feedback update (cloud feedback_loop.go) is for the account, not one
+      // machine, so it carries no machineId and any window running the app can
+      // show it. Hand it the target the same way; navigating to
+      // "/?pane=feedback:N" would reload the app. A window that does not
+      // answer is not running the app, so the tap falls through to the URL,
+      // which is still there once a computer is picked. (sw v31)
+      if (!data.machineId && typeof data.paneId === 'string' && data.paneId.startsWith('feedback:')) {
+        return readyAppWindow(list).then((open) => {
+          if (!open) return openAtTarget(list);
+          try { open.postMessage({ type: 'solu:notification-tap', paneId: data.paneId }); } catch { /* best effort */ }
+          return open.focus();
+        });
       }
-      if (self.clients.openWindow) return self.clients.openWindow(targetPath);
+      return openAtTarget(list);
     })
   );
 });

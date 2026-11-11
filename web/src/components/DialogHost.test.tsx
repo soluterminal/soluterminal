@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { useStore } from '../store';
 import { confirmDialog, confirmOrDismissDialog, promptDialog } from '../lib/dialog';
@@ -29,6 +29,15 @@ describe('DialogHost dismissal', () => {
       await expect(answer).resolves.toBe(expected);
     },
   );
+
+  it('focuses Cancel when asked, and Confirm otherwise', async () => {
+    render(<DialogHost />);
+    void open(() => confirmDialog({ message: 'Connect?', confirmLabel: 'Connect this PC', focusCancel: true }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus());
+    act(() => useStore.getState().closeDialog(null));
+    void open(() => confirmDialog({ message: 'Sure?' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toHaveFocus());
+  });
 
   it('still submits a prompt when Enter is pressed in its input', async () => {
     render(<DialogHost />);

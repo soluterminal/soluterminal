@@ -4,13 +4,31 @@ import { useStore } from '../../store';
 import { api, ApiError, type FeedbackContext, type FeedbackReq } from '../../api';
 import { useCloud } from '../../cloud';
 import { FeedbackComposer } from './FeedbackComposer';
-import { FEEDBACK_LIMIT_ERROR, FEEDBACK_PREVIEW_ERROR, FEEDBACK_SEND_ERROR } from '../../lib/feedbackReport';
+import {
+  FEEDBACK_CONNECTED_TOAST,
+  FEEDBACK_UNPAIRED_LINE,
+  FEEDBACK_COPIED_NOTE,
+  FEEDBACK_COPY_ERROR,
+  FEEDBACK_EMAIL_CUT_NOTE,
+  FEEDBACK_LIMIT_ERROR,
+  FEEDBACK_MAIL_DRAFT_NOTE,
+  FEEDBACK_NO_MAIL_APP_ERROR,
+  FEEDBACK_NOT_SENT_YET,
+  FEEDBACK_PREVIEW_ERROR,
+  FEEDBACK_ROW_UNAVAILABLE,
+  FEEDBACK_SEND_ERROR,
+  FEEDBACK_UNCHECKED_NOTE,
+} from '../../lib/feedbackReport';
 
 vi.mock('../../api', async (importOriginal) => ({ ...(await importOriginal<typeof import('../../api')>()),
   api: { submitFeedback: vi.fn(), feedbackStatus: vi.fn(), feedbackPreview: vi.fn() },
 }));
 
-const mail = vi.hoisted(() => ({ openMailDraft: vi.fn<(href: string) => Promise<void>>(async () => {}) }));
+// null is a browser's answer: the page can't tell whether a draft opened.
+const mail = vi.hoisted(() => ({ openMailDraft: vi.fn<(href: string) => Promise<boolean | null>>(async () => null) }));
+const connect = vi.hoisted(() => ({ connectThisComputerAfterWarning: vi.fn<(msg?: string) => Promise<boolean>>() }));
+vi.mock('../../accountConnect', () => connect);
+
 vi.mock('../../lib/feedbackReport', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/feedbackReport')>()),
   openMailDraft: mail.openMailDraft,
@@ -34,7 +52,9 @@ function previewImpl(req: Omit<FeedbackReq, 'type'>) {
     body: req.body.replace('hunter2', '[REDACTED]'),
     snapshot: req.includeSnapshot ? req.snapshot ?? PANE_TEXT : '',
     logs: req.includeLogs ? req.logs ?? 'daemon started\nlistening' : '',
-    context: { ...CTX, paneId: req.includeSnapshot ? req.paneId ?? '' : '' },
+    context: req.includeSnapshot
+      ? { ...CTX, paneId: req.paneId ?? '', paneKind: 'Focus', paneAgent: 'Codex' }
+      : { ...CTX, paneId: '' },
   });
 }
 
@@ -59,7 +79,8 @@ beforeEach(() => {
   submitFeedback.mockReset();
   feedbackStatus.mockReset().mockResolvedValue({ available: true });
   feedbackPreview.mockReset().mockImplementation(previewImpl);
-  mail.openMailDraft.mockClear();
+  mail.openMailDraft.mockReset().mockResolvedValue(null);
+  connect.connectThisComputerAfterWarning.mockReset().mockResolvedValue(false);
   localStorage.clear();
 });
 
@@ -99,6 +120,32 @@ describe('FeedbackComposer', () => {
       "Thanks, we've got it. Report #99 is with the team.",
       expect.objectContaining({ kind: 'success' }),
     );
+  });
+
+  it('hands a filed report to the host instead of closing with a toast', async () => {
+    const { toast } = seed();
+    submitFeedback.mockResolvedValue({ ok: true, number: 99, url: 'https://x/issues/99' });
+    const onDone = vi.fn();
+    const onSent = vi.fn();
+    render(<FeedbackComposer onDone={onDone} onSent={onSent} onCancel={() => {}} />);
+    fireEvent.change(mainField(), { target: { value: 'Tabs vanish' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(onSent).toHaveBeenCalledWith(99));
+    expect(onDone).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('a queued report has no number yet: thanks and close, as before', async () => {
+    const { toast } = seed();
+    submitFeedback.mockResolvedValue({ ok: true, number: 0, url: '', queued: true });
+    const onDone = vi.fn();
+    const onSent = vi.fn();
+    render(<FeedbackComposer onDone={onDone} onSent={onSent} onCancel={() => {}} />);
+    fireEvent.change(mainField(), { target: { value: 'Tabs vanish' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(onDone).toHaveBeenCalled());
+    expect(onSent).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("Thanks, we've got it.", expect.objectContaining({ kind: 'success' }));
   });
 
   it('labels the main field by type and announces an empty one', async () => {
@@ -169,7 +216,7 @@ describe('FeedbackComposer', () => {
 
     await waitFor(() => expect(feedbackPreview).toHaveBeenCalled());
     fireEvent.click(within(screen.getByText('App and system details · always sent').closest('.inbox-send-row') as HTMLElement)
-      .getByRole('button', { name: 'Show' }));
+      .getByRole('button', { name: 'Show app and system details' }));
     expect(await screen.findByText('An ID for this computer (not its name)')).toBeInTheDocument();
     expect(screen.getByText('machine-7')).toBeInTheDocument();
     expect(screen.getByText('0.0.1240')).toBeInTheDocument();
@@ -180,12 +227,52 @@ describe('FeedbackComposer', () => {
     expect(screen.getByRole('button', { name: "What we'll send" })).toHaveAttribute('aria-expanded', 'false');
   });
 
+  // Wording item 9: each Show says what it opens; once open, it reads Hide.
+  it('names the three Show buttons for what they open', async () => {
+    seed();
+    renderComposer();
+    await waitFor(() => expect(feedbackPreview).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('checkbox', { name: /Recent text from a pane/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Recent app logs' }));
+    // Ticked rows open with their text shown; their buttons read Hide.
+    await screen.findByRole('textbox', { name: 'Recent app logs' });
+    for (const hide of screen.getAllByRole('button', { name: 'Hide' })) fireEvent.click(hide);
+    for (const name of ['Show app and system details', 'Show the pane text that would be sent', 'Show the app logs that would be sent']) {
+      expect(await screen.findByRole('button', { name })).toHaveTextContent('Show');
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Show app and system details' }));
+    expect(screen.queryByRole('button', { name: 'Show app and system details' })).toBeNull();
+  });
+
+  // ST-165: the pane's type and agent go with its text, so the details list
+  // shows them while pane text is ticked, and not otherwise.
+  it('lists the pane\'s ID, type and agent in the details only while its text is ticked', async () => {
+    seed();
+    renderComposer();
+    await waitFor(() => expect(feedbackPreview).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Show app and system details' }));
+    expect(await screen.findByText('An ID for this computer (not its name)')).toBeInTheDocument();
+    expect(screen.queryByText('Pane type')).toBeNull();
+
+    const paneBox = screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID, type and agent" });
+    fireEvent.click(paneBox);
+    await screen.findByRole('textbox', { name: 'Recent text from a pane' });
+    expect(await screen.findByText('Pane type')).toBeInTheDocument();
+    expect(screen.getByText('Focus')).toBeInTheDocument();
+    expect(screen.getByText('Agent')).toBeInTheDocument();
+    expect(screen.getByText('Codex')).toBeInTheDocument();
+
+    fireEvent.click(paneBox);
+    expect(screen.queryByText('Pane type')).toBeNull();
+    expect(screen.queryByText('Agent')).toBeNull();
+  });
+
   it('sends the pane text as previewed, without the line the user deleted', async () => {
     seed();
     submitFeedback.mockResolvedValue({ ok: true, number: 1, url: 'u' });
     renderComposer();
     fireEvent.change(mainField(), { target: { value: 'dev server hangs' } });
-    const paneBox = screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID" });
+    const paneBox = screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID, type and agent" });
     expect(paneBox).not.toBeChecked();
     fireEvent.click(paneBox);
     expect(screen.getByLabelText('Pane')).toHaveValue('pane_42');
@@ -211,7 +298,7 @@ describe('FeedbackComposer', () => {
       req.includeSnapshot ? Promise.reject(new Error('404')) : previewImpl(req));
     renderComposer();
     fireEvent.change(mainField(), { target: { value: 'x' } });
-    const box = screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID" });
+    const box = screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID, type and agent" });
     fireEvent.click(box);
     expect(await screen.findByRole('alert')).toHaveTextContent(FEEDBACK_PREVIEW_ERROR);
     expect(box).not.toBeChecked();
@@ -224,7 +311,7 @@ describe('FeedbackComposer', () => {
   it('keeps the preview box when every line is deleted', async () => {
     seed();
     renderComposer();
-    fireEvent.click(screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID" }));
+    fireEvent.click(screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID, type and agent" }));
     const preview = await screen.findByRole('textbox', { name: 'Recent text from a pane' });
     fireEvent.change(preview, { target: { value: '' } });
     expect(screen.getByRole('textbox', { name: 'Recent text from a pane' })).toHaveValue('');
@@ -282,7 +369,7 @@ describe('FeedbackComposer', () => {
     seed();
     const { unmount } = render(<FeedbackComposer onDone={() => {}} onCancel={() => {}} />);
     fireEvent.change(mainField(), { target: { value: 'half-written' } });
-    fireEvent.click(screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID" }));
+    fireEvent.click(screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID, type and agent" }));
     fireEvent.click(screen.getByRole('checkbox', { name: 'Recent app logs' }));
     const preview = await screen.findByRole('textbox', { name: 'Recent text from a pane' });
     fireEvent.change(preview, { target: { value: PANE_TEXT.replace('private line\n', '') } });
@@ -291,7 +378,7 @@ describe('FeedbackComposer', () => {
     render(<FeedbackComposer onDone={() => {}} onCancel={() => {}} />);
     expect(mainField()).toHaveValue('half-written');
     fireEvent.click(screen.getByRole('button', { name: "What we'll send" }));
-    expect(screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID" })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID, type and agent" })).not.toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Recent app logs' })).not.toBeChecked();
     expect(localStorage.getItem('solu.feedbackDraft.v2')).not.toMatch(/include/);
   });
@@ -312,6 +399,56 @@ describe('FeedbackComposer', () => {
   });
 });
 
+// ST-166: a follow-up is a clean form linked by a field, and the person's
+// saved draft is neither shown in it, overwritten nor cleared by it.
+describe('FeedbackComposer as a follow-up', () => {
+  const saved = JSON.stringify({ type: 'idea', trying: '', title: 'half-written idea', body: 'tabs could…' });
+
+  it('opens clean with the follow-up line, sends the link, and leaves the saved draft alone', async () => {
+    seed();
+    localStorage.setItem('solu.feedbackDraft.v2', saved);
+    submitFeedback.mockResolvedValue({ ok: true, number: 9, url: 'u' });
+    render(<FeedbackComposer onDone={() => {}} onCancel={() => {}} prefill={{ followUpOf: 38, body: 'Still broken' }} />);
+
+    expect(screen.getByText('This is a follow-up to report #38.')).toBeInTheDocument();
+    expect(mainField()).toHaveValue('Still broken');
+    expect(screen.getByLabelText('Title (optional)')).toHaveValue('');
+    fireEvent.change(mainField(), { target: { value: 'Still broken in 1242' } });
+    expect(localStorage.getItem('solu.feedbackDraft.v2')).toBe(saved);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1));
+    const req = submitFeedback.mock.calls[0][0];
+    expect(req.followUpOf).toBe(38);
+    expect(req.body).toBe('Still broken in 1242');
+    expect(localStorage.getItem('solu.feedbackDraft.v2')).toBe(saved);
+  });
+
+  it('the normal form still opens on the saved draft, and sends no link', async () => {
+    seed();
+    localStorage.setItem('solu.feedbackDraft.v2', saved);
+    submitFeedback.mockResolvedValue({ ok: true, number: 9, url: 'u' });
+    renderComposer();
+    expect(screen.queryByText(/This is a follow-up/)).toBeNull();
+    expect(screen.getByLabelText('Title (optional)')).toHaveValue('half-written idea');
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1));
+    expect(submitFeedback.mock.calls[0][0]).not.toHaveProperty('followUpOf');
+  });
+
+  it('Copy report names the report it follows up', async () => {
+    seed();
+    feedbackStatus.mockResolvedValue({ available: false, reason: 'signed_out' });
+    const writeText = vi.fn<(text: string) => Promise<void>>(async () => {});
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    render(<FeedbackComposer onDone={() => {}} onCancel={() => {}} prefill={{ followUpOf: 38 }} />);
+    fireEvent.change(mainField(), { target: { value: 'it broke again' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy report' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0][0]).toMatch(/^SoluTerminal feedback · Bug\n\nFollow-up to #38\n\n/);
+  });
+});
+
 describe('FeedbackComposer without a connected account', () => {
   it('signed out: keeps the form, offers Copy report with the redacted report, sends nothing to the cloud', async () => {
     seed();
@@ -327,7 +464,7 @@ describe('FeedbackComposer without a connected account', () => {
     expect(screen.queryByText(/^Only what's shown above is sent/)).toBeNull();
 
     fireEvent.change(mainField(), { target: { value: 'password hunter2 shows' } });
-    fireEvent.click(screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID" }));
+    fireEvent.click(screen.getByRole('checkbox', { name: "Recent text from a pane (last 40 lines), with the pane's ID, type and agent" }));
     await screen.findByRole('textbox', { name: 'Recent text from a pane' });
     fireEvent.click(screen.getByRole('button', { name: 'Copy report' }));
 
@@ -348,17 +485,71 @@ describe('FeedbackComposer without a connected account', () => {
     seed();
     feedbackStatus.mockResolvedValue({ available: false, reason: 'unpaired' });
     renderComposer();
-    expect(await screen.findByText(
-      "This computer isn't connected to your account, so this can't be sent from here. Copy the report or email it to us.",
-    )).toBeInTheDocument();
+    expect(await screen.findByText(FEEDBACK_UNPAIRED_LINE)).toBeInTheDocument();
     fireEvent.change(mainField(), { target: { value: 'it broke' } });
     fireEvent.click(screen.getByRole('button', { name: 'Email it' }));
     await waitFor(() => expect(mail.openMailDraft).toHaveBeenCalledTimes(1));
     const href = mail.openMailDraft.mock.calls[0][0] as string;
-    expect(href).toMatch(/^mailto:hello@soluterminal\.com\?subject=SoluTerminal%20feedback&body=/);
+    expect(href).toMatch(/^mailto:hello@soluterminal\.com\?subject=SoluTerminal%20feedback%20%C2%B7%20Bug%20%C2%B7%20web%20[^&]+&body=/);
     expect(decodeURIComponent(href.split('&body=')[1])).toContain('it broke');
     expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
     expect(submitFeedback).not.toHaveBeenCalled();
+  });
+
+  // Wording item 4 and 18: the same on-demand connect as the mic's, then Send.
+  it('unpaired: Connect this computer connects it, says so, and then offers Send', async () => {
+    seed();
+    // Pairing finishes late: two more checks still say unpaired, one fails.
+    feedbackStatus
+      .mockResolvedValueOnce({ available: false, reason: 'unpaired' })
+      .mockResolvedValueOnce({ available: false, reason: 'unpaired' })
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ available: false, reason: 'unpaired' })
+      .mockResolvedValue({ available: true });
+    connect.connectThisComputerAfterWarning.mockResolvedValue(true);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderComposer();
+      fireEvent.click(await screen.findByRole('button', { name: 'Connect this computer' }));
+      await waitFor(() => expect(connect.connectThisComputerAfterWarning).toHaveBeenCalledWith(FEEDBACK_CONNECTED_TOAST));
+      expect(screen.queryByRole('button', { name: 'Send' })).toBeNull();
+      await vi.advanceTimersByTimeAsync(3000 * 4);
+      expect(await screen.findByRole('button', { name: 'Send' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Connect this computer' })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('unpaired: stops asking after a minute if the computer never connects', async () => {
+    seed();
+    feedbackStatus.mockResolvedValue({ available: false, reason: 'unpaired' });
+    connect.connectThisComputerAfterWarning.mockResolvedValue(true);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderComposer();
+      fireEvent.click(await screen.findByRole('button', { name: 'Connect this computer' }));
+      await waitFor(() => expect(connect.connectThisComputerAfterWarning).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(120_000);
+      const asked = feedbackStatus.mock.calls.length;
+      expect(asked).toBeLessThanOrEqual(1 + 21);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(feedbackStatus.mock.calls.length).toBe(asked);
+      expect(screen.getByRole('button', { name: 'Connect this computer' })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('unpaired: a connect that did not happen leaves the form as it was', async () => {
+    seed();
+    feedbackStatus.mockResolvedValue({ available: false, reason: 'unpaired' });
+    connect.connectThisComputerAfterWarning.mockResolvedValue(false);
+    renderComposer();
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect this computer' }));
+    await waitFor(() => expect(connect.connectThisComputerAfterWarning).toHaveBeenCalledTimes(1));
+    expect(feedbackStatus).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Email it' })).toBeInTheDocument();
   });
 
   it('offers Sign in on a local install with a sign-in screen', async () => {
@@ -376,5 +567,168 @@ describe('FeedbackComposer without a connected account', () => {
     } finally {
       useCloud.setState(initial, true);
     }
+  });
+});
+
+describe('FeedbackComposer when the background service cannot be reached', () => {
+  const PANE_ROW = "Recent text from a pane (last 40 lines), with the pane's ID, type and agent";
+  const down = () => feedbackPreview.mockRejectedValue(new ApiError(502, 'bad gateway'));
+
+  function stubClipboard() {
+    const writeText = vi.fn<(text: string) => Promise<void>>(async () => {});
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    return writeText;
+  }
+
+  it('says the check did not run before Copy report is used, and copies what was typed, scrubbed', async () => {
+    seed();
+    const writeText = stubClipboard();
+    feedbackStatus.mockResolvedValue({ available: false, reason: 'signed_out' });
+    down();
+    renderComposer();
+
+    expect(await screen.findByText(FEEDBACK_UNCHECKED_NOTE)).toBeInTheDocument();
+    expect(screen.queryByText(/^We remove tokens, keys/)).toBeNull();
+
+    fireEvent.change(mainField(), { target: { value: 'it broke for jo@example.com in C:\\Users\\jo\\app' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Copy report' }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const text = writeText.mock.calls[0][0];
+    expect(text).toContain('SoluTerminal feedback · Bug');
+    expect(text).toContain('it broke for [redacted: email] in C:\\Users\\[redacted: user]\\app');
+    expect(text).toMatch(/Web version: .+\nDevice: .+\nOther app details weren't available\.$/);
+    expect(text).not.toContain('App version');
+    expect(text).not.toContain('jo@example.com');
+    expect(await screen.findByText(FEEDBACK_COPIED_NOTE)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(submitFeedback).not.toHaveBeenCalled();
+  });
+
+  it('after a failed send, leaves a ticked pane row out and says so on the row', async () => {
+    seed();
+    const writeText = stubClipboard();
+    submitFeedback.mockRejectedValue(new ApiError(502, 'bad gateway'));
+    renderComposer();
+    fireEvent.change(mainField(), { target: { value: 'it broke' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: PANE_ROW }));
+    await screen.findByRole('textbox', { name: 'Recent text from a pane' });
+    expect(screen.queryByText(FEEDBACK_UNCHECKED_NOTE)).toBeNull();
+
+    down();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText(FEEDBACK_UNCHECKED_NOTE)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: PANE_ROW })).not.toBeChecked();
+    expect(screen.getByText(FEEDBACK_ROW_UNAVAILABLE)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy report' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0][0]).toContain('it broke');
+    expect(writeText.mock.calls[0][0]).not.toContain(PANE_TEXT);
+    expect(writeText.mock.calls[0][0]).not.toContain('Recent text from a pane');
+  });
+
+  it('a row ticked while it is unreachable is unticked with the same line, not a retry', async () => {
+    seed();
+    feedbackStatus.mockResolvedValue({ available: false, reason: 'unpaired' });
+    down();
+    renderComposer();
+    await screen.findByText(FEEDBACK_UNCHECKED_NOTE);
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Recent app logs' }));
+
+    expect(await screen.findByText(FEEDBACK_ROW_UNAVAILABLE)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Recent app logs' })).not.toBeChecked();
+    expect(screen.queryByText(FEEDBACK_PREVIEW_ERROR)).toBeNull();
+  });
+
+  it('copies or emails nothing on the click that finds the service gone; the next click goes on', async () => {
+    seed();
+    const writeText = stubClipboard();
+    feedbackStatus.mockResolvedValue({ available: false, reason: 'signed_out' });
+    renderComposer();
+    fireEvent.change(mainField(), { target: { value: 'it broke' } });
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Recent app logs' }));
+    await screen.findByRole('textbox', { name: 'Recent app logs' });
+    expect(screen.queryByText(FEEDBACK_UNCHECKED_NOTE)).toBeNull();
+
+    down();
+    fireEvent.click(screen.getByRole('button', { name: 'Email it' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(FEEDBACK_NOT_SENT_YET);
+    expect(screen.getByText(FEEDBACK_UNCHECKED_NOTE)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Recent app logs' })).not.toBeChecked();
+    expect(screen.getByText(FEEDBACK_ROW_UNAVAILABLE)).toBeInTheDocument();
+    expect(mail.openMailDraft).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy report' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0][0]).toContain('it broke');
+    expect(writeText.mock.calls[0][0]).not.toContain('Recent app logs');
+    expect(screen.queryByText(FEEDBACK_NOT_SENT_YET)).toBeNull();
+  });
+
+  it('uses the checked report again once the background service answers', async () => {
+    seed();
+    const writeText = stubClipboard();
+    feedbackStatus.mockResolvedValue({ available: false, reason: 'signed_out' });
+    down();
+    renderComposer();
+    await screen.findByText(FEEDBACK_UNCHECKED_NOTE);
+
+    feedbackPreview.mockImplementation(previewImpl);
+    fireEvent.change(mainField(), { target: { value: 'password hunter2 shows' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Copy report' }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0][0]).toContain('App version: 0.0.1241');
+    expect(writeText.mock.calls[0][0]).not.toContain('hunter2');
+    await waitFor(() => expect(screen.queryByText(FEEDBACK_UNCHECKED_NOTE)).toBeNull());
+  });
+});
+
+describe('FeedbackComposer Copy report and Email it outcomes', () => {
+  function signedOut() {
+    seed();
+    feedbackStatus.mockResolvedValue({ available: false, reason: 'signed_out' });
+    renderComposer();
+  }
+
+  it('says so when the report could not be copied', async () => {
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } });
+    signedOut();
+    fireEvent.change(mainField(), { target: { value: 'it broke' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy report' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(FEEDBACK_COPY_ERROR);
+    expect(screen.queryByText(FEEDBACK_COPIED_NOTE)).toBeNull();
+  });
+
+  it('in a browser, says what to do if no draft opened, and when the email was cut', async () => {
+    signedOut();
+    fireEvent.change(mainField(), { target: { value: 'it broke' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Email it' }));
+    expect(await screen.findByText(FEEDBACK_MAIL_DRAFT_NOTE)).toBeInTheDocument();
+    expect(screen.queryByText(FEEDBACK_EMAIL_CUT_NOTE)).toBeNull();
+
+    fireEvent.change(mainField(), { target: { value: 'long line. '.repeat(400) } });
+    fireEvent.click(screen.getByRole('button', { name: 'Email it' }));
+    expect(await screen.findByText(FEEDBACK_EMAIL_CUT_NOTE)).toBeInTheDocument();
+    expect(screen.getByText(FEEDBACK_MAIL_DRAFT_NOTE)).toBeInTheDocument();
+  });
+
+  it('in the desktop app, says no email app opened only when the open failed', async () => {
+    signedOut();
+    fireEvent.change(mainField(), { target: { value: 'it broke' } });
+    mail.openMailDraft.mockResolvedValue(true);
+    fireEvent.click(await screen.findByRole('button', { name: 'Email it' }));
+    await waitFor(() => expect(mail.openMailDraft).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(FEEDBACK_MAIL_DRAFT_NOTE)).toBeNull();
+
+    mail.openMailDraft.mockResolvedValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Email it' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(FEEDBACK_NO_MAIL_APP_ERROR);
   });
 });

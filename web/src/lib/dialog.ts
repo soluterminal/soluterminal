@@ -15,6 +15,7 @@ export function confirmDialog(opts: {
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
+  focusCancel?: boolean;
 }): Promise<boolean> {
   return new Promise((resolve) =>
     useStore.getState().openDialog({

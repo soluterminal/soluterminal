@@ -16,7 +16,7 @@ import { declaredPaneTeamKind, nearestLeadId, paneLeadRole } from '../lib/paneTe
 /** One-line description of the starter, e.g. "Started by #5 Claude". */
 export function originSummary(o: PaneOrigin, starter = o.byPaneTitle): string {
   if (o.source === 'agent') return `Started by ${starter || 'another agent'}`;
-  if (o.source === 'schedule') return 'Started by a schedule';
+  if (o.source === 'schedule') return 'Started by an automation';
   return 'Started by another program';
 }
 
@@ -56,7 +56,7 @@ export function roleLabel(pane: PaneInfo, panes: Record<string, PaneInfo>, order
       label = `Worker · started by ${livePaneLabel(o.byPaneId, o.byPaneTitle, panes, order) || 'an agent'}`;
     }
   } else if (o?.source === 'schedule') {
-    label = 'Started by a schedule';
+    label = 'Started by an automation';
   } else if (o?.source === 'api') {
     label = 'Started by a program';
   }
@@ -71,7 +71,7 @@ export function roleLabel(pane: PaneInfo, panes: Record<string, PaneInfo>, order
 export function roleShortLabel(pane: PaneInfo, panes: Record<string, PaneInfo>): string {
   const o = pane.origin;
   const n = workersOf(pane.id, panes).length;
-  const base = paneLeadRole(pane) ? 'Lead' : o?.source === 'agent' ? 'Worker' : o?.source === 'schedule' ? 'Schedule' : o?.source === 'api' ? 'Program' : '';
+  const base = paneLeadRole(pane) ? 'Lead' : o?.source === 'agent' ? 'Worker' : o?.source === 'schedule' ? 'Automation' : o?.source === 'api' ? 'Program' : '';
   if (n > 0) return base ? `${base} · ${n}` : plural(n, 'worker');
   return base;
 }

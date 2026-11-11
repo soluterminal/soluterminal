@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { api } from '../api';
 import { useStore } from '../store';
-import { routeNotificationTap } from './notificationTap';
+import { isInboxTapTarget, onServiceWorkerTapMessage, routeNotificationTap } from './notificationTap';
 import type { Schedule } from '../types';
 
 function sched(id: string, kind: Schedule['kind']): Schedule {
@@ -27,6 +28,7 @@ afterEach(() => {
   window.removeEventListener('solu:open-schedule-history', onHistory);
   useStore.setState({ schedules: [] });
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('routeNotificationTap', () => {
@@ -34,6 +36,30 @@ describe('routeNotificationTap', () => {
     expect(routeNotificationTap('pane-123')).toBe(false);
     expect(inbox).toEqual([]);
     expect(history).toEqual([]);
+  });
+
+  it("opens a feedback tap on that report's thread and marks it read", () => {
+    const read = vi.spyOn(api, 'feedbackInboxRead').mockResolvedValue(undefined);
+    expect(routeNotificationTap('feedback:42')).toBe(true);
+    expect(inbox).toEqual([{ view: 'feed', thread: 42 }]);
+    expect(read).toHaveBeenCalledWith(42);
+  });
+
+  it.each(['feedback:0', 'feedback:', 'feedback:abc', 'feedback:-3', 'feedback:4.5'])(
+    'opens the Inbox feed for %s, which names no report',
+    (target) => {
+      const read = vi.spyOn(api, 'feedbackInboxRead').mockResolvedValue(undefined);
+      expect(routeNotificationTap(target)).toBe(true);
+      expect(inbox).toEqual([{ view: undefined, thread: undefined }]);
+      expect(read).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names the targets it routes, so the arrival effect never polls for a pane called feedback:42', () => {
+    expect(isInboxTapTarget('feedback:42')).toBe(true);
+    expect(isInboxTapTarget('sched:s1')).toBe(true);
+    expect(isInboxTapTarget('agent:agt_7')).toBe(true);
+    expect(isInboxTapTarget('pane-123')).toBe(false);
   });
 
   it('opens an agent tap on its Inbox decision immediately, without waiting for a pane', () => {
@@ -70,6 +96,30 @@ describe('routeNotificationTap', () => {
     routeNotificationTap('sched:gone');
     vi.advanceTimersByTime(10_001);
     expect(history).toEqual([{ id: 'gone' }]);
+    expect(inbox).toEqual([]);
+  });
+});
+
+describe('onServiceWorkerTapMessage', () => {
+  // The worker hands a tap only to a window that answers this (sw.js tapReady).
+  it('answers the service worker that the app is listening here', async () => {
+    const { port1, port2 } = new MessageChannel();
+    const answered = new Promise((resolve) => { port1.onmessage = (e) => resolve(e.data); });
+    onServiceWorkerTapMessage(new MessageEvent('message', { data: { type: 'solu:notification-tap-ready' }, ports: [port2] }));
+    expect(await answered).toBe('ready');
+    port1.close();
+    expect(inbox).toEqual([]);
+  });
+
+  it('opens the report a tapped feedback notification names', () => {
+    vi.spyOn(api, 'feedbackInboxRead').mockResolvedValue(undefined);
+    onServiceWorkerTapMessage(new MessageEvent('message', { data: { type: 'solu:notification-tap', paneId: 'feedback:42' } }));
+    expect(inbox).toEqual([{ view: 'feed', thread: 42 }]);
+  });
+
+  it('ignores other messages', () => {
+    onServiceWorkerTapMessage(new MessageEvent('message', { data: { type: 'solu:sw-activated' } }));
+    onServiceWorkerTapMessage(new MessageEvent('message', { data: null }));
     expect(inbox).toEqual([]);
   });
 });

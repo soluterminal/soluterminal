@@ -91,7 +91,7 @@ func (u *Updater) fleetUpdateStatus() updatestatus.Status {
 	}
 	u.mu.Unlock()
 	if r.Reason == "" && s.Available && u.busyCheck != nil {
-		if busy, _, _ := u.busyCheck(); busy {
+		if busy := u.checkBusy(); busy != nil {
 			r.Reason = "busy"
 		}
 	}

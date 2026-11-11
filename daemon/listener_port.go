@@ -6,6 +6,8 @@ import (
 )
 
 func listenOnConfiguredPort(network, addr string) (net.Listener, error) {
+	// Never enable SO_REUSEPORT here: Shinoque's core proves which process
+	// answers this port by the pid holding its only listening socket.
 	ln, err := net.Listen(network, addr)
 	if err != nil {
 		return nil, err

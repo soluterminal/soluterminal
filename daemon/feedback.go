@@ -58,6 +58,9 @@ type feedbackReq struct {
 	Snapshot      *string `json:"snapshot"`
 	Logs          *string `json:"logs"`
 	ClientVersion string  `json:"clientVersion"` // low-trust; label/meta only
+	// FollowUpOf is the person's own earlier report this one follows up. The
+	// cloud keeps it only for a report of theirs.
+	FollowUpOf int64 `json:"followUpOf,omitempty"`
 	// Screenshots are not forwarded until private storage exists (ST-103 D3):
 	// any attachments a client sends are dropped here, for every account.
 }
@@ -72,11 +75,14 @@ type feedbackSubmission struct {
 	Snapshot string                `json:"snapshot"`
 	Logs     string                `json:"logs"`
 	Context  feedbackSubmitContext `json:"context"`
+	// Omitted for a new report, so older clouds see the same shape.
+	FollowUpOf int64 `json:"followUpOf,omitempty"`
 }
 
 // feedbackSubmitContext is the "App and system details" row of the form's
 // preview, field for field. The computer's name is not sent: the machine ID
-// identifies it.
+// identifies it. AppVersion and Platform are kept for older clouds and sent
+// empty: they repeated DaemonVersion and ShellPlatform.
 type feedbackSubmitContext struct {
 	AppVersion        string `json:"appVersion"`
 	DaemonVersion     string `json:"daemonVersion"`
@@ -87,8 +93,11 @@ type feedbackSubmitContext struct {
 	Platform          string `json:"platform"`
 	OS                string `json:"os"`
 	Arch              string `json:"arch"`
+	WindowsBuild      string `json:"windowsBuild,omitempty"`
 	MachineID         string `json:"machineId"`
 	PaneID            string `json:"paneId"`
+	PaneKind          string `json:"paneKind,omitempty"`
+	PaneAgent         string `json:"paneAgent,omitempty"`
 	CaptureKind       string `json:"captureKind"`
 	SnapshotRequested *bool  `json:"snapshotRequested,omitempty"`
 	SnapshotCaptured  *bool  `json:"snapshotCaptured,omitempty"`
@@ -141,22 +150,26 @@ func (a *apiServer) feedbackContext(clientVersion, paneID string, c feedbackCapt
 	} else if c.logsRequested {
 		captureKind = feedbackCaptureLogsOnly
 	}
-	// The pane ID goes only with its text.
-	if !c.snapshotRequested {
+	// The pane ID, type and agent go only with its text.
+	paneKind, paneAgent := "", ""
+	if c.snapshotRequested {
+		paneKind, paneAgent = a.feedbackPaneKind(paneID)
+	} else {
 		paneID = ""
 	}
 	return feedbackSubmitContext{
-		AppVersion:        a.ver,
 		DaemonVersion:     a.ver,
 		ClientVersion:     strings.TrimSpace(clientVersion),
 		ShellVersion:      a.liveShellVersion(),
 		ShellPlatform:     a.shellPlatform,
 		BackendID:         a.backendID,
-		Platform:          a.shellPlatform,
-		OS:                runtime.GOOS,
+		OS:                feedbackOS(),
 		Arch:              runtime.GOARCH,
+		WindowsBuild:      feedbackWindowsBuild(),
 		MachineID:         a.feedbackMachineID(),
 		PaneID:            paneID,
+		PaneKind:          paneKind,
+		PaneAgent:         paneAgent,
 		CaptureKind:       captureKind,
 		SnapshotRequested: feedbackBoolPtr(c.snapshotRequested),
 		SnapshotCaptured:  feedbackBoolPtr(c.snapshot != ""),
@@ -206,6 +219,9 @@ func (a *apiServer) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		Snapshot: capture.snapshot,
 		Logs:     capture.logs,
 		Context:  a.feedbackContext(req.ClientVersion, req.PaneID, capture),
+	}
+	if req.FollowUpOf > 0 {
+		sub.FollowUpOf = req.FollowUpOf
 	}
 	sub.Context.SubmittedAt = time.Now().UTC().Format(time.RFC3339)
 
@@ -377,6 +393,36 @@ func feedbackClamp(s string, max int) string {
 // The web client never talks to the cloud directly; these mirror the filing
 // proxy above: machine Bearer auth, pass-through JSON, calm error text.
 
+// feedbackCloudRefusal answers the web client when the cloud did not accept a
+// reporter-loop call. A refusal the cloud wrote for the person keeps its
+// status and sentence, so a reply to a closed report is a 409 that says so,
+// not a 502. Everything else stays a 502 with the caller's fallback: a 5xx is
+// the service's trouble, and a 401 is about this computer's own credential,
+// which the web client would misread as its own sign-in.
+func feedbackCloudRefusal(w http.ResponseWriter, resp *http.Response, body []byte, fallback string) {
+	switch resp.StatusCode {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusConflict, http.StatusTooManyRequests:
+		if msg := feedbackCloudSentence(body); msg != "" {
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				w.Header().Set("Retry-After", ra)
+			}
+			http.Error(w, msg, resp.StatusCode)
+			return
+		}
+	}
+	http.Error(w, fallback, http.StatusBadGateway)
+}
+
+// feedbackCloudSentence is the cloud's one-line plain-text error, or "" when
+// the body is anything else (a proxy's HTML page, JSON, several lines).
+func feedbackCloudSentence(body []byte) string {
+	msg := strings.TrimSpace(string(body))
+	if msg == "" || len(msg) > 300 || strings.ContainsAny(msg, "\r\n<>{}") {
+		return ""
+	}
+	return msg
+}
+
 // handleFeedbackMine proxies GET /api/feedback/mine — the reporter's filed
 // reports with live pipeline status.
 func (a *apiServer) handleFeedbackMine(w http.ResponseWriter, r *http.Request) {
@@ -445,7 +491,7 @@ func (a *apiServer) handleFeedbackReply(w http.ResponseWriter, r *http.Request) 
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<10))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		http.Error(w, "could not save the reply right now", http.StatusBadGateway)
+		feedbackCloudRefusal(w, resp, body, "could not save the reply right now")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -545,7 +591,7 @@ func (a *apiServer) handleFeedbackThread(w http.ResponseWriter, r *http.Request)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		http.Error(w, "could not load the report thread right now", http.StatusBadGateway)
+		feedbackCloudRefusal(w, resp, body, "could not load the report thread right now")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

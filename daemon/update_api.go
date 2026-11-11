@@ -70,7 +70,7 @@ func (a *apiServer) updateCheck(w http.ResponseWriter, r *http.Request) {
 // daemonOnline poll handles the brief unavailability while the Tauri
 // shell respawns the new binary; existing pane WebSockets reconnect
 // via their built-in retry loop.
-// ?force=1 is the user's explicit override of the Focus gate, workflow drain,
+// ?force=1 is the user's explicit override of the collaboration gate, workflow drain,
 // and defer backoff. It WILL interrupt in-flight workflow invocations. A normal
 // client retries typed 409 holds without force until the daemon admits apply.
 func (a *apiServer) updateApply(w http.ResponseWriter, r *http.Request) {

@@ -89,9 +89,12 @@ func TestSystemLevelsBoundariesAndDiscreteAreas(t *testing.T) {
 		{"daemon guard critical", "daemonMemory", "critical", func(s *systemSample) { setFloat(&s.DaemonRssMB, 4916) }},
 		{"daemon guard off fallback", "daemonMemory", "critical", func(s *systemSample) { s.MemGuardMB = 0; setFloat(&s.DaemonRssMB, 4915) }},
 		{"daemon cpu warning at half of one core", "daemonCpu", "warn", func(s *systemSample) { s.Cores = 1; setFloat(&s.DaemonCpuPct, 50) }},
-		{"daemon cpu warning at half of eight cores", "daemonCpu", "warn", func(s *systemSample) { s.Cores = 8; setFloat(&s.DaemonCpuPct, 400) }},
+		{"daemon cpu warning at half of two cores", "daemonCpu", "warn", func(s *systemSample) { s.Cores = 2; setFloat(&s.DaemonCpuPct, 100) }},
+		{"daemon cpu just under half of two cores", "daemonCpu", "ok", func(s *systemSample) { s.Cores = 2; setFloat(&s.DaemonCpuPct, 99) }},
 		{"daemon cpu one busy core is fine on eight", "daemonCpu", "ok", func(s *systemSample) { s.Cores = 8; setFloat(&s.DaemonCpuPct, 120) }},
-		{"daemon cpu just under half of eight cores", "daemonCpu", "ok", func(s *systemSample) { s.Cores = 8; setFloat(&s.DaemonCpuPct, 399) }},
+		{"daemon cpu warning at two cores of eight", "daemonCpu", "warn", func(s *systemSample) { s.Cores = 8; setFloat(&s.DaemonCpuPct, 200) }},
+		{"daemon cpu warning at two cores of twenty-four", "daemonCpu", "warn", func(s *systemSample) { s.Cores = 24; setFloat(&s.DaemonCpuPct, 200) }},
+		{"daemon cpu just under two cores of twenty-four", "daemonCpu", "ok", func(s *systemSample) { s.Cores = 24; setFloat(&s.DaemonCpuPct, 199) }},
 		{"daemon cpu unknown core count counts as one", "daemonCpu", "warn", func(s *systemSample) { s.Cores = 0; setFloat(&s.DaemonCpuPct, 60) }},
 		{"engine warning", "engine", "warn", func(s *systemSample) { s.EngineWarn = true }},
 		{"runtime warning beats partial", "runtimes", "warn", func(s *systemSample) { s.RuntimesWarn, s.RuntimesUnknown = true, true }},
@@ -137,9 +140,9 @@ func TestSystemLevelsDaemonCPUReadsInCores(t *testing.T) {
 		detail string
 	}{
 		// Reasons list only areas that are not ok, so each case warns.
-		{100, 2, "SoluTerminal CPU: 1.0 core", "of 2 cores on this machine; warns when it holds 1.0 or more for about 30 s"},
-		{420, 8, "SoluTerminal CPU: 4.2 cores", "of 8 cores on this machine; warns when it holds 4.0 or more for about 30 s"},
-		{60, 1, "SoluTerminal CPU: 0.6 cores", "of 1 core on this machine; warns when it holds 0.5 or more for about 30 s"},
+		{100, 2, "Background service CPU: 1.0 core", "SoluTerminal itself, not your panes; of 2 cores on this machine; warns when it holds 1.0 or more for about 30 s"},
+		{420, 8, "Background service CPU: 4.2 cores", "SoluTerminal itself, not your panes; of 8 cores on this machine; warns when it holds 2.0 or more for about 30 s"},
+		{60, 1, "Background service CPU: 0.6 cores", "SoluTerminal itself, not your panes; of 1 core on this machine; warns when it holds 0.5 or more for about 30 s"},
 	} {
 		pct := tc.pct
 		sample := systemSample{DaemonCpuPct: &pct, Cores: tc.cores}
@@ -160,7 +163,7 @@ func TestSystemLevelsDaemonCPUReadsInCores(t *testing.T) {
 	}
 	waiting, _ := systemLevels(systemSample{}, time.Unix(1, 0), levelState{})
 	for _, r := range waiting.Reasons {
-		if r.Key == "daemonCpu" && r.Text != "SoluTerminal CPU: awaiting sample" {
+		if r.Key == "daemonCpu" && r.Text != "Background service CPU: awaiting sample" {
 			t.Fatalf("unsampled daemon CPU text = %q", r.Text)
 		}
 	}

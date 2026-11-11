@@ -87,7 +87,7 @@ func TestDaemonFeedbackForwardsRedacted(t *testing.T) {
 	if got.Channel != "inapp" || got.Type != "bug" {
 		t.Fatalf("forwarded channel/type wrong: %+v", got)
 	}
-	if got.Context.AppVersion != "0.0.770" || got.Context.DaemonVersion != "0.0.770" || got.Context.OS == "" {
+	if got.Context.AppVersion != "" || got.Context.DaemonVersion != "0.0.770" || got.Context.OS == "" {
 		t.Fatalf("context not gathered server-side: %+v", got.Context)
 	}
 	if got.Context.ShellVersion != "0.0.771" || got.Context.ShellPlatform != "linux" {
@@ -318,5 +318,52 @@ func TestDaemonFeedbackReplySharedRulesBeforeTransport(t *testing.T) {
 	}
 	if got.Number != 7 || got.Text != "I saw [redacted: code] and password=[redacted: token]" {
 		t.Fatal("reply must be redacted on the device before transport")
+	}
+}
+
+// A refusal the cloud wrote for the person reaches the web client as it is: a
+// reply to a closed report is a 409 with the sentence, not a 502.
+func TestDaemonFeedbackReplyPassesTheCloudRefusalThrough(t *testing.T) {
+	const closed = "This report is closed, so it can't take replies. Send a follow-up instead."
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantStatus int
+		wantBody   string
+	}{
+		{"closed report", http.StatusConflict, closed, http.StatusConflict, closed},
+		{"someone else's report", http.StatusForbidden, "not your report", http.StatusForbidden, "not your report"},
+		{"service trouble", http.StatusBadGateway, "could not read the report", http.StatusBadGateway, "could not save the reply right now"},
+		{"this computer's credential", http.StatusUnauthorized, "unauthenticated", http.StatusBadGateway, "could not save the reply right now"},
+		{"a proxy's page", http.StatusConflict, "<html><body>409</body></html>", http.StatusBadGateway, "could not save the reply right now"},
+		{"no sentence", http.StatusConflict, "", http.StatusBadGateway, "could not save the reply right now"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, tc.body, tc.status)
+			}))
+			defer srv.Close()
+			a := &apiServer{cloudBase: srv.URL, cloudToken: "tok"}
+			w := httptest.NewRecorder()
+			a.handleFeedbackReply(w, httptest.NewRequest("POST", "/api/feedback/reply", strings.NewReader(`{"number":7,"text":"more"}`)))
+			if got := strings.TrimSpace(w.Body.String()); w.Code != tc.wantStatus || got != tc.wantBody {
+				t.Fatalf("answer = %d %q, want %d %q", w.Code, got, tc.wantStatus, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestDaemonFeedbackThreadPassesTheCloudRefusalThrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not your report", http.StatusForbidden)
+	}))
+	defer srv.Close()
+	a := &apiServer{cloudBase: srv.URL, cloudToken: "tok"}
+	w := httptest.NewRecorder()
+	a.handleFeedbackThread(w, httptest.NewRequest("GET", "/api/feedback/thread?number=7", nil))
+	if got := strings.TrimSpace(w.Body.String()); w.Code != http.StatusForbidden || got != "not your report" {
+		t.Fatalf("answer = %d %q, want the cloud's 403", w.Code, got)
 	}
 }

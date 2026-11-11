@@ -316,7 +316,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
       notifyTouched.current = false;
       setEnabled(true);
       // A pane context-menu entry means the user already chose both the prompt
-      // job and its destination. The global New schedule entry still defaults
+      // job and its destination. The global New automation entry still defaults
       // to a fresh Claude task because it works unattended without a live pane,
       // unless this computer has no Claude Code to run it.
       setJobKind(fromPaneMenu || taskUnavailableRef.current ? 'prompt' : 'task');
@@ -562,7 +562,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
       if (!paneId) { toast('Pick a target pane', { kind: 'warn', icon: '⚠' }); return; }
       if (!prompt.trim()) { toast('Prompt is empty', { kind: 'warn', icon: '⚠' }); return; }
     }
-    if (cronMode !== 'once' && !cronValid) { toast('Schedule looks wrong — check the repeat settings', { kind: 'warn', icon: '⚠' }); return; }
+    if (cronMode !== 'once' && !cronValid) { toast('The timing looks wrong — check the repeat settings', { kind: 'warn', icon: '⚠' }); return; }
     if (cronMode === 'once' && !runAtValid) { toast('Pick a time in the future', { kind: 'warn', icon: '⚠' }); return; }
 
     const input: ScheduleInput =
@@ -619,10 +619,10 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
     try {
       if (editing) {
         await updateSchedule(editing.id, input);
-        toast('Schedule updated', { kind: 'success', icon: '✓', ttlMs: 1500 });
+        toast('Automation updated', { kind: 'success', icon: '✓', ttlMs: 1500 });
       } else {
         await createSchedule(input);
-        toast('Schedule created', { kind: 'success', icon: '✓', ttlMs: 1500 });
+        toast('Automation created', { kind: 'success', icon: '✓', ttlMs: 1500 });
       }
       onClose();
     } catch (e) {
@@ -658,7 +658,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
         style={{ width: 560, maxWidth: '92vw' }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h2>{editing ? 'Edit schedule' : 'New schedule'}</h2>
+          <h2>{editing ? 'Edit automation' : 'New automation'}</h2>
           <button
             onClick={onClose}
             title="Close (Esc)"

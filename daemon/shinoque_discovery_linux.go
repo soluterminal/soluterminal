@@ -430,17 +430,20 @@ func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, str
 	if reason := c.checkHome(record.Home); reason != "" {
 		return fail(reason)
 	}
-	config := shinoqueRelayConfig{port: strconv.Itoa(record.Port), home: record.Home, relayAuth: record.RelayAuth, privateDeviceProof: record.PrivateDeviceProof}
+	config := shinoqueRelayConfig{port: strconv.Itoa(record.Port), home: record.Home, relayAuth: record.RelayAuth, privateDeviceProof: record.PrivateDeviceProof, relayKey: record.RelayKey}
 	c.path, c.identity, c.content, c.config = path, identity, content, config
 	c.invalidate()
 	return config, true, ""
 }
 
-// Accepted fields are version, port, home, relayAuth and privateDeviceProof.
-// Optional capability versions must be JSON integers; absent fields are zero.
+// Accepted fields are version, port, home, relayAuth, privateDeviceProof and
+// relayKey. Optional capability versions must be JSON integers; absent fields
+// are zero. Releases up to 0.0.1240 refuse relayKey as an unknown field, so a
+// core must not write it while those are in use; its marker file carries the
+// same signal meanwhile.
 type shinoqueDiscoveryRecord struct {
-	Version, Port, RelayAuth, PrivateDeviceProof int
-	Home                                         string
+	Version, Port, RelayAuth, PrivateDeviceProof, RelayKey int
+	Home                                                   string
 }
 
 func parseShinoqueDiscovery(content []byte) (shinoqueDiscoveryRecord, error) {
@@ -473,6 +476,8 @@ func parseShinoqueDiscovery(content []byte) (shinoqueDiscoveryRecord, error) {
 			value = &record.RelayAuth
 		case "privateDeviceProof":
 			value = &record.PrivateDeviceProof
+		case "relayKey":
+			value = &record.RelayKey
 		default:
 			return record, invalid
 		}

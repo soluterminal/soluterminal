@@ -13,6 +13,11 @@ type shinoqueRelayConfig struct {
 	home               string
 	relayAuth          int
 	privateDeviceProof int
+	// relayKey 1 marks a core that pushes its relay key (shinoque_relay_key.go).
+	relayKey int
+	// relayV2 signs every forward with a per-request MAC and never sends the
+	// raw key; the Windows bridge always sets it (shinoque_relay_bridge.go).
+	relayV2 bool
 }
 
 func (c shinoqueRelayConfig) supportsRelayAuth() bool { return c.relayAuth == 2 }
@@ -40,6 +45,10 @@ type shinoqueDiscoveryCache struct {
 	// Test seams; nil uses the real /proc scan and clock.
 	scanSolud func(sockets map[string]bool) (bool, error)
 	now       func() time.Time
+
+	// bridge, when set, is the only source: the core's push through the
+	// Shinoque desktop. No env, file or default source is read (Windows).
+	bridge *shinoqueRelayBridge
 }
 
 type shinoqueFileIdentity struct {
@@ -100,6 +109,13 @@ func (c *shinoqueDiscoveryCache) resolve() (shinoqueRelayConfig, bool) {
 }
 
 func (c *shinoqueDiscoveryCache) resolveWith(tables *shinoqueProcTables) (shinoqueRelayConfig, bool) {
+	if c.bridge != nil {
+		config, reason := c.bridge.current()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.noteResolve("push", config, reason)
+		return config, reason == ""
+	}
 	c.mu.Lock()
 	config := shinoqueRelayConfig{port: shinoquePort()}
 	config.home = shinoqueTokenHome()
@@ -127,6 +143,12 @@ func (c *shinoqueDiscoveryCache) resolveWith(tables *shinoqueProcTables) (shinoq
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.noteResolve(source, config, reason)
+	return config, reason == ""
+}
+
+// noteResolve logs a changed source or rejection. c.mu must be held.
+func (c *shinoqueDiscoveryCache) noteResolve(source string, config shinoqueRelayConfig, reason string) {
 	if source != c.source || config != c.lastConfig {
 		log.Printf("shinoque relay: source=%s", source)
 	}
@@ -134,5 +156,4 @@ func (c *shinoqueDiscoveryCache) resolveWith(tables *shinoqueProcTables) (shinoq
 		log.Printf("shinoque relay: discovery rejected: %s", reason)
 	}
 	c.source, c.lastConfig, c.rejection = source, config, reason
-	return config, reason == ""
 }

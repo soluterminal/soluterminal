@@ -20,7 +20,7 @@ import { Tooltip } from './Tooltip';
 import { IconArrowUp, IconClock, IconAlertTriangle, IconCloud, IconGauge } from './ui/icons';
 import { useCloud } from '../cloud';
 import { isEmbedded } from '../embed';
-import { ApiError, api } from '../api';
+import { ApiError, api, backgroundServiceIsSelectedBackend } from '../api';
 import { primaryLabel } from './PortPanel';
 import { isWebService, workspacePorts } from '../lib/ports';
 import './statusbarChips.css';
@@ -185,8 +185,14 @@ function SystemChip({ health }: { health: Health | null }) {
     // The chip carries the short reason ("host disk: 102.9 GB free on C:\");
     // its long tail (VHDX, %TEMP%) rides in the tooltip, never in the bar.
     const detail = systemReasonDetail(system);
+    // Service CPU has one fix, and it is on the System page this chip opens,
+    // except where that restart would reach a different service than the one
+    // this chip reports (see backgroundServiceIsSelectedBackend).
+    const fix = system.reasons?.find((r) => r.text === system.reason)?.key !== 'daemonCpu' ? ''
+      : backgroundServiceIsSelectedBackend() ? ' · click to open System and restart the background service'
+        : ' · click to open System';
     text = system.level === 'ok' || partial ? 'System' : (system.reason || 'System needs attention');
-    title = `${system.reason || (partial ? 'Partial data (unavailable on this platform)' : 'All monitored systems healthy')}${detail ? ` · ${detail}` : ''}${age ? ` · checked ${age} ago` : ''}`;
+    title = `${system.reason || (partial ? 'Partial data (unavailable on this platform)' : 'All monitored systems healthy')}${detail ? ` · ${detail}` : ''}${age ? ` · checked ${age} ago` : ''}${fix}`;
   } else {
     const plain = plainSystemText(system);
     text = plain ?? 'System';

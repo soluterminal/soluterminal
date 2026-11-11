@@ -143,6 +143,7 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['workspace.panes', 'arrangeLeftStack', 'Left+stack', ['left stack']],
   ['workspace.panes', 'copyOnSelect', 'Copy on select'],
   ['workspace.panes', 'middleClickPaste', 'Middle-click paste'],
+  ['workspace.panes', 'alwaysShowAgentMemory', 'Always show agent memory', ['ram', 'memory pill']],
   ['workspace.panes', 'autoNamePanes', 'Name new agent panes with AI', ['title', 'rename', 'ai name', 'haiku']],
   ['workspace.sidebar', 'sidebarSections', 'Sidebar sections'],
   ['workspace.sidebar', 'files', 'Files'],

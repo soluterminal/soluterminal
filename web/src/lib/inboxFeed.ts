@@ -1,5 +1,6 @@
 import type { Schedule } from '../types';
-import type { AgentReport, FeedbackEvent } from '../api';
+import type { AgentReport, FeedbackEvent, FeedbackReport } from '../api';
+import { reportStatusWord } from './myReports';
 import { reportsFeed, type ReportFeedItem } from './reportsFeed';
 
 // The inbox: ONE chronological surface for everything addressed to the human.
@@ -36,6 +37,10 @@ export interface InboxItem {
   report?: ReportFeedItem;
   /** source=feedback: the underlying event (open My reports + mark read). */
   feedback?: FeedbackEvent;
+  /** source=feedback: the report's number, and its live status word from My
+   *  reports (absent when the status can't be read). */
+  number?: number;
+  status?: string;
   /** source=agentreport: the durable operator-decision report. */
   agentReport?: AgentReport;
 }
@@ -57,7 +62,8 @@ export function agentReportToInbox(report: AgentReport): InboxItem {
   };
 }
 
-export function feedbackToInbox(ev: FeedbackEvent): InboxItem {
+export function feedbackToInbox(ev: FeedbackEvent, live?: FeedbackReport): InboxItem {
+  const status = live ? reportStatusWord(live) : null;
   return {
     key: `fb:${ev.number}:${ev.event}`,
     source: 'feedback',
@@ -69,6 +75,27 @@ export function feedbackToInbox(ev: FeedbackEvent): InboxItem {
     // "fixed" is good news, not a demand; only an open ask needs the user.
     needsYou: ev.event === 'needs-info',
     feedback: ev,
+    number: ev.number,
+    ...(status ? { status } : {}),
+  };
+}
+
+/** A report of the person's own with no events yet (filed before the reporter
+ *  loop, or closed quietly): a quiet row, never unread. */
+export function myReportToInbox(r: FeedbackReport): InboxItem {
+  const status = reportStatusWord(r);
+  return {
+    key: `fbmine:${r.number}`,
+    source: 'feedback',
+    sender: 'Feedback',
+    at: r.filedAt,
+    title: r.title,
+    // "Closed" over "Closed" says nothing; the row then names the report.
+    preview: r.message && r.message !== status ? r.message : `Report #${r.number}`,
+    unread: false,
+    needsYou: false,
+    number: r.number,
+    ...(status ? { status } : {}),
   };
 }
 
@@ -79,6 +106,7 @@ export function inboxFeed(
   schedules: Schedule[],
   feedback: FeedbackEvent[],
   agentReports: AgentReport[] = [],
+  myReports: FeedbackReport[] = [],
 ): InboxItem[] {
   const items: InboxItem[] = reportsFeed(schedules).map((r) => ({
     key: `${r.schedule.id}:${r.run.at}`,
@@ -91,7 +119,15 @@ export function inboxFeed(
     needsYou: r.needsYou,
     report: r,
   }));
-  for (const ev of feedback) items.push(feedbackToInbox(ev));
+  // My reports: every own report once, with its live status; a report with
+  // no events yet still shows.
+  const live = new Map(myReports.map((r) => [r.number, r]));
+  const withEvents = new Set<number>();
+  for (const ev of feedback) {
+    withEvents.add(ev.number);
+    items.push(feedbackToInbox(ev, live.get(ev.number)));
+  }
+  for (const r of myReports) if (!withEvents.has(r.number)) items.push(myReportToInbox(r));
   for (const report of agentReports) items.push(agentReportToInbox(report));
   items.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
   return items;

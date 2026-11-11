@@ -8,7 +8,7 @@ export interface RecoverySettings {
 
 // Per-install self-update preference (GET/PUT /api/update/settings). 'off' keeps
 // the notify-then-click banner; 'when-idle' auto-applies the daemon swap the
-// moment it's safe (no native pane mid-turn). Daemon-stored — see
+// server safety gates admit it, with a bounded collaboration hold. Daemon-stored — see
 // daemon/update_settings.go.
 export type UpdateAutoApplyMode = 'off' | 'when-idle';
 

@@ -874,24 +874,26 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 	}
 	if s.DaemonCpuPct == nil {
 		raw["daemonCpu"] = "unknown"
-		text["daemonCpu"] = "SoluTerminal CPU: awaiting sample"
+		text["daemonCpu"] = "Background service CPU: awaiting sample"
 	} else {
 		// Measured in cores (100% of one core = 1.0) and judged against the
 		// whole machine: one busy core is nothing on a 16-core desktop but is
 		// the whole of a 1-core VM. The usual two-sample rule makes it a
-		// sustained ~30 s before the warning shows.
+		// sustained ~30 s before the warning shows. This is the daemon's own
+		// process only; panes run in their own processes and are not counted.
 		cores := max(1, s.Cores)
 		used := *s.DaemonCpuPct / 100
+		warnAt := daemonCPUWarnCores(cores)
 		raw["daemonCpu"] = "ok"
-		if used >= daemonCPUWarnShare*float64(cores) {
+		if used >= warnAt {
 			raw["daemonCpu"] = "warn"
 		}
 		unit := " cores"
 		if formatSystemDecimal(used) == "1.0" {
 			unit = " core"
 		}
-		text["daemonCpu"] = "SoluTerminal CPU: " + formatSystemDecimal(used) + unit
-		detail["daemonCpu"] = "of " + systemCountPhrase(cores, "core", "cores") + " on this machine; warns when it holds " + formatSystemDecimal(daemonCPUWarnShare*float64(cores)) + " or more for about 30 s"
+		text["daemonCpu"] = "Background service CPU: " + formatSystemDecimal(used) + unit
+		detail["daemonCpu"] = "SoluTerminal itself, not your panes; of " + systemCountPhrase(cores, "core", "cores") + " on this machine; warns when it holds " + formatSystemDecimal(warnAt) + " or more for about 30 s"
 		sampled["daemonCpu"] = true
 	}
 	for key, on := range map[string]bool{"engine": s.EngineWarn, "runtimes": s.RuntimesWarn, "automation": s.AutomationWarn, "cloud": s.CloudWarn} {
@@ -1008,8 +1010,19 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 }
 
 // daemonCPUWarnShare is the share of the machine's cores the daemon may hold,
-// sustained, before the System chip warns: half of them.
-const daemonCPUWarnShare = 0.5
+// sustained, before the System chip warns: half of them. daemonCPUWarnMaxCores
+// caps that on a large machine: half of 24 cores is 12, and a daemon holding
+// 2 for 30 s is already worth a look.
+const (
+	daemonCPUWarnShare    = 0.5
+	daemonCPUWarnMaxCores = 2.0
+)
+
+// daemonCPUWarnCores is the sustained daemon CPU, in cores, that warns on a
+// machine with this many cores.
+func daemonCPUWarnCores(cores int) float64 {
+	return min(daemonCPUWarnShare*float64(max(1, cores)), daemonCPUWarnMaxCores)
+}
 
 // Thresholds for the Windows-disk alarm a person sees. They are deliberately
 // separate from the host-disk floor (max(100 GB, 5%) by default), which only

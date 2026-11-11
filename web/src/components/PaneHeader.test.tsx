@@ -1,10 +1,14 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ComponentProps } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { api, type SystemStatus } from '../api';
+import { resetAgentMemoryGrowthForTests } from '../lib/agentMemory';
+import { resetHostMemoryForTests } from '../lib/useAgentMemoryPill';
 import type { PaneInfo, Schedule } from '../types';
 import { PaneHeader } from './PaneHeader';
 import { PaneHeaderBadges } from './PaneHeaderBadges';
 import { DialogHost } from './DialogHost';
-import { MEASURE_SENTINEL } from './PaneHeaderOverflow';
+import { DETAIL_PRIORITY, MEASURE_SENTINEL } from './PaneHeaderOverflow';
 import { useStore } from '../store';
 
 // Focus is retired by default (lib/focusAvailability). These suites cover the
@@ -222,14 +226,17 @@ describe('PaneHeaderBadges Codex Focus auto-approval', () => {
     }
   });
 
-  it('shows the shared auto-approve control by default', () => {
-    render(
-      <PaneHeaderBadges
-        pane={{ ...pane, agent: 'codex', kind: 'native', cmd: ['codex'], autoMode: '' }}
-        paneIndex={1}
-      />,
-    );
-    expect(screen.getByRole('button', { name: /Auto-approve:/ })).toBeInTheDocument();
+  it('shows the auto-approve control only while auto-approve is on or locked', () => {
+    const codex: PaneInfo = { ...pane, agent: 'codex', kind: 'native', cmd: ['codex'], autoMode: '' };
+    const { rerender } = render(<PaneHeaderBadges pane={codex} paneIndex={1} />);
+    // Manual is the default: no chip. The pane menu turns auto-approve on.
+    expect(screen.queryByRole('button', { name: /Auto-approve:/ })).toBeNull();
+    rerender(<PaneHeaderBadges pane={{ ...codex, autoMode: 'cautious' }} paneIndex={1} />);
+    expect(screen.getByRole('button', { name: /Auto-approve:/ })).toHaveTextContent('auto?');
+    rerender(<PaneHeaderBadges pane={{ ...codex, autoMode: 'always' }} paneIndex={1} />);
+    expect(screen.getByRole('button', { name: /Auto-approve:/ })).toHaveTextContent('AUTO');
+    rerender(<PaneHeaderBadges pane={{ ...codex, neverAutoAnswer: true }} paneIndex={1} />);
+    expect(screen.getByRole('button', { name: 'Auto-approve: locked' })).toBeInTheDocument();
   });
 
   it('keeps the transient auto-approving chip immediately right of the auto badge', () => {
@@ -269,156 +276,107 @@ describe('PaneHeader managed-harness auto-approval capability', () => {
   );
 
   it('offers auto-approval for a managed Pi pane', () => {
-    renderPane({ cmd: ['node', 'launch.mjs', 'pi'], hasPi: true });
+    renderPane({ cmd: ['node', 'launch.mjs', 'pi'], hasPi: true, autoMode: 'cautious' });
     expect(screen.getByRole('button', { name: /Auto-approve:/ })).toBeInTheDocument();
   });
 
   it('offers auto-approval for a DeepSeek terminal client pane', () => {
-    renderPane({ cmd: ['bash'], hasDeepseek: true });
+    renderPane({ cmd: ['bash'], hasDeepseek: true, autoMode: 'cautious' });
     expect(screen.getByRole('button', { name: /Auto-approve:/ })).toBeInTheDocument();
   });
 
   it('omits auto-approval for a plain shell pane', () => {
-    renderPane({ cmd: ['bash'], hasPi: false });
+    renderPane({ cmd: ['bash'], hasPi: false, autoMode: 'cautious' });
     expect(screen.queryByRole('button', { name: /Auto-approve:/ })).not.toBeInTheDocument();
   });
 });
 
-describe('PaneHeader Claude resume badge', () => {
-  it('uses the Codex thread id for a resumable Codex pane', () => {
-    render(
-      <PaneHeader
-        pane={{ ...pane, agent: 'codex', kind: 'native', codexThreadId: 'thread-codex-1', resumeReady: true }}
-        paneIndex={1}
-        activityClass="idle"
-        editingTitle={false}
-        titleDraft={pane.title}
-        unread={false}
-        connStatus="open"
-        setTitleDraft={vi.fn()}
-        setEditingTitle={vi.fn()}
-        onDragStart={vi.fn()}
-        onDragEnd={vi.fn()}
-        onRename={vi.fn()}
-        onClose={vi.fn()}
-        isZoomed={false}
-        canZoom={false}
-        onToggleZoom={vi.fn()}
-      />,
-    );
-    expect(screen.getByText('Copy ID')).toHaveAttribute('aria-label', 'Copy Codex thread id thread-codex-1');
+describe('PaneHeader declutter', () => {
+  const resumable: PaneInfo = { ...pane, claudeSessionId: '5e6473fa-90f1-4c60-bdf7-690a6dcc61be', resumeReady: true };
+  const renderWith = (p: PaneInfo, zoom: { isZoomed: boolean; canZoom: boolean }, extra: Partial<ComponentProps<typeof PaneHeader>> = {}) => render(
+    <PaneHeader
+      pane={p}
+      paneIndex={3}
+      activityClass="idle"
+      editingTitle={false}
+      titleDraft={p.title}
+      unread={false}
+      connStatus="open"
+      setTitleDraft={vi.fn()}
+      setEditingTitle={vi.fn()}
+      onDragStart={vi.fn()}
+      onDragEnd={vi.fn()}
+      onRename={vi.fn()}
+      onClose={vi.fn()}
+      onToggleZoom={vi.fn()}
+      onOpenMenu={vi.fn()}
+      {...zoom}
+      {...extra}
+    />,
+  );
+  const setWidth = (px: number) => Object.defineProperty(window, 'innerWidth', { configurable: true, value: px });
+  const desktopWidth = window.innerWidth;
+  beforeEach(() => { vi.spyOn(api, 'systemStatus').mockResolvedValue({ host: { memTotalMB: 16384 } } as unknown as SystemStatus); });
+  afterEach(() => {
+    setWidth(desktopWidth);
+    useStore.setState({ dialog: null, alwaysShowAgentMemory: false });
+    resetHostMemoryForTests();
+    resetAgentMemoryGrowthForTests();
+    vi.restoreAllMocks();
   });
 
-  it('shows the same pill for a shell-launched Codex after discovery', () => {
-    render(
-      <PaneHeader
-        pane={{ ...pane, cmd: ['bash'], hasCodex: true, codexThreadId: 'thread-shell-1', resumeReady: true }}
-        paneIndex={1}
-        activityClass="idle"
-        editingTitle={false}
-        titleDraft={pane.title}
-        unread={false}
-        connStatus="open"
-        setTitleDraft={vi.fn()}
-        setEditingTitle={vi.fn()}
-        onDragStart={vi.fn()}
-        onDragEnd={vi.fn()}
-        onRename={vi.fn()}
-        onClose={vi.fn()}
-        isZoomed={false}
-        canZoom={false}
-        onToggleZoom={vi.fn()}
-      />,
-    );
-    expect(screen.getByText('Copy ID')).toHaveAttribute('aria-label', 'Copy Codex thread id thread-shell-1');
-  });
-
-  it('uses the Muse session id for a resumable Muse pane', () => {
-    render(
-      <PaneHeader
-        pane={{ ...pane, agent: 'muse', kind: 'native', museSessionId: 'muse-session-1', resumeReady: true }}
-        paneIndex={1}
-        activityClass="idle"
-        editingTitle={false}
-        titleDraft={pane.title}
-        unread={false}
-        connStatus="open"
-        setTitleDraft={vi.fn()}
-        setEditingTitle={vi.fn()}
-        onDragStart={vi.fn()}
-        onDragEnd={vi.fn()}
-        onRename={vi.fn()}
-        onClose={vi.fn()}
-        isZoomed={false}
-        canZoom={false}
-        onToggleZoom={vi.fn()}
-      />,
-    );
-    expect(screen.getByText('Copy ID')).toHaveAttribute('aria-label', 'Copy Muse session id muse-session-1');
-  });
-
-  it('renders a compact click-to-copy resume badge with the full id in its tooltip', () => {
-    render(
-      <PaneHeader
-        pane={{ ...pane, claudeSessionId: '5e6473fa-90f1-4c60-bdf7-690a6dcc61be', resumeReady: true }}
-        paneIndex={1}
-        activityClass="idle"
-        editingTitle={false}
-        titleDraft={pane.title}
-        unread={false}
-        connStatus="open"
-        setTitleDraft={vi.fn()}
-        setEditingTitle={vi.fn()}
-        onDragStart={vi.fn()}
-        onDragEnd={vi.fn()}
-        onRename={vi.fn()}
-        onClose={vi.fn()}
-        isZoomed={false}
-        canZoom={false}
-        onToggleZoom={vi.fn()}
-      />,
-    );
-
-    // Compact label that says what a click does (it copies; it does not
-    // resume anything), with no shortened id baked into the visible text…
-    const badge = screen.getByText('Copy ID');
-    expect(screen.queryByText('resume')).toBeNull();
-    // …but the full id is recoverable via the tooltip + aria-label.
-    expect(badge).toHaveAttribute(
-      'title',
-      expect.stringContaining('5e6473fa-90f1-4c60-bdf7-690a6dcc61be'),
-    );
-    expect(badge.getAttribute('title')).toMatch(/^Copy the Claude session id/);
-    expect(badge).toHaveAttribute(
-      'aria-label',
-      'Copy Claude session id 5e6473fa-90f1-4c60-bdf7-690a6dcc61be',
-    );
-  });
-
-  it('hides the resume badge until the session transcript exists (resumeReady)', () => {
-    // The daemon pins claudeSessionId at SessionStart, before the transcript is
-    // written — the badge must stay hidden until resumeReady flips true.
-    render(
-      <PaneHeader
-        pane={{ ...pane, claudeSessionId: '5e6473fa-90f1-4c60-bdf7-690a6dcc61be' }}
-        paneIndex={1}
-        activityClass="idle"
-        editingTitle={false}
-        titleDraft={pane.title}
-        unread={false}
-        connStatus="open"
-        setTitleDraft={vi.fn()}
-        setEditingTitle={vi.fn()}
-        onDragStart={vi.fn()}
-        onDragEnd={vi.fn()}
-        onRename={vi.fn()}
-        onClose={vi.fn()}
-        isZoomed={false}
-        canZoom={false}
-        onToggleZoom={vi.fn()}
-      />,
-    );
+  it('keeps the session id out of the header (it is in the pane menu)', () => {
+    renderWith(resumable, { isZoomed: false, canZoom: true });
     expect(screen.queryByText('Copy ID')).toBeNull();
+    expect(screen.queryByRole('button', { name: /session id/i })).toBeNull();
+  });
+
+  it('shows no Maximise button; the way back shows only while maximised', () => {
+    const { unmount } = renderWith(pane, { isZoomed: false, canZoom: true });
+    expect(screen.queryByRole('button', { name: 'Maximise pane' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Restore pane' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Pane menu' })).toBeInTheDocument();
+    unmount();
+    renderWith(pane, { isZoomed: true, canZoom: true });
+    expect(screen.getByRole('button', { name: 'Restore pane' })).toBeInTheDocument();
+  });
+
+  it('on a phone shows neither Restore nor usual memory, but keeps unusual memory', async () => {
+    setWidth(390);
+    const { unmount } = renderWith({ ...pane, agentRssMB: 384 }, { isZoomed: true, canZoom: true });
+    expect(screen.queryByRole('button', { name: 'Restore pane' })).toBeNull();
+    expect(screen.queryByLabelText(/Agent memory/)).toBeNull();
+    unmount();
+    renderWith({ ...pane, agentRssMB: 1536 }, { isZoomed: true, canZoom: true });
+    expect(await screen.findByLabelText('Agent memory 1.5 GB')).toBeInTheDocument();
+  });
+
+  it('hides usual memory on a desktop header unless "Always show agent memory" is on', () => {
+    const { unmount } = renderWith({ ...pane, agentRssMB: 384 }, { isZoomed: false, canZoom: true });
+    expect(screen.queryByLabelText(/Agent memory/)).toBeNull();
+    unmount();
+    useStore.setState({ alwaysShowAgentMemory: true });
+    renderWith({ ...pane, agentRssMB: 384 }, { isZoomed: false, canZoom: true });
+    expect(screen.getByLabelText('Agent memory 384 MB').closest('[data-pane-detail]')).toHaveAttribute('data-priority', String(DETAIL_PRIORITY.memory));
+  });
+
+  it('offers a confirmed restart for unusual memory, ranked with auto-approve', async () => {
+    const onRestartPane = vi.fn();
+    const actionGuard = vi.fn(() => true);
+    render(<DialogHost />);
+    renderWith({ ...pane, agentRssMB: 1843 }, { isZoomed: false, canZoom: true }, { onRestartPane, actionGuard });
+    const pill = await screen.findByRole('button', { name: 'Agent memory 1.8 GB. Restart?' });
+    expect(pill.closest('[data-pane-detail]')).toHaveAttribute('data-priority', String(DETAIL_PRIORITY.memoryUnusual));
+    fireEvent.click(pill);
+    fireEvent.click(await screen.findByRole('button', { name: 'Restart' }));
+    await waitFor(() => expect(onRestartPane).toHaveBeenCalledTimes(1));
+    expect(actionGuard).toHaveBeenCalled();
+  });
+
+  it('offers no restart from the pill on an exited pane', async () => {
+    renderWith({ ...pane, status: 'exited', agentRssMB: 1843 }, { isZoomed: false, canZoom: true }, { onRestartPane: vi.fn() });
+    expect((await screen.findByLabelText('Agent memory 1.8 GB')).tagName).toBe('SPAN');
+    expect(screen.queryByRole('button', { name: /Restart\?/ })).toBeNull();
   });
 });
 

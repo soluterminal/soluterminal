@@ -41,11 +41,18 @@ import { PersonalViewPill } from './PersonalViewPill';
 // (accent), warn-tinted when something needs the user. Rendered in the
 // desktop toolbar AND standalone on mobile (the toolbar is desktop-only,
 // but phones need an inbox entry that isn't buried in the drawer).
+//
+// It shows only once the Inbox can hold something: a row in the feed, or an
+// automation that runs an agent (its reports land here). An Inbox nothing can
+// reach is an empty window behind a permanent button. The feedback form stays
+// reachable: on the desktop from the status-bar Feedback button, Help and
+// Ctrl+K; on a phone from the drawer's "Send feedback" row.
 function InboxBubble() {
   const schedules = useStore((s) => s.schedules);
   const feedback = useFeedbackInbox();
   const agentReports = useInboxReports();
   const items = inboxFeed(schedules, feedback, agentReports);
+  if (items.length === 0 && !schedules.some((s) => s.kind === 'task')) return null;
   const unread = items.filter((i) => i.unread);
   const needs = unread.some((i) => i.needsYou);
   const title = unread.length > 0

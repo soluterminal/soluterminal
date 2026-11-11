@@ -22,6 +22,9 @@ type apiServer struct {
 	// queuedAsks keeps a timed-out queued ask_pane's baseline for the
 	// caller's wait_for_pane (mcp_collab_ask.go).
 	queuedAsks queuedAskBaselines
+	// collabInflight covers the whole ask_pane / wait_for_pane call, including
+	// delivery and reply bookkeeping, which cannot survive a daemon restart.
+	collabInflight atomic.Int64
 	// asks is the user's "Waiting on you" list (asks.go); nil in tests that
 	// don't build one.
 	asks    *askStore
@@ -491,6 +494,9 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 		a.jevBridge.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("GET /api/health", a.health)
+	// No method in the pattern: a wrong method must not fall through to the
+	// 404 that tells Shinoque's core this solud predates the push.
+	mux.HandleFunc(shinoqueRelayKeyPath, a.shinoqueRelayKeyPush)
 	mux.HandleFunc("GET /api/service/restart", a.serviceCapability)
 	mux.HandleFunc("POST /api/service/restart", a.restartService)
 
@@ -1070,8 +1076,13 @@ func (a *apiServer) health(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, body)
 		return
 	}
-	// A capability bit only. Never expose the token or its path.
-	body["shinoqueRelay"] = a.shinoqueTokens != nil && a.shinoqueTokens.read() != ""
+	// Capability bits only. Never expose the token, the key or a path.
+	relay, pushedKey := false, false
+	if a.shinoqueTokens != nil {
+		relay, pushedKey = a.shinoqueTokens.relayCapability()
+	}
+	body["shinoqueRelay"] = relay
+	body["shinoqueRelayKey"] = pushedKey
 	body["build"] = buildProvenance()
 
 	exe, _ := os.Executable()

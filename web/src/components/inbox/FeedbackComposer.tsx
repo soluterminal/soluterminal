@@ -5,19 +5,33 @@ import {
   FEEDBACK_MAIN_FIELD,
   composeFeedbackBody,
   feedbackDetailRows,
+  feedbackFallbackReportText,
   feedbackMailto,
   feedbackReportText,
   feedbackFirstLine,
+  feedbackFollowUpLine,
   feedbackSendError,
   openMailDraft,
+  FEEDBACK_COPIED_NOTE,
+  FEEDBACK_COPY_ERROR,
+  FEEDBACK_EMAIL_CUT_NOTE,
+  FEEDBACK_MAIL_DRAFT_NOTE,
+  FEEDBACK_NO_MAIL_APP_ERROR,
+  FEEDBACK_NOT_SENT_YET,
   FEEDBACK_PREVIEW_ERROR,
+  FEEDBACK_ROW_UNAVAILABLE,
+  FEEDBACK_CONNECTED_TOAST,
+  FEEDBACK_UNPAIRED_LINE,
+  FEEDBACK_UNCHECKED_NOTE,
   type FeedbackPrefill,
   type FeedbackType,
 } from '../../lib/feedbackReport';
+import { copyToClipboard } from '../../lib/clipboard';
 import { openInSystemBrowser } from '../../tauri-browser';
 import { useStore } from '../../store';
 import { useCloud } from '../../cloud';
 import { useUnsentInput } from '../../lib/unsentInput';
+import { connectThisComputerAfterWarning } from '../../accountConnect';
 
 // The feedback form, hosted by the inbox panel's Compose view (the old modal
 // is retired; compose lives where the replies land). The client collects
@@ -29,6 +43,11 @@ import { useUnsentInput } from '../../lib/unsentInput';
 // the edited text, so a line the user deleted is never sent. Signed out or
 // unpaired, the same form offers Copy report and Email it instead of Send,
 // built from the same redacted preview; nothing goes to our cloud then.
+//
+// When the daemon can't be reached there is no redacted preview. Copy report
+// and Email it then carry text this page builds from the typed fields alone
+// (lib/feedbackReport.ts), the form says the usual check didn't run, and pane
+// text and logs are left out, because only the daemon can check them.
 //
 // Screenshots are hidden for everyone until private storage exists (ST-103
 // D3); the daemon drops any a client sends.
@@ -45,6 +64,9 @@ const TYPE_OPTIONS: { value: FeedbackType; label: string; hint: string }[] = [
 ];
 
 const DRAFT_KEY = 'solu.feedbackDraft.v2';
+// After Connect this computer: how often, and how long, to ask whether it can send.
+const CONNECT_POLL_MS = 3000;
+const CONNECT_WAIT_MS = 60_000;
 // The v1 draft's fields carry over; its tick never did.
 const DRAFT_KEY_V1 = 'solu.feedbackDraft.v1';
 // "What we'll send" opens by itself the first time the form is used.
@@ -79,6 +101,8 @@ function loadDraft(): Draft | null {
 }
 
 function initialState(prefill?: FeedbackPrefill): Draft {
+  // A follow-up starts clean; the saved draft stays saved for the next form.
+  if (prefill?.followUpOf) return { type: prefill.type ?? 'bug', trying: '', title: '', body: prefill.body ?? '' };
   const d: Draft = loadDraft() ?? { type: 'bug', trying: '', title: '', body: '' };
   if (!prefill) return d;
   // An error screen's details join whatever the user had already started.
@@ -101,10 +125,14 @@ function paneLabel(p: { id: string; title: string; titleOverride?: string }): st
 
 export function FeedbackComposer({
   onDone,
+  onSent,
   onCancel,
   prefill,
 }: {
   onDone: () => void;
+  /** The report was filed as #number. The host shows that report, which
+   *  says it was sent; without it the form closes with a toast. */
+  onSent?: (number: number) => void;
   onCancel: () => void;
   prefill?: FeedbackPrefill;
 }) {
@@ -112,6 +140,7 @@ export function FeedbackComposer({
   const focusedPaneId = useStore((s) => s.focusedPaneId);
   const panes = useStore((s) => s.panes);
 
+  const followUpOf = prefill?.followUpOf && prefill.followUpOf > 0 ? prefill.followUpOf : undefined;
   const start = useRef<Draft | null>(null);
   if (start.current === null) start.current = initialState(prefill);
   const [type, setType] = useState<FeedbackType>(start.current.type);
@@ -132,6 +161,8 @@ export function FeedbackComposer({
   const [context, setContext] = useState<FeedbackContext | null>(null);
   // The previewed text: undefined while it loads, then what will be sent.
   const [paneText, setPaneText] = useState<string | undefined>(undefined);
+  // The picked pane's type and agent, from its own preview: they go with its text.
+  const [paneInfo, setPaneInfo] = useState<{ kind?: string; agent?: string }>({});
   const [logsText, setLogsText] = useState<string | undefined>(undefined);
   // Whether the capture itself was empty: deleting every line of a preview
   // keeps the box, so the user can still see that nothing will be sent.
@@ -140,9 +171,22 @@ export function FeedbackComposer({
   const paneReq = useRef(0);
   const logsReq = useRef(0);
 
+  // The daemon gave no preview the last time it was asked, so Copy report and
+  // Email it would carry page-built text. Known before either is clicked
+  // wherever possible, so the form can say so beside them.
+  const [serviceDown, setServiceDown] = useState(false);
+  const serviceDownRef = useRef(false);
+  // A ticked row that was left out because the daemon couldn't be reached.
+  const [paneDropped, setPaneDropped] = useState(false);
+  const [logsDropped, setLogsDropped] = useState(false);
+  const mounted = useRef(true);
+  // The ticks as they are now, for answers that arrive after a render.
+  const ticked = useRef({ pane: false, logs: false });
+  ticked.current = { pane: includePane, logs: includeLogs };
+
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string[]>([]);
   // A failed send says "copy it and email us", so the form then offers the
   // same Copy report / Email it as a computer that can't send at all.
   const [sendFailed, setSendFailed] = useState(false);
@@ -153,18 +197,33 @@ export function FeedbackComposer({
     s.mode === 'cloud' && s.isLocal && s.accountOptional && (s.withoutAccount || !s.session)
   ));
 
-  useEffect(() => {
-    let mounted = true;
-    void api
-      .feedbackStatus()
-      .then((s) => { if (mounted) setStatus(s); })
-      .catch(() => { /* unknown: keep Send; a failure says so in plain words */ });
+  function noteService(down: boolean) {
+    serviceDownRef.current = down;
+    setServiceDown(down);
+    if (!down) return;
+    // Fail closed: text the daemon can't check again is not carried.
+    if (ticked.current.pane) { setIncludePane(false); setPaneDropped(true); }
+    if (ticked.current.logs) { setIncludeLogs(false); setLogsDropped(true); }
+  }
+
+  // Asks the daemon for the details row; the answer also says whether a
+  // redacted preview can be had at all.
+  function probeService() {
     void api
       .feedbackPreview({ title: '', body: '', clientVersion: webVersion })
-      .then((p) => { if (mounted) setContext(p.context); })
-      .catch(() => { /* the summary line still says what is sent */ });
+      .then((p) => { if (mounted.current) { setContext(p.context); noteService(false); } })
+      .catch(() => { if (mounted.current) noteService(true); });
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    void api
+      .feedbackStatus()
+      .then((s) => { if (mounted.current) setStatus(s); })
+      .catch(() => { /* unknown: keep Send; a failure says so in plain words */ });
+    probeService();
     try { localStorage.setItem(PREVIEW_SEEN_KEY, '1'); } catch { /* best effort */ }
-    return () => { mounted = false; };
+    return () => { mounted.current = false; };
   }, []);
 
   // Capture the pane text when it is ticked or another pane is picked.
@@ -172,12 +231,24 @@ export function FeedbackComposer({
     if (!includePane || !paneId) { setPaneText(undefined); return; }
     const req = ++paneReq.current;
     setPaneText(undefined);
+    setPaneInfo({});
     void api
       .feedbackPreview({ title: '', body: '', paneId, includeSnapshot: true, includeLogs: false })
-      .then((p) => { if (paneReq.current === req) { setPaneEmpty(!p.snapshot); setPaneText(p.snapshot); } })
+      .then((p) => {
+        if (paneReq.current !== req) return;
+        setPaneEmpty(!p.snapshot);
+        setPaneText(p.snapshot);
+        setPaneInfo({ kind: p.context.paneKind, agent: p.context.paneAgent });
+      })
       // Fail closed: a row whose preview can't be shown is unticked, so nothing
       // the user hasn't seen can go (an older daemon would capture it anew).
-      .catch(() => { if (paneReq.current === req) { setIncludePane(false); setErr(FEEDBACK_PREVIEW_ERROR); } });
+      .catch(() => {
+        if (paneReq.current !== req) return;
+        setIncludePane(false);
+        // Known unreachable: ticking again can't work, so the row says so.
+        if (serviceDownRef.current) setPaneDropped(true);
+        else setErr(FEEDBACK_PREVIEW_ERROR);
+      });
   }, [includePane, paneId]);
 
   useEffect(() => {
@@ -187,10 +258,16 @@ export function FeedbackComposer({
     void api
       .feedbackPreview({ title: '', body: '', includeSnapshot: false, includeLogs: true })
       .then((p) => { if (logsReq.current === req) { setLogsEmpty(!p.logs); setLogsText(p.logs); } })
-      .catch(() => { if (logsReq.current === req) { setIncludeLogs(false); setErr(FEEDBACK_PREVIEW_ERROR); } });
+      .catch(() => {
+        if (logsReq.current !== req) return;
+        setIncludeLogs(false);
+        if (serviceDownRef.current) setLogsDropped(true);
+        else setErr(FEEDBACK_PREVIEW_ERROR);
+      });
   }, [includeLogs]);
 
   useEffect(() => {
+    if (followUpOf) return; // never in place of the saved draft
     const d: Draft = { type, trying, title, body };
     try {
       if (!title && !body && !trying) localStorage.removeItem(DRAFT_KEY);
@@ -216,6 +293,7 @@ export function FeedbackComposer({
       clientVersion: webVersion,
       ...(paneOn ? { paneId, snapshot: paneText ?? '' } : {}),
       ...(includeLogs ? { logs: logsText ?? '' } : {}),
+      ...(followUpOf ? { followUpOf } : {}),
     };
   }
 
@@ -229,55 +307,92 @@ export function FeedbackComposer({
     e?.preventDefault();
     if (unavailable || !validate()) return;
     setErr(null);
-    setNotice(null);
+    setNotice([]);
     setSubmitting(true);
     try {
       const res = await api.submitFeedback(request());
+      // A follow-up never used the saved draft, so it leaves it saved.
+      if (!followUpOf) {
+        try { localStorage.removeItem(DRAFT_KEY); } catch { /* best effort */ }
+      }
+      // A queued report has no number yet, so there is no report to show.
+      if (res.number && onSent) {
+        onSent(res.number);
+        return;
+      }
       toast(
         res.number ? `Thanks, we've got it. Report #${res.number} is with the team.` : "Thanks, we've got it.",
         { kind: 'success', icon: '✓' },
       );
-      try { localStorage.removeItem(DRAFT_KEY); } catch { /* best effort */ }
       onDone();
     } catch (e) {
       setErr(feedbackSendError(e));
       setSendFailed(true);
+      // Copy report and Email it now show: learn what they would carry.
+      probeService();
     } finally {
       setSubmitting(false);
     }
   }
 
   // The plain-text report for Copy report / Email it, redacted by the daemon
-  // exactly as a send would be.
+  // exactly as a send would be. When the daemon can't be reached, the typed
+  // fields alone, scrubbed by this page; but never on the click that finds
+  // that out, because the line saying so is not on screen yet.
   async function reportText(): Promise<string | null> {
     if (!validate()) return null;
     setErr(null);
+    setNotice([]);
+    const req = request();
     try {
-      const req = request();
-      return feedbackReportText(type, await api.feedbackPreview(req));
+      const text = feedbackReportText(type, await api.feedbackPreview(req), followUpOf);
+      noteService(false);
+      return text;
     } catch {
-      setErr(feedbackSendError(null));
-      return null;
+      const warned = serviceDownRef.current;
+      noteService(true);
+      if (!warned) { setErr(FEEDBACK_NOT_SENT_YET); return null; }
+      return feedbackFallbackReportText(type, req.title, req.body, webVersion, followUpOf);
     }
   }
 
   async function copyReport() {
     const text = await reportText();
     if (text == null) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      setNotice(
-        'Copied. Paste it into an email to hello@soluterminal.com, or into a GitHub issue (those are public, so check it first).',
-      );
-    } catch {
-      setErr("Couldn't copy. Select the text in the preview and copy it, or use Email it.");
-    }
+    if (await copyToClipboard(text)) setNotice([FEEDBACK_COPIED_NOTE]);
+    else setErr(FEEDBACK_COPY_ERROR);
   }
 
   async function emailReport() {
     const text = await reportText();
     if (text == null) return;
-    await openMailDraft(feedbackMailto(text).href);
+    const { href, cut } = feedbackMailto(text, type, webVersion);
+    const opened = await openMailDraft(href);
+    if (opened === false) { setErr(FEEDBACK_NO_MAIL_APP_ERROR); return; }
+    setNotice([
+      ...(cut ? [FEEDBACK_EMAIL_CUT_NOTE] : []),
+      ...(opened === null ? [FEEDBACK_MAIL_DRAFT_NOTE] : []),
+    ]);
+  }
+
+  // The connect warning first, then the mic's on-demand connect; Send appears once the form
+  // learns the computer is connected. Pairing can take a while (the daemon
+  // retries), so the form asks every few seconds for up to a minute.
+  async function connectComputer() {
+    if (!(await connectThisComputerAfterWarning(FEEDBACK_CONNECTED_TOAST))) return;
+    const until = Date.now() + CONNECT_WAIT_MS;
+    const check = () => {
+      if (!mounted.current) return;
+      void api.feedbackStatus()
+        .then((s) => {
+          if (!mounted.current) return;
+          setStatus(s);
+          if (!s || s.available || s.reason !== 'unpaired') return;
+          if (Date.now() < until) window.setTimeout(check, CONNECT_POLL_MS);
+        })
+        .catch(() => { if (Date.now() < until) window.setTimeout(check, CONNECT_POLL_MS); });
+    };
+    window.setTimeout(check, CONNECT_POLL_MS);
   }
 
   const signIn = () => {
@@ -287,10 +402,15 @@ export function FeedbackComposer({
 
   const paneIds = Object.keys(panes);
   if (paneId && !panes[paneId] && paneIds.length) paneIds.unshift(paneId);
-  const detailRows = context ? feedbackDetailRows({ ...context, paneId: paneOn ? paneId : '' }) : [];
+  const detailRows = context
+    ? feedbackDetailRows(paneOn
+      ? { ...context, paneId, paneKind: paneInfo.kind, paneAgent: paneInfo.agent }
+      : { ...context, paneId: '', paneKind: '', paneAgent: '' })
+    : [];
 
   return (
     <form className="inbox-compose" onSubmit={submit} noValidate>
+      {followUpOf && <div className="dialog-help">{feedbackFollowUpLine(followUpOf)}</div>}
       <div>
         <span id="fb-type-label" className="inbox-compose-label">Type</span>
         <div className="dialog-chip-row" role="group" aria-labelledby="fb-type-label">
@@ -362,7 +482,14 @@ export function FeedbackComposer({
             <div className="inbox-send-row">
               <div className="inbox-send-row-head">
                 <span className="inbox-send-row-title">App and system details · always sent</span>
-                <button type="button" className="vp-link" aria-expanded={showDetails} onClick={() => setShowDetails((v) => !v)}>
+                <button
+                  type="button"
+                  className="vp-link"
+                  aria-expanded={showDetails}
+                  // Named for screen readers while it says Show (wording item 9).
+                  aria-label={showDetails ? undefined : 'Show app and system details'}
+                  onClick={() => setShowDetails((v) => !v)}
+                >
                   {showDetails ? 'Hide' : 'Show'}
                 </button>
               </div>
@@ -381,15 +508,22 @@ export function FeedbackComposer({
             <div className="inbox-send-row">
               <div className="inbox-send-row-head">
                 <label className="inbox-send-check">
-                  <input type="checkbox" checked={includePane} onChange={(e) => { setIncludePane(e.target.checked); setShowPane(true); }} />
-                  <span>Recent text from a pane (last 40 lines), with the pane&apos;s ID</span>
+                  <input type="checkbox" checked={includePane} onChange={(e) => { setIncludePane(e.target.checked); setPaneDropped(false); setShowPane(true); }} />
+                  <span>Recent text from a pane (last 40 lines), with the pane&apos;s ID, type and agent</span>
                 </label>
                 {paneOn && (
-                  <button type="button" className="vp-link" aria-expanded={showPane} onClick={() => setShowPane((v) => !v)}>
+                  <button
+                    type="button"
+                    className="vp-link"
+                    aria-expanded={showPane}
+                    aria-label={showPane ? undefined : 'Show the pane text that would be sent'}
+                    onClick={() => setShowPane((v) => !v)}
+                  >
                     {showPane ? 'Hide' : 'Show'}
                   </button>
                 )}
               </div>
+              {paneDropped && !includePane && <div className="dialog-help" role="status">{FEEDBACK_ROW_UNAVAILABLE}</div>}
               {includePane && paneIds.length > 0 && (
                 <div className="inbox-send-pane">
                   <label htmlFor="fb-pane">Pane</label>
@@ -421,15 +555,22 @@ export function FeedbackComposer({
             <div className="inbox-send-row">
               <div className="inbox-send-row-head">
                 <label className="inbox-send-check">
-                  <input type="checkbox" checked={includeLogs} onChange={(e) => { setIncludeLogs(e.target.checked); setShowLogs(true); }} />
+                  <input type="checkbox" checked={includeLogs} onChange={(e) => { setIncludeLogs(e.target.checked); setLogsDropped(false); setShowLogs(true); }} />
                   <span>Recent app logs</span>
                 </label>
                 {includeLogs && (
-                  <button type="button" className="vp-link" aria-expanded={showLogs} onClick={() => setShowLogs((v) => !v)}>
+                  <button
+                    type="button"
+                    className="vp-link"
+                    aria-expanded={showLogs}
+                    aria-label={showLogs ? undefined : 'Show the app logs that would be sent'}
+                    onClick={() => setShowLogs((v) => !v)}
+                  >
                     {showLogs ? 'Hide' : 'Show'}
                   </button>
                 )}
               </div>
+              {logsDropped && !includeLogs && <div className="dialog-help" role="status">{FEEDBACK_ROW_UNAVAILABLE}</div>}
               {includeLogs && showLogs && (
                 logsText === undefined ? (
                   <div className="dialog-help" role="status">Loading…</div>
@@ -448,10 +589,13 @@ export function FeedbackComposer({
               )}
             </div>
 
-            <div className="dialog-help">
-              We remove tokens, keys, email addresses and home-folder paths we recognise. Check the preview and delete
-              anything else you don&apos;t want to send.
-            </div>
+            {/* Said only while the daemon's check can run. */}
+            {!serviceDown && (
+              <div className="dialog-help">
+                We remove tokens, keys, email addresses and home-folder paths we recognise. Check the preview and delete
+                anything else you don&apos;t want to send.
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -459,7 +603,7 @@ export function FeedbackComposer({
       {unavailable ? (
         <p className="dialog-help" role="status">
           {unavailable === 'unpaired'
-            ? "This computer isn't connected to your account, so this can't be sent from here. Copy the report or email it to us."
+            ? FEEDBACK_UNPAIRED_LINE
             : "You're not signed in, so this can't be sent from here. Copy the report or email it to us. Sign in to send it and get replies in the app."}
         </p>
       ) : (
@@ -473,7 +617,15 @@ export function FeedbackComposer({
         </p>
       )}
 
-      {notice && <div className="dialog-help" role="status">{notice}</div>}
+      {/* Above Copy report and Email it, so it is read before either is used. */}
+      {serviceDown && (unavailable || sendFailed) && (
+        <div className="dialog-help" role="status">{FEEDBACK_UNCHECKED_NOTE}</div>
+      )}
+      {notice.length > 0 && (
+        <div className="dialog-help" role="status">
+          {notice.map((line) => <div key={line}>{line}</div>)}
+        </div>
+      )}
       {err && <div id="fb-error" className="dialog-error" role="alert">{err}</div>}
 
       <div className="dialog-actions">
@@ -482,6 +634,9 @@ export function FeedbackComposer({
           <>
             {unavailable === 'signed_out' && canSignIn && (
               <button type="button" onClick={signIn}>Sign in</button>
+            )}
+            {unavailable === 'unpaired' && (
+              <button type="button" onClick={() => void connectComputer()}>Connect this computer</button>
             )}
             <button type="button" onClick={() => void copyReport()} disabled={loading}>Copy report</button>
             <button type="button" className="primary" onClick={() => void emailReport()} disabled={loading}>Email it</button>

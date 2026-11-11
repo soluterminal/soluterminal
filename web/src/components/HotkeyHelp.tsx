@@ -56,7 +56,7 @@ const GROUPS: ShortcutGroup[] = [
       { keys: ['Alt', 'K'], label: 'Focus pane above' },
       { keys: ['Alt', 'L'], label: 'Focus pane to the right' },
       { keys: ['Ctrl', 'Shift', '← ↑ ↓ →'], label: 'Move between panes with the arrow keys (same as Alt+H/J/K/L)' },
-      { keys: ['Alt', '1', '…', '9'], label: 'Focus pane N (by layout order)' },
+      { keys: ['Alt', '1', '…', '9'], label: 'Focus pane N (hold Alt to see the numbers)' },
       { keys: ['Alt', '[', '/', ']'], label: 'Focus previous / next pane (cycle)' },
     ],
   },

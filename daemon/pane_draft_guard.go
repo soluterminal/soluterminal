@@ -372,6 +372,11 @@ func (p *Pane) checkPutBack() bool {
 func (p *Pane) putBackReceipt() *unsentPaneMessage {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.putBackReceiptLocked()
+}
+
+// Caller holds mu. Kept receipts still protect input while their text remains.
+func (p *Pane) putBackReceiptLocked() *unsentPaneMessage {
 	msg := p.unsentMessage
 	if msg == nil || !msg.PutBack || p.Status != PaneRunning || p.Kind == "native" || p.respawning.Load() || msg.connection != p.agentConn {
 		return nil

@@ -13,9 +13,17 @@ let events: FeedbackEvent[] = [];
 let listeners = new Set<() => void>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let inflight = false;
+// A refresh asked for while one is in flight: run once more when it lands, so
+// a list fetched before a read-stamp reached the cloud doesn't stand for a
+// whole poll interval.
+let again = false;
 
 async function refresh() {
-  if (inflight || document.hidden) return;
+  if (document.hidden) return;
+  if (inflight) {
+    again = true;
+    return;
+  }
   inflight = true;
   try {
     const res = await api.feedbackInbox();
@@ -31,6 +39,10 @@ async function refresh() {
     // inbox that briefly shows stale feedback rows beats one that flickers.
   } finally {
     inflight = false;
+    if (again) {
+      again = false;
+      void refresh();
+    }
   }
 }
 
@@ -60,9 +72,17 @@ export function useFeedbackInbox(): FeedbackEvent[] {
   return snap;
 }
 
+// A report this app just sent: its "Received" is not news to the person who
+// sent it. Stamp it read on the cloud, then fetch, so the row shows up in the
+// feed now and never as unread.
+export function noteFeedbackSent(number: number): void {
+  void api.feedbackInboxRead(number).catch(() => {}).then(() => refresh());
+}
+
 // Optimistic local read-stamp: flips the row read immediately (and notifies
 // subscribers) while the POST syncs the cloud; the next poll reconciles.
 export function markFeedbackEventRead(number: number): void {
+  const known = events.some((e) => e.number === number);
   let changed = false;
   events = events.map((e) => {
     if (e.number !== number || e.readAt) return e;
@@ -70,11 +90,16 @@ export function markFeedbackEventRead(number: number): void {
     return { ...e, readAt: new Date().toISOString() };
   });
   if (changed) listeners.forEach((l) => l());
-  void api.feedbackInboxRead(number).catch(() => {});
+  const synced = api.feedbackInboxRead(number);
+  // No local row to flip (a notification tap on a cold start, before the
+  // first poll landed): pick the stamp up from the cloud once it is stored.
+  if (!known && listeners.size > 0) void synced.then(() => refresh()).catch(() => {});
+  else void synced.catch(() => {});
 }
 
 // Test hook: reset module state between tests.
 export function __resetFeedbackInboxForTests(next: FeedbackEvent[] = []): void {
   events = next;
+  again = false;
   listeners.forEach((l) => l());
 }

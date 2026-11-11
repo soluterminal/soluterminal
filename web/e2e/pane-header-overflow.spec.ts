@@ -6,9 +6,9 @@ const widths = [1600, 1200, 900, 700, 600, 500, 400, 320, 256];
 const before = process.env.PANE_HEADER_BEFORE === '1';
 // Details leave the header least important first; the popover lists them in the same order.
 const classRanks: [string, number][] = [
-  ['.pane-automode-badge', 1], ['.pane-account-chip', 3], ['.pane-schedule-chip', 4], ['.pane-review-chip', 5],
-  ['.pane-origin-message', 6], ['.pane-message-chip', 6], ['.pane-identity-chip', 7], ['.pane-origin', 8],
-  ['.pane-resume-badge', 11], ['.pane-mem-chip', 12], ['.pane-zoom-btn', 13],
+  ['.pane-automode-badge', 1], ['.pane-account-chip', 4], ['.pane-schedule-chip', 5], ['.pane-review-chip', 6],
+  ['.pane-origin-message', 7], ['.pane-message-chip', 7], ['.pane-identity-chip', 8], ['.pane-origin', 9],
+  ['.pane-mem-chip', 12],
 ];
 
 type DetailState = { rank: number; hidden: boolean; kind: string };
@@ -41,6 +41,8 @@ test('busy pane header collapses details by priority, keeps attention, and keeps
     nextFire: new Date(now + 720_000).toISOString(), createdAt: pane.createdAt, fireCount: 0, skipCount: 0, errorCount: 0,
   }] }));
   await page.routeWebSocket(/\/api\/panes\/overflow_header\/io/, ws => ws.send(Buffer.from('\r\nReady\r\n')));
+  // 111 MB is usual memory: the readout shows only with this setting on.
+  await page.addInitScript(() => localStorage.setItem('solu.alwaysShowAgentMemory', '1'));
   await page.goto('/?ws=Overflow%20header');
   // The header fixture inspects an agent-started worker; workspace overviews
   // now show top-level panes until All panes is selected.
@@ -74,7 +76,10 @@ test('busy pane header collapses details by priority, keeps attention, and keeps
       const details = await readDetails(header);
       const hidden = details.filter(d => d.hidden);
       const visible = details.filter(d => !d.hidden);
-      expect(details.length).toBeGreaterThanOrEqual(8);
+      expect(details.length).toBeGreaterThanOrEqual(7);
+      // Copy ID, Maximise and the pane number are not header details any more.
+      await expect(header.locator('.pane-resume-badge, .pane-zoom-btn')).toHaveCount(0);
+      await expect(header.locator('.pane-index-badge')).toBeHidden();
       if (hidden.length && visible.length) expect(Math.max(...visible.map(d => d.rank))).toBeLessThan(Math.min(...hidden.map(d => d.rank)));
       expect(hidden.length).toBeGreaterThanOrEqual(previouslyHidden);
       previouslyHidden = hidden.length;
@@ -100,7 +105,7 @@ test('busy pane header collapses details by priority, keeps attention, and keeps
     await page.screenshot({ animations: 'disabled', clip: (await header.boundingBox())!, path: testInfo.outputPath(`${before ? 'before' : 'after'}-${width}.png`) });
   }
   if (!before) {
-    expect(previouslyHidden).toBeGreaterThanOrEqual(8); // at 256px everything but the attention group is in +N
+    expect(previouslyHidden).toBeGreaterThanOrEqual(7); // at 256px everything but the attention group is in +N
     // Fully collapsed: every detail works from the popover.
     await more.focus();
     await page.keyboard.press('Enter');
@@ -112,12 +117,13 @@ test('busy pane header collapses details by priority, keeps attention, and keeps
     await expect(more).toHaveAttribute('aria-label', `${await details.locator('.pane-detail-row').count()} more pane details`);
     await page.locator('[data-pane-id="overflow_header"] .xterm-viewport').dispatchEvent('scroll');
     await expect(details).toBeVisible();
+    // A double-click inside the popover is not a double-click on the header: nothing maximises.
     await details.locator('.pane-mem-chip').dblclick();
-    await expect(details.getByRole('button', { name: 'Maximise pane', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Restore pane', exact: true })).toHaveCount(0);
     await details.getByRole('button', { name: /Auto-approve:/ }).click();
     await expect(page.getByRole('menu', { name: 'Auto-approve', exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
-    await details.locator('.pane-resume-badge').focus();
+    await details.getByRole('button', { name: /Auto-approve:/ }).focus();
     await page.keyboard.press('Escape');
     await expect(details).toBeHidden();
     await expect(more).toBeFocused();
@@ -162,8 +168,10 @@ test('busy pane header collapses details by priority, keeps attention, and keeps
     // enable both measurement and CSS, without a fold/unfold loop.
     await page.evaluate(() => { (window as unknown as { __SOLU_TAURI__: boolean }).__SOLU_TAURI__ = true; });
     await page.setViewportSize({ width: 600, height: 900 });
-    await header.getByRole('button', { name: /more pane details/ }).click();
-    await page.getByRole('dialog', { name: 'More pane details', exact: true }).getByRole('button', { name: 'Maximise pane', exact: true }).click();
+    // Maximise lives in the pane menu; the header then shows the way back.
+    await header.getByRole('button', { name: 'Pane menu', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Maximise pane/ }).click();
+    await expect(header.getByRole('button', { name: 'Restore pane', exact: true })).toBeVisible();
     await page.waitForTimeout(250);
     for (const width of [400, 320, 256]) {
       await header.evaluate((el, width) => { el.style.width = `${width}px`; }, width);
@@ -201,7 +209,7 @@ test('busy pane header collapses details by priority, keeps attention, and keeps
       await expect(details.locator('.pane-message-chip')).toBeVisible();
       await expect(more).toHaveAttribute('aria-label', `${await details.locator('.pane-detail-row').count()} more pane details`);
       if (width === 256) await details.screenshot({ animations: 'disabled', path: testInfo.outputPath('after-separate-message-256.png') });
-      await details.locator('.pane-resume-badge').focus();
+      await details.focus();
       await page.keyboard.press('Escape');
     }
   }
@@ -214,6 +222,8 @@ for (const dismiss of ['fold', 'close'] as const) {
       id: 'mode-confirm', title: 'Busy renderer switch', cwd: '/', cmd: ['codex'],
       status: 'running', pid: 1, cols: 80, rows: 24, state: 'busy', hasCodex: true,
       createdAt: '', lastActivityMs: Date.now(), codexThreadId: 'mode-confirm-thread',
+      // Enough details that the renderer toggle folds into +N at 256px.
+      autoMode: 'always', agentRssMB: 111, identity: { handle: 'mode-confirm', workingOn: 'Switch the renderer while busy' },
     };
     const workspace: Workspace = { name: 'Confirm', layout: { type: 'pane', paneId: pane.id }, paneIds: [pane.id], activeAt: '' };
     const input: string[] = [];

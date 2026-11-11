@@ -204,10 +204,10 @@ function ActivityRow({ ev, onReveal }: { ev: ActivityEvent; onReveal: () => void
     body = <span>open file: {basename(ev.path)}</span>;
   } else if (ev.type === 'schedule-fired') {
     dotClass += ' kind-schedule';
-    body = <span>schedule fired{ev.text ? ` · ${ev.text}` : ''}</span>;
+    body = <span>automation ran{ev.text ? ` · ${ev.text}` : ''}</span>;
   } else if (ev.type === 'schedule-firing-soon') {
     dotClass += ' kind-schedule';
-    body = <span>schedule firing soon{ev.text ? ` · ${ev.text}` : ''}</span>;
+    body = <span>automation runs soon{ev.text ? ` · ${ev.text}` : ''}</span>;
   } else if (ev.type === 'toast' && ev.text) {
     dotClass += ' kind-other';
     body = <span className="activity-toast">{ev.text}</span>;

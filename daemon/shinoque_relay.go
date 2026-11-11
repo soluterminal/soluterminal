@@ -53,6 +53,7 @@ func denyLocalShinoque(next http.Handler) http.Handler {
 
 type shinoqueTokenCache struct {
 	discovery shinoqueDiscoveryCache
+	pushedKey shinoqueRelayKeyState // shinoque_relay_key.go
 	mu        sync.Mutex
 	path      string
 	info      os.FileInfo
@@ -71,16 +72,20 @@ func shinoqueTokenHome() string {
 	return home
 }
 
-// Revalidate metadata on every request, including cache hits. Installed Linux
-// tokens have the same ownership, mode and no-symlink requirements as discovery.
+// read returns the secret that would sign a forward now: the pushed key, or
+// the legacy file token (signingKey).
 func (c *shinoqueTokenCache) read() string {
 	config, ok := c.discovery.resolve()
 	if !ok {
 		return ""
 	}
-	return c.readHome(config.home)
+	return c.signingKey(config)
 }
 
+// readHome reads the legacy relay-token file. Only signingKey calls it, and
+// only while no key has been pushed and the home is not memory-key.
+// Revalidate metadata on every request, including cache hits. Installed Linux
+// tokens have the same ownership, mode and no-symlink requirements as discovery.
 func (c *shinoqueTokenCache) readHome(home string) string {
 	if home == "" {
 		return ""
@@ -311,7 +316,9 @@ func newShinoqueRelayHandlerWithTables(next http.Handler, tokens *shinoqueTokenC
 			http.Error(w, shinoqueUpdateRequired, http.StatusServiceUnavailable)
 			return
 		}
-		token := tokens.readHome(config.home)
+		// The pushed key, or the legacy file for an older core; never the
+		// file once this process or the home has seen a pushed key.
+		token := tokens.signingKey(config)
 		if token == "" {
 			http.Error(w, shinoqueUnavailable, http.StatusServiceUnavailable)
 			return
@@ -323,7 +330,17 @@ func newShinoqueRelayHandlerWithTables(next http.Handler, tokens *shinoqueTokenC
 		}
 		// Resolve discovery for this request, then check and proxy the same
 		// immutable port. Do not re-resolve the destination after this check.
-		if !listenerAllowed(port, tables) {
+		// Through the desktop, each new connection's owner is checked when it
+		// is dialed instead (shinoque_relay_bridge.go).
+		bridge := tokens.discovery.bridge
+		var transport http.RoundTripper = shinoqueRelayTransport
+		if bridge != nil {
+			if !config.relayV2 || bridge.skewed() {
+				http.Error(w, shinoqueUnavailable, http.StatusServiceUnavailable)
+				return
+			}
+			transport = bridge.transport
+		} else if !listenerAllowed(port, tables) {
 			http.Error(w, shinoqueUnavailable, http.StatusServiceUnavailable)
 			return
 		}
@@ -333,7 +350,7 @@ func newShinoqueRelayHandlerWithTables(next http.Handler, tokens *shinoqueTokenC
 			rest = "/"
 		}
 		proxy := &httputil.ReverseProxy{
-			Transport:     shinoqueRelayTransport,
+			Transport:     transport,
 			FlushInterval: -1,
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(target)
@@ -363,15 +380,29 @@ func newShinoqueRelayHandlerWithTables(next http.Handler, tokens *shinoqueTokenC
 				// Only the authenticated private channel may identify a device.
 				// The readable relay must never inherit a client-supplied claim.
 				pr.Out.Header.Del("X-Shinoque-Private-Device")
-				if device := privateRelayDevice(pr.In); device != "" {
+				pr.Out.Header.Del("X-Shinoque-Relay")
+				pr.Out.Header.Del(shinoqueRelayV2Header)
+				device := privateRelayDevice(pr.In)
+				if device != "" {
 					pr.Out.Header.Set("X-Shinoque-Private-Device", device)
+				}
+				switch {
+				case config.relayV2:
+					// A fresh MAC over the request exactly as the transport
+					// writes it; no reusable secret goes on the connection.
+					pr.Out.Header.Set(shinoqueRelayV2Header, shinoqueRelayV2Sign(token,
+						pr.Out.Method, pr.Out.URL.RequestURI(), prefix+"/shinoque", device))
+				case device != "":
 					pr.Out.Header.Set("X-Shinoque-Relay", shinoquePrivateDeviceProof(token, device))
-				} else {
+				default:
 					pr.Out.Header.Set("X-Shinoque-Relay", token)
 				}
 			},
 			ModifyResponse: func(resp *http.Response) error {
 				resp.Header.Del("Set-Cookie")
+				if bridge != nil {
+					return bridge.checkReply(resp, token)
+				}
 				return nil
 			},
 			// A refused, failed or cut upstream connection may mean the
@@ -382,6 +413,9 @@ func newShinoqueRelayHandlerWithTables(next http.Handler, tokens *shinoqueTokenC
 				// other failure, deadlines included, forces a rescan.
 				if !errors.Is(err, context.Canceled) || r.Context().Err() == nil {
 					tokens.discovery.invalidate()
+					if bridge != nil {
+						bridge.forget()
+					}
 				}
 				log.Printf("http: proxy error: %v", err)
 				w.WriteHeader(http.StatusBadGateway)

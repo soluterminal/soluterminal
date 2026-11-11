@@ -50,7 +50,7 @@ export function originLine(p: PaneInfo, panes: Record<string, PaneInfo>, order: 
   const purpose = p.identity?.workingOn || o.purpose || '';
   let by = '';
   if (o.source === 'agent' && o.byPaneId && o.byPaneId !== o.leadPaneId) by = `started by ${livePaneLabel(o.byPaneId, o.byPaneTitle, panes, order) || 'an agent'}`;
-  if (o.source === 'schedule') by = 'started by a schedule';
+  if (o.source === 'schedule') by = 'started by an automation';
   if (o.source === 'api') by = 'started by another program';
   return [by, purpose].filter(Boolean).join(' · ');
 }

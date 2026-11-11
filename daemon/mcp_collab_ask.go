@@ -316,6 +316,8 @@ func (a *apiServer) mcpToolAskPane(args map[string]any, callerPane string) any {
 }
 
 func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
+	a.collabInflight.Add(1)
+	defer a.collabInflight.Add(-1)
 	// A message never answers a prompt, whoever sends it. One or two letters
 	// are written as raw keys, and a dialog still drawn after its first
 	// answer (menuInputDrawn) passes the state check below: the write-time
@@ -462,6 +464,8 @@ func (a *apiServer) mcpToolWaitForPane(args map[string]any, callerPane string) a
 }
 
 func (a *apiServer) mcpToolWaitForPaneAs(args map[string]any, c paneCaller) any {
+	a.collabInflight.Add(1)
+	defer a.collabInflight.Add(-1)
 	callerPane := c.ID
 	ref, _ := args["pane_id"].(string)
 	paneID := a.resolvePaneRef(ref, callerPane)

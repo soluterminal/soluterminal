@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { agentReportToInbox, INBOX_CAP, inboxCountLabel, inboxFeed } from './inboxFeed';
-import type { AgentReport, FeedbackEvent } from '../api';
+import type { AgentReport, FeedbackEvent, FeedbackReport } from '../api';
+import { reportStatusWord } from './myReports';
 import type { Schedule } from '../types';
 
 function sched(id: string, at: string, over: Partial<Schedule> = {}): Schedule {
@@ -89,5 +90,46 @@ describe('inboxCountLabel', () => {
     expect(inboxCountLabel(INBOX_CAP)).toBe('50');
     expect(inboxCountLabel(INBOX_CAP + 1)).toBe('50+');
     expect(inboxCountLabel(195)).toBe('50+');
+  });
+});
+
+// ST-162: one "My reports" list, the union of event rows and /mine.
+describe('My reports', () => {
+  const mine = (number: number, status: FeedbackReport['status'], over: Partial<FeedbackReport> = {}): FeedbackReport => ({
+    number, title: `Report ${number}`, filedAt: '2026-11-01T10:00:00Z', status, message: `status of ${number}`, ...over,
+  });
+
+  it('gives each event row its live status word, and adds reports with no events, quietly', () => {
+    const items = inboxFeed([], [fb(42, '2026-11-10T10:00:00Z')], [], [mine(42, 'needs-info'), mine(7, 'closed')]);
+    const row42 = items.find((i) => i.number === 42)!;
+    expect(row42).toMatchObject({ source: 'feedback', status: 'Needs info', unread: true });
+    const row7 = items.find((i) => i.number === 7)!;
+    expect(row7).toMatchObject({ source: 'feedback', status: 'Closed', unread: false, needsYou: false, at: '2026-11-01T10:00:00Z' });
+    expect(items.filter((i) => i.number === 42)).toHaveLength(1);
+    // Newest change first.
+    expect(items.map((i) => i.number)).toEqual([42, 7]);
+  });
+
+  it('shows no word when the status can\'t be read, and no row is lost without /mine', () => {
+    expect(inboxFeed([], [fb(42, '2026-11-10T10:00:00Z')], [], [mine(42, 'unknown')])[0].status).toBeUndefined();
+    expect(inboxFeed([], [fb(42, '2026-11-10T10:00:00Z')])[0]).toMatchObject({ number: 42 });
+  });
+
+  it.each([
+    ['received', undefined, 'Received'],
+    ['triaged', undefined, 'Looking into it'],
+    ['fix-merged', undefined, 'Looking into it'],
+    ['needs-info', undefined, 'Needs info'],
+    ['known', undefined, 'Known problem'],
+    ['answered', undefined, 'Answered'],
+    ['fixed', '0.0.1242', 'Fixed in 0.0.1242'],
+    // No public version yet: never "Fixed in".
+    ['fixed', undefined, 'Looking into it'],
+    ['not-planned', undefined, 'Closed'],
+    ['cant-reproduce', undefined, 'Closed'],
+    ['closed', undefined, 'Closed'],
+    ['unknown', undefined, null],
+  ] as const)('status %s (fixedIn %s) reads %s', (status, fixedIn, word) => {
+    expect(reportStatusWord({ status, fixedIn })).toBe(word);
   });
 });

@@ -39,7 +39,7 @@ export function useZoomHotkeyWarning(): void {
         localStorage.setItem(warnedKey(combo), '1');
       } catch { /* ignore — worst case the toast repeats next boot */ }
       useStore.getState().toast(
-        `${prettyCombo(combo)} is reserved system-wide by another app (usually the NVIDIA/AMD overlay) — pane zoom can't receive it. Use the maximize pane button, or press ? and rebind "Maximise / restore focused pane".`,
+        `${prettyCombo(combo)} is reserved system-wide by another app (usually the NVIDIA/AMD overlay) — pane zoom can't receive it. Use Maximise pane in the pane menu, or press ? and rebind "Maximise / restore focused pane".`,
         { kind: 'warn', ttlMs: 12000 },
       );
     });

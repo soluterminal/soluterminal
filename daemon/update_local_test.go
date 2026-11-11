@@ -138,7 +138,9 @@ func TestApplyLocalUsesTheGuardedSwap(t *testing.T) {
 	u.restartGate = new(atomic.Bool)
 	u.executable = func() (string, error) { return bin, nil }
 
-	u.busyCheck = func() (bool, string, string) { return true, "pane p1 mid-turn", "p1" }
+	u.busyCheck = func() *updateBusyError {
+		return &updateBusyError{cause: updateBusyCauseCollaboration, reason: "pane p1 mid-turn", paneID: "p1"}
+	}
 	var busy *updateBusyError
 	if err := u.ApplyLocal(context.Background(), func(int) {}, localUpdateCandidate{path: path, sha256: sum, version: "0.0.1168.9"}); !errors.As(err, &busy) {
 		t.Fatalf("busy daemon: ApplyLocal = %v, want the busy gate", err)

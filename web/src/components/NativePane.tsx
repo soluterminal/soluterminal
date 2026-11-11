@@ -11,7 +11,7 @@
 // component is the view + scroll/auto-scroll + composer + interrupt.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { IconMaximize, IconMinimize } from './ui/icons';
+import { IconMinimize } from './ui/icons';
 import type { PaneInfo } from '../types';
 import { effectiveVisiblePaneIds, useStore } from '../store';
 import { api } from '../api';
@@ -38,6 +38,8 @@ import { collectLeaves, collectPaneIds, layoutHasLeaf } from '../lib/layout';
 import { isTemporaryWorkspaceView, workspaceViewLayout } from '../lib/workspaceView';
 import { isTypingElsewhere } from '../lib/focusGuard';
 import { isMobileViewport } from '../lib/mobile';
+import { useIsMobileView } from './useIsMobileView';
+import { paneTitleHint } from '../lib/altHeld';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { roleConvertAllowed } from '../extensions';
 import { operatorFeaturesAllowed } from '../entitlements';
@@ -173,6 +175,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
   }, [layout, pane.id]);
   const paneCount = useMemo(() => collectPaneIds(layout).length, [layout]);
   const canZoom = paneCount > 1 || isZoomed;
+  const isMobileView = useIsMobileView();
   // Whether this pane is in the ACTIVE workspace layout (vs parked/warm in a
   // hidden host). Drives whether useNativePane holds its SSE open: a parked
   // native pane keeps its DOM warm but drops the held-open HTTP/1.1 SSE so it
@@ -1814,7 +1817,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
         ) : (
           <span
             className="pane-title"
-            title="Double-click to rename"
+            title={paneTitleHint(paneIndex)}
             onDoubleClick={(e) => {
               e.stopPropagation();
               setTitleDraft(pane.title);
@@ -1864,29 +1867,26 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
               />
             )}
           </div>
-          {/* Memory chip: the agent's resident RAM (sampled ~60s), display-only
-              like the Terminal header's. Restart pane in the ⋯ menu reclaims it.
-              Goes amber when heavy. Hidden until the first sample (agentRssMB
-              0/absent). */}
-          <AgentMemoryChip pane={pane} />
-          {/* Maximise/restore — header parity with the Terminal pane
-              (PaneHeader.tsx). Same classes/glyphs/titles so it looks and behaves
-              identically; positioned AFTER the mode toggle and BEFORE the ⋯ menu to
-              match the Terminal action order. canZoom mirrors the terminal gate
-              (only meaningful with >1 pane, or while already zoomed). The
-              @container collapse rule already hides .pane-zoom-btn on very narrow
-              panes for both headers. */}
-          {canZoom && (
+          {/* Memory pill: the agent's resident RAM (sampled ~60s), hidden
+              until unusual, then "1.8 GB · Restart?" like the Terminal
+              header's. */}
+          <AgentMemoryChip pane={pane} onRestart={pane.status === 'running' ? () => { void restartPaneFlow(pane.id); } : undefined} />
+          {/* Restore — header parity with the Terminal pane (PaneHeader.tsx):
+              Maximise lives in the pane menu, and the header shows only the way
+              back while maximised. Same classes/glyph/title, positioned AFTER the
+              mode toggle and BEFORE the ⋯ menu to match the Terminal action
+              order. */}
+          {canZoom && isZoomed && !isMobileView && (
             <button
               className="iconbtn pane-zoom-btn"
-              title={isZoomed ? 'Restore layout (Alt+Z)' : 'Maximise pane (Alt+Z)'}
-              aria-label={isZoomed ? 'Restore pane' : 'Maximise pane'}
+              title="Restore layout (Alt+Z)"
+              aria-label="Restore pane"
               onClick={(e) => {
                 e.stopPropagation();
                 toggleZoom(pane.id);
               }}
               onDoubleClick={(e) => e.stopPropagation()}
-            >{isZoomed ? <IconMinimize size={13} /> : <IconMaximize size={13} />}</button>
+            ><IconMinimize size={13} /></button>
           )}
           <button
             className="iconbtn pane-menu-btn"
@@ -1947,6 +1947,11 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
           }}
           onSplitDown={ctxMenuActions.splitDown}
           onClonePane={ctxMenuActions.clonePane}
+          onToggleZoom={canZoom && !isMobileView ? () => {
+            closeContextMenu();
+            toggleZoom(pane.id);
+          } : undefined}
+          isZoomed={isZoomed}
           onMoveToWorkspace={pane.role !== 'task_owner' ? ctxMenuActions.moveToWorkspace : undefined}
           onNewSession={ctxMenuActions.newSession}
           onCreateSchedule={ctxMenuActions.createSchedule}
@@ -1956,6 +1961,7 @@ export function NativePane({ pane }: { pane: PaneInfo }) {
           onUnflag={ctxMenuActions.unflag}
           onFlagForAttention={ctxMenuActions.flagForAttention}
           onRename={ctxMenuActions.rename}
+          onCopySessionId={ctxMenuActions.copySessionId}
           onEditIdentity={() => {
             closeContextMenu();
             setIdentityDialogOpen(true);

@@ -40,7 +40,7 @@ describe('app layout styles', () => {
       '.pane-cwd', '.pane-identity-working-on', '.pane-status',
       '.pane-identity-chip:not(.is-attention):not(.is-warn)',
       '.pane-message-chip:not(.is-attention):not(.is-warn):not(.unread)',
-      '.pane-resume-badge', '.pane-origin:not(.is-attention):not(.is-warn)', '.pane-zoom-btn',
+      '.pane-schedule-chip', '.pane-origin:not(.is-attention):not(.is-warn)', '.pane-zoom-btn',
     ];
     const widths = order.map((selector) => {
       const tier = tiers.find((match) => match[2].includes(selector));
@@ -51,7 +51,7 @@ describe('app layout styles', () => {
     widths.slice(1).forEach((width, i) => expect(width).toBeLessThan(widths[i]));
     const workingOn = tiers.find((match) => match[2].includes('.pane-identity-working-on'))?.[2];
     expect(workingOn).toContain('.pane-identity-chip:has(.pane-identity-handle) .pane-identity-working-on');
-    const badges = tiers.find((match) => match[2].includes('.pane-resume-badge'))?.[2];
+    const badges = tiers.find((match) => match[2].includes('.pane-schedule-chip'))?.[2];
     expect(badges).toContain('.pane-delegated-chip:not(.is-attention)');
     expect(badges).toContain('.pane-delegated-pending-chip:not(.is-attention)');
     expect(badges).toContain('.pane-account-chip:not(.is-warn)');

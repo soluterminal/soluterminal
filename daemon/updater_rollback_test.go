@@ -213,10 +213,12 @@ func TestRollbackDeclinesIncompatibleStateAndFailedProbe(t *testing.T) {
 
 func TestRollbackBusyForceAndFailedSuccessorRecovery(t *testing.T) {
 	u, store, bin, _ := rollbackFixture(t, "2.0.0", "1.0.0", capabilityScript("1.0.0", `{}`))
-	u.busyCheck = func() (bool, string, string) { return true, "pane busy", "p1" }
+	u.busyCheck = func() *updateBusyError {
+		return &updateBusyError{cause: updateBusyCauseCollaboration, reason: "pane busy", paneID: "p1"}
+	}
 	err := u.Rollback(context.Background(), rollbackRequest{TargetVersion: "1.0.0"}, func(int) {})
 	var busy *updateBusyError
-	if !errors.As(err, &busy) || busy.cause != updateBusyCauseFocus {
+	if !errors.As(err, &busy) || busy.cause != updateBusyCauseCollaboration {
 		t.Fatalf("busy error = %v", err)
 	}
 	u.busyCheck = nil
@@ -347,7 +349,9 @@ func TestUpdateRollbackAPIBusyBodiesMatchForwardApply(t *testing.T) {
 	u := NewUpdater("2.0.0", "", "", nil, nil)
 	u.rollback, _ = newUpdateRollbackStore(t.TempDir())
 	u.restartGate = new(atomic.Bool)
-	u.busyCheck = func() (bool, string, string) { return true, "pane busy", "p1" }
+	u.busyCheck = func() *updateBusyError {
+		return &updateBusyError{cause: updateBusyCauseCollaboration, reason: "pane busy", paneID: "p1"}
+	}
 	a := &apiServer{updater: u, rollback: u.rollback}
 
 	forward := httptest.NewRecorder()

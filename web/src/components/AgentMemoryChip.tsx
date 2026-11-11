@@ -1,28 +1,53 @@
 import type { PaneInfo } from '../types';
-import { paneAgentRssMB } from '../lib/agentMemory';
+import { confirmDialog } from '../lib/dialog';
+import { useAgentMemoryPill, type AgentMemoryPillState } from '../lib/useAgentMemoryPill';
 import { Tooltip } from './Tooltip';
+import { useIsMobileView } from './useIsMobileView';
 
-function memoryLabel(mb: number) {
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
-}
-
-// Display-only, like the Terminal header's readout (PaneHeader.tsx): a chip
-// that restarted the agent on click looked like any other status chip, so a
-// curious click cost a restart. Reclaiming stays in the pane menu.
-export function AgentMemoryChip({ pane }: { pane: PaneInfo }) {
-  const mb = paneAgentRssMB(pane);
-  if (!(mb > 0)) return null;
-
-  const label = memoryLabel(mb);
-  const heavy = mb >= 500;
+// The agent's memory in a pane header. Hidden until it is unusual; then it
+// reads "1.8 GB · Restart?" and asks before restarting the agent in place.
+// "Always show agent memory" adds a plain readout that does nothing on click:
+// a chip that restarted on any click cost a curious user a restart.
+export function AgentMemoryPill({ memory, onRestart }: { memory: AgentMemoryPillState; onRestart?: () => void }) {
+  const { label, unusual } = memory;
+  if (unusual && onRestart) {
+    const restart = async () => {
+      const ok = await confirmDialog({
+        title: 'Restart this agent?',
+        message: `It is using ${label} of memory. Restarting it frees that memory. The conversation is kept.`,
+        confirmLabel: 'Restart',
+      });
+      if (ok) onRestart();
+    };
+    return (
+      <Tooltip label={`Agent memory ${label}, more than usual. Restart the agent to free it; the conversation is kept.`}>
+        <button
+          type="button"
+          className="iconbtn pane-mem-chip heavy"
+          aria-label={`Agent memory ${label}. Restart?`}
+          onClick={(e) => { e.stopPropagation(); void restart(); }}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          {label} · Restart?
+        </button>
+      </Tooltip>
+    );
+  }
   return (
-    <Tooltip label={`Agent memory ${label}${heavy ? ' — heavy' : ''}. To reclaim it, use Restart pane in the ⋯ menu; your conversation is kept.`}>
+    <Tooltip label={`Agent memory ${label}${unusual ? ', more than usual' : ''}. To free it, use Restart pane in the ⋯ menu; the conversation is kept.`}>
       <span
-        className={`iconbtn pane-mem-chip readonly${heavy ? ' heavy' : ''}`}
+        className={`iconbtn pane-mem-chip readonly${unusual ? ' heavy' : ''}`}
         aria-label={`Agent memory ${label}`}
       >
         {label}
       </span>
     </Tooltip>
   );
+}
+
+// The Focus header's pill. The Terminal header (PaneHeader.tsx) renders
+// AgentMemoryPill itself, inside its overflow-managed details.
+export function AgentMemoryChip({ pane, onRestart }: { pane: PaneInfo; onRestart?: () => void }) {
+  const memory = useAgentMemoryPill(pane, useIsMobileView());
+  return memory.show ? <AgentMemoryPill memory={memory} onRestart={onRestart} /> : null;
 }

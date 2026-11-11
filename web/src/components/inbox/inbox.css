@@ -231,9 +231,15 @@
   color: var(--ok);
   background: color-mix(in srgb, var(--ok) 12%, transparent);
 }
+/* A report's status word (My reports) when it's neither an ask nor a fix. */
+.inbox-badge-status {
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--fg-dim) 14%, transparent);
+}
 /* Inside the pinned group the header already says "Needs you" — repeating
-   it per row is noise. "failed" stays: it carries different information. */
-.inbox-pinned .inbox-badge-needs { display: none; }
+   it per row is noise. "failed" stays: it carries different information, and
+   so does a report's status word (My reports). */
+.inbox-pinned .inbox-badge-needs:not(.inbox-badge-chip) { display: none; }
 
 .inbox-empty {
   font-size: 12px;
@@ -263,8 +269,19 @@
   padding: 12px max(14px, calc((100% - 640px) / 2)) 14px;
 }
 .inbox-thread-head { margin-bottom: 4px; }
+/* Above the thread of a report sent a moment ago, lined up with its column. */
+.inbox-thread-sent {
+  flex-shrink: 0;
+  margin: 12px max(14px, calc((100% - 640px) / 2)) 0;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--ok) 9%, transparent);
+  font-size: 12px;
+}
 .inbox-thread-title { font-size: 15px; font-weight: var(--weight-heading); line-height: 1.35; }
 .inbox-thread-sub { font-size: 11px; color: var(--fg-dim); margin-top: 3px; }
+.inbox-thread-status { margin-top: 5px; display: flex; }
 
 .inbox-msg { max-width: 92%; }
 .inbox-msg-meta {
@@ -326,6 +343,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+/* The report's state could not be read: one line and Try again, no reply box. */
+.inbox-reply-retry {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--fg-dim);
 }
 
 /* ── Compose view — the extracted FeedbackComposer follows the dialog form

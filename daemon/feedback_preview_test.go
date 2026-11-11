@@ -200,7 +200,7 @@ func TestFeedbackPreviewWorksUnpaired(t *testing.T) {
 	if prev.Snapshot != "" || prev.Logs != "" || prev.Context.PaneID != "" {
 		t.Fatalf("unticked preview carries pane text or logs: %+v", prev)
 	}
-	if prev.Context.AppVersion != "0.0.1241" || prev.Context.ClientVersion != "0.0.1241" {
+	if prev.Context.DaemonVersion != "0.0.1241" || prev.Context.ClientVersion != "0.0.1241" {
 		t.Fatalf("versions missing: %+v", prev.Context)
 	}
 }
@@ -284,5 +284,28 @@ func TestFeedbackEmailsRedacted(t *testing.T) {
 	once := redactFeedback(long)
 	if once != "[redacted: email]" || redactFeedback(once) != once {
 		t.Fatalf("long local part: %q", once)
+	}
+}
+
+// ST-166: the follow-up link passes through to the cloud, which checks it; a
+// new report carries no followUpOf at all.
+func TestFeedbackFollowUpOfPassesThrough(t *testing.T) {
+	srv, raw := feedbackCloudStub(t)
+	a := feedbackTestServer(t, srv.URL)
+	for _, tc := range []struct {
+		followUpOf int64
+		want       string
+	}{{38, `"followUpOf":38`}, {0, ""}, {-4, ""}} {
+		w := postDaemonFeedback(t, a, feedbackReq{Type: "bug", Body: "still broken", IncludeSnapshot: boolPtr(false), FollowUpOf: tc.followUpOf})
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		got := string(*raw)
+		if tc.want != "" && !strings.Contains(got, tc.want) {
+			t.Fatalf("followUpOf %d not forwarded: %s", tc.followUpOf, got)
+		}
+		if tc.want == "" && strings.Contains(got, "followUpOf") {
+			t.Fatalf("followUpOf %d forwarded: %s", tc.followUpOf, got)
+		}
 	}
 }

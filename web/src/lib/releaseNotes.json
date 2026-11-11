@@ -1,4 +1,17 @@
 {
+  "0.0.1242": [
+    "Updates now wait, for up to ten minutes, while a message between agents is waiting to be delivered or an agent is waiting for another agent's answer.",
+    "Automations: finished ones now show as done, and Clear finished removes them in one go. Delete now tells you when a run that's already going won't be stopped.",
+    "Tidier pane headers: hold Alt to see pane numbers. Copy session ID (Copy thread ID in Codex panes) and Maximise pane are now in the pane's menu.",
+    "A pane now shows its agent's memory only when it's unusually high or growing fast, and restarting the agent from there asks first. To always see it, turn on Always show agent memory in Settings › Terminal & panes.",
+    "The Inbox button now appears only when the Inbox has something in it or an automation reports there. Tapping a feedback notification opens that report.",
+    "Your feedback now lives under My reports in the Inbox, with a status for each report. After you send one, you stay on it.",
+    "On a phone, Send feedback is now in the menu.",
+    "Copy report and Email it now work even when SoluTerminal's background service can't be reached; the form then asks you to check the text yourself before you send it.",
+    "A closed report now has a Send a follow-up button, which starts a new report linked to it.",
+    "Feedback errors now say what went wrong in plain words. Report details now name Windows and WSL correctly and include your Windows build; if you include a pane's text, they also include the pane's type and agent.",
+    "When SoluTerminal hits an error it can't recover from, the error screen now lists what a report would send, and Show displays the exact text before you send it."
+  ],
   "0.0.1241": [
     "After Claude Code or Codex installs, a card now stays at the top with a Start button for each one until you start your first agent.",
     "The welcome tour has a Skip tour button on its first slide, which also says what the daily check-in sends.",

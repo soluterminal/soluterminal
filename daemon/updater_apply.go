@@ -77,14 +77,15 @@ func valueOrUnknown(s string) string {
 	return s
 }
 
-// updateBusyError is Apply's non-forced refusal while a Focus/native turn must
-// settle or critical workflow invocations must drain. The HTTP handler maps it
+// updateBusyError is Apply's non-forced refusal while volatile collaboration
+// state must settle or critical workflow invocations must drain. The HTTP handler maps it
 // to a typed 409 so clients can defer and retry without guessing from prose;
 // every other Apply error stays a plain 500.
 const (
-	updateBusyCauseFocus    = "focus"
-	updateBusyCauseWorkflow = "workflow"
-	updateBusyCauseRestart  = "restart"
+	updateBusyCauseFocus         = "focus"
+	updateBusyCauseCollaboration = "collaboration"
+	updateBusyCauseWorkflow      = "workflow"
+	updateBusyCauseRestart       = "restart"
 )
 
 type updateBusyError struct {
@@ -120,12 +121,49 @@ func (e *updateBusyError) Error() string {
 	return "update deferred: " + e.reason + " — retry when idle or force with ?force=1"
 }
 
-// checkBusy consults the injected busy gate (nil-safe).
-func (u *Updater) checkBusy() (bool, string, string) {
+// A continuous busy episode gets the same ten-minute grace as workflow drain.
+// Unlike workflow backoff (which can repeat forever), this gate then opens until
+// collaboration is observed idle. Stuck put-back receipts cannot starve updates.
+const (
+	updateBusyGrace = defaultWorkflowDrainWindow
+	// Normal daemon polling runs every 30s. After two missed observations we
+	// cannot treat a gap between attempts as continuously busy. A download
+	// retains its episode through the existing restart reservation.
+	updateBusyObservationGap = 2 * pollInterval
+)
+
+func (u *Updater) checkBusy() *updateBusyError {
+	return u.checkBusyAt(time.Now())
+}
+
+func (u *Updater) checkBusyAt(now time.Time) *updateBusyError {
 	if u.busyCheck == nil {
-		return false, "", ""
+		return nil
 	}
-	return u.busyCheck()
+	busy := u.busyCheck()
+	// Focus still owns an in-process turn loop. Its temporary gate is not
+	// subject to the bounded collaboration grace.
+	if busy != nil && busy.cause != updateBusyCauseCollaboration {
+		return busy
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if busy == nil {
+		u.busySince = time.Time{}
+		u.busyLastObserved = time.Time{}
+		return nil
+	}
+	// Apply and Rollback hold this reservation through download and swap.
+	// Preserve their grace across a slow download, even with no status sampler.
+	attemptActive := u.restartGate != nil && u.restartGate.Load()
+	if u.busySince.IsZero() || (!attemptActive && now.Sub(u.busyLastObserved) > updateBusyObservationGap) {
+		u.busySince = now
+	}
+	u.busyLastObserved = now
+	if now.Sub(u.busySince) >= updateBusyGrace {
+		return nil
+	}
+	return busy
 }
 
 // Apply downloads the platform-specific binary, verifies its SHA-256,
@@ -157,7 +195,7 @@ func (u *Updater) Apply(ctx context.Context, exitFn func(int), force bool) error
 // already closed model admission and waited its bounded grace, so a still-open
 // invocation must not stall the release forever: this keeps every gate except
 // the workflow drain. An interrupted invocation is a normal, already-handled
-// state that boot adoption closes and resumes. The Focus-busy check and the kill switch are deliberately kept.
+// state that boot adoption closes and resumes. The collaboration check and kill switch are kept.
 func (u *Updater) ApplyRollPastWorkflow(ctx context.Context, exitFn func(int)) error {
 	return u.apply(ctx, exitFn, false, true)
 }
@@ -196,13 +234,11 @@ func (u *Updater) applyCandidate(ctx context.Context, exitFn func(int), force, r
 			reason: "workflow boot is loading or failed; waiting for the complete board before updating",
 		}
 	}
-	// Server-side update-safety gate: refuse a non-forced apply while a Focus
-	// pane is mid-turn. The client already defers locally, so a well-behaved UI
-	// never trips this — it's the backstop for curl/scripts/stale clients (and
-	// the no-open-tab case, where the client's deferred auto-apply can't run).
+	// Protect volatile collaboration state for a bounded grace. Clients cannot
+	// infer this from pane activity; every normal attempt consults this gate.
 	if !force {
-		if busy, reason, paneID := u.checkBusy(); busy {
-			return &updateBusyError{cause: updateBusyCauseFocus, reason: reason, paneID: paneID}
+		if busy := u.checkBusy(); busy != nil {
+			return busy
 		}
 	}
 	u.mu.Lock()
@@ -390,12 +426,12 @@ func (u *Updater) applyCandidate(ctx context.Context, exitFn func(int), force, r
 	}
 
 	// Re-check the busy gate now that the (possibly slow) download is done: a
-	// Focus pane idle at entry can be mid-turn by now, and past this point we
+	// delivery or ask can arrive during the download, and past this point we
 	// freeze the UI and swap — the point of no return. Forced applies skip it.
 	if !force {
-		if busy, reason, paneID := u.checkBusy(); busy {
+		if busy := u.checkBusy(); busy != nil {
 			_ = os.Remove(newPath)
-			return &updateBusyError{cause: updateBusyCauseFocus, reason: reason, paneID: paneID}
+			return busy
 		}
 		if !rollPastWorkflow {
 			check := u.checkWorkflowDrain(time.Now())
@@ -489,6 +525,14 @@ func (u *Updater) commitBinarySwap(selfPath, newPath string, c swapCommit, exitF
 	swap := u.swapBinaryFn
 	if swap == nil {
 		swap = swapBinary
+	}
+	if u.restartLossCounts != nil {
+		held, receipts, asks := u.restartLossCounts()
+		if held > 0 || receipts > 0 || asks > 0 {
+			slog.Warn("daemon swap risks losing volatile collaboration state",
+				"from", c.fromVersion, "to", c.toVersion,
+				"heldDeliveries", held, "putBackReceipts", receipts, "collabInflight", asks)
+		}
 	}
 	if err := swap(selfPath, newPath); err != nil {
 		clearRestartIntent(selfPath)

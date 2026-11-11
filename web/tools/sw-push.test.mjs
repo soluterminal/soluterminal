@@ -51,6 +51,96 @@ async function renderPush(payload) {
   return { title: call[0], body: call[1].body ?? '', renotify: call[1].renotify === true };
 }
 
+// Taps: what notificationclick does with the windows that are open.
+async function tapNotification(data, clients) {
+  const source = readFileSync(swSource, 'utf8');
+  const listeners = new Map();
+  const openWindow = vi.fn(() => Promise.resolve());
+  const stubSelf = {
+    addEventListener: (type, listener) => { listeners.set(type, listener); },
+    registration: { showNotification: () => Promise.resolve() },
+    skipWaiting: () => {},
+    clients: { claim: () => Promise.resolve(), matchAll: () => Promise.resolve(clients), openWindow },
+  };
+  new Function('self', source)(stubSelf);
+  const pending = [];
+  listeners.get('notificationclick')({
+    notification: { close: () => {}, data },
+    waitUntil: (promise) => { pending.push(promise); },
+  });
+  await Promise.all(pending);
+  return { openWindow };
+}
+
+// A window as the worker sees it. `app: true` is a window where the app is
+// mounted: it answers the worker's "are you listening?" on the port it is sent
+// (lib/notificationTap.ts). Any other page never answers.
+function windowClient(url, { app = false, ...over } = {}) {
+  return {
+    url,
+    focused: false,
+    visibilityState: 'hidden',
+    postMessage: vi.fn((message, transfer) => {
+      if (app && message.type === 'solu:notification-tap-ready') transfer[0].postMessage('ready');
+    }),
+    focus: vi.fn(() => Promise.resolve()),
+    navigate: vi.fn(() => Promise.resolve()),
+    ...over,
+  };
+}
+
+const tapsSentTo = (client) => client.postMessage.mock.calls.map(([message]) => message).filter((m) => m.type === 'solu:notification-tap');
+
+describe('service worker feedback notification tap', () => {
+  const feedback = { machineId: null, paneId: 'feedback:42' };
+  const tap = { type: 'solu:notification-tap', paneId: 'feedback:42' };
+
+  it('hands the report to an open window instead of reloading it', async () => {
+    const background = windowClient('https://app.example/m/m_1/', { app: true });
+    const front = windowClient('https://app.example/m/m_2/', { app: true, focused: true, visibilityState: 'visible' });
+    const { openWindow } = await tapNotification(feedback, [background, front]);
+    expect(tapsSentTo(front)).toEqual([tap]);
+    expect(front.focus).toHaveBeenCalledTimes(1);
+    expect(front.navigate).not.toHaveBeenCalled();
+    expect(tapsSentTo(background)).toEqual([]);
+    expect(background.focus).not.toHaveBeenCalled();
+    expect(openWindow).not.toHaveBeenCalled();
+  });
+
+  // A sign-in screen, the computer picker or a standalone page has no
+  // listener: a message posted there is lost, so the target goes in the URL.
+  it('loads the report from the URL in a window that is not running the app', async () => {
+    const signIn = windowClient('https://app.example/', { focused: true, visibilityState: 'visible' });
+    const { openWindow } = await tapNotification(feedback, [signIn]);
+    expect(tapsSentTo(signIn)).toEqual([]);
+    expect(signIn.navigate).toHaveBeenCalledWith('/?pane=feedback%3A42');
+    expect(signIn.focus).toHaveBeenCalledTimes(1);
+    expect(openWindow).not.toHaveBeenCalled();
+  });
+
+  it('picks the window running the app over a focused page that is not', async () => {
+    const page = windowClient('https://app.example/privacy', { focused: true, visibilityState: 'visible' });
+    const app = windowClient('https://app.example/m/m_1/', { app: true });
+    await tapNotification(feedback, [page, app]);
+    expect(tapsSentTo(app)).toEqual([tap]);
+    expect(app.focus).toHaveBeenCalledTimes(1);
+    expect(page.navigate).not.toHaveBeenCalled();
+    expect(page.focus).not.toHaveBeenCalled();
+  });
+
+  it('opens the app on the report when no window is open', async () => {
+    const { openWindow } = await tapNotification(feedback, []);
+    expect(openWindow).toHaveBeenCalledWith('/?pane=feedback%3A42');
+  });
+
+  it('still navigates a window on another machine for a pane push', async () => {
+    const other = windowClient('https://app.example/m/m_2/');
+    await tapNotification({ machineId: 'm_1', paneId: 'pane_9' }, [other]);
+    expect(other.navigate).toHaveBeenCalledWith('/m/m_1/?pane=pane_9');
+    expect(other.postMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe('service worker workflow push rendering', () => {
   it('renders a post-approval landing failure with its blocker-led summary', async () => {
     const shown = await renderPush({

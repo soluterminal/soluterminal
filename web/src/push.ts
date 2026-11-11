@@ -69,7 +69,13 @@ export function detectPushSupport(): PushSupport {
 //  3. POSTs the subscription to the cloud so it can push to us later.
 //
 // Returns true if the user is subscribed at the end; false on denial or error.
-export async function subscribePushToCloud(vapidPublicKey: string, bearerToken: string): Promise<boolean> {
+export async function subscribePushToCloud(
+  vapidPublicKey: string,
+  bearerToken: string,
+  // false on the one retry after an "endpoint in use" answer, so a browser
+  // that fails to drop its old subscription can't rotate forever.
+  rotateIfEndpointInUse = true,
+): Promise<boolean> {
   if (isEmbedded()) return false;
   const s = detectPushSupport();
   if (!s.ok) return false;
@@ -113,6 +119,18 @@ export async function subscribePushToCloud(vapidPublicKey: string, bearerToken: 
     body: JSON.stringify(sub.toJSON()),
   });
   if (!resp.ok) {
+    // This browser's endpoint is registered to another account (someone
+    // else signed in here before). The cloud never moves it, so mint a
+    // fresh one for this account, once.
+    if (resp.status === 409 && !createdFresh && rotateIfEndpointInUse) {
+      try {
+        const body = await resp.clone().json();
+        if (body && body.error === 'endpoint_in_use') {
+          debugLog('[solu] push endpoint belongs to another account - rotating');
+          return rotatePushSubscription(vapidPublicKey, bearerToken, false);
+        }
+      } catch { /* not JSON — fall through to the warning */ }
+    }
     // eslint-disable-next-line no-console
     console.warn('push subscribe POST failed:', resp.status);
     return false;
@@ -159,7 +177,11 @@ export async function subscribePushToCloud(vapidPublicKey: string, bearerToken: 
 // so a user who leaves the PWA closed overnight doesn't miss pushes
 // in the morning — re-opening the app forces a fresh endpoint that
 // bypasses whatever per-endpoint throttle Android has accumulated.
-export async function rotatePushSubscription(vapidPublicKey: string, bearerToken: string): Promise<boolean> {
+export async function rotatePushSubscription(
+  vapidPublicKey: string,
+  bearerToken: string,
+  rotateIfEndpointInUse = true,
+): Promise<boolean> {
   const s = detectPushSupport();
   if (!s.ok || !vapidPublicKey) return false;
   if (Notification.permission !== 'granted') return false;
@@ -195,7 +217,7 @@ export async function rotatePushSubscription(vapidPublicKey: string, bearerToken
     } catch { /* ignore */ }
   }
 
-  return subscribePushToCloud(vapidPublicKey, bearerToken);
+  return subscribePushToCloud(vapidPublicKey, bearerToken, rotateIfEndpointInUse);
 }
 
 // unsubscribePushFromCloud: best-effort — tells the cloud to drop our
