@@ -192,6 +192,19 @@ func feedbackTitle(title, body string) string {
 	return ""
 }
 
+// Derive a missing title from the checked body. A title copied from body text
+// must not restore text removed by the body's surrounding context.
+func feedbackRedactedText(title, body string) (string, string) {
+	body = strings.TrimSpace(body)
+	title = strings.TrimSpace(title)
+	checkedBody := redactFeedback(body)
+	checkedTitle := redactFeedback(feedbackTitle(title, checkedBody))
+	if title != "" && strings.Contains(body, title) && !strings.Contains(checkedBody, checkedTitle) {
+		checkedTitle = feedbackTitle("", checkedBody)
+	}
+	return feedbackClamp(checkedTitle, feedbackMaxTitle), feedbackClamp(checkedBody, feedbackMaxBody)
+}
+
 func (a *apiServer) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	var req feedbackReq
 	if !decodeJSON(w, r, &req, defaultJSONBodyBytes) {
@@ -199,7 +212,6 @@ func (a *apiServer) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Type = strings.TrimSpace(strings.ToLower(req.Type))
 	req.Body = strings.TrimSpace(req.Body)
-	req.Title = feedbackTitle(req.Title, req.Body)
 	if !feedbackAllowedTypes[req.Type] {
 		http.Error(w, "type must be bug, idea, or question", http.StatusBadRequest)
 		return
@@ -210,12 +222,13 @@ func (a *apiServer) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	capture := a.feedbackGather(req)
+	title, body := feedbackRedactedText(req.Title, req.Body)
 	sub := feedbackSubmission{
 		Schema:   1,
 		Channel:  "inapp",
 		Type:     req.Type,
-		Title:    redactFeedback(feedbackClamp(req.Title, feedbackMaxTitle)),
-		Body:     redactFeedback(feedbackClamp(req.Body, feedbackMaxBody)),
+		Title:    title,
+		Body:     body,
 		Snapshot: capture.snapshot,
 		Logs:     capture.logs,
 		Context:  a.feedbackContext(req.ClientVersion, req.PaneID, capture),
@@ -287,11 +300,11 @@ func (a *apiServer) handleFeedbackPreview(w http.ResponseWriter, r *http.Request
 	if !decodeJSON(w, r, &req, defaultJSONBodyBytes) {
 		return
 	}
-	body := strings.TrimSpace(req.Body)
+	title, body := feedbackRedactedText(req.Title, req.Body)
 	capture := a.feedbackGather(req)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"title":    redactFeedback(feedbackClamp(feedbackTitle(req.Title, body), feedbackMaxTitle)),
-		"body":     redactFeedback(feedbackClamp(body, feedbackMaxBody)),
+		"title":    title,
+		"body":     body,
 		"snapshot": capture.snapshot,
 		"logs":     capture.logs,
 		"context":  a.feedbackContext(req.ClientVersion, req.PaneID, capture),

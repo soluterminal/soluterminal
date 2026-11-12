@@ -1236,6 +1236,11 @@ type paneDTO struct {
 	// actually change relay behavior. A merely different binary is not stale.
 	AgentVersion string `json:"agentVersion,omitempty"`
 	AgentStale   bool   `json:"agentStale,omitempty"`
+	// TerminalAddressLost: this PowerShell terminal was given a daemon address
+	// this daemon no longer serves, so agents typed in it cannot start (and
+	// ones already running in it cannot reach their account) until the
+	// terminal is restarted.
+	TerminalAddressLost bool `json:"terminalAddressLost,omitempty"`
 	// ClaudeRssMB is a compatibility alias for clients loaded before AgentRssMB
 	// shipped. Emit both during the rolling update; new clients prefer AgentRssMB.
 	ClaudeRssMB int `json:"claudeRssMB,omitempty"`
@@ -1570,6 +1575,12 @@ func makePaneDTOWithProcessSnapshot(p *Pane, aria *Aria, att *attentionEngine, p
 		Turn:         turnSummaryFor(p.ID),
 	}
 	d.Credential = p.projectLiveCredential(paneCredentialProjection(d.Credential, p.credentialSelectionCallback(), p.credentialTeamSelectionCallback()))
+	if d.Status == PaneRunning {
+		if c := d.Credential; c != nil && c.Source == "broker" && paneRoute.sessionLost != nil && paneRoute.sessionLost(p.ID) {
+			c.ConnectionLost = true
+		}
+		d.TerminalAddressLost = d.Kind == "" && paneRoute.terminalLost != nil && paneRoute.terminalLost(p.ID)
+	}
 	// Capability badges must not hinge on the live process scan alone: it
 	// misses whenever a client argv is unreadable or hasn't appeared yet,
 	// while the pane's adopted harness session or spawn argv already says

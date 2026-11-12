@@ -34,7 +34,7 @@ export function PanesTab() {
       <SettingsGroup title="Layout">
         <SettingsRow
           label="Pane layout"
-          hint="Saved with this workspace. Auto balances the grid; dragging a divider or choosing a preset switches to Custom."
+          hint="Saved with this workspace. Auto balances the grid; dragging a divider, choosing a preset, or using Split right, Split down or Clone pane switches to Custom."
         >
           <select
             className="settings-select"

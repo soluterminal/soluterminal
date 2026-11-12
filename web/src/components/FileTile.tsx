@@ -285,7 +285,7 @@ export function FileTile({ info }: Props) {
           title={`Open in shell (vim / $EDITOR) — for changes beyond one-liners`}
           onClick={(e) => {
             e.stopPropagation();
-            launchShellHere(focusedPaneId || info.id, 'horizontal').catch(() => {});
+            launchShellHere(focusedPaneId || info.id, 'horizontal', 'policy').catch(() => {});
             // Hint the user — opening a shell in the right cwd is the
             // easiest approximation of "open in editor" here.
             toast('Shell opened — run `$EDITOR ' + info.path + '`', { kind: 'info', icon: '⎋', ttlMs: 4500 });
@@ -362,7 +362,7 @@ export function FileTile({ info }: Props) {
                   style={{ marginTop: 8 }}
                   onClick={(e) => {
                     e.stopPropagation();
-                    launchShellHere(focusedPaneId || info.id, 'horizontal').catch(() => {});
+                    launchShellHere(focusedPaneId || info.id, 'horizontal', 'policy').catch(() => {});
                     toast('Shell opened — run `$EDITOR ' + info.path + '`', { kind: 'info', icon: '⎋', ttlMs: 4500 });
                   }}
                 >⎋ Open in shell</button>

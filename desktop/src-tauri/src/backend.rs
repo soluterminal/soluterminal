@@ -9,13 +9,19 @@
 //
 // On macOS / Linux there's no choice — always host-native.
 //
-// On first launch a PC whose WSL already works is asked once which to
-// use. A PC without a working WSL starts on Windows PowerShell silently:
-// a setup prompt before the window opens is the scariest moment to ask a
-// newcomer for administrator rights and a restart. WSL setup stays
-// reachable from the tray "Repair setup" item and the
-// `desktop_set_up_wsl` command. The choice is saved at
-// %LOCALAPPDATA%\soluterminal\backend.txt.
+// The first launch asks nothing. It looks for Claude Code and Codex on
+// Windows and, only if WSL is already running, inside WSL (agent_detect.rs),
+// and runs where they are: Windows, WSL, or the side with more of them when
+// both have some (WSL on a tie). Dual is never chosen automatically; it runs
+// two daemons and shows one side at a time, so it stays a choice the person
+// makes from the tray's "Switch mode" menu. With no agent found the app runs
+// on Windows and saves nothing, so a later launch looks again; that holds on
+// a PC without WSL too. Such a PC starts on Windows PowerShell silently: a
+// setup prompt before the window opens is the scariest moment to ask a
+// newcomer for administrator rights and a restart. WSL setup stays reachable
+// from the tray "Repair setup" item
+// and the `desktop_set_up_wsl` command. A saved mode is never changed by
+// detection. It is saved at %LOCALAPPDATA%\soluterminal\backend.txt.
 
 #[cfg(windows)]
 use std::fs;
@@ -32,9 +38,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 #[cfg(windows)]
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind};
 
 // `Wsl` / `Dual` are only constructed on Windows; on other hosts we
 // always pick `HostNative`. Suppress the "never constructed" warning
@@ -67,8 +73,12 @@ fn unattended_backend(interactive: bool) -> Option<Backend> {
 }
 
 /// Resolve which backend to use this session. On Windows: reads the
-/// saved preference, runs the first-run wizard if none, falls back to
-/// HostNative for any issue. On non-Windows: always HostNative.
+/// saved preference, detects where the agents are if there is none, falls
+/// back to HostNative for any issue. On non-Windows: always HostNative.
+///
+/// Slow and blocking on Windows: the WSL check can take a minute and the
+/// wizards wait on the user. Never call it on the main thread. Startup runs
+/// it on its worker thread with the startup window already up (lib.rs).
 #[cfg(windows)]
 pub fn resolve_backend(app: &AppHandle, interactive: bool) -> Backend {
     // Consume the one-shot Repair setup request on every path so it can't
@@ -88,6 +98,7 @@ pub fn resolve_backend(app: &AppHandle, interactive: bool) -> Backend {
             if !crate::daemon::wsl_start_allowed() {
                 return saved;
             }
+            crate::startup_screen::step(CHECKING_WSL_STEP);
             let (st, reason) = wsl_probe();
             if st != WslStatus::Ready {
                 if let Some(fallback) = unattended_backend(interactive) {
@@ -98,21 +109,104 @@ pub fn resolve_backend(app: &AppHandle, interactive: bool) -> Backend {
         }
         return saved;
     }
-    if let Some(fallback) = unattended_backend(interactive) {
-        return fallback;
-    }
-    // First run — the wizard persists the chosen pref itself (so an
-    // install-needs-reboot case can keep pref=Wsl for the next launch
-    // while running HostNative this session).
+    // Nothing saved: a first launch, a launch after Repair setup, or an
+    // earlier launch that found no agent to decide by.
+    crate::startup_screen::step(CHECKING_SETUP_STEP);
     let start_allowed = crate::daemon::wsl_start_allowed();
-    let (status, reason) = wsl_probe();
-    run_first_run_wizard(app, status, &reason, offer_setup, start_allowed)
+    if offer_setup && interactive {
+        // Repair setup: the person asked for WSL to be checked and fixed, so
+        // this one path may wake it, and may show the guided dialogs. They
+        // persist the outcome themselves (an install that needs a reboot
+        // keeps pref=Wsl for the next launch while running HostNative now).
+        let (status, reason) = wsl_probe();
+        match repair_plan(status, start_allowed) {
+            RepairPlan::OfferUpdate => {
+                return persist_first_run_outcome(run_update_wsl_wizard(app, status, &reason));
+            }
+            RepairPlan::OfferInstall => {
+                return persist_first_run_outcome(run_install_wsl_wizard(app));
+            }
+            RepairPlan::Detect => {}
+        }
+    }
+    let windows = crate::agent_detect::windows_agents(&crate::agent_detect::WindowsPlaces::from_env());
+    let wsl = crate::agent_detect::wsl_agents();
+    if let Ok(mut seen) = FIRST_RUN_WSL.lock() {
+        *seen = Some(wsl);
+    }
+    let choice = first_run_choice(windows, wsl, start_allowed);
+    crate::daemon::launch_log(&format!(
+        "no saved mode: agents on Windows {windows:?}, in WSL {wsl:?}; using {:?} (saved={})",
+        choice.backend, choice.save
+    ));
+    if choice.save {
+        let _ = write_pref(choice.backend);
+    }
+    choice.backend
+}
+
+/// What this launch's detection saw of WSL, for `wsl_distro_seen`.
+#[cfg(windows)]
+static FIRST_RUN_WSL: std::sync::Mutex<Option<crate::agent_detect::WslAgents>> =
+    std::sync::Mutex::new(None);
+
+/// Whether this launch saw a WSL distro: `Some(true)` when the default
+/// distro exists (asleep or running), `Some(false)` when there is none, and
+/// `None` when detection did not run (a mode was already saved) or could not
+/// tell. The setup checklist uses it to offer "Use Linux (WSL)" instead of
+/// "Set up Linux (WSL)". A launch with a saved mode never asks WSL anything
+/// just to word a button.
+#[cfg(windows)]
+pub fn wsl_distro_seen() -> Option<bool> {
+    use crate::agent_detect::WslAgents;
+    match (*FIRST_RUN_WSL.lock().ok()?)? {
+        WslAgents::Asleep | WslAgents::Running(_) => Some(true),
+        WslAgents::NoDistro => Some(false),
+        WslAgents::Unknown => None,
+    }
+}
+
+/// What the startup window says while a saved WSL or Dual choice is checked.
+/// The person picked WSL, so its name means something to them.
+#[cfg(windows)]
+const CHECKING_WSL_STEP: &str = "Checking Linux (WSL)";
+/// The same on a first launch, when WSL may not exist and its name may mean
+/// nothing.
+#[cfg(windows)]
+const CHECKING_SETUP_STEP: &str = "Checking this PC's setup";
+#[cfg(windows)]
+const INSTALLING_WSL_STEP: &str = "Setting up Linux (WSL)";
+#[cfg(windows)]
+const UPDATING_WSL_STEP: &str = "Updating Linux (WSL)";
+
+/// The setup dialogs' entry point, in place of `app.dialog()`. At launch the
+/// startup window is already on screen, so it owns each dialog: the dialog
+/// opens in front of it, stays in front, and the startup window can't be
+/// closed from under it. The in-app "Set up Linux (WSL)" request has no
+/// startup window, and its dialogs stand alone as before.
+#[cfg(windows)]
+struct SetupDialogs<'a>(&'a AppHandle);
+
+#[cfg(windows)]
+fn setup_dialogs(app: &AppHandle) -> SetupDialogs<'_> {
+    SetupDialogs(app)
+}
+
+#[cfg(windows)]
+impl SetupDialogs<'_> {
+    fn message(self, message: impl Into<String>) -> MessageDialogBuilder<tauri::Wry> {
+        let dialog = self.0.dialog().message(message);
+        match self.0.get_webview_window(crate::startup_screen::LABEL) {
+            Some(startup) => dialog.parent(&startup),
+            None => dialog,
+        }
+    }
 }
 
 /// Environment flag the tray "Repair setup" item sets before restarting.
-/// Tauri restarts inherit the process environment, so the relaunched
-/// shell's first-run wizard knows the user explicitly asked to re-detect
-/// and should still be offered WSL setup rather than defaulting silently.
+/// Tauri restarts inherit the process environment, so the relaunched shell
+/// knows the user explicitly asked to re-detect and should still be offered
+/// WSL setup rather than defaulting silently.
 #[cfg(any(windows, test))]
 const OFFER_WSL_SETUP_ENV: &str = "SOLU_OFFER_WSL_SETUP";
 
@@ -128,34 +222,65 @@ fn take_wsl_setup_offer() -> bool {
     requested
 }
 
-/// What the first launch (no saved preference) does for a given WSL state.
+/// Where a launch with no saved mode runs, and whether that is saved.
 #[cfg(any(windows, test))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum FirstRunPlan {
-    /// WSL works: ask which one the user prefers.
-    AskPreference,
+struct FirstRunChoice {
+    backend: Backend,
+    /// False while there is nothing to decide by, so the next launch looks
+    /// again. Once saved, detection never runs again and the mode changes
+    /// only by the person's own switch.
+    save: bool,
+}
+
+/// Run where the agents are. The mode is saved only once an agent is found
+/// on the chosen side: until then every answer about WSL (none, asleep,
+/// couldn't tell) may change, and a wrong one must not pin a PC to Windows.
+/// With agents on both sides the side with more wins and WSL wins a tie: WSL
+/// agents are only visible when the person already has WSL running. Never
+/// Dual. `start_allowed` is false when low disk space blocks WSL: nothing
+/// learned about WSL can be trusted then, so nothing is saved.
+#[cfg(any(windows, test))]
+fn first_run_choice(
+    windows: crate::agent_detect::Agents,
+    wsl: crate::agent_detect::WslAgents,
+    start_allowed: bool,
+) -> FirstRunChoice {
+    use crate::agent_detect::WslAgents;
+    match wsl {
+        WslAgents::Running(in_wsl) if in_wsl.any() && in_wsl.count() >= windows.count() => {
+            FirstRunChoice { backend: Backend::Wsl, save: start_allowed }
+        }
+        // No WSL, WSL asleep or not answering, or fewer agents there than on
+        // Windows (maybe none). Windows either way; saved only if an agent is
+        // there to run.
+        WslAgents::Running(_) | WslAgents::NoDistro | WslAgents::Asleep | WslAgents::Unknown => {
+            FirstRunChoice { backend: Backend::HostNative, save: windows.any() && start_allowed }
+        }
+    }
+}
+
+/// What Repair setup does about WSL before detection runs.
+#[cfg(any(windows, test))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum RepairPlan {
     /// A distro exists but WSL can't run it: offer the update.
     OfferUpdate,
-    /// No usable WSL and the user asked via Repair setup: offer install.
+    /// No usable WSL: offer the install.
     OfferInstall,
-    /// No usable WSL: run on Windows without a dialog. `persist` is false
-    /// when the probe couldn't be trusted (WSL start blocked by low disk
-    /// space), so the next launch detects again instead of locking a WSL
-    /// user onto Windows.
-    WindowsSilently { persist: bool },
+    /// WSL works, or low disk space blocks it: nothing to repair, detect.
+    Detect,
 }
 
 #[cfg(any(windows, test))]
-fn first_run_plan(status: WslStatus, offer_setup: bool, start_allowed: bool) -> FirstRunPlan {
+fn repair_plan(status: WslStatus, start_allowed: bool) -> RepairPlan {
     match status {
-        WslStatus::Ready => FirstRunPlan::AskPreference,
-        WslStatus::NeedsUpdate | WslStatus::Failed => FirstRunPlan::OfferUpdate,
-        WslStatus::NoDistro | WslStatus::Unavailable if offer_setup && start_allowed => {
-            FirstRunPlan::OfferInstall
-        }
-        WslStatus::NoDistro | WslStatus::Unavailable => FirstRunPlan::WindowsSilently {
-            persist: start_allowed,
-        },
+        WslStatus::Ready => RepairPlan::Detect,
+        WslStatus::NeedsUpdate | WslStatus::Failed => RepairPlan::OfferUpdate,
+        WslStatus::NoDistro | WslStatus::Unavailable if start_allowed => RepairPlan::OfferInstall,
+        // wsl_probe_once reports Unavailable when the disk gate blocks WSL;
+        // that says nothing about whether WSL is installed.
+        WslStatus::NoDistro | WslStatus::Unavailable => RepairPlan::Detect,
     }
 }
 
@@ -187,7 +312,8 @@ pub enum WslStatus {
 }
 
 /// `wsl -e true` can cold-boot the VM, so this is generous, but a wedged WSL
-/// must still reach a dialog instead of holding the app before its window opens.
+/// must still reach a dialog instead of holding startup on the startup window
+/// for good.
 #[cfg(windows)]
 const WSL_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
@@ -310,9 +436,9 @@ pub fn saved_or_default() -> Backend {
 }
 
 /// Clear the saved backend choice + transient WSL artifacts so the next
-/// launch re-runs detection and the first-run wizard. Backs the tray
-/// "Repair setup" item (and is the in-app counterpart to a reinstall
-/// reset). The relaunch still offers WSL setup when it's missing, because
+/// launch detects again where to run. Backs the tray "Repair setup" item
+/// (and is the in-app counterpart to a reinstall reset). The relaunch checks
+/// WSL properly and still offers its setup or update when needed, because
 /// the user asked for it. Best-effort — missing files are fine.
 #[cfg(windows)]
 pub fn reset_setup() {
@@ -325,66 +451,7 @@ pub fn reset_setup() {
     }
 }
 
-/// First-run backend wizard. WSL-ready machines get the plain-language
-/// preference dialog; a WSL that needs updating gets the guided update.
-/// Without WSL the app opens on Windows PowerShell with no dialog, unless
-/// the user came here through Repair setup, which still offers the guided
-/// install. Persists the right pref so the next launch lands correctly
-/// even when setup needs a reboot.
-#[cfg(windows)]
-fn run_first_run_wizard(
-    app: &AppHandle,
-    status: WslStatus,
-    reason: &str,
-    offer_setup: bool,
-    start_allowed: bool,
-) -> Backend {
-    match first_run_plan(status, offer_setup, start_allowed) {
-        FirstRunPlan::AskPreference => {} // fall through to the preference dialog
-        FirstRunPlan::OfferUpdate => {
-            return persist_first_run_outcome(run_update_wsl_wizard(app, status, reason));
-        }
-        FirstRunPlan::OfferInstall => {
-            return persist_first_run_outcome(run_install_wsl_wizard(app));
-        }
-        FirstRunPlan::WindowsSilently { persist } => {
-            crate::daemon::launch_log(&format!(
-                "first run: WSL not ready ({status:?}); using Windows PowerShell without a setup prompt (saved={persist})"
-            ));
-            if persist {
-                let _ = write_pref(Backend::HostNative);
-            }
-            return Backend::HostNative;
-        }
-    }
-
-    // WSL is ready — ask the user which they prefer. Plain-language copy:
-    // lead with what each choice means, not "WSL"/"native" jargon.
-    let picked_wsl = app
-        .dialog()
-        .message(
-            "How should soluterminal run on this PC?\n\n\
-             • Run inside Windows (recommended) — uses Windows' built-in \
-             Linux (WSL) for the full experience: reliable alerts when \
-             Claude needs you, the Ports panel, and smarter pane grouping.\n\n\
-             • Run on Windows directly — simpler, no extra setup, but a few \
-             features are limited.\n\n\
-             You can change this any time from the tray menu (\"Switch to …\").",
-        )
-        .title("Choose how soluterminal runs")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Run inside Windows (recommended)".into(),
-            "Run on Windows directly".into(),
-        ))
-        .blocking_show();
-
-    let choice = if picked_wsl { Backend::Wsl } else { Backend::HostNative };
-    let _ = write_pref(choice);
-    choice
-}
-
-/// Map a first-run setup outcome to the session backend AND persist the
+/// Map a Repair setup outcome to the session backend AND persist the
 /// pref. ReadyNow → WSL. RebootRequired → keep pref=WSL so the post-
 /// reboot launch auto-restores it, but run HostNative this session.
 /// Declined/Failed → the user is on Windows now; persist HostNative so we
@@ -452,8 +519,7 @@ fn repair_or_fallback(app: &AppHandle, saved: Backend, status: WslStatus, reason
             "Set it up",
         ),
     };
-    let do_fix = app
-        .dialog()
+    let do_fix = setup_dialogs(app)
         .message(body)
         .title(title)
         .kind(MessageDialogKind::Warning)
@@ -546,8 +612,7 @@ enum SetupOutcome {
 /// Confirm + guided distro install. Used on first run.
 #[cfg(windows)]
 fn run_install_wsl_wizard(app: &AppHandle) -> SetupOutcome {
-    let install_requested = app
-        .dialog()
+    let install_requested = setup_dialogs(app)
         .message(
             "soluterminal runs best using Windows' built-in Linux (WSL). \
              Set it up now for the full experience — reliable alerts when \
@@ -584,8 +649,7 @@ fn run_update_wsl_wizard(app: &AppHandle, status: WslStatus, reason: &str) -> Se
          use it for the full experience. Update now?"
             .to_string()
     };
-    let update_requested = app
-        .dialog()
+    let update_requested = setup_dialogs(app)
         .message(format!(
             "{lead}\n\nWindows will ask for administrator permission. You can skip \
              this and run on Windows directly instead."
@@ -610,8 +674,9 @@ fn run_update_wsl_wizard(app: &AppHandle, status: WslStatus, reason: &str) -> Se
 /// We probe `wsl -e true` and report ready-now vs reboot-required.
 #[cfg(windows)]
 fn do_install_and_verify(app: &AppHandle) -> SetupOutcome {
+    crate::startup_screen::step(INSTALLING_WSL_STEP);
     if let Err(e) = run_wsl_command_elevated("'--install','-d','Ubuntu'") {
-        app.dialog()
+        setup_dialogs(app)
             .message(format!(
                 "Couldn't start the setup: {e}\n\n\
                  You can set it up manually later by running `wsl --install` \
@@ -634,8 +699,9 @@ fn do_install_and_verify(app: &AppHandle) -> SetupOutcome {
 /// over a registered distro that merely failed would strand their files.
 #[cfg(windows)]
 fn do_update_and_verify(app: &AppHandle) -> SetupOutcome {
+    crate::startup_screen::step(UPDATING_WSL_STEP);
     if let Err(e) = run_wsl_command_elevated("'--update'") {
-        app.dialog()
+        setup_dialogs(app)
             .message(format!(
                 "Couldn't update WSL: {e}\n\n\
                  You can update it manually by running `wsl --update` in an \
@@ -655,7 +721,7 @@ fn do_update_and_verify(app: &AppHandle) -> SetupOutcome {
         WslStatus::Ready => finish_setup_with_verify(app, "WSL is updated and ready."),
         WslStatus::NoDistro => run_install_wsl_wizard(app),
         _ => {
-            app.dialog()
+            setup_dialogs(app)
                 .message(format!(
                     "WSL was updated, but it still didn't start.\n\n{}\n\nRestart this PC \
                      and reopen SoluTerminal. For now SoluTerminal will run directly on \
@@ -679,14 +745,14 @@ fn do_update_and_verify(app: &AppHandle) -> SetupOutcome {
 #[cfg(windows)]
 fn finish_setup_with_verify(app: &AppHandle, ready_msg: &str) -> SetupOutcome {
     if wait_for_wsl_ready(Duration::from_secs(8)) {
-        app.dialog()
+        setup_dialogs(app)
             .message(ready_msg)
             .title("Setup complete")
             .kind(MessageDialogKind::Info)
             .blocking_show();
         SetupOutcome::ReadyNow
     } else {
-        app.dialog()
+        setup_dialogs(app)
             .message(
                 "Setup is almost done. Please restart your PC to finish, then \
                  open soluterminal again — it will switch to the full \
@@ -799,14 +865,48 @@ pub fn set_pref(b: Backend) -> std::io::Result<()> {
     write_pref(b)
 }
 
-/// The next backend in the WSL → Windows → Dual → WSL cycle — used
-/// to label the "Switch to X" tray menu entry at startup.
+/// The modes in the order the tray's "Switch mode" menu lists them.
 #[allow(dead_code)]
-pub fn other(b: Backend) -> Backend {
+pub const MODES: [Backend; 3] = [Backend::Wsl, Backend::HostNative, Backend::Dual];
+
+/// The tray menu id of a mode's item.
+#[allow(dead_code)]
+pub fn mode_menu_id(b: Backend) -> &'static str {
     match b {
-        Backend::Wsl => Backend::HostNative,
-        Backend::HostNative => Backend::Dual,
-        Backend::Dual => Backend::Wsl,
+        Backend::Wsl => "switch_mode_wsl",
+        Backend::HostNative => "switch_mode_host",
+        Backend::Dual => "switch_mode_dual",
+    }
+}
+
+#[allow(dead_code)]
+pub fn mode_from_menu_id(id: &str) -> Option<Backend> {
+    MODES.into_iter().find(|mode| mode_menu_id(*mode) == id)
+}
+
+/// What picking `target` in the "Switch mode" menu does.
+#[allow(dead_code)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ModePick {
+    /// It is already the saved mode.
+    Keep,
+    /// Nothing was saved and it is the mode running now: save it, no restart.
+    Save,
+    /// A different mode: save it and restart into it.
+    SaveAndRestart,
+}
+
+/// `saved` is the saved mode, if any; `running` is what this launch chose.
+/// A saved mode that fell back (saved Dual, running on Windows) is still the
+/// saved mode: picking Windows there saves Windows and restarts, so the next
+/// launch stops trying WSL.
+#[allow(dead_code)]
+pub fn mode_pick(saved: Option<Backend>, running: Backend, target: Backend) -> ModePick {
+    match saved {
+        Some(saved) if saved == target => ModePick::Keep,
+        Some(_) => ModePick::SaveAndRestart,
+        None if running == target => ModePick::Save,
+        None => ModePick::SaveAndRestart,
     }
 }
 
@@ -814,9 +914,52 @@ pub fn other(b: Backend) -> Backend {
 #[allow(dead_code)]
 pub fn label(b: Backend) -> &'static str {
     match b {
-        Backend::Wsl => "WSL",
-        Backend::HostNative => "Windows-native",
+        Backend::Wsl => "Linux (WSL)",
+        Backend::HostNative => "Windows",
         Backend::Dual => "Dual (WSL + Windows)",
+    }
+}
+
+#[cfg(test)]
+mod switch_mode_tests {
+    use super::{mode_from_menu_id, mode_menu_id, mode_pick, Backend, ModePick, MODES};
+
+    #[test]
+    fn every_mode_has_its_own_menu_item() {
+        for mode in MODES {
+            assert_eq!(mode_from_menu_id(mode_menu_id(mode)), Some(mode));
+        }
+        assert_eq!(mode_from_menu_id("quit"), None);
+        assert_eq!(mode_from_menu_id("switch_mode"), None);
+    }
+
+    #[test]
+    fn any_mode_is_one_pick_away() {
+        // The old single item cycled WSL → Windows → Dual, so from Dual the
+        // only offer was WSL.
+        for saved in MODES {
+            for target in MODES {
+                let expected = if saved == target { ModePick::Keep } else { ModePick::SaveAndRestart };
+                assert_eq!(mode_pick(Some(saved), saved, target), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn windows_can_be_picked_after_a_fallback_to_windows() {
+        // Saved Dual, WSL didn't start, running on Windows: picking Windows
+        // must save it, or every launch tries WSL again.
+        assert_eq!(
+            mode_pick(Some(Backend::Dual), Backend::HostNative, Backend::HostNative),
+            ModePick::SaveAndRestart
+        );
+        assert_eq!(mode_pick(Some(Backend::Dual), Backend::HostNative, Backend::Dual), ModePick::Keep);
+    }
+
+    #[test]
+    fn with_nothing_saved_picking_the_running_mode_just_saves_it() {
+        assert_eq!(mode_pick(None, Backend::HostNative, Backend::HostNative), ModePick::Save);
+        assert_eq!(mode_pick(None, Backend::HostNative, Backend::Wsl), ModePick::SaveAndRestart);
     }
 }
 
@@ -834,9 +977,23 @@ mod autostart_tests {
 #[cfg(test)]
 mod first_run_tests {
     use super::{
-        classify_wsl_error, first_run_plan, request_wsl_setup_offer, take_wsl_setup_offer,
-        wsl_failure_detail, wsl_output_text, FirstRunPlan, WslStatus,
+        classify_wsl_error, first_run_choice, repair_plan, request_wsl_setup_offer,
+        take_wsl_setup_offer, wsl_failure_detail, wsl_output_text, Backend, FirstRunChoice,
+        RepairPlan, WslStatus,
     };
+    use crate::agent_detect::{Agents, WslAgents};
+
+    const NONE: Agents = Agents { claude: false, codex: false };
+    const CLAUDE: Agents = Agents { claude: true, codex: false };
+    const BOTH: Agents = Agents { claude: true, codex: true };
+
+    fn windows(save: bool) -> FirstRunChoice {
+        FirstRunChoice { backend: Backend::HostNative, save }
+    }
+
+    fn wsl() -> FirstRunChoice {
+        FirstRunChoice { backend: Backend::Wsl, save: true }
+    }
 
     fn utf16le(text: &str) -> Vec<u8> {
         text.encode_utf16().flat_map(u16::to_le_bytes).collect()
@@ -878,60 +1035,91 @@ mod first_run_tests {
     }
 
     #[test]
-    fn a_failed_wsl_with_a_distro_is_offered_the_update() {
-        assert_eq!(first_run_plan(WslStatus::Failed, false, true), FirstRunPlan::OfferUpdate);
+    fn no_wsl_opens_on_windows_and_saves_it_once_an_agent_is_there() {
+        for agents in [CLAUDE, BOTH] {
+            assert_eq!(first_run_choice(agents, WslAgents::NoDistro, true), windows(true));
+        }
+        // A new PC with nothing installed: someone who later sets up WSL and
+        // installs their agents there must not be pinned to Windows.
+        assert_eq!(first_run_choice(NONE, WslAgents::NoDistro, true), windows(false));
     }
 
     #[test]
-    fn no_wsl_opens_on_windows_without_a_dialog() {
-        for status in [WslStatus::NoDistro, WslStatus::Unavailable] {
-            assert_eq!(
-                first_run_plan(status, false, true),
-                FirstRunPlan::WindowsSilently { persist: true }
-            );
+    fn agents_only_on_one_side_run_there() {
+        assert_eq!(first_run_choice(CLAUDE, WslAgents::Running(NONE), true), windows(true));
+        assert_eq!(first_run_choice(NONE, WslAgents::Running(CLAUDE), true), wsl());
+    }
+
+    #[test]
+    fn agents_on_both_sides_run_on_the_side_with_more_and_wsl_on_a_tie() {
+        assert_eq!(first_run_choice(BOTH, WslAgents::Running(CLAUDE), true), windows(true));
+        assert_eq!(first_run_choice(CLAUDE, WslAgents::Running(BOTH), true), wsl());
+        assert_eq!(first_run_choice(CLAUDE, WslAgents::Running(CLAUDE), true), wsl());
+        assert_eq!(first_run_choice(BOTH, WslAgents::Running(BOTH), true), wsl());
+    }
+
+    #[test]
+    fn dual_is_never_chosen_automatically() {
+        for on_windows in [NONE, CLAUDE, BOTH] {
+            for in_wsl in [
+                WslAgents::NoDistro,
+                WslAgents::Asleep,
+                WslAgents::Unknown,
+                WslAgents::Running(NONE),
+                WslAgents::Running(CLAUDE),
+                WslAgents::Running(BOTH),
+            ] {
+                for start_allowed in [false, true] {
+                    assert_ne!(
+                        first_run_choice(on_windows, in_wsl, start_allowed).backend,
+                        Backend::Dual
+                    );
+                }
+            }
         }
     }
 
     #[test]
-    fn working_wsl_keeps_the_preference_dialog() {
-        assert_eq!(
-            first_run_plan(WslStatus::Ready, false, true),
-            FirstRunPlan::AskPreference
-        );
-        assert_eq!(
-            first_run_plan(WslStatus::Ready, true, true),
-            FirstRunPlan::AskPreference
-        );
-    }
-
-    #[test]
-    fn wsl_needing_an_update_keeps_the_update_offer() {
-        assert_eq!(
-            first_run_plan(WslStatus::NeedsUpdate, false, true),
-            FirstRunPlan::OfferUpdate
-        );
-    }
-
-    #[test]
-    fn repair_setup_still_offers_the_install() {
-        for status in [WslStatus::NoDistro, WslStatus::Unavailable] {
-            assert_eq!(
-                first_run_plan(status, true, true),
-                FirstRunPlan::OfferInstall
-            );
+    fn no_agent_anywhere_runs_windows_and_looks_again_next_launch() {
+        for in_wsl in [
+            WslAgents::Running(NONE),
+            WslAgents::Asleep,
+            WslAgents::Unknown,
+            WslAgents::NoDistro,
+        ] {
+            assert_eq!(first_run_choice(NONE, in_wsl, true), windows(false));
         }
+    }
+
+    #[test]
+    fn a_sleeping_wsl_is_not_woken_to_decide() {
+        // Agents on Windows are enough to settle on Windows. Without them
+        // nothing is saved, so a launch with WSL awake can still find its agents.
+        assert_eq!(first_run_choice(CLAUDE, WslAgents::Asleep, true), windows(true));
+        assert_eq!(first_run_choice(CLAUDE, WslAgents::Unknown, true), windows(true));
+        assert_eq!(first_run_choice(NONE, WslAgents::Asleep, true), windows(false));
     }
 
     #[test]
     fn low_disk_runs_windows_for_this_session_only() {
-        // wsl_probe_once reports Unavailable when the disk gate blocks WSL; that
-        // says nothing about whether WSL is installed, so don't save Windows
-        // and don't offer an install.
-        for offer in [false, true] {
-            assert_eq!(
-                first_run_plan(WslStatus::Unavailable, offer, false),
-                FirstRunPlan::WindowsSilently { persist: false }
-            );
+        // The disk gate blocks WSL, so detection reports Unknown; that says
+        // nothing about whether WSL has agents. Save nothing.
+        for agents in [NONE, CLAUDE, BOTH] {
+            assert_eq!(first_run_choice(agents, WslAgents::Unknown, false), windows(false));
+            assert_eq!(first_run_choice(agents, WslAgents::NoDistro, false), windows(false));
+        }
+    }
+
+    #[test]
+    fn repair_setup_offers_the_fix_wsl_needs() {
+        assert_eq!(repair_plan(WslStatus::Ready, true), RepairPlan::Detect);
+        for status in [WslStatus::NeedsUpdate, WslStatus::Failed] {
+            assert_eq!(repair_plan(status, true), RepairPlan::OfferUpdate);
+        }
+        for status in [WslStatus::NoDistro, WslStatus::Unavailable] {
+            assert_eq!(repair_plan(status, true), RepairPlan::OfferInstall);
+            // Low disk: no install offer on a probe that can't be trusted.
+            assert_eq!(repair_plan(status, false), RepairPlan::Detect);
         }
     }
 

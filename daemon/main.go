@@ -828,51 +828,10 @@ func main() {
 		log.Printf("suspended %d resumable agent pane(s) for manual resume (after-restart mode %q)", suspended, resumeMode)
 	}
 
-	// Sweep orphan agent sockets. Anything in ~/.solu/agents/ that doesn't
-	// belong to a live pane is leftover from a crashed agent, a killed
-	// daemon, or a prior panes.json that got rewritten. Safe to delete —
-	// a live agent's socket is kept open by its process, and removing the
-	// filesystem entry doesn't affect an already-bound Unix socket.
-	agentsDir := filepath.Join(*dataDir, "agents")
-	if entries, err := os.ReadDir(agentsDir); err == nil && historyErr == nil {
-		live := map[string]bool{}
-		for _, history := range ownerHistories {
-			if !history.RestoreEnabled && history.State.Phase != "retired" {
-				live[filepath.Base(history.Pane.SocketPath)] = true
-			}
-		}
-		for _, p := range mgr.List() {
-			live[filepath.Base(p.SocketPath)] = true
-		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".sock") {
-				continue
-			}
-			if live[e.Name()] {
-				continue
-			}
-			if err := os.Remove(filepath.Join(agentsDir, e.Name())); err == nil {
-				log.Printf("removed orphan socket %s", e.Name())
-			}
-		}
-	}
-
-	// Reap leaked agent PROCESSES (the socket sweep above only deletes files): a
-	// surviving-but-unreattached agent, or a duplicate a prior resume left on the
-	// same socket, that no RUNNING pane owns. Runs after the restore loop so every
-	// reattached/respawned agent is already a live pane's Pid and is spared. Scoped
-	// to agentsDir so it ONLY reaps our own agents — never another daemon's.
-	if historyErr == nil {
-		reapOrphanAgents(mgr, agentsDir, ownerHistories)
-	}
-	// A managed harness client is DETACHED from its pane's process group, so a
-	// pane restart can orphan it; its harness child then holds the session's
-	// cross-process flock and later /resume calls answer "Internal error". Reap
-	// those left behind by a predecessor agent now that every live pane's agent
-	// pid is published.
-	if historyErr == nil {
-		reapOrphanHarnessClients(mgr, *dataDir, ownerHistories)
-	}
+	// Remove sockets and agent processes that no pane owns — but only when the
+	// pane list read at startup is a trustworthy record (agent_reaper.go).
+	panesProblem, panesRestored := paneStore.BootProblem()
+	cleanOrphansAtBoot(mgr, *dataDir, ownerHistories, historyErr, panesProblem, panesRestored)
 
 	for i := range toResume {
 		mgr.SuspendExisting(&toResume[i])
@@ -1303,7 +1262,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	api.stopService = stop
-	boot.ctx = ctx
+	boot.ctx, boot.server = ctx, srv
 	go api.entitlements.run(ctx)
 	if bootTeamSource != "env" {
 		go settleAgentIntegrationVerdict(ctx, agentIntegration, *addr, cachedOperatorVerdictFresh, legacyAgentRegistrationPresent)

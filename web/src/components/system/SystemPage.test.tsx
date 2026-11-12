@@ -44,6 +44,38 @@ describe('SystemPage',()=>{
     render(<SystemPage onClose={()=>{}}/>);
     expect(screen.getByText('measured 2m ago · fresh cache')).toBeInTheDocument();
   });
+  describe('refused pairing',()=>{
+    const devicesFix='This computer’s pairing is no longer accepted. Open Settings › Devices › Phone access, choose Sign in, then Pair again.';
+    const refused=()=>{const status=fixture();status.surface.cloud={configured:true,hasCreds:true,credsInvalid:true,relayState:'offline'};return status;};
+    afterEach(()=>{delete (window as unknown as {__SOLU_TAURI__?:boolean}).__SOLU_TAURI__;});
+
+    it('says how to fix it next to the Devices link, for operators',()=>{
+      (window as unknown as {__SOLU_TAURI__?:boolean}).__SOLU_TAURI__=true;
+      mocks.snapshot={status:refused(),error:null,polling:false};
+      render(<SystemPage onClose={()=>{}}/>);
+      expect(screen.getByText(devicesFix)).toHaveClass('system-error-text');
+      expect(screen.getByRole('button',{name:'Devices & cloud'})).toBeInTheDocument();
+    });
+    it('says it on a public install too; a browser tab is sent to the app on this computer',()=>{
+      useEntitlements.setState({loaded:true,tier:'account',team:false,operator:false,account:true});
+      mocks.snapshot={status:refused(),error:null,polling:false};
+      render(<SystemPage onClose={()=>{}}/>);
+      expect(screen.getByText('This computer’s pairing is no longer accepted. In the SoluTerminal app on this computer, open Settings › Devices › Phone access and choose Pair again.')).toBeInTheDocument();
+    });
+    it('in the desktop app with no account, says to sign in first',()=>{
+      (window as unknown as {__SOLU_TAURI__?:boolean}).__SOLU_TAURI__=true;
+      useEntitlements.setState({loaded:true,tier:'none',team:false,operator:false,account:false});
+      mocks.snapshot={status:refused(),error:null,polling:false};
+      render(<SystemPage onClose={()=>{}}/>);
+      expect(screen.getByText('This computer’s pairing is no longer accepted. First choose Create free account or sign in under Settings › Account, then open Settings › Devices › Phone access, choose Sign in, then Pair again.')).toBeInTheDocument();
+    });
+    it('says nothing about pairing while the pairing is accepted',()=>{
+      const status=fixture();status.surface.cloud={configured:true,hasCreds:true,credsInvalid:false,relayState:'offline'};
+      mocks.snapshot={status,error:null,polling:false};
+      render(<SystemPage onClose={()=>{}}/>);
+      expect(screen.queryByText(/pairing is no longer accepted/)).not.toBeInTheDocument();
+    });
+  });
   it('renders WSL and Windows-host provenance',()=>{
     const status=fixture();
     status.host.provenance='wsl';

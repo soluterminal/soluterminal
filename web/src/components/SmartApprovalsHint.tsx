@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useCloud } from '../cloud';
 import { useAccountFeatures, useEntitlements } from '../entitlements';
-import { connectThisComputerWithToast } from '../accountConnect';
+import { connectThisComputerAfterWarning } from '../accountConnect';
 
 // "Approve with caution" asks Jev whether a prompt is low-risk. With a Jev
 // key saved on this computer the daemon calls it directly; otherwise the
@@ -15,6 +15,10 @@ export const SMART_APPROVALS_FREE = 'Smart approvals: via your free account (100
 export const SMART_APPROVALS_TEAM = 'Smart approvals: via your account';
 export const SMART_APPROVALS_CONNECT = 'Connect this computer to use smart approvals';
 export const SMART_APPROVALS_USED_UP = "Smart approvals: today's are used up (they reset tomorrow)";
+/** After Connect from the hint (wording item 21): connecting makes them
+ *  available; it doesn't switch anything on. */
+export const SMART_APPROVALS_CONNECTED =
+  'This computer is connected to your account. You can use smart approvals in a few seconds.';
 
 export function smartApprovalsLeft(remaining: number, limit?: number): string {
   return `Smart approvals: ${remaining} of ${limit ?? 100} left today`;
@@ -85,7 +89,7 @@ export function SmartApprovalsHint() {
           type="button"
           role="menuitem"
           className="pane-ctx-menu-hint-action"
-          onClick={() => { void connectThisComputerWithToast(); }}
+          onClick={() => { void connectThisComputerAfterWarning(SMART_APPROVALS_CONNECTED); }}
         >
           {SMART_APPROVALS_CONNECT}
         </button>

@@ -58,7 +58,7 @@ function refreshVerdictSoon(): void {
   window.setTimeout(() => { void useEntitlements.getState().load(); }, 4000);
 }
 
-const CONNECTED_FOR_VOICE = 'This computer is connected to your account. Try voice again in a few seconds.';
+export const CONNECTED_FOR_VOICE = 'This computer is connected to your account. Try voice again in a few seconds.';
 
 /** Connect on demand (the mic's "Connect" action, the feedback form's
  *  "Connect this computer") and say what happened. Resolves true once
@@ -85,7 +85,8 @@ export async function connectThisComputerWithToast(connected = CONNECTED_FOR_VOI
 }
 
 /** Connect from a button whose label is about something else (the feedback
- *  form's "Connect this computer"): the warning comes first, with Cancel
+ *  form's "Connect this computer", the mic's Connect, the smart-approvals
+ *  hint; ST-208): the warning comes first, with Cancel
  *  focused, and says so when the person chose not to connect before, because
  *  force overrides that choice (@secure). Nothing is changed without Connect
  *  this PC; the only call before it is a {check: true} probe. */
@@ -163,7 +164,10 @@ async function askToConnect(): Promise<void> {
     toast(CONNECT_LATER_TOAST, {
       kind: 'info',
       ttlMs: 10000,
-      action: { label: 'Connect now', run: () => { void connectAndReport(); } },
+      // Escape isn't a decision and a toast can be clicked much later, so
+      // the warning comes again first (@secure: every force connect follows
+      // the warning in the same click flow).
+      action: { label: 'Connect now', run: () => { void connectThisComputerAfterWarning(CONNECTED_FROM_PROMPT); } },
     });
     return;
   }
@@ -175,11 +179,14 @@ async function askToConnect(): Promise<void> {
   await connectAndReport();
 }
 
+const CONNECTED_FROM_PROMPT = 'This PC is connected. You can disconnect it in Settings → Devices & updates.';
+
+// The first-run prompt's own Connect: that click is the warning's confirm.
 async function connectAndReport(): Promise<void> {
   const toast = useStore.getState().toast;
   const result = await connectThisComputer({ force: true });
   if (result.status === 'connecting' || result.status === 'connected') {
-    toast('This PC is connected. You can disconnect it in Settings → Devices & updates.', { kind: 'info', ttlMs: 7000 });
+    toast(CONNECTED_FROM_PROMPT, { kind: 'info', ttlMs: 7000 });
     refreshVerdictSoon();
   } else {
     toast(result.message || "Couldn't connect this PC.", { kind: 'warn', ttlMs: 10000 });

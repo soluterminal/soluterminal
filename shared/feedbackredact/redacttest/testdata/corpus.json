@@ -370,6 +370,36 @@
     "want": "~\\project\\file.go"
   },
   {
+    "name": "home /Users name with a space",
+    "input": "/Users/Fake User/project/file.go",
+    "want": "~/project/file.go"
+  },
+  {
+    "name": "home /mnt/c/Users name with a space",
+    "input": "/mnt/c/Users/Fake User/project/file.go",
+    "want": "~/project/file.go"
+  },
+  {
+    "name": "windows home name with a space",
+    "input": "C:\\Users\\Fake User\\project\\file.go",
+    "want": "~\\project\\file.go"
+  },
+  {
+    "name": "windows home name runs to the line end",
+    "input": "saved in C:\\Users\\Fake User \nnext line",
+    "want": "saved in ~ \nnext line"
+  },
+  {
+    "name": "windows home name stops at a quote or colon",
+    "input": "\"C:\\Users\\Fake User\": not found",
+    "want": "\"~\": not found"
+  },
+  {
+    "name": "linux home stops at a space",
+    "input": "/home/fakeuser is the folder",
+    "want": "~ is the folder"
+  },
+  {
     "name": "wsl unc",
     "input": "\\\\wsl.localhost\\Ubuntu\\home\\fakeuser\\file.go",
     "want": "~\\file.go"
@@ -588,5 +618,184 @@
     "name": "known code shape false positives",
     "input": "SHA256 SHA384 SHA224 AES256 BASE64",
     "want": "[redacted: code] [redacted: code] [redacted: code] [redacted: code] [redacted: code]"
+  },
+  {
+    "name": "quoted JSON escaped quote",
+    "input": "{\"password\":\"fake\\\" short tail\",\"safe\":true}",
+    "want": "{\"password\":\"[redacted: token]\",\"safe\":true}",
+    "web": true
+  },
+  {
+    "name": "quoted assignment escaped quote",
+    "input": "password=\"fake\\\" short tail\" next",
+    "want": "password=\"[redacted: token]\" next",
+    "web": true
+  },
+  {
+    "name": "quoted assignment escaped single quote",
+    "input": "password='fake\\' short tail' next",
+    "want": "password='[redacted: token]' next",
+    "web": true
+  },
+  {
+    "name": "quoted JSON escaped backslash",
+    "input": "{\"token\":\"fake\\\\\",\"safe\":\"visible\"}",
+    "want": "{\"token\":\"[redacted: token]\",\"safe\":\"visible\"}",
+    "web": true
+  },
+  {
+    "name": "quoted assignment escaped backslash",
+    "input": "password=\"fake\\\\\" next",
+    "want": "password=\"[redacted: token]\" next",
+    "web": true
+  },
+  {
+    "name": "quoted assignment repeated escapes",
+    "input": "password=\"fake\\\\\\\" short\\\" tail\" next",
+    "want": "password=\"[redacted: token]\" next",
+    "web": true
+  },
+  {
+    "name": "quoted JSON escape text",
+    "input": "{\"token\":\"fake\\n short\\t tail\",\"safe\":true}",
+    "want": "{\"token\":\"[redacted: token]\",\"safe\":true}",
+    "web": true
+  },
+  {
+    "name": "quoted code JSON escaped quote",
+    "input": "{\"device_code\":\"fake\\\" short tail\",\"safe\":true}",
+    "want": "{\"device_code\":\"[redacted: code]\",\"safe\":true}",
+    "web": true
+  },
+  {
+    "name": "quoted code assignment escaped quote",
+    "input": "pairing code=\"fake\\\" short tail\" next",
+    "want": "pairing code=\"[redacted: code]\" next",
+    "web": true
+  },
+  {
+    "name": "quoted code assignment escaped single quote",
+    "input": "claim_code='fake\\' short tail' next",
+    "want": "claim_code='[redacted: code]' next",
+    "web": true
+  },
+  {
+    "name": "quoted value preserves markers",
+    "input": "password=\"fake\\\" [redacted: token] tail\" next",
+    "want": "password=\"[redacted: token][redacted: token][redacted: token]\" next",
+    "web": true
+  },
+  {
+    "name": "quoted prefixed assignment escaped quote",
+    "input": "DB_PASSWORD=\"fake\\\" short tail\" next",
+    "want": "DB_PASSWORD=\"[redacted: token]\" next",
+    "web": true
+  },
+  {
+    "name": "quoted JSON unclosed escaped quote",
+    "input": "{\"password\":\"fake\\\" short tail",
+    "want": "{\"password\":\"[redacted: token]",
+    "web": true
+  },
+  {
+    "name": "quoted code JSON unclosed escaped quote",
+    "input": "{\"device_code\":\"fake\\\" short tail",
+    "want": "{\"device_code\":\"[redacted: code]",
+    "web": true
+  },
+  {
+    "name": "quoted assignment unclosed escaped quote",
+    "input": "password=\"fake\\\" short tail",
+    "want": "password=\"[redacted: token]",
+    "web": true
+  },
+  {
+    "name": "quoted assignment unclosed single quote",
+    "input": "password='fake\\' short tail",
+    "want": "password='[redacted: token]",
+    "web": true
+  },
+  {
+    "name": "quoted JSON trailing backslash",
+    "input": "{\"token\":\"fake\\",
+    "want": "{\"token\":\"[redacted: token]",
+    "web": true
+  },
+  {
+    "name": "quoted assignment trailing backslash",
+    "input": "password='fake\\",
+    "want": "password='[redacted: token]",
+    "web": true
+  },
+  {
+    "name": "quoted JSON unclosed CRLF",
+    "input": "{\"token\":\"fake\\\" tail\r\nnext",
+    "want": "{\"token\":\"[redacted: token]\r\nnext",
+    "web": true
+  },
+  {
+    "name": "quoted JSON adjacent key after lone backslash",
+    "input": "{\"token\":\"a\\\",\"password\":\"b\"}",
+    "want": "{\"token\":\"[redacted: token]\"password\":\"[redacted: token]\"}",
+    "web": true
+  },
+  {
+    "name": "quoted assignment Windows path trailing backslash",
+    "input": "secret=\"C:\\dir\\\" next",
+    "want": "secret=\"[redacted: token]",
+    "web": true
+  },
+  {
+    "name": "quoted code JSON adjacent key after lone backslash",
+    "input": "{\"device_code\":\"a\\\",\"password\":\"b\"}",
+    "want": "{\"device_code\":\"[redacted: code]\"password\":\"[redacted: token]\"}",
+    "web": true
+  },
+  {
+    "name": "quoted code JSON adjacent code after lone backslash",
+    "input": "{\"device_code\":\"a\\\",\"pairing_code\":\"b\"}",
+    "want": "{\"device_code\":\"[redacted: code]\"pairing_code\":\"[redacted: code]\"}",
+    "web": true
+  },
+  {
+    "name": "quoted assignments adjacent after lone backslash",
+    "input": "password=\"a\\\" token=\"b\"",
+    "want": "password=\"[redacted: token]\"[redacted: token]\"",
+    "web": true
+  },
+  {
+    "name": "empty single quotes fall through to the unquoted value",
+    "input": "api_key: '''{{fake6}}",
+    "want": "api_key: [redacted: token]"
+  },
+  {
+    "name": "empty single quotes before a name-like value",
+    "input": "api_key: ''MY_KEY{{fake6}}'",
+    "want": "api_key: [redacted: token]"
+  },
+  {
+    "name": "password with empty quotes then a value",
+    "input": "password: ''api_keytoken{{fake6}}",
+    "want": "password: [redacted: token]"
+  },
+  {
+    "name": "empty double quotes then a quoted word and value",
+    "input": "MY_KEY: \"\"secret\"{{fake6}}",
+    "want": "MY_KEY: [redacted: token]"
+  },
+  {
+    "name": "labelled code after empty quotes",
+    "input": "pairing code: ''ABCD99",
+    "want": "pairing code: ''[redacted: code]"
+  },
+  {
+    "name": "query key with an unclosed quote",
+    "input": "GET /x?token=\" is password: {{fake6}} next",
+    "want": "GET /x?token=\"[redacted: token]"
+  },
+  {
+    "name": "query key with a quoted value",
+    "input": "GET /x?token=\"{{fake6}}\"&page=2",
+    "want": "GET /x?token=\"[redacted: token]\"&page=2"
   }
 ]

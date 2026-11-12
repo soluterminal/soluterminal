@@ -190,12 +190,18 @@ export interface PaneInfo {
     source: 'launch' | 'broker';
     activeAccount?: string;
     restartRequired?: boolean;
+    // The daemon no longer serves the address this session was given (its
+    // port moved with the Startup mode); only a restart reconnects it.
+    connectionLost?: boolean;
     liveState?: string;
     recovery?: string;
     retryAt?: number;
     teamId?: string;
     activeTeamId?: string;
   };
+  // A PowerShell terminal holding a daemon address the daemon no longer
+  // serves: agents typed in it cannot start until the terminal is restarted.
+  terminalAddressLost?: boolean;
   titleOverride?: string;
   socketPath?: string;
   id: string;
@@ -1202,6 +1208,8 @@ export interface CreatePaneReq {
 // What Claude Code would see for a given pane's project. Returned by
 // GET /api/mcp/servers?cwd=…. Read-only — the UI doesn't mutate this;
 // users still edit ~/.claude.json or .mcp.json with their own tooling.
+// url, command and args arrive in a short display form, not as configured:
+// show and copy them as they are, and never treat them as the real entry.
 
 export interface McpServer {
   name: string;

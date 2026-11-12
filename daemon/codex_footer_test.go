@@ -99,7 +99,7 @@ func TestPutBackMessageWithFooterTextStillShows(t *testing.T) {
 // once, and one held while the person typed goes in when the box empties.
 func TestNarrowCodexPaneTakesMessagesWhenItsBoxIsEmpty(t *testing.T) {
 	narrow := codex0166Screen(t, "idle_narrow")
-	empty := strings.Replace(narrow, "› Ask Codex to do anything", "›", 1) // the faint placeholder, blanked
+	empty := narrow // keep the real placeholder for the draft guard to recognise
 	t.Run("empty box", func(t *testing.T) {
 		p, frames, screen := newDraftGuardPane(t, "narrow-empty")
 		screen.Store(empty)

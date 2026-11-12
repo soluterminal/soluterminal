@@ -33,6 +33,14 @@ func pattern(kind, expr string, groups []int, hints ...string) rule {
 }
 
 const secretName = `(?:password|passphrase|passwd|secret|token|api[_-]?key|access[_-]?key|auth[_-]?token|access_token|refresh_token|id_token|account_id|openai_api_key|codex_access_token|codex_api_key|expires_at|[A-Z][A-Z0-9_]*_KEY)`
+
+// Quoted values consume backslash escapes as a pair before matching a delimiter.
+// An unclosed value runs to the line end, including a trailing lone backslash.
+// A value is never empty: an empty quote pair falls through to the rule's
+// unquoted form, as it did before quotes were read this way.
+const doubleQuotedValue = `(?:(?:\\[^\r\n]|[^"\\\r\n])+(?:\\)?|\\)`
+const singleQuotedValue = `(?:(?:\\[^\r\n]|[^'\\\r\n])+(?:\\)?|\\)`
+
 const codeName = `(?:pairing[ _-]?code|pair[ _-]?code|device[ _-]?code|verification[ _-]?code|user[ _-]?code|claim[ _-]?code)`
 
 // This is the only pattern list. Keep provider-specific forms ahead of the
@@ -41,13 +49,19 @@ var rules = []rule{
 	pattern("private key", `(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|\z)`, nil, "private key-----"),
 	pattern("password", `(?im)(?:^|\n)[^\r\n]*(?:password|passphrase)[^:\r\n]*:[ \t]*\r?\n([^\r\n]+)`, []int{1}, "password", "passphrase"),
 	pattern("header", `(?i)\b(?:authorization|proxy-authorization|(?:set-)?cookie)[ \t]*:[ \t]*([^\s"'][^\r\n"']*)`, []int{1}, "authorization", "cookie"),
+	pattern("code", `(?im)"`+codeName+`"[ \t]*:[ \t]*"(`+doubleQuotedValue+`)(?:"|\r?$)`, []int{1}, "code"),
+	pattern("code", `(?im)\b`+codeName+`(?:[ \t]+is)?[ \t]*(?:[=:][ \t]*|[ \t]+)(?:"(`+doubleQuotedValue+`)(?:"|\r?$)|'(`+singleQuotedValue+`)(?:'|\r?$)|([^\s"'&,;<>]+))`, []int{1, 2, 3}, "code"),
+	// Merge the original quote interpretation too: an escaped closing quote
+	// must not consume a following field's opening quote and hide that value.
 	pattern("code", `(?i)"`+codeName+`"[ \t]*:[ \t]*"([^"\r\n]+)"`, []int{1}, "code"),
-	pattern("code", `(?i)\b`+codeName+`(?:[ \t]+is)?[ \t]*(?:[=:][ \t]*|[ \t]+)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s"'&,;<>]+))`, []int{1, 2, 3}, "code"),
+	pattern("code", `(?i)\b`+codeName+`(?:[ \t]+is)?[ \t]*(?:[=:][ \t]*|[ \t]+)(?:"([^"\r\n]+)"|'([^'\r\n]+)')`, []int{1, 2}, "code"),
 	pattern("claim", `\b[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}\b`, nil),
 	pattern("code", `\b[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){3}\b`, nil, "-"),
 	pattern("token", `(?i)(?:[?&])(?:code|state|sid|session|key|sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|token|access_token|id_token|refresh_token|client_secret|password|auth|[A-Z0-9_-]*`+secretName+`)=([^&\s#"'<>]+)`, []int{1}, "?", "&"),
+	pattern("token", `(?im)"`+secretName+`"[ \t]*:[ \t]*"(`+doubleQuotedValue+`)(?:"|\r?$)`, []int{1}, "\""),
+	pattern("assignment", `(?im)`+secretName+`\b[ \t]*[=:][ \t]*(?:"(`+doubleQuotedValue+`)(?:"|\r?$)|'(`+singleQuotedValue+`)(?:'|\r?$)|([^\s]+))`, []int{1, 2, 3}, "=", ":"),
 	pattern("token", `(?i)"`+secretName+`"[ \t]*:[ \t]*"([^"\r\n]+)"`, []int{1}, "\""),
-	pattern("assignment", `(?i)`+secretName+`\b[ \t]*[=:][ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s]+))`, []int{1, 2, 3}, "=", ":"),
+	pattern("assignment", `(?i)`+secretName+`\b[ \t]*[=:][ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)')`, []int{1, 2}, "=", ":"),
 	pattern("token", `(?i)\bBearer[ \t]+([A-Za-z0-9._~+/-]+=*)`, []int{1}, "bearer"),
 	pattern("token", `\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{8,}|xapp-[A-Za-z0-9-]{8,}|xoxe-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{35}|[sr]k_live_[A-Za-z0-9]{8,}|npm_[A-Za-z0-9]{8,}|glpat-[A-Za-z0-9_-]{8,}|hf_[A-Za-z]{30,})\b`, nil, "sk-", "gh", "xox", "xapp-", "AIza", "k_live_", "npm_", "glpat-", "hf_"),
 	pattern("token", `\b(?:AKIA|ASIA|AROA|AIDA|AGPA|ANPA|AIPA|ABIA|ACCA|ANVA)[0-9A-Z]{16}\b`, nil, "akia", "asia", "aroa", "aida", "agpa", "anpa", "aipa", "abia", "acca", "anva"),
@@ -56,7 +70,10 @@ var rules = []rule{
 	pattern("token", `(?i)\b[a-z][a-z0-9+.-]*://([^/\s:@]+:[^/\s@]+@)`, []int{1}, "://"),
 	pattern("email", `(?i)\b[A-Z0-9.!#$%&'*+/=?^_`+"`"+`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)+`, nil, "@"),
 	pattern("host", `\b[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+`, nil, "@"),
-	pattern("home", `(?i)(?:/mnt/[a-z]/Users|/home|/Users|[A-Z]:[\\/]Users)[\\/][^/\\\s"'<>:]+`, nil, "/users", "/home", "\\users"),
+	pattern("home", `(?i)/home/[^/\\\s"'<>:]+`, nil, "/home"),
+	// Windows and Mac user names may hold spaces: the name runs to the next
+	// slash, quote or colon, or to the line end, without trailing spaces.
+	pattern("home", `(?i)(?:/mnt/[a-z]/Users|/Users|[A-Z]:[\\/]Users)[\\/][^/\\\s"'<>:](?:[^/\\\r\n"'<>:]*[^/\\\s"'<>:])?`, nil, "/users", "\\users"),
 	pattern("home", `(?i)\\\\wsl(?:\.localhost|\$)\\[^\\\s]+\\home\\[^\\\s"'<>:]+`, nil, "\\wsl"),
 	pattern("home", `/root(?:/|\b)`, nil, "/root"),
 	pattern("token", `\b[A-Za-z0-9_-]{32,}\b`, nil),
@@ -220,18 +237,23 @@ func matches(p rule, s, lower string, identity bool) []span {
 	}
 	var out []span
 	for _, m := range p.re.FindAllStringSubmatchIndex(s, -1) {
-		// Query parameters have their own delimiter-aware rule. Everywhere
-		// else, an unquoted password may contain punctuation and must be
-		// removed through the next whitespace, preserving the legacy safety.
-		if p.kind == "assignment" && queryKey(s, m[0]) {
-			continue
-		}
 		a, b := m[0], m[1]
+		matched := 0
 		for _, group := range p.groups {
 			if m[2*group] >= 0 {
 				a, b = m[2*group], m[2*group+1]
+				matched = group
 				break
 			}
+		}
+		// Query parameters have their own delimiter-aware rule for an unquoted
+		// value. Everywhere else, an unquoted password may contain punctuation
+		// and must be removed through the next whitespace, preserving the
+		// legacy safety. A quoted value after a query key is removed here: the
+		// query rule stops at quotes, and skipping an unclosed one would hide
+		// every assignment after it on the line.
+		if p.kind == "assignment" && queryKey(s, m[0]) && len(p.groups) == 3 && matched == p.groups[2] {
+			continue
 		}
 		if a == b {
 			continue

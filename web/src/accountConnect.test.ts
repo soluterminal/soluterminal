@@ -158,7 +158,7 @@ describe('askToConnectAfterSignIn', () => {
 
   it('treats Escape or a click outside as "later", not as Not now', async () => {
     signedIn();
-    const { bodies } = daemon([{ status: 'available' }, { status: 'connecting' }]);
+    const { bodies } = daemon([{ status: 'available' }, { status: 'available' }, { status: 'available' }, { status: 'connecting' }]);
     const toast = vi.fn();
     const prevToast = useStore.getState().toast;
     useStore.setState({ toast: toast as never });
@@ -170,12 +170,23 @@ describe('askToConnectAfterSignIn', () => {
     expect(toast).toHaveBeenCalledWith(CONNECT_LATER_TOAST, expect.objectContaining({
       action: expect.objectContaining({ label: 'Connect now' }),
     }));
-    // The toast's "Connect now" connects straight away.
+    // The toast's "Connect now" shows the warning again (@secure): Cancel
+    // sends no connect, only Connect this PC does.
     const action = (toast.mock.calls[0][1] as { action: { run: () => void } }).action;
+    const cancelled = answerDialog(false);
     action.run();
     await new Promise((r) => setTimeout(r, 0));
+    cancelled.restore();
+    expect(cancelled.opened).toHaveLength(1);
+    expect(cancelled.opened[0]).toMatchObject({ title: CONNECT_PROMPT_TITLE, confirmLabel: 'Connect this PC', focusCancel: true });
+    expect(bodies).toEqual([{ force: false, check: true }, { force: false, check: true }]);
+
+    const confirmed = answerDialog(true);
+    action.run();
+    await new Promise((r) => setTimeout(r, 0));
+    confirmed.restore();
     useStore.setState({ toast: prevToast });
-    expect(bodies).toEqual([{ force: false, check: true }, { force: true }]);
+    expect(bodies).toEqual([{ force: false, check: true }, { force: false, check: true }, { force: false, check: true }, { force: true }]);
   });
 
   it('is pending while it asks, so other first-run questions wait', async () => {

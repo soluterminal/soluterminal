@@ -197,14 +197,62 @@ describe('BackendControls via the hosting chip', () => {
     expect(screen.getByRole('button', { name: 'Dual' })).toBeInTheDocument();
   });
 
-  it('highlights the actual backend on fallback and lets the requested backend retry', () => {
-    setDesktopBackend({ requested: 'wsl', actual: 'host', fallback: true });
+  it('marks the saved mode on fallback, lets it retry, and lets Windows be chosen for good', async () => {
+    // Saved Dual, WSL didn't start, running on Windows. "Windows" used to look
+    // selected and be disabled, so the saved mode could never change and every
+    // start tried WSL again.
+    setDesktopBackend({ requested: 'dual', actual: 'host', fallback: true });
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    useStore.setState({
+      openDialog: (d: { resolve: (v: unknown) => void }) => d.resolve(true),
+    } as never);
 
     render(<ContextPill />);
-
     openEnv();
-    expect(screen.getByRole('button', { name: 'Windows' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Linux' })).not.toBeDisabled();
+
+    const windows = screen.getByRole('button', { name: 'Windows' });
+    const dual = screen.getByRole('button', { name: 'Dual' });
+    expect(windows).not.toBeDisabled();
+    expect(windows.className).not.toContain('active');
+    expect(dual).not.toBeDisabled();
+    expect(dual.className).toContain('active');
+    expect(screen.getByRole('note').textContent).toBe(
+      'Saved mode: Dual. It didn’t start, so this session is running on Windows. Choose Windows to stop trying Dual at each start.',
+    );
+
+    fireEvent.click(windows);
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('desktop_set_backend_mode', { mode: 'host' }),
+    );
+  });
+
+  it('retries the saved mode after a fallback when it is picked again', async () => {
+    setDesktopBackend({ requested: 'wsl', actual: 'host', fallback: true });
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    useStore.setState({
+      openDialog: (d: { resolve: (v: unknown) => void }) => d.resolve(true),
+    } as never);
+
+    render(<ContextPill />);
+    openEnv();
+    fireEvent.click(screen.getByRole('button', { name: 'Linux' }));
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('desktop_set_backend_mode', { mode: 'wsl' }),
+    );
+  });
+
+  it('without a fallback the saved mode is the selected, disabled one and there is no note', () => {
+    setDesktopBackend({ requested: 'dual', actual: 'dual' });
+
+    render(<ContextPill />);
+    openEnv();
+
+    expect(screen.getByRole('button', { name: 'Dual' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Windows' })).not.toBeDisabled();
+    expect(screen.queryByRole('note')).toBeNull();
   });
 
   it('switches the active side in router dual mode without using the legacy URL swap', () => {

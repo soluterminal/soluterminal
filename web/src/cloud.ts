@@ -632,8 +632,8 @@ export const useCloud = create<CloudState>((set, get) => ({
  * stamps X-Forwarded-Prefix, which the daemon's fileAccessOverRelay checks.
  * Cloud sign-in alone is not remote: the local daemon serves `/api/config`
  * with `isLocal: true` (daemon/config.go), and API calls stay un-prefixed.
- * This mirrors StatusBar ConnChip (`relayed = !isLocal` in cloud mode) and
- * BackendSwitcher (`cloudMode === 'cloud' && !cloudIsLocal`). Settings
+ * This mirrors BackendSwitcher (`cloudMode === 'cloud' && !cloudIsLocal`),
+ * which drives the top-left context pill. Settings
  * that require a cloud session deliberately keep gating on cloud mode,
  * independently of whether a relay is in use.
  */

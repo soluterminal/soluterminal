@@ -205,6 +205,68 @@ func TestFeedbackPreviewWorksUnpaired(t *testing.T) {
 	}
 }
 
+func TestFeedbackTextBoundsAfterRedaction(t *testing.T) {
+	srv, raw := feedbackCloudStub(t)
+	a := feedbackTestServer(t, srv.URL)
+	for _, tc := range []struct {
+		name, title, body, wantTitle, wantBody string
+	}{
+		{
+			name:      "body quoted value",
+			title:     "report",
+			body:      `{"password":"` + strings.Repeat("fake value ", feedbackMaxBody/10) + `","safe":true}`,
+			wantTitle: "report", wantBody: `{"password":"[redacted: token]","safe":true}`,
+		},
+		{
+			name:      "title quoted value",
+			title:     `{"password":"` + strings.Repeat("fake value ", feedbackMaxTitle/10) + `","safe":true}`,
+			body:      "report",
+			wantTitle: `{"password":"[redacted: token]","safe":true}`, wantBody: "report",
+		},
+		{
+			name:      "derived title quoted value",
+			body:      `{"password":"` + strings.Repeat("fake value ", feedbackMaxTitle/10) + `","safe":true}`,
+			wantTitle: `{"password":"[redacted: token]","safe":true}`,
+			wantBody:  `{"password":"[redacted: token]","safe":true}`,
+		},
+		{
+			name:      "title copied from removed body context",
+			title:     "fake+key/material+line",
+			body:      "What I was trying to do: " + strings.Repeat("-", 5) + "BEGIN OPENSSH PRIVATE KEY" + strings.Repeat("-", 5) + "\nfake+key/material+line",
+			wantTitle: "What I was trying to do: [redacted: private key]",
+			wantBody:  "What I was trying to do: [redacted: private key]",
+		},
+		{
+			name:  "safe text remains bounded",
+			title: strings.Repeat("safe ", feedbackMaxTitle), body: strings.Repeat("safe ", feedbackMaxBody),
+			wantTitle: strings.Repeat("safe ", feedbackMaxTitle/5),
+			wantBody:  strings.Repeat("safe ", feedbackMaxBody/5) + "sa",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := feedbackReq{Type: "bug", Title: tc.title, Body: tc.body}
+			prev := postFeedbackPreview(t, a, req)
+			if prev.Title != tc.wantTitle || prev.Body != tc.wantBody {
+				t.Fatalf("preview text differs: title=%q body=%q", prev.Title, prev.Body)
+			}
+			w := postDaemonFeedback(t, a, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("submit status = %d, body=%s", w.Code, w.Body.String())
+			}
+			var got feedbackSubmission
+			if err := json.Unmarshal(*raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Title != prev.Title || got.Body != prev.Body {
+				t.Fatal("submitted text differs from preview")
+			}
+			if len(got.Title) > feedbackMaxTitle || len(got.Body) > feedbackMaxBody {
+				t.Fatal("submitted text exceeds bounds")
+			}
+		})
+	}
+}
+
 // The redaction is idempotent over the bounds, so a re-sent preview is
 // unchanged even when it was cut to size.
 func TestFeedbackBoundsIdempotent(t *testing.T) {

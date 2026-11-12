@@ -72,7 +72,7 @@ func feedbackWSLWindowsVer() string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, feedbackCmdExe, "/c", "ver")
+	cmd := exec.CommandContext(ctx, feedbackCmdExe, "/d", "/c", "ver")
 	applyNoWindow(cmd)
 	// Started from a Windows folder, cmd doesn't warn about a UNC path.
 	cmd.Dir = filepath.Dir(feedbackCmdExe)

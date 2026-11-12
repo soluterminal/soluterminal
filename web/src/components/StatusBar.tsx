@@ -15,10 +15,11 @@ import { PortsPopover } from './PortsPopover';
 import { slotList } from '../extensions';
 import { ranAgo } from '../lib/ranAgo';
 import { PhoneAccessChip } from './PhoneAccessChip';
-import { useOperatorFeatures } from '../entitlements';
+import { useEntitlements, useOperatorFeatures, usePhoneAccessAllowed } from '../entitlements';
+import { isDesktopShell } from '../cloudPair';
 import { Tooltip } from './Tooltip';
-import { IconArrowUp, IconClock, IconAlertTriangle, IconCloud, IconGauge } from './ui/icons';
-import { useCloud } from '../cloud';
+import { IconArrowUp, IconClock, IconAlertTriangle, IconGauge } from './ui/icons';
+import { isRelayedSession, useCloud } from '../cloud';
 import { isEmbedded } from '../embed';
 import { ApiError, api, backgroundServiceIsSelectedBackend } from '../api';
 import { primaryLabel } from './PortPanel';
@@ -26,7 +27,7 @@ import { isWebService, workspacePorts } from '../lib/ports';
 import './statusbarChips.css';
 import { deriveUpdateHoldPresentation, type Health, type ReleaseCheck } from '../types';
 import type { ReleaseTrainStatus } from '../api';
-import { PLAIN_SYSTEM_AREA } from './system/systemPlain';
+import { PLAIN_SYSTEM_AREA, cloudPairingFix, pairingFixPlace } from './system/systemPlain';
 import { usePresentationMode } from '../lib/hideIdentities';
 import { workspacePaneIds } from '../lib/workspaceView';
 
@@ -38,91 +39,52 @@ function formatDrainCountdown(deadlineMs: number, nowMs: number): string {
 }
 
 // Backend the desktop shell injects on the main window (see SHARED CONTRACTS
-// in lib.rs). `fallback:true` means WSL was requested but host-native is what
-// actually came up.
+// in lib.rs). `fallback:true` means WSL (or Dual) was requested but
+// host-native is what actually came up, so `actual` is then always "host".
 interface SoluBackend {
   requested?: 'wsl' | 'host' | 'dual';
   actual?: 'wsl' | 'host' | 'dual';
   fallback?: boolean;
+  // How the shell was launched; absent on older shells.
+  launchMode?: 'local' | 'cloud';
 }
 
 function soluBackend(): SoluBackend | null {
   if (isEmbedded()) return null;
   const w = window as unknown as { __SOLU_BACKEND__?: SoluBackend; __SOLU_TAURI__?: boolean };
   if (w.__SOLU_BACKEND__) return w.__SOLU_BACKEND__;
-  // Desktop shell present but the global wasn't injected (older shell) — let
-  // the caller fall back to health.backendID. Outside the shell, return null
-  // so the chip stays hidden on the browser tab / phone PWA.
+  // Desktop shell present but the global wasn't injected (older shell): no
+  // fallback flag to read. Outside the shell, return null so the chip stays
+  // hidden on the browser tab / phone PWA.
   return w.__SOLU_TAURI__ ? {} : null;
 }
 
-// Human label for a backend id. WSL daemon == Linux; host/win == the
-// Windows-native (PowerShell) backend; dual == the router fronting both.
-function backendLabel(id: string | undefined): string {
-  switch (id) {
-    case 'wsl': return 'WSL (Linux)';
-    case 'host':
-    case 'win': return 'Windows (PowerShell)';
-    case 'dual': return 'Dual (WSL + Windows)';
-    default: return 'Backend';
-  }
-}
-
-// Map a daemon shellPlatform ("linux-amd64" / "windows-amd64") to a backend id
-// so we can still label the chip when the desktop shell didn't inject an
-// `actual` (older shell), reading only health.
-function backendFromPlatform(platform: string | undefined): string | undefined {
-  if (!platform) return undefined;
-  if (platform.startsWith('linux')) return 'wsl';
-  if (platform.startsWith('windows')) return 'win';
-  return undefined;
-}
-
-// Footer chip: which backend the daemon is running as ("WSL (Linux)" vs
-// "Windows (PowerShell)"). Desktop-shell only — a browser tab / phone PWA
-// has no backend choice, so it renders nothing (and no dangling separator).
-// On a WSL→host fallback it tints warning + explains how to recover.
-function BackendChip({ health }: { health: { backendID?: string; shellPlatform?: string } | null }) {
+// Footer warning, desktop shell only: WSL was requested but could not start,
+// so the Windows-native backend came up instead. In every other case the
+// top-left context pill already names the backend (locally) or the remote
+// computer's OS (relayed through the cloud), so this renders nothing, and no
+// dangling separator. A window launched in Cloud mode runs no local daemon:
+// the shell fills `actual` with a placeholder "host" there, so its fallback
+// flag says nothing about the computer the panes run on. An older shell
+// doesn't say how it was launched, so there the cloud session decides, and
+// nothing shows until it is known. A local daemon with a signed-in account is
+// still local, and keeps the warning.
+function BackendChip() {
   const sb = soluBackend();
-  const cloudMode = useCloud((s) => s.mode) === 'cloud';
-  if (!sb) return null; // not the desktop shell
-
-  // Cloud mode runs no LOCAL daemon, so the Tauri shell hardcodes
-  // __SOLU_BACKEND__.actual to "host" (a placeholder). Left unchecked that
-  // mislabels a remote WSL host as "Windows (PowerShell)". The real backend
-  // is the REMOTE host's, carried by the relayed /api/health
-  // (backendID / shellPlatform) — prefer it in cloud mode. Locally, keep
-  // preferring the shell's `actual` (it's truthful there) with health as
-  // fallback for older shells.
-  const id = cloudMode
-    ? (health?.backendID || backendFromPlatform(health?.shellPlatform))
-    : (sb.actual || health?.backendID || backendFromPlatform(health?.shellPlatform));
-  if (!id) return null; // cloud mode before the first health lands: hide rather than mislabel
-  const fallback = !cloudMode && sb.fallback === true;
-  // Dedup vs the top-left context pill, which already shows the selected backend
-  // on local desktop. The footer chip earns its space only when it says
-  // something the pill can't: a WSL→host fallback (actual ≠ selected), or the
-  // remote host's backend in cloud mode.
-  if (!cloudMode && !fallback) return null;
-  const label = backendLabel(id);
-
-  const title = cloudMode
-    ? `Host backend: ${label}`
-    : fallback
-      ? 'WSL was requested but could not start — running the Windows-native backend instead. ' +
-        'Fix: use the tray "Repair setup" item to re-validate WSL, or switch the backend.'
-      : `Daemon backend: ${label}`;
+  const detecting = useCloud((s) => s.mode) === 'detecting';
+  const relayed = useCloud(isRelayedSession);
+  if (!sb || sb.fallback !== true) return null;
+  if (sb.launchMode === 'cloud' || (sb.launchMode !== 'local' && (relayed || detecting))) return null;
+  const title = 'WSL was requested but could not start — running the Windows-native backend instead. ' +
+    'Fix: use the tray "Repair setup" item to re-validate WSL, or switch the backend.';
 
   return (
     <>
       <span className="statusbar-sep">·</span>
       <Tooltip label={title} side="top">
-        <span
-          className="statusbar-backend"
-          style={fallback ? { color: 'var(--warn)' } : undefined}
-        >
-          {fallback && <IconAlertTriangle size={12} />}
-          {label}
+        <span className="statusbar-backend" style={{ color: 'var(--warn)' }}>
+          <IconAlertTriangle size={12} />
+          Windows (PowerShell)
         </span>
       </Tooltip>
     </>
@@ -158,9 +120,23 @@ export function systemWithoutWorkflow(system: SystemSummary): SystemSummary {
 // partial data stay a quiet "System" (details remain on the System page).
 export function plainSystemText(system: SystemSummary): string | null {
   if (system.level !== 'critical') return null;
+  return PLAIN_SYSTEM_AREA[criticalArea(system)] ?? 'System needs attention';
+}
+
+// The area behind a critical verdict ("cloud", "disk", …).
+function criticalArea(system: SystemSummary): string {
   const top = system.reasons?.find((r) => r.level === 'critical');
-  const key = top?.key ?? system.reason?.split(':')[0]?.trim() ?? '';
-  return PLAIN_SYSTEM_AREA[key] ?? 'System needs attention';
+  return top?.key ?? system.reason?.split(':')[0]?.trim() ?? '';
+}
+
+// True when the operator chip's headline is a refused pairing ("cloud:
+// credentials invalid"), the cloud area's one critical state. A daemon that
+// sends only the headline, without per-area reasons, is read by its prefix.
+function headlineIsRefusedPairing(system: SystemSummary): boolean {
+  if (system.level !== 'critical') return false;
+  const headline = system.reasons?.find((r) => r.text === system.reason);
+  if (headline) return headline.key === 'cloud' && headline.level === 'critical';
+  return criticalArea(system) === 'cloud';
 }
 
 // The long tail behind the headline reason, for the chip's tooltip.
@@ -174,6 +150,11 @@ function SystemChip({ health }: { health: Health | null }) {
   const presenting = usePresentationMode();
   const team = useOperatorFeatures() && !presenting;
   const setOpen = useStore((s) => s.setSystemPageOpen);
+  // Settings › Devices has the Phone access row only in the desktop app, for
+  // an account; the pairing fix says how to get to it from where the person is.
+  // Until the account verdict has loaded, don't tell anyone to sign in.
+  const accountKnown = useEntitlements((s) => s.loaded);
+  const pairingFix = cloudPairingFix(pairingFixPlace(isDesktopShell(), usePhoneAccessAllowed() || !accountKnown));
   const reported = health?.system;
   const system = reported && !team ? systemWithoutWorkflow(reported) : reported;
   if (!system) return null;
@@ -185,18 +166,23 @@ function SystemChip({ health }: { health: Health | null }) {
     // The chip carries the short reason ("host disk: 102.9 GB free on C:\");
     // its long tail (VHDX, %TEMP%) rides in the tooltip, never in the bar.
     const detail = systemReasonDetail(system);
+    const headline = system.reasons?.find((r) => r.text === system.reason);
     // Service CPU has one fix, and it is on the System page this chip opens,
     // except where that restart would reach a different service than the one
-    // this chip reports (see backgroundServiceIsSelectedBackend).
-    const fix = system.reasons?.find((r) => r.text === system.reason)?.key !== 'daemonCpu' ? ''
-      : backgroundServiceIsSelectedBackend() ? ' · click to open System and restart the background service'
-        : ' · click to open System';
+    // this chip reports (see backgroundServiceIsSelectedBackend). A refused
+    // pairing ("cloud: credentials invalid") has one fix too: pair it again.
+    const fix = headlineIsRefusedPairing(system) ? ` · ${pairingFix}`
+      : headline?.key !== 'daemonCpu' ? ''
+        : backgroundServiceIsSelectedBackend() ? ' · click to open System and restart the background service'
+          : ' · click to open System';
     text = system.level === 'ok' || partial ? 'System' : (system.reason || 'System needs attention');
     title = `${system.reason || (partial ? 'Partial data (unavailable on this platform)' : 'All monitored systems healthy')}${detail ? ` · ${detail}` : ''}${age ? ` · checked ${age} ago` : ''}${fix}`;
   } else {
     const plain = plainSystemText(system);
     text = plain ?? 'System';
-    title = plain ? `${plain}. Click for details.` : 'Computer and app health. Click for details.';
+    title = !plain ? 'Computer and app health. Click for details.'
+      : criticalArea(system) === 'cloud' ? `${plain}. ${pairingFix}`
+        : `${plain}. Click for details.`;
   }
   // Public installs keep the chip neutral unless it is critical.
   const level = team || system.level === 'critical' ? system.level : 'ok';
@@ -208,43 +194,6 @@ function SystemChip({ health }: { health: Health | null }) {
           <IconGauge size={13} />
           <span role="status" aria-live="polite">{text}</span>
         </button>
-      </Tooltip>
-    </>
-  );
-}
-
-// Connection chip: the one first-class "am I on cloud or local hosting?"
-// signal in the app chrome. Everything else here (backend chip, phone chip)
-// describes WHAT is running; this one says HOW this client reaches it —
-// direct to a local daemon, or relayed through soluterminal cloud to a
-// (possibly remote) machine. Hidden while cloud.ts is still detecting so it
-// never flashes a wrong answer.
-function ConnChip() {
-  const mode = useCloud((s) => s.mode);
-  const isLocal = useCloud((s) => s.isLocal);
-  const selectedMachineId = useCloud((s) => s.selectedMachineId);
-  const machines = useCloud((s) => s.machines);
-  if (mode === 'detecting') return null;
-  // Dedup vs the top-left context pill, which already states hosting (⚡ Local).
-  // The chip earns its space only when this client is relayed through the
-  // cloud to a machine (☁ name). A direct connection (local mode, or cloud
-  // mode wired straight to this machine's daemon) would repeat the pill, so
-  // it shows nothing.
-  if (mode !== 'cloud' || isLocal) return null;
-
-  const machine = machines.find((m) => m.id === selectedMachineId);
-  const name = machine?.name || 'cloud';
-  return (
-    <>
-      <span className="statusbar-sep">·</span>
-      <Tooltip
-        label={`Cloud hosting — relayed through soluterminal cloud to ${machine?.name ? `"${machine.name}"` : 'the selected machine'}. Panes run on that machine.`}
-        side="top"
-      >
-        <span className="statusbar-conn is-cloud">
-          <IconCloud size={12} />
-          {name}
-        </span>
       </Tooltip>
     </>
   );
@@ -548,19 +497,15 @@ export function StatusBar() {
         ) : null}
       </div>
       <div className="statusbar-right">
-        {/* Panes aggregate — flips to "N need you" when panes are waiting
-            on the user; popover carries the breakdown + exited cleanup. */}
+        {/* Panes count; the popover carries the pane list + exited cleanup. */}
         <PanesChip />
         {/* Pane-owned listeners only — renders its own leading separator,
             and nothing when no pane runs a server. */}
         <PortsChip />
-        {/* Cloud-vs-local connection chip — renders its own leading
-            separator; hidden only while cloud mode is still detecting. */}
-        <ConnChip />
-        {/* Desktop-only backend chip ("WSL (Linux)" vs "Windows
-            (PowerShell)") — renders its own leading separator, and nothing
-            outside the Tauri shell. Warning-tinted on a WSL→host fallback. */}
-        <BackendChip health={health} />
+        {/* WSL→Windows fallback warning, desktop only — renders its own
+            leading separator, and nothing in every other case (the top-left
+            pill already names hosting, machine and backend). */}
+        <BackendChip />
         <SystemChip health={health} />
         {/* Desktop-only phone-access status — renders its own leading
             separator, and nothing outside the Tauri shell. */}
@@ -572,6 +517,11 @@ export function StatusBar() {
 
         {/* Release train readiness is founder tooling. */}
         {teamFeatures && <ReleaseChip health={health} />}
+      </div>
+      {/* The version / update chip and Feedback sit in their own group that
+          never shrinks: when the bar is too narrow, the chips above clip at
+          the end of .statusbar-right, not the one canonical update signal. */}
+      <div className="statusbar-end">
         <span className="statusbar-sep">·</span>
         {updating ? (
           <span className="statusbar-dim">daemon updating…</span>

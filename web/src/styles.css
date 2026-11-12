@@ -1594,18 +1594,6 @@ input:focus, select:focus, textarea:focus {
   isolation: isolate;
 }
 
-/* Connection chip (see StatusBar's ConnChip) — shown only when this client is
-   relayed through the cloud to a machine; a direct connection shows nothing. */
-.statusbar-conn {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  white-space: nowrap;
-}
-/* Cloud hosting = calm violet (matches the context pill), NOT accent — accent is
-   reserved for "needs attention" so a remote environment never reads as an alert. */
-.statusbar-conn.is-cloud { color: var(--host-cloud); }
-
 /* Minimal phone-access status — a footer StatusBar item (see PhoneAccessChip).
    The dot encodes state: filled green = connected, filled amber = sign-in
    needed, hollow ring = not set up; a spinner replaces the dot while
@@ -5710,6 +5698,13 @@ button.cloud-gate-inline-link {
   color: var(--fg-dim);
   margin-bottom: 4px;
 }
+.env-popover-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--fg-dim);
+  margin-top: 6px;
+  max-width: 260px;
+}
 .env-popover .backend-mode-row {
   margin-top: 0;
 }
@@ -7317,6 +7312,18 @@ kbd {
   overflow: hidden;
 }
 .statusbar-left { flex: 1; }
+/* The version / update chip and Feedback. This group never shrinks, so on a
+   narrow window the bar gives way in this order: the focused-pane text on the
+   left (flex basis 0), then the chips in .statusbar-right, whose System text
+   ellipsizes first and whose trailing chips then clip at the group's own
+   end. The update chip used to be the last child of .statusbar-right, so it
+   was the first thing clipped. */
+.statusbar-end {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
 .statusbar-strong { font-weight: 600; }
 .statusbar-path {
   font-family: 'SF Mono','Menlo',monospace;
@@ -15076,9 +15083,8 @@ h6.md-heading {
   font-size: 12px;
   line-height: 1.45;
 }
-/* Desktop-shell backend chip ("WSL (Linux)" / "Windows (PowerShell)").
-   Warning tint for the WSL→host fallback case is applied inline by the
-   component (color: var(--warn)); this is just the base chip. */
+/* WSL→Windows fallback warning chip ("Windows (PowerShell)"). The warning
+   tint is applied inline by the component (color: var(--warn)). */
 .statusbar-backend { display: inline-flex; align-items: center; gap: 3px; color: var(--fg-dim); white-space: nowrap; cursor: default; }
 
 /* ── Agents cockpit ────────────────────────────────────────────────────────

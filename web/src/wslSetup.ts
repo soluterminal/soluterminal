@@ -16,6 +16,9 @@ export interface SoluBackendGlobal {
   fallback?: boolean;
   hostPlatform?: 'windows' | 'macos' | 'linux';
   launchMode?: 'local' | 'cloud';
+  // Whether the desktop app saw a WSL distro on this PC at this launch. Null
+  // or absent when it did not look (a mode was already saved, or an older app).
+  wslDistro?: boolean | null;
 }
 
 export function readBackendGlobal(): SoluBackendGlobal | null {

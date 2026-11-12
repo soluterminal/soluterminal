@@ -23,13 +23,55 @@ struct Status {
     step: String,
     notice: String,
     detail: String,
+    /// Startup stopped on the "couldn't start" dialog (startup_failure.rs).
+    failed: bool,
 }
 
 static STATUS: Mutex<Status> = Mutex::new(Status {
     step: String::new(),
     notice: String::new(),
     detail: String::new(),
+    failed: false,
 });
+
+impl Status {
+    fn title(&self) -> &'static str {
+        if self.failed {
+            crate::startup_failure::TITLE
+        } else {
+            TITLE
+        }
+    }
+
+    /// Startup stopped. The dialog in front carries the reason; this window
+    /// must not go on saying a service is starting, or that Windows took
+    /// over from WSL when Windows did not start either.
+    fn fail(&mut self) {
+        self.failed = true;
+        self.step.clear();
+        self.notice.clear();
+        self.detail.clear();
+    }
+
+    fn retry(&mut self) {
+        self.failed = false;
+        self.step = "Trying again".to_string();
+    }
+}
+
+/// Startup failed and the "couldn't start" dialog is up.
+pub fn failed() {
+    if let Ok(mut status) = STATUS.lock() {
+        status.fail();
+    }
+}
+
+/// The person chose Retry.
+pub fn retrying() {
+    if let Ok(mut status) = STATUS.lock() {
+        status.retry();
+    }
+}
 
 /// The step the startup window shows, e.g. "Starting the WSL background
 /// service". Callable from any thread; a no-op when no window is shown.
@@ -69,12 +111,21 @@ fn fallback_detail(err: &str) -> String {
 }
 
 fn status_json() -> String {
-    let (step, notice, detail) = match STATUS.lock() {
-        Ok(s) => (s.step.clone(), s.notice.clone(), s.detail.clone()),
-        Err(_) => Default::default(),
-    };
-    serde_json::json!({ "title": TITLE, "step": step, "notice": notice, "detail": detail })
-        .to_string()
+    match STATUS.lock() {
+        Ok(status) => json_for(&status),
+        Err(_) => serde_json::json!({ "title": TITLE }).to_string(),
+    }
+}
+
+fn json_for(status: &Status) -> String {
+    serde_json::json!({
+        "title": status.title(),
+        "step": status.step,
+        "notice": status.notice,
+        "detail": status.detail,
+        "failed": status.failed,
+    })
+    .to_string()
 }
 
 fn escape_html(text: &str) -> String {
@@ -95,15 +146,24 @@ fn escape_html(text: &str) -> String {
 /// The page, rendered with the current status so it is right even before the
 /// first poll.
 fn page() -> String {
-    let (step, notice, detail) = match STATUS.lock() {
-        Ok(s) => (s.step.clone(), s.notice.clone(), s.detail.clone()),
-        Err(_) => Default::default(),
-    };
-    PAGE.replace("{{title}}", &escape_html(TITLE))
-        .replace("{{step}}", &escape_html(&step))
-        .replace("{{notice}}", &escape_html(&notice))
-        .replace("{{detail}}", &escape_html(&detail))
-        .replace("{{notice_hidden}}", if notice.is_empty() { "hidden" } else { "" })
+    match STATUS.lock() {
+        Ok(status) => page_for(&status),
+        Err(_) => page_for(&Status {
+            step: String::new(),
+            notice: String::new(),
+            detail: String::new(),
+            failed: false,
+        }),
+    }
+}
+
+fn page_for(status: &Status) -> String {
+    PAGE.replace("{{title}}", &escape_html(status.title()))
+        .replace("{{step}}", &escape_html(&status.step))
+        .replace("{{notice}}", &escape_html(&status.notice))
+        .replace("{{detail}}", &escape_html(&status.detail))
+        .replace("{{notice_hidden}}", if status.notice.is_empty() { "hidden" } else { "" })
+        .replace("{{spin_hidden}}", if status.failed { "hidden" } else { "" })
 }
 
 /// The custom-protocol handler: `/status` is the JSON the page polls, and
@@ -200,7 +260,7 @@ const PAGE: &str = r#"<!doctype html>
 </head>
 <body>
 <main>
-  <h1><span class="spin" aria-hidden="true"></span><span id="title">{{title}}</span></h1>
+  <h1><span id="spin" class="spin" aria-hidden="true" {{spin_hidden}}></span><span id="title">{{title}}</span></h1>
   <p id="step" role="status" aria-live="polite">{{step}}</p>
   <div id="notice-box" {{notice_hidden}}>
     <p id="notice">{{notice}}</p>
@@ -215,6 +275,7 @@ const PAGE: &str = r#"<!doctype html>
     el("notice").textContent = s.notice || "";
     el("detail").textContent = s.detail || "";
     el("notice-box").hidden = !s.notice;
+    el("spin").hidden = !!s.failed;
   }
   async function poll() {
     try {
@@ -257,6 +318,45 @@ mod tests {
         assert!(html.contains(">Starting the WSL background service<"));
         assert!(html.contains("id=\"notice-box\" hidden"));
         assert_eq!(escape_html("<b>\"x\" & 'y'</b>"), "&lt;b&gt;&quot;x&quot; &amp; &#39;y&#39;&lt;/b&gt;");
+    }
+
+    // These build their own Status: the shared one belongs to the tests above.
+    #[test]
+    fn a_failed_start_stops_the_spinner_and_drops_the_fallback_notice() {
+        let mut status = Status {
+            step: "Starting the Windows background service".into(),
+            notice: WSL_FALLBACK.into(),
+            detail: "Port 8787 is in use".into(),
+            failed: false,
+        };
+        assert!(page_for(&status).contains("class=\"spin\" aria-hidden=\"true\" ></span>"));
+        status.fail();
+        let html = page_for(&status);
+        assert!(html.contains("SoluTerminal couldn&#39;t start"));
+        assert!(!html.contains("Starting SoluTerminal…"));
+        assert!(html.contains("class=\"spin\" aria-hidden=\"true\" hidden></span>"));
+        assert!(html.contains("id=\"notice-box\" hidden"));
+        assert!(!html.contains("Starting the Windows background service"));
+        let body: serde_json::Value = serde_json::from_str(&json_for(&status)).unwrap();
+        assert_eq!(body["title"], "SoluTerminal couldn't start");
+        assert_eq!(body["failed"], true);
+        assert_eq!(body["notice"], "");
+    }
+
+    #[test]
+    fn retry_puts_the_starting_window_back() {
+        let mut status = Status {
+            step: String::new(),
+            notice: String::new(),
+            detail: String::new(),
+            failed: true,
+        };
+        status.retry();
+        let body: serde_json::Value = serde_json::from_str(&json_for(&status)).unwrap();
+        assert_eq!(body["title"], TITLE);
+        assert_eq!(body["failed"], false);
+        assert_eq!(body["step"], "Trying again");
+        assert!(page_for(&status).contains("class=\"spin\" aria-hidden=\"true\" ></span>"));
     }
 
     #[test]

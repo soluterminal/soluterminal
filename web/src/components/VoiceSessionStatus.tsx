@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { connectThisComputerWithToast } from '../accountConnect';
+import { CONNECTED_FOR_VOICE, connectThisComputerAfterWarning } from '../accountConnect';
 import { voiceSession, type SessionProgress } from '../lib/voiceSession';
 import { VOICE_WARN_AUDIO_BYTES } from '../lib/voiceGuards';
 import './VoiceSessionStatus.css';
@@ -47,7 +47,7 @@ export function VoiceSessionStatus({
       retry={voiceSession.retry}
       useAvailable={voiceSession.useAvailable}
       download={voiceSession.download}
-      connect={() => { void connectThisComputerWithToast(); }}
+      connect={() => { void connectThisComputerAfterWarning(CONNECTED_FOR_VOICE); }}
     />
   );
 }

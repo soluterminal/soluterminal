@@ -150,7 +150,13 @@ export function useBackendEnv() {
   const startup = desktopBackend?.requested ?? desktopBackend?.actual;
   const actual = desktopBackend?.actual;
   const fallback = desktopBackend?.fallback === true;
+  // What is running now: the summary and the OS word describe this.
   const activeStartup = fallback ? actual : startup;
+  // What is SAVED, and so what the next start will try. The mode row marks
+  // this one. It used to mark the running mode, so after Linux (WSL) failed
+  // and the app fell back, "Windows" looked selected, was disabled, and could
+  // never be saved: every start tried WSL again.
+  const savedStartup = startup;
 
   // OS/backend word for an at-a-glance readout on the context pill (the pill
   // keeps its visible text short, so this rides along as a quiet secondary
@@ -165,10 +171,16 @@ export function useBackendEnv() {
   else if (desktopBackend?.hostPlatform) osWord = osWordFromHostPlatform(desktopBackend.hostPlatform);
 
   const requestStartup = async (mode: StartupMode) => {
-    if (mode === activeStartup || pendingStartup) return;
+    if (pendingStartup) return;
+    // Picking the saved mode again only makes sense after a fallback: it
+    // restarts and tries that mode once more.
+    const retry = mode === savedStartup;
+    if (retry && !fallback) return;
     const ok = await confirmDialog({
-      title: `Switch to ${startupLabel(mode)}`,
-      message: `Restart soluterminal in ${startupLabel(mode)} mode?\n\nThe desktop shell and daemon connections will restart.`,
+      title: retry ? `Try ${startupLabel(mode)} again` : `Switch to ${startupLabel(mode)}`,
+      message: retry
+        ? `Restart soluterminal and try ${startupLabel(mode)} mode again?\n\nThe desktop shell and daemon connections will restart.`
+        : `Restart soluterminal in ${startupLabel(mode)} mode?\n\nThe desktop shell and daemon connections will restart.`,
       confirmLabel: 'Restart',
     });
     if (!ok) return;
@@ -230,7 +242,7 @@ export function useBackendEnv() {
     pendingStartup, pendingSide, pendingConn,
     showStartup, showRouterSide, showLegacySwap, showConnSwitch, showConnDisplay,
     connActive, machineName, paneCounts,
-    actual, fallback, activeStartup, osWord,
+    actual, fallback, activeStartup, savedStartup, osWord,
     requestStartup, requestSide, requestConn,
     legacyActiveLabel, legacyTargetLabel, legacyTarget,
     actionable, summary, nothingToRender,
@@ -282,15 +294,24 @@ export function BackendControls() {
               <button
                 key={mode}
                 type="button"
-                className={`backend-mode-seg${mode === env.activeStartup ? ' active' : ''}`}
-                disabled={mode === env.activeStartup || env.pendingStartup !== null}
-                title={`Restart in ${startupLabel(mode)} mode`}
+                className={`backend-mode-seg${mode === env.savedStartup ? ' active' : ''}`}
+                disabled={(mode === env.savedStartup && !env.fallback) || env.pendingStartup !== null}
+                title={mode === env.savedStartup
+                  ? `Restart and try ${startupLabel(mode)} mode again`
+                  : `Restart in ${startupLabel(mode)} mode`}
                 onClick={() => { void env.requestStartup(mode); }}
               >
                 {env.pendingStartup === mode ? '...' : startupLabel(mode)}
               </button>
             ))}
           </div>
+          {env.fallback && env.savedStartup && env.actual && env.savedStartup !== env.actual && (
+            <div className="env-popover-note" role="note">
+              Saved mode: {startupLabel(env.savedStartup)}. It didn’t start, so this session is
+              running on {startupLabel(env.actual)}. Choose {startupLabel(env.actual)} to stop
+              trying {startupLabel(env.savedStartup)} at each start.
+            </div>
+          )}
         </div>
       )}
 

@@ -42,6 +42,8 @@ func TestFeedbackAdversarialOneMiB(t *testing.T) {
 		"unbroken":         strings.Repeat("a", 1<<20),
 		"near matches":     strings.Repeat("password: \nAuthorization: \n::xyz.. @ /home/ = ?token=& ", (1<<20)/55+1),
 		"unterminated key": "-----BEGIN OPENSSH PRIVATE KEY-----\n" + strings.Repeat("x", 1<<20),
+		"escaped quotes":   strings.Repeat(`"token":"a\"`, (1<<20)/12+1),
+		"backslashes":      `password="` + strings.Repeat(`\`, 1<<20),
 	}
 	for name, input := range inputs {
 		t.Run(name, func(t *testing.T) {

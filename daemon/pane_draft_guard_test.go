@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -184,6 +185,74 @@ func TestFaintPlaceholderIsNotADraft(t *testing.T) {
 			plain, blanked, _ = e.VisibleTextFaintBlanked()
 			if draft, _ := composerDraft(typedComposerScreen(plain, blanked, tc.codex), tc.codex); draft == "" {
 				t.Fatal("text typed into the box must count as a draft")
+			}
+		})
+	}
+}
+
+// Replay the real Codex repaint stream, including SGR 1/22 around the prompt
+// and SGR 2/22 around the placeholder. Do not pre-blank its text: the production
+// grid reader and draft guard must decide whether delivery is safe.
+func TestCodexPlaceholderDeliveryFromRawScreen(t *testing.T) {
+	raw, err := os.ReadFile("testdata/unsent_clear/codex_0_166_0.raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		draft     string
+		plainOnly bool
+		hold      bool
+	}{
+		{name: "dim placeholder"},
+		{name: "placeholder without attributes", plainOnly: true},
+		{name: "real draft", draft: "I want the release updates", hold: true},
+		{name: "Ask draft", draft: "Ask about the release", hold: true},
+		{name: "placeholder prefix", draft: "Ask Codex to do anything else", hold: true},
+		{name: "placeholder with continuation", draft: "Ask Codex to do anything\r\n  then check the build", hold: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, frames, screen := newDraftGuardPane(t, "codex-raw-placeholder")
+			e := grid.New(66, 40) // dimensions recorded with the capture
+			defer e.Close()
+			e.Feed(raw)
+			if tc.draft != "" {
+				// Codex overwrites the dim placeholder with normal-intensity text.
+				e.Feed([]byte("\x1b[9;1H\x1b[0m\x1b[2K\x1b[1m›\x1b[22m " + tc.draft))
+			}
+			p.gridEmu = e
+			draftGuardScreen = paneScreenFaintBlanked
+			plain, blanked, ok := paneScreenFaintBlanked(p)
+			if !ok || !strings.Contains(plain, "› ") {
+				t.Fatalf("unreadable raw screen: %q", plain)
+			}
+			if tc.draft == "" && (!strings.Contains(plain, "Ask Codex to do anything") || strings.Contains(blanked, "Ask Codex to do anything")) {
+				t.Fatal("capture must preserve the placeholder and its faint attribute")
+			}
+			if tc.plainOnly {
+				// Some screen sources lose SGR attributes. Exercise the exact-text
+				// fallback with the unmodified projection of the same raw bytes.
+				draftGuardScreen = func(p *Pane) (string, string, bool) {
+					text, _, ok := paneScreenFaintBlanked(p)
+					return text, text, ok
+				}
+			}
+			screen.Store(plain)
+			done := agentDelivery(p, codexProbeMessage, "@lead")
+			if tc.hold {
+				if got := <-done; got != deliveryHeld {
+					t.Fatalf("outcome = %q, want held", got)
+				}
+				expectNoFrame(t, frames, "nothing typed into the person's draft")
+				return
+			}
+			expectFrame(t, frames, "body", "\x1b[200~"+codexProbeMessage+"\x1b[201~")
+			expectFrame(t, frames, "Enter", "\r")
+			if got := <-done; got != deliverySubmitted {
+				t.Fatalf("outcome = %q, want submitted", got)
+			}
+			if held := p.Snapshot().HeldMessages; len(held) != 0 {
+				t.Fatalf("unexpected held messages: %+v", held)
 			}
 		})
 	}

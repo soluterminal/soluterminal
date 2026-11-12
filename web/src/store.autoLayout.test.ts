@@ -43,7 +43,7 @@ afterEach(async () => { await vi.advanceTimersByTimeAsync(500); vi.useRealTimers
 describe('workspace auto layout', () => {
   it('balances every open and close while preserving current pane order and focus', async () => {
     for (let count = 2; count <= 8; count++) {
-      await useStore.getState().splitFocused('vertical', { cwd: '/repo', cmd: ['bash'] });
+      await useStore.getState().createPane({ cwd: '/repo', cmd: ['bash'] });
       expect(rows(useStore.getState().layout)).toEqual(autoGridRows(count));
       expect(collectPaneIds(useStore.getState().layout)).toEqual(Array.from({ length: count }, (_, i) => `p${i + 1}`));
     }
@@ -61,11 +61,11 @@ describe('workspace auto layout', () => {
     expect(useStore.getState().paneLayoutMode).toBe('free');
     expect(useStore.getState().layout).toMatchObject({ ratio: .3 });
   });
-  it('splits the largest custom pane along its longer side', async () => {
+  it('a new session splits the largest custom pane along its longer side', async () => {
     withPanes(2, 'free');
     useStore.setState({ layout: { type: 'split', direction: 'horizontal', ratio: .2, a: leaf('p1'), b: leaf('p2') } });
     vi.mocked(api.createPane).mockResolvedValue(pane('new'));
-    await useStore.getState().splitFocused('vertical', { cwd: '/repo', cmd: ['bash'] });
+    await useStore.getState().createPane({ cwd: '/repo', cmd: ['bash'] });
     expect(useStore.getState().layout).toEqual({ type: 'split', direction: 'horizontal', ratio: .2, a: leaf('p1'),
       b: { type: 'split', direction: 'horizontal', ratio: .5, a: leaf('p2'), b: leaf('new') } });
   });

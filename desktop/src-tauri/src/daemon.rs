@@ -242,7 +242,7 @@ pub fn recovery_should_spawn_wsl(v: &HostDiskVerdict) -> bool {
 // running-only listing. Neither list operation starts a distribution, and we
 // do not depend on localized column headings or state names.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn default_wsl_is_running(verbose: &str, running: &str) -> bool {
+pub(crate) fn default_wsl_is_running(verbose: &str, running: &str) -> bool {
     let Some(row) = verbose.lines().find_map(|line| line.trim_start().strip_prefix("* ")) else {
         return false;
     };
@@ -1754,6 +1754,9 @@ fn describe_wsl_port_block(
         "WSL port held: port {port} is in use by {detail}{location}, so the WSL background \
          service in {ours} cannot start."
     );
+    if block.reason.contains("inside WSL only") {
+        msg.push_str(" It listens inside WSL only, so the Windows app cannot use it either.");
+    }
     if elsewhere {
         msg.push_str(&format!(
             " WSL distros share one network, so only one of them can serve port {port}."
@@ -1795,6 +1798,12 @@ struct WslWaitPass {
 /// instead of after `timeout`. An answer from a usable daemon always wins over
 /// a report seen in the same tick. Returns the outcome and the final candidate
 /// list (a VM IP resolved during the wait is prepended).
+///
+/// `launcher_exited` says how start-wsl.sh ended once it has. A launcher that
+/// exits has decided not to start a daemon: it found one it will keep, or it
+/// gave up. Either way nothing new is coming, so a daemon Windows can reach
+/// answers within `exit_grace` or not at all, and the wait ends there instead
+/// of running out the whole `timeout` (120 s on every launch, 2026-11-12).
 #[cfg(any(windows, test))]
 #[allow(clippy::too_many_arguments)]
 fn wait_for_spawned_wsl_daemon<P, R, L>(
@@ -1805,6 +1814,8 @@ fn wait_for_spawned_wsl_daemon<P, R, L>(
     probe: P,
     mut resolve_vm_ip: R,
     mut port_block: impl FnMut() -> Option<WslPortBlock>,
+    mut launcher_exited: impl FnMut() -> Option<String>,
+    exit_grace: Duration,
     log: L,
 ) -> (SpawnedWslWait, Vec<String>)
 where
@@ -1866,6 +1877,8 @@ where
     let mut candidates = candidates;
     let mut last_err = String::from("not attempted");
     let mut loopback_since: Option<Instant> = None;
+    let mut launcher_gone: Option<(Instant, String)> = None;
+    let mut gave_up_on_exit: Option<String> = None;
     let finish = |outcome: SpawnedWslWait, candidates: Vec<String>| {
         stop.store(true, Ordering::SeqCst);
         (outcome, candidates)
@@ -1912,17 +1925,38 @@ where
             ));
             return finish(SpawnedWslWait::Blocked(block), candidates);
         }
+        if launcher_gone.is_none() {
+            if let Some(how) = launcher_exited() {
+                log(&format!(
+                    "start-wsl.sh has exited ({how}) after {}s; allowing {}s more for a daemon it left running",
+                    started.elapsed().as_secs(),
+                    exit_grace.as_secs()
+                ));
+                launcher_gone = Some((Instant::now(), how));
+            }
+        }
+        if let Some((at, how)) = &launcher_gone {
+            if at.elapsed() >= exit_grace {
+                gave_up_on_exit = Some(how.clone());
+                break;
+            }
+        }
         if Instant::now() >= deadline {
             break;
         }
     }
     // Keep the "not reachable within" wording — classify_wsl_fallback in
     // lib.rs keys on it to pick the user-facing explanation.
-    let msg = format!(
+    let mut msg = format!(
         "WSL daemon was not reachable within {}s via {:?}: {last_err}",
         started.elapsed().as_secs(),
         candidates
     );
+    if let Some(how) = gave_up_on_exit {
+        msg.push_str(&format!(
+            " (the WSL launcher exited, {how}, and left no daemon Windows can reach)"
+        ));
+    }
     finish(SpawnedWslWait::GaveUp(msg), candidates)
 }
 
@@ -2073,6 +2107,12 @@ pub fn wsl_start_allowed() -> bool {
 /// Permit only bounded discovery/token reads below the floor, and only when
 /// the default distribution is already running. Fail closed on list errors.
 /// Never use this for a startup script, install, update or recovery restart.
+///
+/// This is a low-disk rule, not a "never wake WSL" rule: the running check
+/// happens only below the disk floor. With enough free space the command runs
+/// straight away and starts a stopped distribution like any `wsl -e`. Code
+/// that must not start WSL checks `--list --running` itself first
+/// (agent_detect.rs).
 #[cfg(windows)]
 pub(crate) fn run_wsl_probe_bounded(args: &[&str], timeout: Duration) -> Result<std::process::Output, String> {
     run_wsl_probe_bounded_with_stdin(args, None, timeout)
@@ -2360,17 +2400,21 @@ pub(crate) fn ensure_daemon_running_wsl_with(app: &AppHandle, headless: bool) ->
 
     crate::startup_screen::step("Starting the WSL background service");
     let mut wsl_cmd = Command::new("wsl.exe");
+    let mut wslenv = std::env::var("WSLENV").ok();
     if headless {
         // WSLENV carries these into WSL, where start-wsl.sh hands its
         // environment to the daemon.
         wsl_cmd.envs(HEADLESS_UPDATE_ENV);
-        wsl_cmd.env(
-            "WSLENV",
-            headless_wslenv(std::env::var("WSLENV").ok().as_deref()),
-        );
+        wslenv = Some(headless_wslenv(wslenv.as_deref()));
         launch_log("starting the WSL daemon update-only");
     }
-    let child = wsl_cmd
+    // Tell the launcher whether any route from here even accepts a connection
+    // (see WSL_WINDOWS_ROUTES_ENV). Three quick connects, 250 ms each at most.
+    let windows_routes = wsl_windows_routes_value(upstream_candidates.iter().any(|c| port_alive(c)));
+    launch_log(&format!("routes to WSL before the launcher runs: {windows_routes}"));
+    wsl_cmd.env(WSL_WINDOWS_ROUTES_ENV, windows_routes);
+    wsl_cmd.env("WSLENV", wslenv_sharing(wslenv.as_deref(), WSL_WINDOWS_ROUTES_ENV));
+    let mut child = wsl_cmd
         .args(["-e", "bash", &script_wsl_path])
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -2392,6 +2436,10 @@ pub(crate) fn ensure_daemon_running_wsl_with(app: &AppHandle, headless: bool) ->
     // no backend id in a second distro (WSL2 distros share one network) held
     // :8787 on 2026-10-28 and every launch waited the full 120s for nothing.
     let startup_timeout = Duration::from_secs(120);
+    // After start-wsl.sh itself has exited, a daemon it kept must answer within
+    // this long. One probe pass over three candidates can take 30 s on a
+    // loaded host when two of them time out, so allow more than one.
+    const WSL_LAUNCHER_EXIT_GRACE: Duration = Duration::from_secs(45);
     // A *stale* WSL daemon answering for this long also ends the wait early.
     let stale_bail = Duration::from_secs(10);
     let have_vm_ip = upstream_candidates.len() > WSL_LOOPBACK_CANDIDATES.len();
@@ -2407,6 +2455,11 @@ pub(crate) fn ensure_daemon_running_wsl_with(app: &AppHandle, headless: bool) ->
                 .ok()
                 .and_then(|text| parse_wsl_start_status(&text))
         },
+        || match child.try_wait() {
+            Ok(Some(status)) => Some(status.to_string()),
+            _ => None,
+        },
+        WSL_LAUNCHER_EXIT_GRACE,
         launch_log,
     );
     let wsl_addr = match outcome {
@@ -2693,6 +2746,49 @@ fn wsl_holder_inspect_script() -> String {
 /// the script) when the WSL port is held by a daemon it will not replace.
 const WSL_START_STATUS_FILE: &str = "wsl-start-status";
 
+/// What the app's own routes to a WSL daemon looked like just before it ran
+/// start-wsl.sh, handed to the launcher in this environment variable (shared
+/// into WSL through WSLENV). `NONE` means not one of them (the VM address,
+/// 127.0.0.1, ::1) accepted a TCP connection, so a daemon the launcher finds
+/// on WSL's loopback only is certainly out of the app's reach. A connection
+/// that opens proves little about health but does prove a route, and then the
+/// launcher keeps a healthy daemon exactly as before.
+///
+/// An environment variable, not an argument: the launcher is recognised by
+/// its exact command line (is_supervisor_pid in the script,
+/// daemon/background_service_wsl.sh), and an argument would make every new
+/// supervisor a stranger to the next one.
+#[cfg_attr(not(windows), allow(dead_code))]
+const WSL_WINDOWS_ROUTES_ENV: &str = "SOLU_WINDOWS_ROUTES";
+#[cfg_attr(not(windows), allow(dead_code))]
+const WSL_WINDOWS_ROUTES_NONE: &str = "none";
+#[cfg_attr(not(windows), allow(dead_code))]
+const WSL_WINDOWS_ROUTES_OPEN: &str = "open";
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wsl_windows_routes_value(any_route_accepts: bool) -> &'static str {
+    if any_route_accepts {
+        WSL_WINDOWS_ROUTES_OPEN
+    } else {
+        WSL_WINDOWS_ROUTES_NONE
+    }
+}
+
+/// WSLENV with `name` shared from Windows into WSL, keeping whatever it
+/// already shares.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wslenv_sharing(existing: Option<&str>, name: &str) -> String {
+    let mut parts: Vec<String> = existing
+        .unwrap_or("")
+        .split(':')
+        .filter(|p| !p.is_empty())
+        .filter(|p| p.split('/').next() != Some(name))
+        .map(str::to_string)
+        .collect();
+    parts.push(format!("{name}/u"));
+    parts.join(":")
+}
+
 /// The start-wsl.sh text itself, split out from the Windows-only writer above
 /// so the template can be unit-tested (and `bash -n`'d) on any host. This is
 /// the launcher that generations of daemon crashes have to survive, and the
@@ -2765,6 +2861,15 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "{network_functions}\n",
             "ADDR=\"127.0.0.1:8787\"\n",
             "WSL_ADDR=\"$(wsl_daemon_host):8787\"\n",
+            "# What the Windows app found just before it ran us: `{routes_none}` when\n",
+            "# none of its routes to a WSL daemon (the VM address, 127.0.0.1, ::1)\n",
+            "# accepted a connection. Anything else, or nothing (an older app, or a\n",
+            "# restart that did not come from the app), means it could not rule a\n",
+            "# route out. See live_daemon_reachable_from_windows. It arrives in the\n",
+            "# environment and is ours alone: the daemon and its panes inherit this\n",
+            "# launcher's environment, so it is taken out again.\n",
+            "WINDOWS_ROUTES=\"${{{routes_env}:-}}\"\n",
+            "unset {routes_env}\n",
             "# Discovery only: retain healthy daemons from an older launcher.\n",
             "WSL_ETH0_IP=\"$(wsl_eth0_ipv4)\"\n",
             "mkdir -p \"$DAEMON_DIR\"\n",
@@ -3064,15 +3169,56 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "}}\n",
             "# Returns 0 when, after every cleanup this launcher may run, the port still\n",
             "# answers as a SoluTerminal daemon we must not keep: a different backend,\n",
-            "# or older than the bundle. A healthy current daemon is never reported.\n",
+            "# older than the bundle, or current but out of the Windows app's reach\n",
+            "# (live_daemon_reachable_from_windows). A healthy current daemon the app\n",
+            "# can reach is never reported.\n",
             "# The usual cause is a daemon in ANOTHER WSL distro. WSL2 distros share one\n",
             "# network namespace, so its 127.0.0.1:8787 blocks our bind while its\n",
             "# processes are invisible from here. It is never stopped from here: its\n",
             "# panes live in that distro's ~/.solu, which our daemon cannot reattach.\n",
             "port_held_by_other_daemon() {{\n",
+            "  PORT_BLOCK_REASON=\"\"\n",
             "  probe_live_daemon || return 1\n",
-            "  if live_daemon_is_current; then return 1; fi\n",
+            "  if live_daemon_is_current; then\n",
+            "    if live_daemon_reachable_from_windows; then return 1; fi\n",
+            "    PORT_BLOCK_REASON=\"it answers inside WSL only, not on $WSL_ADDR where the Windows app connects\"\n",
+            "  fi\n",
             "  return 0\n",
+            "}}\n",
+            "# A daemon that answers on the loopback is only useful if the Windows app\n",
+            "# can reach it. Under WSL's NAT networking the app connects to the eth0\n",
+            "# address ($WSL_ADDR). A daemon started without --wsl-addr listens on\n",
+            "# 127.0.0.1 only: healthy from in here, unreachable from Windows. Leaving\n",
+            "# one alone made the app wait its whole two minutes and fall back, on\n",
+            "# every launch (2026-11-12: another program had started `solud\n",
+            "# --backend-id wsl` with no listen flags, in one case in a second\n",
+            "# distro). In mirrored and unknown modes $WSL_ADDR is the loopback\n",
+            "# itself, which the probe just used.\n",
+            "#\n",
+            "# A closed eth0 port alone proves nothing: WSL's localhost forwarding can\n",
+            "# carry Windows' own 127.0.0.1 or ::1 to a loopback-only daemon, and the\n",
+            "# app uses that route. Only the app can see it. So a daemon counts as out\n",
+            "# of reach only when the app also said that no route of its own accepted\n",
+            "# a connection. A healthy daemon that merely missed the app's probe on a\n",
+            "# busy host still has an open route, and is kept as before.\n",
+            "live_daemon_reachable_from_windows() {{\n",
+            "  local host port\n",
+            "  [ \"${{WINDOWS_ROUTES:-}}\" = \"{routes_none}\" ] || return 0\n",
+            "  host=\"${{WSL_ADDR%:*}}\"\n",
+            "  port=\"${{WSL_ADDR##*:}}\"\n",
+            "  case \"$host\" in ''|127.0.0.1) return 0 ;; esac\n",
+            "  case \"$port\" in ''|*[!0-9]*) return 0 ;; esac\n",
+            "  command -v timeout >/dev/null 2>&1 || return 0\n",
+            "  timeout 5 bash -c 'exec 3<>\"/dev/tcp/$1/$2\"' probe \"$host\" \"$port\" 2>/dev/null\n",
+            "}}\n",
+            "# The live daemon is this launcher's own staged binary, running in this\n",
+            "# distro: the one daemon it may stop without being asked. Anything else\n",
+            "# (another distro, a dev build, another program's daemon) is reported.\n",
+            "live_daemon_is_our_binary_here() {{\n",
+            "  local exe\n",
+            "  live_daemon_visible_here || return 1\n",
+            "  exe=\"$(readlink \"/proc/$LIVE_PID/exe\" 2>/dev/null || true)\"\n",
+            "  [ \"$exe\" = \"$LOCAL\" ] || [ \"$exe\" = \"$LOCAL (deleted)\" ]\n",
             "}}\n",
             "{pid_listens}",
             "# Whether LIVE_PID is the reported daemon running in this distro: it\n",
@@ -3152,7 +3298,7 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "      write_start_status \"starting\" \"port released\"\n",
             "      return 0\n",
             "    fi\n",
-            "    if probe_live_daemon && live_daemon_is_current; then\n",
+            "    if probe_live_daemon && live_daemon_is_current && live_daemon_reachable_from_windows; then\n",
             "      echo \"a current daemon pid=${{LIVE_PID:-unknown}} now serves $ADDR; leaving it alone\"\n",
             "      trap - EXIT\n",
             "      exit 0\n",
@@ -3233,6 +3379,13 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "      while :; do\n",
             "        if probe_live_daemon; then\n",
             "          if live_daemon_is_current; then\n",
+            "            if ! live_daemon_reachable_from_windows; then\n",
+            "              # That supervisor is waiting for the port (await_port_release).\n",
+            "              # Say so again: the Windows app cleared the last report.\n",
+            "              PORT_BLOCK_REASON=\"it answers inside WSL only, not on $WSL_ADDR where the Windows app connects\"\n",
+            "              report_port_blocked port-held \"$PORT_BLOCK_REASON\"\n",
+            "              exit 0\n",
+            "            fi\n",
             "            echo \"its daemon pid=${{LIVE_PID:-unknown}} is healthy (version ${{LIVE_VERSION:-unknown}}); leaving it alone\"\n",
             "            exit 0\n",
             "          fi\n",
@@ -3274,6 +3427,17 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "      return 0\n",
             "    fi\n",
             "    if [ -z \"$LIVE_VERSION\" ]; then echo \"daemon on $ADDR reported no version; treating it as current\"; fi\n",
+            "    if ! live_daemon_reachable_from_windows; then\n",
+            "      if live_daemon_is_our_binary_here; then\n",
+            "        echo \"daemon pid=$LIVE_PID on $ADDR is healthy but does not listen on $WSL_ADDR, where the Windows app connects; replacing it\"\n",
+            "        stop_pid \"$LIVE_PID\"\n",
+            "      else\n",
+            "        echo \"a healthy daemon pid=${{LIVE_PID:-unknown}} answers on $ADDR but not on $WSL_ADDR, where the Windows app connects; not adopting it\"\n",
+            "      fi\n",
+            "      # Not ours to stop, or stopped: the check before the first bind\n",
+            "      # reports whatever still holds the port and waits for it.\n",
+            "      return 0\n",
+            "    fi\n",
             "    if [ -n \"$LIVE_PID\" ] && [ -r \"/proc/$LIVE_PID/cmdline\" ]; then\n",
             "      ADOPT_PID=\"$LIVE_PID\"\n",
             "      echo \"daemon pid=$ADOPT_PID on $ADDR is healthy (version ${{LIVE_VERSION:-unknown}}); adopting it instead of restarting it\"\n",
@@ -3470,7 +3634,7 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "  # Whatever still answers here survived every cleanup we may run; our\n",
             "  # daemon would only load its state and fail to bind, ten times over.\n",
             "  if port_held_by_other_daemon; then\n",
-            "    report_port_blocked port-held \"it still answers after the stale-daemon cleanup\"\n",
+            "    report_port_blocked port-held \"${{PORT_BLOCK_REASON:-it still answers after the stale-daemon cleanup}}\"\n",
             "    await_port_release\n",
             "  fi\n",
             "  echo \"=== start daemon under WSL supervisor ===\"\n",
@@ -3509,7 +3673,7 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "  if [ \"$status\" != \"0\" ] && daemon_bind_failed; then\n",
             "    sleep 2\n",
             "    if port_held_by_other_daemon; then\n",
-            "      report_port_blocked port-held \"$BIND_FAILURE\"\n",
+            "      report_port_blocked port-held \"${{PORT_BLOCK_REASON:-$BIND_FAILURE}}\"\n",
             "      await_port_release\n",
             "      restarts=0\n",
             "    elif ! probe_live_daemon && port_is_open; then\n",
@@ -3550,6 +3714,8 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
         // Same cap the host-native supervisor rotates its daemon.log at, so
         // one platform's logs never age out faster than the other's.
         network_functions = crate::wsl_network::FUNCTIONS,
+        routes_none = WSL_WINDOWS_ROUTES_NONE,
+        routes_env = WSL_WINDOWS_ROUTES_ENV,
         logmax = DAEMON_LOG_MAX_BYTES,
         src_amd64 = bundled_amd64_wsl,
         src_arm64 = bundled_arm64_wsl,
@@ -3842,8 +4008,9 @@ const WSL_CLAIM_ABSENT_EXIT: i32 = 3;
 /// absent or empty; `Err` means WSL could not answer (timeout, interop
 /// failure, distro not running). Callers must never treat `Err` as absent: the
 /// mirror used to, and under load it rewrote a claim that was there hundreds
-/// of times, each rewrite another wsl.exe session. Bounded, and it never wakes
-/// a stopped distro (run_wsl_probe_bounded). Home resolved via WSL_HOME_PREFIX
+/// of times, each rewrite another wsl.exe session. Bounded. It refuses a
+/// stopped distro only while low disk space blocks WSL (run_wsl_probe_bounded);
+/// otherwise it starts one like any `wsl -e`. Home resolved via WSL_HOME_PREFIX
 /// (passwd db), matching the WSL daemon's own claim location.
 #[cfg(windows)]
 fn read_wsl_claim_bytes() -> Result<Option<Vec<u8>>, String> {
@@ -7165,6 +7332,7 @@ mod wsl_port_block_tests {
             extract_fn(&b, "live_daemon_is_update_only"),
             extract_fn(&b, "live_daemon_is_current"),
             extract_fn(&b, "port_held_by_other_daemon"),
+            extract_fn(&b, "live_daemon_reachable_from_windows"),
             extract_fn(&b, "live_daemon_visible_here"),
             extract_fn(&b, "status_value"),
             extract_fn(&b, "write_start_status"),
@@ -7316,6 +7484,167 @@ mod wsl_port_block_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(stdout.contains("FREE"), "a current WSL daemon was treated as a blocker: {stdout}");
         assert!(!reported, "nothing may be reported for a healthy daemon");
+    }
+
+    /// The 12 Nov failure: another program started `solud --backend-id wsl`
+    /// with no listen flags. It answers on the loopback as a current WSL
+    /// daemon, but under NAT the Windows app connects to the eth0 address,
+    /// where nothing listens. That is a held port, reported at once. 127.0.0.2
+    /// stands in for the eth0 address.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_current_daemon_windows_cannot_reach_is_reported_as_holding_the_port() {
+        let json = r#"{"status":"ok","version":"0.0.1242","pid":999998,"backendID":"wsl","binaryPath":"/home/u/.local/share/soluterminal/solud"}"#;
+        let port = serve_health(json);
+        let dir = scratch_dir("port-wsl-only").expect("scratch dir");
+        let script = format!(
+            "{}\nWSL_ADDR=127.0.0.2:{port}\nWINDOWS_ROUTES={WSL_WINDOWS_ROUTES_NONE}\n\
+             if port_held_by_other_daemon; then report_port_blocked port-held \"$PORT_BLOCK_REASON\"; echo BLOCKED; else echo FREE; fi\n",
+            classifier(&dir, port, "0.0.1242", None).replace("ADDR='0.0.0.0:", "ADDR='127.0.0.1:")
+        );
+        let out = run_bash(&script).expect("bash");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("BLOCKED"), "{stdout} {}", String::from_utf8_lossy(&out.stderr));
+        let report = std::fs::read_to_string(dir.join(WSL_START_STATUS_FILE)).expect("report written");
+        let _ = std::fs::remove_dir_all(&dir);
+        let block = parse_wsl_start_status(&report).expect("the report ends the Windows wait");
+        assert!(block.identified);
+        assert_eq!(block.backend, "wsl");
+        assert_eq!(block.pid, Some(999998));
+        assert!(!block.visible, "pid 999998 is not a process here");
+        assert_eq!(
+            block.reason,
+            format!("it answers inside WSL only, not on 127.0.0.2:{port} where the Windows app connects")
+        );
+        let holder = WslPortHolder { distro: "Ubuntu-24.04".into(), cgroup: String::new() };
+        let msg = describe_wsl_port_block(&block, Some(&holder), "0.0.1242");
+        assert!(msg.starts_with("WSL port held: port "), "{msg}");
+        assert!(msg.contains("another SoluTerminal service (version 0.0.1242, backend \"wsl\", pid 999998) in the WSL distro \"Ubuntu-24.04\""), "{msg}");
+        assert!(msg.contains("It listens inside WSL only, so the Windows app cannot use it either."), "{msg}");
+        assert!(msg.contains("wsl -d Ubuntu-24.04 -- kill 999998"), "{msg}");
+    }
+
+    /// The same loopback-only daemon, but the app saw one of its own routes
+    /// accept a connection (localhost forwarding, or a busy daemon that missed
+    /// the probe), or is an older app that says nothing. The launcher cannot
+    /// call that out of reach: the daemon is kept, exactly as before.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_loopback_only_daemon_is_kept_unless_the_app_found_no_route_at_all() {
+        let json = r#"{"status":"ok","version":"0.0.1242","pid":999998,"backendID":"wsl"}"#;
+        for routes in [WSL_WINDOWS_ROUTES_OPEN, ""] {
+            let port = serve_health(json);
+            let dir = scratch_dir("port-forwarded").expect("scratch dir");
+            let script = format!(
+                "{}\nWSL_ADDR=127.0.0.2:{port}\nWINDOWS_ROUTES='{routes}'\n\
+                 if port_held_by_other_daemon; then echo BLOCKED; else echo FREE; fi\n",
+                classifier(&dir, port, "0.0.1242", None).replace("ADDR='0.0.0.0:", "ADDR='127.0.0.1:")
+            );
+            let out = run_bash(&script).expect("bash");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let reported = dir.join(WSL_START_STATUS_FILE).exists();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(stdout.contains("FREE"), "routes={routes:?}: {stdout} {}", String::from_utf8_lossy(&out.stderr));
+            assert!(!reported, "routes={routes:?}");
+        }
+    }
+
+    /// The app's verdict reaches the launcher in the environment, and the app
+    /// sends "none" only when no route accepted a connection. It must not
+    /// travel as an argument: the launcher is recognised by its exact command
+    /// line, and a supervisor started with an argument would be a stranger to
+    /// the next launcher, which then could never take over from it.
+    #[test]
+    fn the_app_tells_the_launcher_whether_any_route_is_open_without_changing_its_command_line() {
+        assert_eq!(wsl_windows_routes_value(false), "none");
+        assert_eq!(wsl_windows_routes_value(true), "open");
+        let b = body();
+        assert!(b.contains("WINDOWS_ROUTES=\"${SOLU_WINDOWS_ROUTES:-}\"\nunset SOLU_WINDOWS_ROUTES\n"));
+        assert!(!b.contains("${1:-}"), "the launcher takes no arguments");
+        let check = extract_fn(&b, "live_daemon_reachable_from_windows");
+        assert!(check.contains("[ \"${WINDOWS_ROUTES:-}\" = \"none\" ] || return 0"));
+        // Recognition still expects the argument-free command line the app uses.
+        let recognise = extract_fn(&b, "is_supervisor_pid");
+        assert!(recognise.contains("\"bash $SUPERVISOR_SCRIPT \"|\"/bin/bash $SUPERVISOR_SCRIPT \"|\"/usr/bin/bash $SUPERVISOR_SCRIPT \")"));
+        let source = include_str!("daemon.rs");
+        assert!(source.contains(".args([\"-e\", \"bash\", &script_wsl_path])"));
+        assert!(!source.contains(concat!(".args([\"-e\", \"bash\", &script_wsl_path", ",")));
+    }
+
+    #[test]
+    fn the_route_verdict_is_shared_into_wsl_alongside_what_was_already_shared() {
+        assert_eq!(wslenv_sharing(None, "SOLU_WINDOWS_ROUTES"), "SOLU_WINDOWS_ROUTES/u");
+        assert_eq!(
+            wslenv_sharing(Some("FOO/p:SOLU_WINDOWS_ROUTES:BAR"), "SOLU_WINDOWS_ROUTES"),
+            "FOO/p:BAR:SOLU_WINDOWS_ROUTES/u"
+        );
+        // With the update-only variables too (this_computer_update.rs).
+        let headless = headless_wslenv(Some("FOO/p"));
+        assert_eq!(
+            wslenv_sharing(Some(&headless), "SOLU_WINDOWS_ROUTES"),
+            "FOO/p:SOLU_UPDATE_ONLY/u:SOLU_WINDOWS_ROUTES/u"
+        );
+    }
+
+    /// The same daemon listening where Windows connects is healthy: not
+    /// reported, exactly as before.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_current_daemon_windows_can_reach_is_left_alone() {
+        let json = r#"{"status":"ok","version":"0.0.1242","pid":4242,"backendID":"wsl"}"#;
+        let port = serve_health_at("127.0.0.2:0", json);
+        let dir = scratch_dir("port-reachable").expect("scratch dir");
+        let script = format!(
+            "{}\nWSL_ETH0_IP=127.0.0.2\nWSL_ADDR=127.0.0.2:{port}\nWINDOWS_ROUTES={WSL_WINDOWS_ROUTES_NONE}\n\
+             if port_held_by_other_daemon; then echo BLOCKED; else echo FREE; fi\n",
+            classifier(&dir, port, "0.0.1242", None).replace("ADDR='0.0.0.0:", "ADDR='127.0.0.1:")
+        );
+        let out = run_bash(&script).expect("bash");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let reported = dir.join(WSL_START_STATUS_FILE).exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(stdout.contains("FREE"), "{stdout} {}", String::from_utf8_lossy(&out.stderr));
+        assert!(!reported);
+    }
+
+    /// Mirrored and unknown networking: the Windows app uses the loopback, so
+    /// there is no second address to check and nothing changes.
+    #[cfg(unix)]
+    #[test]
+    fn with_loopback_as_the_windows_address_nothing_more_is_checked() {
+        let check = extract_fn(&body(), "live_daemon_reachable_from_windows");
+        for wsl_addr in ["127.0.0.1:1", ":8787", "", "172.20.0.5:notaport"] {
+            let script = format!("set -e\nWINDOWS_ROUTES={WSL_WINDOWS_ROUTES_NONE}\nWSL_ADDR='{wsl_addr}'\n{check}\nlive_daemon_reachable_from_windows && echo REACHABLE\n");
+            let Some(out) = run_bash(&script) else { return };
+            assert!(String::from_utf8_lossy(&out.stdout).contains("REACHABLE"), "{wsl_addr}");
+        }
+    }
+
+    /// claim_supervision must check reachability before it adopts a daemon or
+    /// leaves one alone, and may stop only its own staged binary. The waiting
+    /// launcher must not leave for a daemon Windows cannot reach.
+    #[test]
+    fn the_launcher_never_keeps_a_daemon_windows_cannot_reach() {
+        let b = body();
+        let claim = extract_fn(&b, "claim_supervision");
+        let check = claim.rfind("if ! live_daemon_reachable_from_windows; then").expect("checked before adopting");
+        let adopt = claim.find("ADOPT_PID=\"$LIVE_PID\"").expect("adoption");
+        let leave = claim.rfind("is not visible from here; leaving it alone").expect("leave-alone exit");
+        assert!(check < adopt && check < leave, "reachability is checked before adopting or leaving alone");
+        // The other supervisor's daemon: reported, not silently left.
+        let other = claim.find("is healthy (version ${LIVE_VERSION:-unknown}); leaving it alone").unwrap();
+        let other_check = claim.find("if ! live_daemon_reachable_from_windows; then").unwrap();
+        assert!(other_check < other);
+        assert!(claim[other_check..other].contains("report_port_blocked port-held"));
+        // Only our own binary in this distro is ever stopped.
+        let stop = claim.find("stop_pid \"$LIVE_PID\"").expect("replacement");
+        let ours = claim.find("if live_daemon_is_our_binary_here; then").expect("identity check");
+        assert!(ours < stop && claim.matches("stop_pid").count() == 1);
+        let ours_fn = extract_fn(&b, "live_daemon_is_our_binary_here");
+        assert!(ours_fn.contains("live_daemon_visible_here || return 1"));
+        assert!(ours_fn.contains("[ \"$exe\" = \"$LOCAL\" ]"));
+        let wait = extract_fn(&b, "await_port_release");
+        assert!(wait.contains("if probe_live_daemon && live_daemon_is_current && live_daemon_reachable_from_windows; then"));
     }
 
     /// A leftover update-only daemon (its own environ carries the marker) is
@@ -7608,11 +7937,63 @@ mod wsl_port_block_tests {
                 *n += 1;
                 (*n >= 2).then(block)
             },
+            || None,
+            Duration::from_secs(45),
             |_: &str| {},
         );
         assert!(matches!(outcome, SpawnedWslWait::Blocked(ref b) if b.pid == Some(600)), "{outcome:?}");
         assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
         assert!(*calls.lock().unwrap() >= 2);
+    }
+
+    /// start-wsl.sh exited and nothing answers: the wait ends after the grace,
+    /// not after the whole timeout, and says why.
+    #[test]
+    fn wait_ends_soon_after_the_launcher_exits_with_nothing_reachable() {
+        let started = Instant::now();
+        let (outcome, _) = wait_for_spawned_wsl_daemon(
+            vm_and_loopback(),
+            true,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            |_addr: &str| Err("request daemon health failed or timed out".to_string()),
+            || None,
+            || None,
+            || Some("exit status: 0".to_string()),
+            Duration::from_millis(400),
+            |_: &str| {},
+        );
+        let SpawnedWslWait::GaveUp(msg) = outcome else { panic!("{outcome:?}") };
+        assert!(msg.starts_with("WSL daemon was not reachable within"), "{msg}");
+        assert!(msg.ends_with("(the WSL launcher exited, exit status: 0, and left no daemon Windows can reach)"), "{msg}");
+        assert!(started.elapsed() >= Duration::from_millis(400));
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    /// A launcher that exits because it found a daemon to keep is the normal
+    /// case: that daemon answers and is used.
+    #[test]
+    fn a_daemon_the_exited_launcher_kept_is_still_used() {
+        let (outcome, _) = wait_for_spawned_wsl_daemon(
+            vm_and_loopback(),
+            true,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            |addr: &str| {
+                if addr.starts_with("192.168.") {
+                    thread::sleep(Duration::from_millis(300));
+                    Ok(())
+                } else {
+                    Err("x".into())
+                }
+            },
+            || None,
+            || None,
+            || Some("exit status: 0".to_string()),
+            Duration::from_secs(30),
+            |_: &str| {},
+        );
+        assert!(matches!(outcome, SpawnedWslWait::Reachable(ref r) if r == "192.168.255.176:8787"), "{outcome:?}");
     }
 
     /// A usable daemon that answers wins: a report never overrides it.
@@ -7633,6 +8014,8 @@ mod wsl_port_block_tests {
             },
             || None,
             move || (started.elapsed() > Duration::from_secs(1)).then(block),
+            || None,
+            Duration::from_secs(45),
             |_: &str| {},
         );
         assert!(matches!(outcome, SpawnedWslWait::Reachable(ref r) if r == "192.168.255.176:8787"), "{outcome:?}");
@@ -7652,6 +8035,8 @@ mod wsl_port_block_tests {
             |_: &str| Err("daemon at 127.0.0.1:8787 is backend \"\", expected \"wsl\"".to_string()),
             || Some("172.20.0.2".to_string()),
             || None,
+            || None,
+            Duration::from_secs(45),
             |_: &str| {},
         );
         assert!(started.elapsed() >= Duration::from_millis(700));

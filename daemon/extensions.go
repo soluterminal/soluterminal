@@ -233,6 +233,9 @@ type bootEnv struct {
 	scheds    *ScheduleStore
 	bus       *uiBus
 	updater   *Updater
+	// server is the daemon's HTTP server (nil before bootLoops). A step may
+	// serve its handler on a listener of its own; it must not change it.
+	server *http.Server
 	// restartAdmission is the invocation boundary shared by every feature
 	// that starts provider runs.
 	restartAdmission *restartAdmissionBarrier
@@ -423,9 +426,28 @@ type paneRouteHooks struct {
 	// codexLiveConfigValid checks a routed Codex launch's overrides before it
 	// may use the live relay.
 	codexLiveConfigValid func(overrides []string) bool
+	// shellDaemonURL chooses the daemon address a PowerShell terminal keeps
+	// for agent commands typed in it; own is this daemon's own address.
+	shellDaemonURL func(own string) string
+	// shellStarted records the daemon address a new PowerShell terminal was
+	// given; it is called for every pane spawn, with "" when the pane is not
+	// such a terminal. sessionLost and terminalLost report a running pane whose routed
+	// session, or whose terminal, holds an address this daemon no longer
+	// serves; only restarting the pane gives it the current one.
+	shellStarted func(paneID, daemonURL string)
+	sessionLost  func(paneID string) bool
+	terminalLost func(paneID string) bool
 }
 
 func paneRouteActive(env []string) bool { return paneRoute.active != nil && paneRoute.active(env) }
+
+// paneShellDaemonURL is the daemon address given to a PowerShell terminal.
+func paneShellDaemonURL(own string) string {
+	if own == "" || paneRoute.shellDaemonURL == nil {
+		return own
+	}
+	return paneRoute.shellDaemonURL(own)
+}
 
 func paneRouteAccount(label string) bool {
 	return paneRoute.isAccount != nil && paneRoute.isAccount(label)

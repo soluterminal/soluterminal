@@ -151,6 +151,10 @@ func renderWSLStartScript(t *testing.T) string {
 		"{shellver}":  "0.0.0",
 		"{daemonver}": "0.0.0",
 		"{shellplat}": "windows-amd64",
+		// How the desktop app tells the launcher what its own routes to a
+		// WSL daemon looked like (WSL_WINDOWS_ROUTES_ENV / _NONE in daemon.rs).
+		"{routes_env}":  "SOLU_WINDOWS_ROUTES",
+		"{routes_none}": "none",
 	} {
 		body = strings.ReplaceAll(body, placeholder, value)
 	}
@@ -681,7 +685,9 @@ func admissionScript(t *testing.T, dir, addr, bundleVersion string) string {
 	fmt.Fprintf(&b, "SUPERVISOR_SCRIPT='%s'\nSUPERVISOR_LOCK='%s'\nSUPERVISOR_PIDFILE='%s'\n",
 		filepath.Join(dir, "never-running", "start-wsl.sh"), filepath.Join(dir, "start-wsl.lock"), filepath.Join(dir, "start-wsl.pid"))
 	for _, fn := range []string{"ver_gt", "rollback_hold_active", "json_top_value", "probe_live_daemon",
-		"live_daemon_is_current", "is_supervisor_pid", "retire_stray_supervisors", "claim_supervision"} {
+		"live_daemon_is_current", "live_daemon_reachable_from_windows", "live_daemon_visible_here",
+		"live_daemon_is_our_binary_here", "stop_pid", "is_supervisor_pid", "retire_stray_supervisors",
+		"claim_supervision"} {
 		b.WriteString(extractShellFunc(t, body, fn))
 		b.WriteString("\n")
 	}
@@ -708,6 +714,61 @@ func TestWSLLauncherProbeReadsTheDaemonsOwnVersion(t *testing.T) {
 	}
 	if !strings.Contains(out, "pid=4242 backend=wsl version=1.2.3") {
 		t.Fatalf("probe read a nested fleet value instead of the daemon's own identity:\n%s", out)
+	}
+}
+
+// The 2026-11-12 failure: another program had started `solud --backend-id wsl`
+// with no listen flags, so it answered on WSL's loopback only. The desktop app
+// connects to the eth0 address under NAT and could never reach it, yet the
+// launcher adopted it or left it alone and the app waited out its whole
+// timeout on every launch. With the app's own verdict that no route of its
+// accepted a connection, the launcher must not adopt such a daemon; without
+// that verdict (an older app, or a route that did open) it adopts as before.
+func TestWSLLauncherDoesNotAdoptADaemonTheWindowsAppCannotReach(t *testing.T) {
+	t.Parallel()
+	requireTools(t, "bash", "timeout", "awk", "flock")
+	daemon := exec.Command("sleep", "60")
+	if err := daemon.Start(); err != nil {
+		t.Skipf("cannot start stand-in process: %v", err)
+	}
+	t.Cleanup(func() { _ = daemon.Process.Kill(); _ = daemon.Wait() })
+	pid := daemon.Process.Pid
+	addr := fakeWSLDaemon(t, "wsl", "2.0.0", pid)
+	// A port nothing listens on stands in for the eth0 address.
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot reserve a port: %v", err)
+	}
+	unreachable := "127.0.0.2:" + strconv.Itoa(closed.Addr().(*net.TCPAddr).Port)
+	_ = closed.Close()
+
+	for _, tc := range []struct {
+		routes  string
+		adopted bool
+	}{
+		{routes: "none", adopted: false},
+		{routes: "open", adopted: true},
+		{routes: "", adopted: true},
+	} {
+		out, err := runBash(t, admissionScript(t, t.TempDir(), addr, "2.0.0")+
+			// The socket-owner check comes from a constant outside the template.
+			"pid_listens_on_port() { return 1; }\n"+
+			fmt.Sprintf("WSL_ADDR='%s'\nWINDOWS_ROUTES='%s'\nLOCAL=/nonexistent/solud\n", unreachable, tc.routes)+
+			"claim_supervision\necho \"ADOPT=[$ADOPT_PID]\"\n")
+		if err != nil {
+			t.Fatalf("routes=%q: admission aborted: %v\n%s", tc.routes, err, out)
+		}
+		adopted := strings.Contains(out, fmt.Sprintf("ADOPT=[%d]", pid))
+		if adopted != tc.adopted {
+			t.Fatalf("routes=%q: adopted=%v, want %v:\n%s", tc.routes, adopted, tc.adopted, out)
+		}
+		if !tc.adopted && !strings.Contains(out, "where the Windows app connects; not adopting it") {
+			t.Fatalf("routes=%q: the launcher did not say why it would not adopt:\n%s", tc.routes, out)
+		}
+		// The stand-in is not the app's own staged binary, so it is never stopped.
+		if err := daemon.Process.Signal(syscall.Signal(0)); err != nil {
+			t.Fatalf("routes=%q: a daemon that is not the app's own binary was stopped: %v", tc.routes, err)
+		}
 	}
 }
 

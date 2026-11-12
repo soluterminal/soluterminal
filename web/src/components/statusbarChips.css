@@ -30,9 +30,14 @@
   color: var(--fg);
 }
 /* Operator reasons can be long ("host disk: 102.9 GB free on C:\…"); cap the
-   chip so one reason never pushes the version off the bar. The full text is
-   in the tooltip and the aria-label. */
+   chip so one reason never fills the bar. The full text is in the tooltip
+   and the aria-label. */
 .statusbar-system { max-width: 32ch; }
+/* On a narrow bar the System text gives way before any chip is clipped: it is
+   the one that runs long. The floor keeps its gauge icon, and with it a warn
+   or critical tint, on screen. Every other chip keeps its size. */
+.statusbar-right > * { flex-shrink: 0; }
+.statusbar-right > .statusbar-system { flex-shrink: 1; min-width: 29px; }
 .statusbar-system > span {
   min-width: 0;
   overflow: hidden;

@@ -191,7 +191,7 @@ export function DiffTile({ leaf }: Props) {
           title="Open a shell here (to stage / commit / edit)"
           onClick={(e) => {
             e.stopPropagation();
-            launchShellHere(focusedPaneId || diffId, 'horizontal').catch(() => {});
+            launchShellHere(focusedPaneId || diffId, 'horizontal', 'policy').catch(() => {});
           }}
         >⎋ shell</button>
         <div className="pane-actions">

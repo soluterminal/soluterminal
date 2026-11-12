@@ -1,6 +1,7 @@
 // lib.rs pattern matches the `create-tauri-app` template so future
 // mobile (iOS / Android) targets can reuse the same entry point.
 
+mod agent_detect;
 mod autostart;
 mod backend;
 mod daemon;
@@ -22,6 +23,7 @@ mod shell_update;
 mod shell_update_manifest;
 #[cfg(desktop)]
 mod single_instance;
+mod startup_failure;
 mod startup_screen;
 mod this_computer_update;
 mod restart_service;
@@ -35,6 +37,9 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+
+#[cfg(windows)]
+use tauri::menu::{CheckMenuItem, Submenu};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StartupWindowPlan {
@@ -179,21 +184,18 @@ pub fn run() {
             // (launch_mode::resolve defaults to Local). An install already
             // saved in Cloud mode keeps it and keeps a tray item back to Local.
             let desktop_mode = launch_mode::resolve();
-            let chosen = if matches!(desktop_mode, launch_mode::LaunchMode::Local) {
-                Some(backend::resolve_backend(&app_handle, interactive_startup))
-            } else {
-                None
-            };
             // Best-effort and intentionally before daemon startup: an upgrade
             // may have removed the Run value while leaving the preference.
             autostart::reconcile();
 
-            // Start the backends off the main thread. Setup used to block on
-            // them, so nothing was on screen until they were up: two minutes
-            // and more when the WSL daemon could not start (2026-10-28, an
-            // older daemon in a second distro held its port). The startup
-            // window says what is happening meanwhile; the main window is
-            // built, exactly as before, once the backends are known.
+            // Choose and start the backends off the main thread. Setup used
+            // to block on both, so nothing was on screen until they were up:
+            // two minutes and more when the WSL daemon could not start
+            // (2026-10-28, an older daemon in a second distro held its port),
+            // and up to a minute before that while `wsl -e true` woke the WSL
+            // VM to validate a saved choice. The startup window opens first
+            // and says what is happening; the main window is built, exactly
+            // as before, once the backends are known.
             if interactive_startup && matches!(desktop_mode, launch_mode::LaunchMode::Local) {
                 startup_screen::open(&app_handle);
             }
@@ -201,7 +203,37 @@ pub fn run() {
             std::thread::Builder::new()
                 .name("backend-startup".into())
                 .spawn(move || {
-                    let started = start_backends(&worker, desktop_mode, chosen, interactive_startup);
+                    let chosen = choose_backend(&worker, desktop_mode, interactive_startup);
+                    // A background service that can't start stops startup
+                    // here, with the reason and a way to try again. A failed
+                    // start returns no guard, and a guard dropped by the
+                    // listening check stops what it started before this
+                    // thread goes on. Only a failed WSL start leaves its
+                    // launcher behind, and start_wsl_once never runs a second.
+                    let started = loop {
+                        let attempt = start_backends(&worker, desktop_mode, chosen, interactive_startup)
+                            .and_then(|started| wait_for_first_answer(started, desktop_mode));
+                        match attempt {
+                            Ok(started) => break started,
+                            Err(reason) => {
+                                eprintln!("desktop: startup failed: {reason}");
+                                #[cfg(windows)]
+                                daemon::launch_log(&format!("startup failed: {reason}"));
+                                startup_screen::failed();
+                                match startup_failure::ask(&worker, &reason) {
+                                    startup_failure::Choice::Retry => {
+                                        #[cfg(windows)]
+                                        daemon::launch_log("startup: retrying at the user's request");
+                                        startup_screen::retrying();
+                                    }
+                                    startup_failure::Choice::Quit => {
+                                        worker.exit(1);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    };
                     if startup_screen::has_notice()
                         && worker.get_webview_window(startup_screen::LABEL).is_some()
                     {
@@ -218,7 +250,13 @@ pub fn run() {
                             eprintln!("desktop: startup failed: {e}");
                             #[cfg(windows)]
                             daemon::launch_log(&format!("startup failed: {e}"));
-                            main.exit(1);
+                            // Exits once the person has read why. The startup
+                            // window stays: it owns the dialog, and closing the
+                            // app's only window would end the app before the
+                            // dialog is read.
+                            startup_screen::failed();
+                            startup_failure::window_failed(&main, &e.to_string());
+                            return;
                         }
                         startup_screen::close(&main);
                     });
@@ -280,22 +318,47 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+/// Which backend this launch uses; None in Cloud mode, which runs no local
+/// daemon. On Windows this can wait on WSL (the check is bounded, but waking
+/// the WSL VM takes up to a minute) and can stop on a setup dialog, so it runs
+/// on the startup thread, after the startup window is up, never in `setup`.
+fn choose_backend(
+    app_handle: &tauri::AppHandle,
+    desktop_mode: launch_mode::LaunchMode,
+    interactive_startup: bool,
+) -> Option<backend::Backend> {
+    if !matches!(desktop_mode, launch_mode::LaunchMode::Local) {
+        return None;
+    }
+    #[cfg(windows)]
+    let began = std::time::Instant::now();
+    let chosen = backend::resolve_backend(app_handle, interactive_startup);
+    #[cfg(windows)]
+    daemon::launch_log(&format!(
+        "backend chosen: {chosen:?} after {} ms",
+        began.elapsed().as_millis()
+    ));
+    Some(chosen)
+}
+
 /// Start the daemon(s) for this launch: the slow part of startup, run on its
-/// own thread while the startup window is up. Never fails: a backend that
-/// cannot start falls back as before, ending at a URL the window can load.
+/// own thread while the startup window is up. A WSL backend that cannot start
+/// falls back to Windows as before. `Err` means no backend came up at all, and
+/// carries the reason for the "couldn't start" dialog (startup_failure.rs).
+/// It may be called again for Retry: see start_wsl_once.
 fn start_backends(
     app_handle: &tauri::AppHandle,
     desktop_mode: launch_mode::LaunchMode,
     chosen: Option<backend::Backend>,
     interactive_startup: bool,
-) -> daemon::DaemonStart {
+) -> Result<daemon::DaemonStart, String> {
     match desktop_mode {
-        launch_mode::LaunchMode::Cloud => daemon::DaemonStart::single(
+        launch_mode::LaunchMode::Cloud => Ok(daemon::DaemonStart::single(
             daemon::SidecarGuard::empty(),
             launch_mode::cloud_web_url()
                 .expect("cloud launch mode resolves only in a build with a hosted cloud")
                 .into(),
-        ),
+        )),
         launch_mode::LaunchMode::Local => {
             let chosen = chosen.expect("local desktop mode should resolve a backend");
             // Drop ~/.solu/shell-info.json so a daemon launched
@@ -331,7 +394,7 @@ fn start_backends(
                     match chosen {
                         backend::Backend::Wsl => {
                             startup_screen::step("Connecting to the WSL background service");
-                            daemon::ensure_daemon_running_wsl(app_handle)
+                            start_wsl_once(app_handle)
                             .or_else(|err| {
                                 daemon::launch_log(&format!("WSL backend FAILED: {err}"));
                                 daemon::launch_log("falling back to host-native");
@@ -344,7 +407,11 @@ fn start_backends(
                                 // advice is wrong/misleading for an incomplete install or
                                 // a port already held). Non-blocking so startup isn't
                                 // stalled; launch.log still holds the full error.
-                                if interactive_startup {
+                                // Shown only once Windows is really up: when it
+                                // fails too, "running on Windows for now" would be
+                                // false, and the "couldn't start" dialog reports both.
+                                let host = daemon::ensure_daemon_running(daemon::BACKEND_ID_HOST);
+                                if host.is_ok() && interactive_startup {
                                     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
                                     let (title, body) = classify_wsl_fallback(&err);
                                     app_handle
@@ -354,7 +421,9 @@ fn start_backends(
                                         .kind(MessageDialogKind::Warning)
                                         .show(|_| {});
                                 }
-                                daemon::ensure_daemon_running(daemon::BACKEND_ID_HOST)
+                                host.map_err(|host_err| {
+                                    format!("both backends failed: WSL={err}; Windows={host_err}")
+                                })
                             })
                         }
                         backend::Backend::HostNative => {
@@ -366,12 +435,13 @@ fn start_backends(
                             // `solud router` that multiplexes both
                             // behind 127.0.0.1:28787.
                             daemon::launch_log("Dual: spawning WSL + Windows-native + router");
-                            // Circuit-breaker: WSL is attempted EXACTLY ONCE per launch.
-                            // On failure we fall through to Windows-only below — we never
-                            // retry WSL in a loop within a single launch (a flapping WSL
-                            // VM otherwise stalled startup retrying the 45s spawn-wait).
+                            // Circuit-breaker: WSL is attempted EXACTLY ONCE per launch
+                            // (start_wsl_once). On failure we fall through to Windows-only
+                            // below — we never retry WSL in a loop within a single launch
+                            // (a flapping WSL VM otherwise stalled startup retrying the
+                            // 45s spawn-wait).
                             startup_screen::step("Connecting to the WSL background service");
-                            let wsl = daemon::ensure_daemon_running_wsl(app_handle);
+                            let wsl = start_wsl_once(app_handle);
                             if let Err(e) = &wsl {
                                 startup_screen::wsl_fell_back(e);
                             }
@@ -479,16 +549,63 @@ fn start_backends(
                     daemon::ensure_daemon_running(daemon::BACKEND_ID_HOST)
                 }
             }
-            .unwrap_or_else(|err| {
-                eprintln!("desktop: {err}");
-                eprintln!("desktop: continuing without sidecar — window will fail to load until you start solud manually");
-                daemon::DaemonStart::single(
-                    daemon::SidecarGuard::empty(),
-                    "http://127.0.0.1:8787".into(),
-                )
-            })
         }
     }
+}
+
+/// Run `start` unless an earlier call in this launch already failed; then
+/// return that first error without calling it again.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn once_per_launch<T>(
+    failed: &std::sync::Mutex<Option<String>>,
+    start: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if let Some(err) = failed.lock().ok().and_then(|slot| slot.clone()) {
+        return Err(err);
+    }
+    let started = start();
+    if let Err(err) = &started {
+        if let Ok(mut slot) = failed.lock() {
+            *slot = Some(err.clone());
+        }
+    }
+    started
+}
+
+/// Start the WSL backend, at most once per launch. A failed WSL start leaves
+/// its launcher (wsl.exe running start-wsl.sh) alive on purpose: it starts the
+/// daemon by itself once whatever blocked it clears. Retry in the "couldn't
+/// start" dialog must not run a second launcher beside it, which would fight
+/// the first for the supervisor lock. So after a failure Retry goes straight
+/// to the Windows side, and the first WSL error is reported again.
+#[cfg(windows)]
+fn start_wsl_once(app_handle: &tauri::AppHandle) -> Result<daemon::DaemonStart, String> {
+    static FAILED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    if FAILED.lock().ok().is_some_and(|slot| slot.is_some()) {
+        daemon::launch_log("WSL already failed to start in this launch; not starting it again");
+    }
+    once_per_launch(&FAILED, || daemon::ensure_daemon_running_wsl(app_handle))
+}
+
+/// Hold the main window back until something listens where it is about to
+/// load. A host-native daemon is handed to its watchdog after five seconds
+/// whether or not it has bound its port; loading the window then left it on a
+/// dead page for good. `Err` drops `started`, which stops what this launch
+/// started, so a retry begins clean. Cloud mode loads a hosted page instead.
+fn wait_for_first_answer(
+    started: daemon::DaemonStart,
+    desktop_mode: launch_mode::LaunchMode,
+) -> Result<daemon::DaemonStart, String> {
+    if !matches!(desktop_mode, launch_mode::LaunchMode::Local) {
+        return Ok(started);
+    }
+    let url = &started.initial_url;
+    if startup_failure::wait_until_listening(url, std::time::Duration::ZERO).is_ok() {
+        return Ok(started);
+    }
+    startup_screen::step("Waiting for the background service");
+    startup_failure::wait_until_listening(url, startup_failure::FIRST_ANSWER_PATIENCE)?;
+    Ok(started)
 }
 
 /// Everything setup did after the backends were up: managed state, the main
@@ -632,12 +749,24 @@ fn finish_startup(
     // installer comes only through this computer's daemon, whatever computer
     // the window shows, so the page routes its update there too.
     let shell_flavor = if env!("SOLU_SHELL_FLAVOR") == "team" { "team" } else { "public" };
+    // wslDistro: whether this launch saw a WSL distro on this PC (true or
+    // false), or null when it did not look: a mode was already saved, or this
+    // is not Windows. The setup checklist then offers "Use Linux (WSL)"
+    // instead of "Set up Linux (WSL)". Older shells omit it.
+    #[cfg(windows)]
+    let wsl_distro = match backend::wsl_distro_seen() {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "null",
+    };
+    #[cfg(not(windows))]
+    let wsl_distro = "null";
     let backend_script = format!(
         "window.__SOLU_BACKEND__ = {{ requested: \"{requested_backend}\", \
          actual: \"{actual_backend}\", fallback: {fallback}, \
          hostPlatform: \"{host_platform}\", launchMode: \"{launch_mode_value}\", \
          version: \"{shell_version}\", updateThisComputer: {update_this_computer}, \
-         shellFlavor: \"{shell_flavor}\" }};"
+         shellFlavor: \"{shell_flavor}\", wslDistro: {wsl_distro} }};"
     );
 
     // Restore the main window's saved geometry (position, size,
@@ -757,22 +886,46 @@ fn finish_startup(
         None::<&str>,
     )?;
 
-    // "Switch backend" tray entry (Windows only). Label shows
-    // what you'd switch TO — "Switch to Windows-native" if
-    // currently on WSL, and vice versa. Clicking saves the new
-    // preference and restarts the app so the new backend comes
-    // up cleanly (rather than trying to swap daemons live,
-    // which would orphan the webview's state).
+    // "Switch mode" tray submenu (Windows only): the three modes, with the
+    // saved one ticked. It used to be one item that cycled WSL → Windows →
+    // Dual, so from Dual the only offer was WSL and Windows was two restarts
+    // away. Picking a mode saves it and restarts the app so the new backend
+    // comes up cleanly (rather than trying to swap daemons live, which would
+    // orphan the webview's state). With nothing saved yet (no agent was found
+    // to decide by) the mode running now is ticked, and picking it saves it.
     #[cfg(windows)]
-    let switch = {
-        let target = backend::other(chosen.unwrap_or(backend::Backend::HostNative));
-        let label = format!("Switch to {}", backend::label(target));
-        MenuItem::with_id(app, "switch_backend", &label, true, None::<&str>)?
+    let mode_items = {
+        let ticked = backend::saved_pref()
+            .or(chosen)
+            .unwrap_or(backend::Backend::HostNative);
+        let mut items = Vec::with_capacity(backend::MODES.len());
+        for mode in backend::MODES {
+            items.push((
+                mode,
+                CheckMenuItem::with_id(
+                    app,
+                    backend::mode_menu_id(mode),
+                    backend::label(mode),
+                    true,
+                    mode == ticked,
+                    None::<&str>,
+                )?,
+            ));
+        }
+        items
     };
+    #[cfg(windows)]
+    let switch = Submenu::with_id_and_items(
+        app,
+        "switch_mode",
+        "Switch mode",
+        true,
+        &[&mode_items[0].1, &mode_items[1].1, &mode_items[2].1],
+    )?;
 
     // "Repair setup" (Windows, Local only): clears the saved
     // backend choice + transient WSL artifacts and restarts so
-    // detection + the first-run wizard re-fire. The in-app escape
+    // detection runs again, with the WSL repair offers. The in-app escape
     // hatch for a botched WSL setup that a reinstall wouldn't fix
     // (prefs live in %LOCALAPPDATA%, untouched by the uninstaller).
     #[cfg(windows)]
@@ -845,19 +998,35 @@ fn finish_startup(
                 restart_from_main_thread(app);
             }
             #[cfg(windows)]
-            "switch_backend" => {
-                // Flip to the opposite of the currently-SAVED
-                // backend, persist, and restart. We read the saved
-                // pref (not resolve_backend) so this never triggers
-                // the WSL re-validation/repair dialog — switching is
+            id if backend::mode_from_menu_id(id).is_some() => {
+                let Some(target) = backend::mode_from_menu_id(id) else { return };
+                // The saved pref decides (not resolve_backend), so this never
+                // triggers the WSL re-validation/repair dialog: switching is
                 // an explicit user action, not a health check.
-                // Restart cleanly stops the current daemon/proxy via
-                // SidecarGuard drop and re-runs .setup().
-                let target = backend::other(backend::saved_or_default());
-                if let Err(e) = backend::set_pref(target) {
-                    eprintln!("desktop: set_pref failed: {e}");
+                let saved = backend::saved_pref();
+                let running = chosen.unwrap_or(backend::Backend::HostNative);
+                match backend::mode_pick(saved, running, target) {
+                    backend::ModePick::Keep => {}
+                    backend::ModePick::Save => {
+                        if let Err(e) = backend::set_pref(target) {
+                            eprintln!("desktop: set_pref failed: {e}");
+                        }
+                    }
+                    backend::ModePick::SaveAndRestart => {
+                        if let Err(e) = backend::set_pref(target) {
+                            eprintln!("desktop: set_pref failed: {e}");
+                        }
+                        // Restart cleanly stops the current daemon/proxy via
+                        // SidecarGuard drop and re-runs .setup().
+                        restart_from_main_thread(app);
+                    }
                 }
-                restart_from_main_thread(app);
+                // A click toggles the item's own tick. Put the ticks back on
+                // the saved mode (reached only when the app keeps running).
+                let ticked = backend::saved_pref().unwrap_or(running);
+                for (mode, item) in &mode_items {
+                    let _ = item.set_checked(*mode == ticked);
+                }
             }
             #[cfg(windows)]
             "repair_reset" => {
@@ -865,9 +1034,10 @@ fn finish_startup(
                 let ok = app
                     .dialog()
                     .message(
-                        "Reset soluterminal's Windows/Linux setup and re-detect from \
-                         scratch? The app will restart and ask how you want it to run \
-                         (and offer to set up Linux/WSL if needed).",
+                        "Reset SoluTerminal's Windows/Linux setup and re-detect from \
+                         scratch? The app will restart, check Linux (WSL) and offer to \
+                         set it up or update it if needed, then run where your agents \
+                         are installed. To pick a mode yourself, use Switch mode.",
                     )
                     .title("Repair setup")
                     .kind(MessageDialogKind::Warning)
@@ -1250,6 +1420,65 @@ mod autostart_window_tests {
                 assert!(!autostart.show_after_build);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wsl_once_tests {
+    use super::once_per_launch;
+    use std::sync::Mutex;
+
+    #[test]
+    fn a_failed_start_is_not_run_again_and_reports_its_first_error() {
+        let failed = Mutex::new(None);
+        let mut runs = 0;
+        let first: Result<(), String> = once_per_launch(&failed, || {
+            runs += 1;
+            Err("WSL daemon was not reachable within 120s".to_string())
+        });
+        assert_eq!(first.unwrap_err(), "WSL daemon was not reachable within 120s");
+        // Retry: the launcher from the first try is still alive.
+        let second: Result<(), String> = once_per_launch(&failed, || {
+            runs += 1;
+            Ok(())
+        });
+        assert_eq!(second.unwrap_err(), "WSL daemon was not reachable within 120s");
+        assert_eq!(runs, 1);
+    }
+
+    #[test]
+    fn a_start_that_worked_may_run_again() {
+        // Retry after the Windows side or the router failed: WSL is up, and
+        // connecting to it again starts nothing.
+        let failed = Mutex::new(None);
+        let mut runs = 0;
+        for _ in 0..2 {
+            let started = once_per_launch(&failed, || {
+                runs += 1;
+                Ok::<_, String>(runs)
+            });
+            assert!(started.is_ok());
+        }
+        assert_eq!(runs, 2);
+    }
+}
+
+#[cfg(test)]
+mod startup_order_tests {
+    // Choosing the backend can wait a minute on WSL and can stop on a setup
+    // dialog. In `setup` that happened on the main thread with no window on
+    // screen. It belongs on the startup thread, after the startup window.
+    #[test]
+    fn the_backend_is_chosen_on_the_startup_thread_after_the_startup_window_opens() {
+        let source = include_str!("lib.rs");
+        let setup = source.split_once(".setup(|app| {").unwrap().1;
+        let setup = setup.split_once(".on_window_event(").unwrap().0;
+        let open = setup.find("startup_screen::open(&app_handle)").unwrap();
+        let spawn = setup.find(".spawn(move || {").unwrap();
+        let choose = setup.find("choose_backend(&worker").unwrap();
+        assert!(open < spawn, "the startup window opens before the startup thread starts");
+        assert!(spawn < choose, "the backend is chosen on the startup thread");
+        assert!(!setup.contains("resolve_backend("), "setup must not check WSL itself");
     }
 }
 

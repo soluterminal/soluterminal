@@ -20,7 +20,8 @@ import {
 //   1. On open → POST /api/cloud/pair/start, render the returned 6-char CODE.
 //   2. Poll /api/cloud/status (via usePhoneAccessStatus): while pairing.active
 //      show "Waiting…"; the instant relayState flips "online", show success.
-//   3. Handle code expiry ("Get a new code" → start again) + credsInvalid.
+//   3. Handle code expiry ("Get a new code" → start again) + credsInvalid
+//      ("Pair again": remove the refused pairing, then start again in place).
 //   4. Cancel → POST /api/cloud/pair/cancel.
 //
 // Desktop-shell only: the gate (PhoneAccessPairPanelGate) refuses to mount
@@ -86,10 +87,22 @@ function PairPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
-  // Forget the cloud connection entirely (deletes the daemon's claim.json). The
-  // way out of a stuck "sign-in needed" (machine deleted server-side → token
-  // permanently rejected) and the off-switch for a user who no longer wants
-  // cloud. Status reverts to "not set up" on the next poll; we close after.
+  const disconnectFailed = (e: unknown) => {
+    const status = (e as { status?: number } | null)?.status;
+    useStore.getState().toast(
+      status === 403
+        ? 'Disconnect must run on the machine itself, not over your phone/cloud link.'
+        : `Couldn’t disconnect: ${(e as Error).message}`,
+      { kind: 'info', icon: '!', ttlMs: 8000 },
+    );
+    // Failure: keep the panel open so the user can retry; re-poll status.
+    setPokeKey((k) => k + 1);
+  };
+
+  // Forget the cloud connection entirely (deletes the daemon's claim.json).
+  // The off-switch for a user who no longer wants cloud: the daemon remembers
+  // the choice, so a later sign-in doesn't connect this computer on its own.
+  // Status reverts to "not set up" on the next poll; we close after.
   const [disconnecting, setDisconnecting] = useState(false);
   const disconnect = async () => {
     setDisconnecting(true);
@@ -101,22 +114,69 @@ function PairPanel({ onClose }: { onClose: () => void }) {
       });
       onClose(); // success: dismiss; the chip/banner poll reverts to "not set up"
     } catch (e) {
-      const status = (e as { status?: number } | null)?.status;
-      useStore.getState().toast(
-        status === 403
-          ? 'Disconnect must run on the machine itself, not over your phone/cloud link.'
-          : `Couldn’t disconnect: ${(e as Error).message}`,
-        { kind: 'info', icon: '!', ttlMs: 8000 },
-      );
-      // Failure: keep the panel open so the user can retry; re-poll status.
-      setPokeKey((k) => k + 1);
+      disconnectFailed(e);
     } finally {
       setDisconnecting(false);
     }
   };
 
+  // The way out of a stuck "sign-in needed" (computer removed from the
+  // account, or its sign-in expired: the saved pairing is refused for good).
+  // One click removes the refused pairing and gets a new code, in place. The
+  // order matters: Disconnect also cancels any pending code, and starting a
+  // pairing is what tells the daemon the person wants this computer connected
+  // again, so a plain Disconnect stays a clean off-switch.
+  const [repairing, setRepairing] = useState(false);
+  // The removed pairing still reads as refused until the next status poll;
+  // don't fall back to the sign-in screen in between.
+  const [refusedRemoved, setRefusedRemoved] = useState(false);
+  // False once the panel is dismissed (Close, Escape or a click outside all
+  // stay available while Pair again works).
+  const openRef = useRef(true);
+  useEffect(() => {
+    // Set on every mount: React's development StrictMode runs the cleanup
+    // once and mounts again, and the panel must still count as open then.
+    openRef.current = true;
+    return () => { openRef.current = false; };
+  }, []);
+  const pairAgain = async () => {
+    setRepairing(true);
+    try {
+      await cloudPairApi.disconnect();
+    } catch (e) {
+      disconnectFailed(e);
+      setRepairing(false);
+      return;
+    }
+    if (!openRef.current) {
+      // Dismissed while the old pairing was being removed: stop there. A new
+      // pairing nobody can see must not start, and it would also clear the
+      // daemon's record of the disconnect. Say what did happen.
+      useStore.getState().toast('Cloud disconnected — this computer no longer connects to the cloud.', {
+        kind: 'info',
+        ttlMs: 7000,
+      });
+      return;
+    }
+    setCode(null);
+    setExpiresAt(undefined);
+    setRefusedRemoved(true);
+    await start();
+    if (!openRef.current) {
+      // Dismissed while the code was on its way: don't leave it pending.
+      void cloudPairApi.pairCancel().catch(() => {});
+      return;
+    }
+    setRepairing(false);
+  };
+  const refused = status?.credsInvalid === true;
+  useEffect(() => {
+    // Once the status has caught up, a later refusal shows the sign-in screen again.
+    if (!refused) setRefusedRemoved(false);
+  }, [refused]);
+
   const remaining = secondsUntil(expiresAt);
-  const phase: Phase = derivePhase(status, { code, startErr, remaining });
+  const phase: Phase = derivePhase(status, { code, startErr, remaining, refusedRemoved });
 
   const copyCode = async () => {
     if (!code) return;
@@ -165,7 +225,13 @@ function PairPanel({ onClose }: { onClose: () => void }) {
           />
         ) : phase === 'signin' ? (
           <SigninBody
-            onClose={onClose}
+            // Opening the panel fetched a code before the refusal was known.
+            // Cancel it on Close, as Escape and a click outside do: while a
+            // code is pending, the Devices row reads "Connecting…" / "Open"
+            // instead of the "Sign-in needed" / "Sign in" the fix names.
+            onClose={() => void cancel()}
+            onPairAgain={() => void pairAgain()}
+            repairing={repairing}
             onDisconnect={() => void disconnect()}
             disconnecting={disconnecting}
           />
@@ -189,11 +255,11 @@ function PairPanel({ onClose }: { onClose: () => void }) {
 
 function derivePhase(
   status: CloudStatus | null,
-  ctx: { code: string | null; startErr: string | null; remaining: number | null },
+  ctx: { code: string | null; startErr: string | null; remaining: number | null; refusedRemoved?: boolean },
 ): Phase {
   // Success wins the instant the relay comes online.
   if (status?.relayState === 'online') return 'connected';
-  if (status?.credsInvalid) return 'signin';
+  if (status?.credsInvalid && !ctx.refusedRemoved) return 'signin';
   if (ctx.startErr) return 'error';
   if (!ctx.code) return 'starting';
   if (ctx.remaining !== null && ctx.remaining <= 0) return 'expired';
@@ -354,10 +420,14 @@ function ConnectedBody({
 
 function SigninBody({
   onClose,
+  onPairAgain,
+  repairing,
   onDisconnect,
   disconnecting,
 }: {
   onClose: () => void;
+  onPairAgain: () => void;
+  repairing: boolean;
   onDisconnect: () => void;
   disconnecting: boolean;
 }) {
@@ -367,21 +437,28 @@ function SigninBody({
         Sign-in needed
       </h2>
       <p className="phone-access-intro">
-        This computer&rsquo;s cloud connection is no longer valid (the sign-in expired, or
-        this machine was removed from your account). Re-pair it: choose
-        &ldquo;Set up phone access&rdquo; again and enter a fresh code on your phone, signed in
-        with the same account.
+        This computer&rsquo;s cloud connection is no longer valid: the sign-in expired, or
+        this computer was removed from your account. Choose <b>Pair again</b> to get a new
+        code, then enter it on your phone, signed in with the same account.
       </p>
       <p className="phone-access-secondary">
-        Or, if you don&rsquo;t use cloud on this computer, <b>Disconnect</b> to stop the
-        reminders. You can pair again anytime.
+        If you don&rsquo;t use the cloud on this computer, <b>Disconnect</b> stops these
+        reminders. You can set it up again any time.
       </p>
       <div className="phone-access-actions end">
         <button
           type="button"
+          className="phone-access-btn primary"
+          onClick={onPairAgain}
+          disabled={repairing || disconnecting}
+        >
+          {repairing ? 'Getting a new code…' : 'Pair again'}
+        </button>
+        <button
+          type="button"
           className="phone-access-btn"
           onClick={onDisconnect}
-          disabled={disconnecting}
+          disabled={disconnecting || repairing}
           title="Forget this cloud connection and clear the sign-in reminder"
         >
           {disconnecting ? 'Disconnecting…' : 'Disconnect'}

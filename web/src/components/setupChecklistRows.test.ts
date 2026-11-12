@@ -76,6 +76,26 @@ describe('whereAgentsRunRow', () => {
     expect(whereAgentsRunRow({ backend: { actual: 'wsl' }, onSetUpWsl })?.fix).toBeUndefined();
   });
 
+  it('offers to use Linux (WSL), not set it up, when the PC already has a distro', () => {
+    const onSetUpWsl = vi.fn();
+    const row = whereAgentsRunRow({ backend: { actual: 'host', requested: 'host', wslDistro: true }, onSetUpWsl });
+    expect(row).toMatchObject({
+      status: 'ok',
+      detail: 'Windows PowerShell. Linux (WSL) is on this PC too.',
+      fix: { label: 'Use Linux (WSL)' },
+    });
+    row?.fix?.onClick();
+    expect(onSetUpWsl).toHaveBeenCalledOnce();
+    // No distro, or a launch that did not look: setting it up stays the offer.
+    for (const wslDistro of [false, null, undefined]) {
+      const other = whereAgentsRunRow({ backend: { actual: 'host', requested: 'host', wslDistro }, onSetUpWsl });
+      expect(other).toMatchObject({
+        detail: 'Windows PowerShell. Setting up Linux (WSL) is optional.',
+        fix: { label: 'Set up Linux (WSL)' },
+      });
+    }
+  });
+
   it('warns when Linux (WSL) did not start', () => {
     const r = whereAgentsRunRow({ backend: { actual: 'host', requested: 'wsl', fallback: true }, onSetUpWsl: () => {} });
     expect(r).toMatchObject({ status: 'warn', fix: { label: 'Set up Linux (WSL)' } });

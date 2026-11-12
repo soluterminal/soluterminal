@@ -133,7 +133,12 @@ export function whereAgentsRunRow(input: {
 }): ChecklistRow | null {
   const { backend, healthBackendID, paneEnvironment, shellPlatform, onSetUpWsl } = input;
   const base = { key: 'backend', label: 'Where agents run' };
-  const setUp = onSetUpWsl ? { label: `Set up ${WSL}`, onClick: onSetUpWsl } : undefined;
+  // With a WSL distro already on this PC there is nothing to set up: the
+  // same action just switches to it.
+  const hasDistro = backend?.wslDistro === true;
+  const setUp = onSetUpWsl
+    ? { label: hasDistro ? `Use ${WSL}` : `Set up ${WSL}`, onClick: onSetUpWsl }
+    : undefined;
   const actual = backend?.actual;
   if (actual === 'host' && backend?.fallback && backend.requested !== 'host') {
     return {
@@ -146,7 +151,9 @@ export function whereAgentsRunRow(input: {
   if (actual === 'host') {
     return {
       ...base,
-      detail: `${POWERSHELL}. Setting up ${WSL} is optional.`,
+      detail: hasDistro
+        ? `${POWERSHELL}. ${WSL} is on this PC too.`
+        : `${POWERSHELL}. Setting up ${WSL} is optional.`,
       status: 'ok',
       fix: setUp,
     };

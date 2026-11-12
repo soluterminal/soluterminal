@@ -48,6 +48,22 @@ export function insertLeaf(
   return options?.rebalance ? rebalanceRunContainingLeaf(next, target, direction) : next;
 }
 
+// "Split right" / "Split down": the new pane takes the far side of a split with
+// the target tile, and the run of same-direction splits it joins is shared
+// equally. A pane already placed elsewhere in the layout moves there. Null when
+// the target is not a tile of this layout, so the caller can place it otherwise.
+export function splitPaneBeside(
+  layout: Layout | null,
+  paneId: string,
+  direction: 'horizontal' | 'vertical' | null,
+  target: string | null,
+): Layout | null {
+  if (!direction || !target || target === paneId) return null;
+  const rest = removePane(layout, paneId);
+  if (!layoutHasLeaf(rest, target)) return null;
+  return insertLeaf(rest, { type: 'pane', paneId }, direction, target, { rebalance: true });
+}
+
 // Check whether a node or its children contain a browser leaf.
 export function containsBrowserLeaf(node: Layout | null): boolean {
   if (!node) return false;

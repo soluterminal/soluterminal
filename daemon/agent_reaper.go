@@ -215,6 +215,68 @@ func reapOrphanAgents(mgr *Manager, agentsDir string, retained ...map[string]own
 	}
 }
 
+// cleanOrphansAtBoot removes what no pane owns after the startup restore
+// loop: stale socket files, leaked agent process trees and managed harness
+// clients left by a replaced agent.
+//
+// All three treat "no pane in the manager owns it" as proof of an orphan, and
+// that proof is only as good as the pane list read from panes.json. When the
+// file was unusable at startup (panesProblem != ""), the list is empty or an
+// older last-good copy, so a live session may have no pane yet: nothing is
+// removed on that start. The leftovers wait for the next normal start.
+// An unreadable owner-retirement record (historyErr) skips cleanup the same
+// way, as before.
+func cleanOrphansAtBoot(mgr *Manager, dataDir string, ownerHistories map[string]ownerRetainedHistory, historyErr error, panesProblem string, panesRestored int) {
+	requireNormalBootEngine("agent_reaper.cleanOrphansAtBoot")
+	if panesProblem != "" {
+		log.Printf("panes.json was unusable at startup (%s; %d pane(s) restored from the last-good copy): leaving agent sockets and processes untouched for this start", panesProblem, panesRestored)
+		return
+	}
+	if historyErr != nil {
+		return
+	}
+	agentsDir := filepath.Join(dataDir, "agents")
+	// Sweep orphan agent sockets. Anything in ~/.solu/agents/ that doesn't
+	// belong to a live pane is leftover from a crashed agent or a killed
+	// daemon. Safe to delete — a live agent's socket is kept open by its
+	// process, and removing the filesystem entry doesn't affect an
+	// already-bound Unix socket.
+	if entries, err := os.ReadDir(agentsDir); err == nil {
+		live := map[string]bool{}
+		for _, history := range ownerHistories {
+			if !history.RestoreEnabled && history.State.Phase != "retired" {
+				live[filepath.Base(history.Pane.SocketPath)] = true
+			}
+		}
+		for _, p := range mgr.List() {
+			live[filepath.Base(p.SocketPath)] = true
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".sock") {
+				continue
+			}
+			if live[e.Name()] {
+				continue
+			}
+			if err := os.Remove(filepath.Join(agentsDir, e.Name())); err == nil {
+				log.Printf("removed orphan socket %s", e.Name())
+			}
+		}
+	}
+	// Reap leaked agent PROCESSES (the socket sweep above only deletes files): a
+	// surviving-but-unreattached agent, or a duplicate a prior resume left on the
+	// same socket, that no RUNNING pane owns. Runs after the restore loop so every
+	// reattached/respawned agent is already a live pane's Pid and is spared. Scoped
+	// to agentsDir so it ONLY reaps our own agents — never another daemon's.
+	reapOrphanAgents(mgr, agentsDir, ownerHistories)
+	// A managed harness client is DETACHED from its pane's process group, so a
+	// pane restart can orphan it; its harness child then holds the session's
+	// cross-process flock and later /resume calls answer "Internal error". Reap
+	// those left behind by a predecessor agent now that every live pane's agent
+	// pid is published.
+	reapOrphanHarnessClients(mgr, dataDir, ownerHistories)
+}
+
 // socketUnderDir reports whether an agent socket path lives DIRECTLY in dir — i.e.
 // it is one of THIS daemon's <dataDir>/agents/pane_*.sock. reapOrphanAgents uses it
 // to confine the machine-wide /proc scan to the calling daemon's own agents, so a

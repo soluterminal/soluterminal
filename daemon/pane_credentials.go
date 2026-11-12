@@ -61,11 +61,15 @@ type paneCredentialInfo struct {
 	Source          string `json:"source"`
 	ActiveAccount   string `json:"activeAccount,omitempty"`
 	RestartRequired bool   `json:"restartRequired,omitempty"`
-	TeamID          string `json:"teamId,omitempty"`
-	ActiveTeamID    string `json:"activeTeamId,omitempty"`
-	LiveState       string `json:"liveState,omitempty"`
-	Recovery        string `json:"recovery,omitempty"`
-	RetryAt         int64  `json:"retryAt,omitempty"`
+	// ConnectionLost: the session was given a daemon address this daemon no
+	// longer serves (the Windows daemon's port moved with the Startup mode),
+	// so its model requests cannot arrive until it is restarted.
+	ConnectionLost bool   `json:"connectionLost,omitempty"`
+	TeamID         string `json:"teamId,omitempty"`
+	ActiveTeamID   string `json:"activeTeamId,omitempty"`
+	LiveState      string `json:"liveState,omitempty"`
+	Recovery       string `json:"recovery,omitempty"`
+	RetryAt        int64  `json:"retryAt,omitempty"`
 }
 
 func clonePaneCredential(info *paneCredentialInfo) *paneCredentialInfo {

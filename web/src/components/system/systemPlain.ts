@@ -19,6 +19,34 @@ export const PLAIN_SYSTEM_AREA: Record<string, string> = {
   cloud: 'Cloud connection problem',
 };
 
+// The fix for a refused pairing. The cloud area turns critical in one case
+// only: the cloud answered this computer's saved pairing with 401/403
+// (credsInvalid; daemon/system_api.go, relay_supervisor.go). The background
+// service then stops retrying, so waiting never clears it: the old pairing
+// has to be removed and a new one made. That is one button, "Pair again", in
+// the Sign-in needed panel (PhoneAccessPairPanel), reached from Settings ›
+// Devices › Phone access › "Sign in". The row exists only in the desktop app
+// and only with an account, so the sentence depends on where the person is.
+// The wording is the marketing lead's; the button names are the ones on
+// screen.
+export type PairingFixPlace = 'devices' | 'signedOut' | 'browser';
+
+export function pairingFixPlace(desktopApp: boolean, phoneAccessRow: boolean): PairingFixPlace {
+  if (!desktopApp) return 'browser';
+  return phoneAccessRow ? 'devices' : 'signedOut';
+}
+
+export function cloudPairingFix(place: PairingFixPlace): string {
+  switch (place) {
+    case 'devices':
+      return 'This computer’s pairing is no longer accepted. Open Settings › Devices › Phone access, choose Sign in, then Pair again.';
+    case 'signedOut':
+      return 'This computer’s pairing is no longer accepted. First choose Create free account or sign in under Settings › Account, then open Settings › Devices › Phone access, choose Sign in, then Pair again.';
+    default:
+      return 'This computer’s pairing is no longer accepted. In the SoluTerminal app on this computer, open Settings › Devices › Phone access and choose Pair again.';
+  }
+}
+
 // The verdict in plain words: a warning or a problem names the area; partial
 // data (an area this platform can't measure) is not worth a stranger's worry.
 export function plainSystemLevel(level: SystemStatus['level']): SystemStatus['level'] {

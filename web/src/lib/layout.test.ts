@@ -8,6 +8,7 @@ import {
   insertLeaf,
   insertPane,
   leafId,
+  splitPaneBeside,
 } from './layout';
 
 const initialStoreState = useStore.getInitialState();
@@ -450,5 +451,63 @@ describe('layout leaf rebalancing', () => {
     const fileId = Array.from(shares.keys()).find((k) => k.startsWith('file_'));
     expect(fileId).toBeDefined();
     expect(shares.get(fileId!)).toBeCloseTo(1 / 3, 4);
+  });
+});
+
+describe('splitPaneBeside (Split right / Split down)', () => {
+  const leaf = (paneId: string): Layout => ({ type: 'pane', paneId });
+  const split = (direction: 'horizontal' | 'vertical', ratio: number, a: Layout, b: Layout): Layout => ({ type: 'split', direction, ratio, a, b });
+
+  it('puts the new pane right of the target for a horizontal split', () => {
+    expect(splitPaneBeside(leaf('p1'), 'new', 'horizontal', 'p1')).toEqual(split('horizontal', 0.5, leaf('p1'), leaf('new')));
+  });
+
+  it('puts the new pane below the target for a vertical split', () => {
+    expect(splitPaneBeside(leaf('p1'), 'new', 'vertical', 'p1')).toEqual(split('vertical', 0.5, leaf('p1'), leaf('new')));
+  });
+
+  it('splits only the target inside a nested layout and keeps the other ratios', () => {
+    const layout = split('vertical', 0.7, split('horizontal', 0.2, leaf('p1'), leaf('p2')), leaf('p3'));
+    expect(splitPaneBeside(layout, 'new', 'vertical', 'p2')).toEqual(
+      split('vertical', 0.7, split('horizontal', 0.2, leaf('p1'), split('vertical', 0.5, leaf('p2'), leaf('new'))), leaf('p3')),
+    );
+    expect(splitPaneBeside(layout, 'new', 'horizontal', 'p3')).toEqual(
+      split('vertical', 0.7, split('horizontal', 0.2, leaf('p1'), leaf('p2')), split('horizontal', 0.5, leaf('p3'), leaf('new'))),
+    );
+  });
+
+  it('shares a run of same-direction splits equally, in both directions', () => {
+    for (const direction of ['horizontal', 'vertical'] as const) {
+      // p1 60%, p2 30%, p3 10% along the split direction.
+      const run = split(direction, 0.6, leaf('p1'), split(direction, 0.75, leaf('p2'), leaf('p3')));
+      const next = splitPaneBeside(run, 'new', direction, 'p1');
+      const shares = computeLeafShares(next);
+      for (const id of ['p1', 'new', 'p2', 'p3']) expect(shares.get(id)).toBeCloseTo(0.25);
+      expect(next).toMatchObject({ direction, a: { direction, a: leaf('p1'), b: leaf('new') } });
+    }
+  });
+
+  it('leaves a perpendicular run untouched when the new pane joins a run inside it', () => {
+    const column = split('vertical', 0.8, leaf('p1'), split('horizontal', 0.5, leaf('p2'), leaf('p3')));
+    const next = splitPaneBeside(column, 'new', 'horizontal', 'p3');
+    expect(next).toMatchObject({ direction: 'vertical', ratio: 0.8, a: leaf('p1') });
+    const shares = computeLeafShares(next);
+    for (const id of ['p2', 'p3', 'new']) expect(shares.get(id)).toBeCloseTo(0.2 / 3);
+  });
+
+  it('moves a pane that is already in the layout to the far side of its target', () => {
+    const layout = split('vertical', 0.5, split('horizontal', 0.5, leaf('p1'), leaf('p2')), leaf('new'));
+    expect(splitPaneBeside(layout, 'new', 'horizontal', 'p1')).toMatchObject({
+      type: 'split', direction: 'horizontal', a: { type: 'split', direction: 'horizontal', a: leaf('p1'), b: leaf('new') }, b: leaf('p2'),
+    });
+  });
+
+  it('returns null when there is no side or no such target tile', () => {
+    const layout = split('horizontal', 0.5, leaf('p1'), leaf('p2'));
+    expect(splitPaneBeside(layout, 'new', null, 'p1')).toBeNull();
+    expect(splitPaneBeside(layout, 'new', 'horizontal', null)).toBeNull();
+    expect(splitPaneBeside(layout, 'new', 'horizontal', 'gone')).toBeNull();
+    expect(splitPaneBeside(layout, 'p1', 'horizontal', 'p1')).toBeNull();
+    expect(splitPaneBeside(null, 'new', 'horizontal', 'p1')).toBeNull();
   });
 });

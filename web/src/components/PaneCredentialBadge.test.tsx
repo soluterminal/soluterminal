@@ -206,3 +206,38 @@ it('hides identities in chip and popover for screen sharing', () => {
  expect(document.body.innerHTML).not.toContain('secret@example.com');
  expect(document.body.innerHTML).not.toContain('other@example.com');
 });
+
+describe('a Backend setting change that cut the pane off', () => {
+ it('a team session offers a restart that keeps the conversation', async () => {
+  const restart = vi.spyOn(paneRestart, 'restartPaneFlow').mockResolvedValue(undefined as never);
+  render(<PaneCredentialBadge pane={{ ...thread, credential: { provider: 'claude', account: 'team__solux', activeAccount: 'team__solux', source: 'broker', connectionLost: true } }} />);
+  fireEvent.click(screen.getByText('connection lost'));
+  expect(screen.getByText('This session lost its team connection after the Backend setting was changed. Restart it to continue; the conversation is kept.')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Restart session' }));
+  await waitFor(() => expect(restart).toHaveBeenCalledWith('pane_test'));
+ });
+ it('outranks an account mismatch: restarting fixes both', () => {
+  const status = paneAccountStatus({ ...thread, credential: { provider: 'codex', account: 'team__old', activeAccount: 'work', source: 'broker', restartRequired: true, connectionLost: true } }, name)!;
+  expect(status.tone).toBe('warn');
+  expect(status.detail?.heading).toBe('Team connection lost');
+ });
+ it('a terminal says what to do and warns what a restart ends', async () => {
+  const resume = vi.spyOn(paneRestart, 'restartPaneFlow').mockResolvedValue(undefined as never);
+  const restart = vi.spyOn(paneRestart, 'restartTerminalFlow').mockResolvedValue(undefined as never);
+  render(<PaneCredentialBadge pane={{ ...thread, terminalAddressLost: true }} />);
+  fireEvent.click(screen.getByText('needs restart'));
+  // The two commands render as code, not as backticks.
+  expect(screen.getByText('claude --resume').tagName).toBe('CODE');
+  expect(screen.getByText('codex resume').tagName).toBe('CODE');
+  expect(document.body.textContent).toContain('start them again: claude --resume or codex resume keeps the conversation.');
+  expect(screen.getByText('Restarting ends anything still running in this terminal.')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Restart terminal' }));
+  await waitFor(() => expect(restart).toHaveBeenCalledWith('pane_test'));
+  // Never the resuming restart: it would relaunch an adopted agent
+  // conversation in place of the shell.
+  expect(resume).not.toHaveBeenCalled();
+ });
+ it('stays silent for a terminal that is fine', () => {
+  expect(paneAccountStatus({ ...thread, terminalAddressLost: false }, name)).toBeNull();
+ });
+});

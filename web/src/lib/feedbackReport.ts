@@ -56,11 +56,10 @@ export function composeFeedbackBody(trying: string, main: string): string {
   return t ? `What I was trying to do: ${t}\n\n${m}` : m;
 }
 
-/** The first non-empty line of what the user wrote, at most 200 characters:
- *  the title when none is typed. */
+/** The first non-empty line of what the user wrote: the title when none is
+ *  typed. Keep it whole so the daemon can redact it before applying its limit. */
 export function feedbackFirstLine(text: string): string {
-  const line = text.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-  return Array.from(line).slice(0, 200).join('');
+  return text.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
 }
 
 /** The "App and system details" rows, in the order the form shows them.
@@ -209,18 +208,84 @@ export function crashReportFallbackText(title: string, body: string, webVersion:
 // The last label must be letters, so "react-dom@18.3.1" in a stack stays.
 const LOCAL_EMAIL = /[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}/g;
 // /home/<x>, /Users/<x> and C:\Users\<x> (either slash, so file:// URLs too).
-const LOCAL_HOME = /((?:\/home\/|[\\/]Users[\\/]))[^\\/\s:"'()<>]+/gi;
+// A Windows or Mac name may hold spaces, so it runs to the next slash, quote,
+// colon or bracket, or to the line end, as in shared/feedbackredact.
+const LOCAL_HOME = /(\/home\/)[^\\/\s:"'()<>]+/gi;
+const LOCAL_USERS_HOME = /([\\/]Users[\\/])[^\\/\s:"'()<>](?:[^\\/\r\n:"'()<>]*[^\\/\s:"'()<>])?/gi;
 const LOCAL_TOKEN_PREFIX = /\b(?:sk|pk|rk|ghp|gho|ghs|ghu|ghr|github_pat|glpat|xox[abeprs])[-_][A-Za-z0-9_-]{10,}/g;
 const LOCAL_LONG_RUN = /[A-Za-z0-9_-]{32,}/g;
+const LOCAL_SECRET_NAME = String.raw`(?:password|passphrase|passwd|secret|token|api[_-]?key|access[_-]?key|auth[_-]?token|access_token|refresh_token|id_token|account_id|openai_api_key|codex_access_token|codex_api_key|expires_at|\b[A-Z][A-Z0-9_]*_KEY)`;
+const LOCAL_CODE_NAME = String.raw`(?:pairing[ _-]?code|pair[ _-]?code|device[ _-]?code|verification[ _-]?code|user[ _-]?code|claim[ _-]?code)`;
 
-/** A small pass over text the daemon could not redact: email addresses,
- *  the user's name in home-folder paths, and long token-like strings. Much
+function localQuotedValue(name: string, escaped = true): RegExp {
+  const double = escaped ? String.raw`(?:\\[^\r\n]|[^"\\\r\n])*(?:\\)?` : String.raw`[^"\r\n]+`;
+  const single = escaped ? String.raw`(?:\\[^\r\n]|[^'\\\r\n])*(?:\\)?` : String.raw`[^'\r\n]+`;
+  const end = escaped ? String.raw`|(?=\r?$)` : '';
+  // Bound separator matching even when an unfinished draft has no value.
+  return new RegExp(
+    String.raw`("${name}"[ \t]{0,64}:[ \t]{0,64}|${name}\b(?:[ \t]{1,64}is)?(?:[ \t]{0,64}[=:][ \t]{0,64}|[ \t]{1,64}))(?:"(${double})("${end})|'(${single})('${end}))`,
+    'gim',
+  );
+}
+
+const LOCAL_QUOTED_RULES = [
+  { pattern: localQuotedValue(LOCAL_CODE_NAME), kind: 'code' },
+  { pattern: localQuotedValue(LOCAL_CODE_NAME, false), kind: 'code' },
+  { pattern: localQuotedValue(LOCAL_SECRET_NAME), kind: 'token' },
+  { pattern: localQuotedValue(LOCAL_SECRET_NAME, false), kind: 'token' },
+];
+const LOCAL_MARKER = /(\[(?:REDACTED|redacted: (?:token|email|ip|host|user|code|private key|password|header))\])/g;
+
+interface LocalQuotedSpan { start: number; end: number; kind: string }
+
+// Each rule supplies an ordered stream; merge on the original text so either
+// quote interpretation can find a following field. Overlaps are removed once.
+function mergeLocalQuoted(a: LocalQuotedSpan[], b: LocalQuotedSpan[]): LocalQuotedSpan[] {
+  const out: LocalQuotedSpan[] = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length) {
+    const next = j === b.length || (i < a.length && a[i].start <= b[j].start) ? a[i++] : b[j++];
+    const last = out[out.length - 1];
+    if (last && next.start < last.end) last.end = Math.max(last.end, next.end);
+    else out.push({ ...next });
+  }
+  return out;
+}
+
+function scrubLocalQuoted(text: string): string {
+  let spans: LocalQuotedSpan[] = [];
+  for (const { pattern, kind } of LOCAL_QUOTED_RULES) {
+    const matches: LocalQuotedSpan[] = [];
+    for (const match of text.matchAll(pattern)) {
+      const value = match[2] ?? match[4];
+      if (!value) continue;
+      const start = match.index + match[1].length + 1;
+      matches.push({ start, end: start + value.length, kind });
+    }
+    spans = mergeLocalQuoted(spans, matches);
+  }
+  const out: string[] = [];
+  let start = 0;
+  for (const span of spans) {
+    out.push(text.slice(start, span.start));
+    out.push(text.slice(span.start, span.end).split(LOCAL_MARKER)
+      .map((part, i) => i % 2 || !part ? part : `[redacted: ${span.kind}]`).join(''));
+    start = span.end;
+  }
+  out.push(text.slice(start));
+  return out.join('');
+}
+
+/** A small pass over text the daemon could not redact: quoted values,
+ *  email addresses, home-folder names, and long token-like strings. Much
  *  less than the daemon's check, so the screen asks the person to read the
  *  text before sending it (@secure). Markers match shared/feedbackredact. */
 export function scrubLocalReport(text: string): string {
+  text = scrubLocalQuoted(text);
   return text
     .replace(LOCAL_EMAIL, '[redacted: email]')
     .replace(LOCAL_HOME, '$1[redacted: user]')
+    .replace(LOCAL_USERS_HOME, '$1[redacted: user]')
     .replace(LOCAL_TOKEN_PREFIX, '[redacted: token]')
     // A long unbroken run mixing letters and digits; plain long words stay.
     .replace(LOCAL_LONG_RUN, (run) => (/\d/.test(run) && /[A-Za-z]/.test(run) ? '[redacted: token]' : run));

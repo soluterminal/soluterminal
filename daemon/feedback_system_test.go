@@ -53,7 +53,7 @@ func TestFeedbackWSLWindowsVerNeverUsesPATH(t *testing.T) {
 		t.Fatal("the cmd.exe on PATH was run")
 	}
 
-	real := fake(fixed, "#!/bin/sh\necho \"Microsoft Windows [Version 10.0.26100.4652] in $(pwd)\"\n")
+	real := fake(fixed, "#!/bin/sh\n[ \"$#\" = 3 ] && [ \"$1\" = /d ] && [ \"$2\" = /c ] && [ \"$3\" = ver ] || exit 1\necho \"Microsoft Windows [Version 10.0.26100.4652] in $(pwd)\"\n")
 	link := filepath.Join(t.TempDir(), "cmd.exe")
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)

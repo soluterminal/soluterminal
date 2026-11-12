@@ -35,10 +35,10 @@ export function MCPSection({ collapsed, onToggle }: MCPSectionProps) {
 
   const servers = (cwd && mcpByCwd[cwd]) || [];
 
-  function copyDetail(s: { url?: string; command?: string; args?: string[] }) {
-    const text = s.url
-      ? s.url
-      : [s.command, ...(s.args || [])].filter(Boolean).join(' ');
+  // The daemon sends url, command and args in a short display form. The row
+  // shows that text and the click copies the same string, so nothing is
+  // copied that isn't on screen.
+  function copyDetail(text: string) {
     if (!text) return;
     navigator.clipboard?.writeText(text)
       .then(() => toast('Copied', { kind: 'success', icon: '✓', ttlMs: 1500 }))
@@ -78,15 +78,15 @@ export function MCPSection({ collapsed, onToggle }: MCPSectionProps) {
               `Source: ${s.source}`,
               statusLabel ? `Status: ${statusLabel}` : null,
               detail ? `→ ${detail}` : null,
-              'Click to copy',
+              detail ? 'Click to copy (short form)' : null,
             ].filter(Boolean).join('\n');
             return (
               <div
                 key={`${s.source}-${s.name}`}
                 className="port-row"
                 title={tooltip}
-                onClick={() => copyDetail(s)}
-                style={{ cursor: 'pointer' }}
+                onClick={() => copyDetail(detail)}
+                style={{ cursor: detail ? 'pointer' : undefined }}
               >
                 <div className="port-row-main">
                   {s.status && (

@@ -15,7 +15,8 @@ import (
 )
 
 // McpServerInfo is what the sidebar renders. Lowercase JSON to match the
-// rest of the API surface.
+// rest of the API surface. Responses carry the short display form of URL,
+// Command and Args (see mcpServersForDisplay).
 type McpServerInfo struct {
 	Name    string   `json:"name"`
 	Type    string   `json:"type"`              // "http" | "sse" | "stdio"
@@ -43,6 +44,10 @@ type McpServerInfo struct {
 // "codex" rows — a different consumer, never merged into Claude precedence.
 //
 // Missing or malformed config is not an error — empty list, log once.
+//
+// The result holds url, command and args exactly as configured. It is for
+// use inside the daemon; pass it through mcpServersForDisplay before it is
+// written to any response.
 func listMCPServersForCwd(cwd string) []McpServerInfo {
 	out := map[string]McpServerInfo{}
 
@@ -265,5 +270,7 @@ func (a *apiServer) listMcpServers(w http.ResponseWriter, r *http.Request) {
 	}
 	list := listMCPServersForCwd(cwd)
 	probeServers(list)
-	writeJSON(w, 200, list)
+	// The probe needs the configured address; everything a client receives
+	// is the short display form.
+	writeJSON(w, 200, mcpServersForDisplay(list))
 }

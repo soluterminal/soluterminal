@@ -219,6 +219,21 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
   const paneCount = useMemo(() => collectPaneIds(layout).length, [layout]);
   const toggleZoom = useStore((s) => s.toggleZoom);
   const canZoom = paneCount > 1 || isZoomed;
+  // Sets this terminal's scrollback from the grid it is shown in. Called when
+  // that grid's pane count changes and when the pane comes back on screen
+  // (the count may have changed while it was parked, with no change since).
+  // Reads the layout from the store so the mount-time reattach listener never
+  // works from a stale count. See the effect below for why parked panes skip.
+  const syncScrollbackToGrid = () => {
+    const term = termRef.current;
+    if (!term) return;
+    if (session.retained || pane.role === 'task_owner') return;
+    if (isPaneHostParked(key)) return;
+    const next = scrollbackForPaneCount(collectPaneIds(useStore.getState().layout).length);
+    if (term.options.scrollback !== next) {
+      term.options.scrollback = next;
+    }
+  };
   const [connStatus, setConnStatus] = useState<'connecting' | 'open' | 'reconnecting' | 'closed'>('connecting');
   const paneReaderMode = usePaneReaderMode({ paneId: key, termRef, actionGuard:canAct });
   // Brief "settling" veil shown on mobile pane mount. Hides the
@@ -3320,6 +3335,8 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       forceBottomUntil = session.retained ? 0 : Date.now()+1000;
       if(!session.retained) {try {term.scrollToBottom();}catch{/* existing ordinary restore policy */}}
       if (hostRef.current) ro.observe(hostRef.current);
+      // Its grid may have gained or lost panes while this pane was parked.
+      syncScrollbackToGrid();
       nudgeRestorePaint();
       // Forced: a workspace switch-back re-parents the host without a pixel-size
       // change; sendVisibilityNow above re-stamps active, so this reclaims width.
@@ -3493,15 +3510,15 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
   // SHRINKING drops the oldest history — the accepted memory/UX tradeoff for
   // large grids. We never grow past 20000. Guarded so we only touch xterm
   // when the computed value actually changes, keeping this off the hot path.
-  useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-    if (session.retained || pane.role === 'task_owner') return;
-    const next = scrollbackForPaneCount(paneCount);
-    if (term.options.scrollback !== next) {
-      term.options.scrollback = next;
-    }
-  }, [paneCount]);
+  //
+  // paneCount is the workspace ON SCREEN. A pane kept warm off-screen (parked
+  // from another workspace, or hidden by zoom or the workspace view) is not in
+  // that grid, so its scrollback is left exactly as it is: visiting a large
+  // workspace used to trim every parked terminal to 5000 lines, history the
+  // person had not chosen to give up and could not see going. PaneSlot parks
+  // and adopts hosts in layout effects, so by the time this passive effect
+  // runs the host's placement already matches the new layout.
+  useEffect(() => { syncScrollbackToGrid(); }, [paneCount]);
 
   // Live font-size / line-height swaps. Changing either invalidates
   // xterm's cell dimensions, so we refit (which recalculates rows/cols

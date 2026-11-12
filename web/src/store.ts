@@ -53,6 +53,7 @@ import {
   pruneLayout,
   remapLayoutIds,
   removePane as removeLayoutPane,
+  splitPaneBeside,
   updateDiffLeaf,
   type LayoutPresetId,
 } from './lib/layout';
@@ -1494,11 +1495,13 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // remount (e.g. a WebSocket reconnect storm) can't re-assert focus and yank the
   // caret back out of wherever the user has since moved it.
   consumeUserFocus: () => void;
+  // Opens the pane on the named side of the focused tile (Split right, Split
+  // down, Clone pane).
   splitFocused: (direction: 'horizontal' | 'vertical', opts: { cwd: string; cmd: string[]; title?: string; kind?: 'native'; agent?: 'claude' | 'codex' | 'muse'; claudeSessionId?: string; codexThreadId?: string; provider?: 'anthropic' | 'glm'; effort?: PaneEffort; model?: string; role?: PaneRole; contextPack?: string }) => Promise<void>;
   // One-click "launch claude here": live-cwd of the given pane + cmd=['claude'], split right.
-  launchClaudeHere: (paneId: string, direction?: 'horizontal' | 'vertical') => Promise<void>;
+  launchClaudeHere: (paneId: string, direction?: 'horizontal' | 'vertical', placement?: PanePlacement) => Promise<void>;
   // One-click "launch shell here": same but spawns $SHELL (daemon default).
-  launchShellHere: (paneId: string, direction?: 'horizontal' | 'vertical') => Promise<void>;
+  launchShellHere: (paneId: string, direction?: 'horizontal' | 'vertical', placement?: PanePlacement) => Promise<void>;
   closePaneInLayout: (paneId: string) => void;
   movePaneInLayout: (source: string, target: string, zone: DropZone) => void;
   movePaneToWorkspace: (paneId: string, destination: string, scope?: RoutingScope) => Promise<void>;
@@ -1528,8 +1531,10 @@ async function launchCmdHere(
   paneId: string,
   direction: 'horizontal' | 'vertical',
   opts: { cmd: string[]; title: string },
+  placement: PanePlacement,
 ) {
   const origin = autosaveSnapshotFromState(get());
+  const side = placement === 'side' && sideSplitAllowed(get());
   let cwd = get().panes[paneId]?.cwd ?? '';
   try {
     const live = await api.paneLiveCwd(paneId);
@@ -1543,12 +1548,13 @@ async function launchCmdHere(
     ...paneWorkspaceClaimForName(origin?.name, direction, paneId),
   });
   if (origin && get().activeWorkspace !== origin.name) {
-    await persistCreatedPaneToOriginWorkspace(get, origin, p, direction, paneId);
+    await persistCreatedPaneToOriginWorkspace(get, origin, p, direction, paneId, side);
     return;
   }
+  const beside = side && commitSideSplitView(get, paneId);
   set((s) => ({
     panes: { ...s.panes, [p.id]: p },
-    layout: insertPaneOrAppend(s.layout, p.id, direction, paneId),
+    ...placeNewPane(s.layout, p.id, direction, paneId, beside),
     focusedPaneId: p.id,
     lastUserFocusId: p.id, // deliberate spawn — grab the caret for the new pane
     // Clear zoom so the new pane is visible, not focused-but-hidden behind
@@ -1882,6 +1888,35 @@ function insertPaneOrAppend(
   return mode === 'auto' ? appendAutoPane(layout, paneId, columns, aspect) : splitLargestPane(layout, paneId, aspect);
 }
 
+// How a command that opens a pane places it. 'side': on the named side of the
+// tile it was used on (Split right, Split down, Clone pane). 'policy': wherever
+// the workspace's layout mode puts new panes (new session, agent spawns).
+export type PanePlacement = 'side' | 'policy';
+
+// A single-pane or team view is a temporary presentation that cannot edit the
+// saved arrangement, so a split from there follows the placement policy.
+function sideSplitAllowed(s: State): boolean {
+  return s.mainPresentation.kind === 'workspace' && !isTemporaryWorkspaceView(effectiveWorkspaceView(s));
+}
+
+// Split what is on screen: an overview that differs from the saved layout is
+// saved first, as a pane move does. False when the target is not a tile there.
+function commitSideSplitView(get: () => State, target: string | null): boolean {
+  const s = get();
+  if (!target || !sideSplitAllowed(s) || !layoutHasLeaf(workspaceViewLayout(s), target)) return false;
+  s.commitWorkspaceOverview();
+  return true;
+}
+
+// A side split is a deliberate arrangement, so it selects Custom layout like a
+// divider drag or a pane move; an auto layout would balance it away again.
+function placeNewPane(
+  layout: Layout | null, paneId: string, direction: 'horizontal' | 'vertical' | null, target: string | null, beside: boolean,
+): Pick<State, 'layout'> | Pick<State, 'layout' | 'paneLayoutMode'> {
+  const split = beside ? splitPaneBeside(layout, paneId, direction, target) : null;
+  return split ? { layout: split, paneLayoutMode: 'free' } : { layout: insertPaneOrAppend(layout, paneId, direction, target) };
+}
+
 function removePane(layout: Layout | null, id: string, mode = useStore.getState().paneLayoutMode,
   columns = useStore.getState().layoutColumns, aspect = useStore.getState().layoutAspect): Layout | null {
   return mode === 'auto' ? balancedLayout(removeLayoutPane(layout, id), columns, aspect) : removeCustomPane(layout, id);
@@ -1928,11 +1963,14 @@ async function persistCreatedPaneToOriginWorkspace(
   pane: PaneInfo,
   direction: 'horizontal' | 'vertical' | null,
   target: string | null,
+  beside = false,
 ) {
   if (!origin) return;
-  const layout = insertPaneOrAppend(origin.layout, pane.id, direction, target, origin.layoutMode, origin.layoutColumns, origin.layoutAspect);
+  const split = beside ? splitPaneBeside(origin.layout, pane.id, direction, target) : null;
+  const layout = split ?? insertPaneOrAppend(origin.layout, pane.id, direction, target, origin.layoutMode, origin.layoutColumns, origin.layoutAspect);
   await saveWorkspaceSnapshot(get, {
     ...origin,
+    ...(split ? { layoutMode: 'free' as const } : {}),
     layout,
     panes: { ...origin.panes, [pane.id]: pane },
   });
@@ -6772,17 +6810,19 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     const s = get();
     const origin = autosaveSnapshotFromState(s);
     const target = s.focusedPaneId;
+    const side = sideSplitAllowed(s);
     const p = await api.createPane({
       ...opts,
       ...paneWorkspaceClaim(s, target ? direction : null, target),
     });
     if (origin && get().activeWorkspace !== origin.name) {
-      await persistCreatedPaneToOriginWorkspace(get, origin, p, target ? direction : null, target);
+      await persistCreatedPaneToOriginWorkspace(get, origin, p, target ? direction : null, target, side);
       return;
     }
+    const beside = side && commitSideSplitView(get, target);
     set((st) => ({
       panes: { ...st.panes, [p.id]: p },
-      layout: insertPaneOrAppend(st.layout, p.id, target ? direction : null, target),
+      ...placeNewPane(st.layout, p.id, target ? direction : null, target, beside),
       focusedPaneId: p.id,
       lastUserFocusId: p.id, // deliberate split — grab the caret for the new pane
       // Clear zoom so the freshly-split pane is visible, not focused-but-
@@ -6793,13 +6833,13 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     await flushAutosave(get, undefined, { throwOnError: true });
   },
 
-  launchClaudeHere: async (paneId, direction = 'horizontal') => {
-    await launchCmdHere(get, set, paneId, direction, { cmd: ['claude'], title: 'claude' });
+  launchClaudeHere: async (paneId, direction = 'horizontal', placement = 'side') => {
+    await launchCmdHere(get, set, paneId, direction, { cmd: ['claude'], title: 'claude' }, placement);
   },
-  launchShellHere: async (paneId, direction = 'horizontal') => {
+  launchShellHere: async (paneId, direction = 'horizontal', placement = 'side') => {
     // Empty cmd tells the daemon to use $SHELL. Title defaults to 'shell'
     // (the user can rename via double-click).
-    await launchCmdHere(get, set, paneId, direction, { cmd: [], title: 'shell' });
+    await launchCmdHere(get, set, paneId, direction, { cmd: [], title: 'shell' }, placement);
   },
 
   closePaneInLayout: (paneId) => {

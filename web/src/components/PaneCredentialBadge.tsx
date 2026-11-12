@@ -4,7 +4,7 @@ import { useStore } from '../store';
 import { useTeamFeatures } from '../entitlements';
 import type { PaneInfo } from '../types';
 import { useHideIdentities } from '../lib/hideIdentities';
-import { restartPaneFlow } from '../lib/paneRestart';
+import { restartPaneFlow, restartTerminalFlow } from '../lib/paneRestart';
 import { maskIdentity } from '../lib/identityLabel';
 import { TopbarPopover } from './TopbarPopover';
 import { sectionOffered } from './sidebar/sidebarSections';
@@ -17,9 +17,9 @@ import { sectionOffered } from './sidebar/sidebarSections';
 // Launch metadata cannot prove a CLI's current billing identity: "still on X"
 // means the session was started on X and nothing has confirmed a switch since.
 
-type PaneAccountPane = Pick<PaneInfo, 'credential' | 'codexAuth'> & Partial<Pick<PaneInfo, 'id'>>;
+type PaneAccountPane = Pick<PaneInfo, 'credential' | 'codexAuth'> & Partial<Pick<PaneInfo, 'id' | 'terminalAddressLost'>>;
 
-export type PaneAccountAction = 'reconnect' | 'cancel' | 'restart' | 'credentials';
+export type PaneAccountAction = 'reconnect' | 'cancel' | 'restart' | 'restart-terminal' | 'credentials';
 
 export interface PaneAccountStatus {
   tone: 'warn' | 'muted' | 'info';
@@ -52,6 +52,26 @@ export function paneAccountStatus(pane: PaneAccountPane, name: (account?: string
   const mismatch = !!credential && (credential.restartRequired || (!!credential.account && !!credential.activeAccount && credential.account !== credential.activeAccount));
   const stillOn: PaneAccountStatus = { tone: 'warn', label: credential?.account ? `still on ${launched}` : 'account changed', title: `Started on ${launched}; ${active} is selected.` };
   const restart = { kind: 'restart' as const, label: 'Restart session' };
+
+  // The address this session or terminal was given is gone (the Windows
+  // background service changes port with the Backend setting: Windows, Linux
+  // or Dual). Text between backticks in a body renders as code. Nothing else on
+  // this chip matters until the pane is restarted.
+  if (credential?.connectionLost) {
+    return { tone: 'warn', label: 'connection lost', title: 'This session lost its team connection after the Backend setting was changed. Restart it to continue.', detail: {
+      heading: 'Team connection lost',
+      body: 'This session lost its team connection after the Backend setting was changed. Restart it to continue; the conversation is kept.',
+      action: restart,
+    } };
+  }
+  if (pane.terminalAddressLost) {
+    return { tone: 'warn', label: 'needs restart', title: 'Agents started in this terminal lost their connection after the Backend setting was changed. Restart the terminal to fix it.', detail: {
+      heading: 'This terminal needs a restart',
+      body: 'After the Backend setting was changed, agents started in this terminal can no longer connect. Restart the terminal, then start them again: `claude --resume` or `codex resume` keeps the conversation.',
+      note: 'Restarting ends anything still running in this terminal.',
+      action: { kind: 'restart-terminal', label: 'Restart terminal' },
+    } };
+  }
 
   const auth = pane.codexAuth;
   if (auth) {
@@ -177,6 +197,8 @@ export function PaneCredentialBadge({ pane }: { pane: PaneAccountPane }) {
       return;
     }
     if (kind === 'restart') { close(); await restartPaneFlow(id); return; }
+    // The terminal's own shell, not an agent conversation it had adopted.
+    if (kind === 'restart-terminal') { close(); await restartTerminalFlow(id); return; }
     setWorking(true);
     try {
       if (kind === 'cancel') {
@@ -207,7 +229,7 @@ export function PaneCredentialBadge({ pane }: { pane: PaneAccountPane }) {
       {({ close }) => (
         <div className="pane-account-popover" role="dialog" aria-label={detail.heading}>
           <div className="pane-account-heading">{detail.heading}</div>
-          <p className="pane-account-body">{detail.body}</p>
+          <p className="pane-account-body">{detail.body.split('`').map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part))}</p>
           {detail.note && <p className="pane-account-note">{detail.note}</p>}
           {(error || detail.error) && <p className="pane-account-error" role="alert">{error || detail.error}</p>}
           {detail.action && (

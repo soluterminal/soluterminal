@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import { useCloud } from '../cloud';
 import { useEntitlements } from '../entitlements';
-import { SmartApprovalsHint, resetSmartApprovalsCacheForTests, SMART_APPROVALS_CONNECT, SMART_APPROVALS_USED_UP } from './SmartApprovalsHint';
+import { SmartApprovalsHint, resetSmartApprovalsCacheForTests, SMART_APPROVALS_CONNECT, SMART_APPROVALS_CONNECTED, SMART_APPROVALS_USED_UP } from './SmartApprovalsHint';
+import { CONNECT_PROMPT_TITLE } from '../accountConnect';
+import { useStore } from '../store';
 
 function keyStatus(configured: boolean) {
   return {
@@ -94,16 +96,40 @@ describe('SmartApprovalsHint', () => {
     expect(await screen.findByText(SMART_APPROVALS_USED_UP)).toBeInTheDocument();
   });
 
-  it('signed in but not connected: offers to connect this computer', async () => {
+  // ST-208: the connect warning first; only Connect this PC connects.
+  it('signed in but not connected: warns first, connects only on Connect this PC', async () => {
     vi.spyOn(api, 'workflowRuntimeSecrets').mockResolvedValue(keyStatus(false));
     vi.spyOn(api, 'smartApprovalsStatus').mockResolvedValue({ source: 'none' });
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ status: 'connecting' }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
-    );
-    signedIn();
-    render(<SmartApprovalsHint />);
-    fireEvent.click(await screen.findByRole('menuitem', { name: SMART_APPROVALS_CONNECT }));
-    await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith('/api/cloud/pair/account', expect.objectContaining({ method: 'POST' })));
+    const bodies: unknown[] = [];
+    const answers = [{ status: 'available' }, { status: 'connecting' }];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      bodies.push(JSON.parse(String((init as RequestInit).body)));
+      return new Response(JSON.stringify(answers.shift() ?? { status: 'error' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    let choice = false;
+    const opened: Array<{ title?: string; confirmLabel?: string; focusCancel?: boolean }> = [];
+    const prev = useStore.getState().openDialog;
+    useStore.setState({ openDialog: ((req: { title?: string; confirmLabel?: string; focusCancel?: boolean; resolve: (v: unknown) => void }) => {
+      opened.push(req);
+      req.resolve(choice);
+    }) as never });
+    try {
+      signedIn();
+      render(<SmartApprovalsHint />);
+      const item = await screen.findByRole('menuitem', { name: SMART_APPROVALS_CONNECT });
+      fireEvent.click(item);
+      await waitFor(() => expect(opened).toHaveLength(1));
+      expect(opened[0]).toMatchObject({ title: CONNECT_PROMPT_TITLE, confirmLabel: 'Connect this PC', focusCancel: true });
+      expect(bodies).toEqual([{ force: false, check: true }]);
+
+      choice = true;
+      answers.unshift({ status: 'available' });
+      fireEvent.click(item);
+      await waitFor(() => expect(bodies).toEqual([{ force: false, check: true }, { force: false, check: true }, { force: true }]));
+      await waitFor(() => expect(useStore.getState().toasts.at(-1)?.message).toBe(SMART_APPROVALS_CONNECTED));
+    } finally {
+      useStore.setState({ openDialog: prev });
+    }
   });
 
   it('daemon reports a local key: says nothing', async () => {

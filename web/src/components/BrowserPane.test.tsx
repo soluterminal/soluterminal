@@ -88,6 +88,11 @@ describe('BrowserPane routing', () => {
   });
 
   it('reloads a restarted service with its new listener selector and scoped pass', async () => {
+    // refreshPorts schedules a 400 ms workspace autosave. Keep it in this
+    // test so its POST cannot reach a later test's fetch mock under CI load.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const saveWorkspace = vi.spyOn(api, 'saveWorkspace').mockImplementation(async (workspace) => workspace);
+    const listWorkspaceSummaries = vi.spyOn(api, 'listWorkspaceSummaries').mockResolvedValue([]);
     configureApi({ prefix: '/m/restart-machine', token: JWT });
     const info = serviceTile('http://127.0.0.1:5173/app?view=1#top');
     useStore.setState({ browsers: { [info.id]: info } });
@@ -103,6 +108,9 @@ describe('BrowserPane routing', () => {
     const ticketCalls = fetchMock.mock.calls.filter(([url]) => url === '/api/relay/ticket');
     const scopes = ticketCalls.map(([, init]) => JSON.parse(String((init as RequestInit).body)).path);
     expect(scopes).toContain('/m/restart-machine/api/proxy/5173~bmV3/');
+    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+    expect(saveWorkspace).toHaveBeenCalledTimes(1);
+    expect(listWorkspaceSummaries).toHaveBeenCalledTimes(1);
   });
 });
 

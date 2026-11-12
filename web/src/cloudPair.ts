@@ -11,7 +11,8 @@
 // daemon's OWN cloud-pairing endpoints, not relayed):
 //   GET  /api/cloud/status      → CloudStatus
 //   POST /api/cloud/pair/start  → { code, expiresAt } (idempotent)
-//   POST /api/cloud/pair/cancel → 200
+//   POST /api/cloud/pair/cancel → 200, empty body
+//   POST /api/cloud/disconnect  → 200, empty body (403 over the relay)
 
 import { useEffect, useRef, useState } from 'react';
 import { isTauri } from './voice';
@@ -57,7 +58,11 @@ async function jsonOrThrow<T>(r: Response): Promise<T> {
     throw err;
   }
   if (r.status === 204) return undefined as T;
-  return (await r.json()) as T;
+  // pair/cancel and disconnect answer 200 with no body: that is success, not
+  // a response to parse. (r.json() rejects on an empty body, which used to
+  // report a Disconnect that had worked as "Couldn't disconnect".)
+  const text = await r.text();
+  return (text.trim() ? JSON.parse(text) : undefined) as T;
 }
 
 export const cloudPairApi = {

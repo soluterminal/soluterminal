@@ -1,4 +1,19 @@
 {
+  "0.0.1243": [
+    "On Windows, the first start no longer asks how SoluTerminal should run: it finds where Claude Code and Codex are installed and starts there. The tray's Switch mode menu now lists Linux (WSL), Windows and Dual (WSL + Windows), with your saved mode ticked.",
+    "On Windows, the startup window now appears straight away and says what it's checking, even while Linux (WSL) is waking up.",
+    "If SoluTerminal can't start, a \"SoluTerminal couldn't start\" box now gives the reason, with Retry and Open logs, instead of a blank window.",
+    "Dual mode: when Windows can't reach the Linux (WSL) background service, SoluTerminal no longer waits two minutes. It restarts its own service, or tells you straight away what's in the way and how to stop it. After a fallback to Windows, choosing Windows under Backend now saves it.",
+    "Split right and Split down now open the new pane on that side of the pane you used them on, and Clone pane opens the copy to its right. Each switches the workspace to Custom layout; Re-tile goes back to the automatic grid.",
+    "Switching to a workspace with many panes no longer cuts the scrollback of panes in your other workspaces.",
+    "If SoluTerminal's saved list of panes is damaged when it starts, it now restores it from a recent copy and leaves running agents alone instead of stopping them.",
+    "Messages from other agents now reach an idle Codex pane, instead of waiting because its empty input box looked like a draft.",
+    "In a narrow window, the status bar now keeps the update button and Feedback in view.",
+    "When this computer's pairing for phone access is no longer accepted, the status bar now says how to fix it, and Pair again in the Sign-in needed panel gets a new code in one click. Disconnect no longer reports an error when it worked.",
+    "Feedback reports now remove your user name from home-folder paths in full, including names with a space, and remove tokens and keys from what you send more reliably.",
+    "Connecting this PC from the pane menu's Connect this computer to use smart approvals, or from the Connect now notice, now shows the \"Connect this PC to your account?\" warning first, like the other Connect buttons.",
+    "MCP server details now show in a shorter form."
+  ],
   "0.0.1242": [
     "Updates now wait, for up to ten minutes, while a message between agents is waiting to be delivered or an agent is waiting for another agent's answer.",
     "Automations: finished ones now show as done, and Clear finished removes them in one go. Delete now tells you when a run that's already going won't be stopped.",

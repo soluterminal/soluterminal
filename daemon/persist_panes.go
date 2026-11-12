@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -139,37 +140,106 @@ type PaneStore struct {
 	path string
 	mu   sync.Mutex
 	list []PersistedPane
+
+	// bootProblem is why panes.json could not be used when this daemon
+	// started ("" when it loaded normally or this is a fresh install).
+	// bootRestored is how many panes came back from the last-good copy.
+	bootProblem  string
+	bootRestored int
+	// savedAt is when this process last replaced panes.json; zero until its
+	// first save. lastGoodAt is when the last-good copy was last checked.
+	savedAt    time.Time
+	lastGoodAt time.Time
+	now        func() time.Time
 }
+
+const (
+	// A panes.json version becomes the last-good copy once it has been the
+	// current file for this long, so the copy and the live file are not both
+	// written inside one short window.
+	paneLastGoodMinAge = 30 * time.Second
+	// Under constant saves the copy is still refreshed this often.
+	paneLastGoodMaxStale = 10 * time.Minute
+)
+
+var errPanesFileEmpty = errors.New("panes.json is empty")
 
 func NewPaneStore(dataDir string) (*PaneStore, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
-	s := &PaneStore{path: filepath.Join(dataDir, "panes.json")}
+	s := &PaneStore{path: filepath.Join(dataDir, "panes.json"), now: time.Now}
 	if err := s.load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	return s, nil
 }
 
+func (s *PaneStore) lastGoodPath() string { return s.path + ".last-good" }
+
+// BootProblem reports why panes.json was unusable when this daemon started
+// (a zero-length file, invalid JSON, or a missing file although a last-good
+// copy exists), and how many panes were restored from the last-good copy. An
+// empty reason means the file loaded normally or this is a fresh install.
+//
+// The list of such a boot is not a complete record of this daemon's
+// sessions: it is either empty or an older copy. Startup must therefore not
+// treat "no pane owns it" as proof that a socket or agent process is an
+// orphan (see cleanOrphansAtBoot).
+func (s *PaneStore) BootProblem() (reason string, restored int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bootProblem, s.bootRestored
+}
+
+// decodePaneList parses panes.json content. A zero-length or whitespace-only
+// file is an error, not "no panes": the store always writes at least "null"
+// or "[]", so an empty file is a torn or truncated write.
+func decodePaneList(b []byte) ([]PersistedPane, error) {
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, errPanesFileEmpty
+	}
+	var list []PersistedPane
+	if err := json.Unmarshal(b, &list); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
 func (s *PaneStore) load() error {
+	restored := false
 	b, err := os.ReadFile(s.path)
-	if err != nil {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if _, statErr := os.Stat(s.lastGoodPath()); statErr != nil {
+			return err // fresh install: no file and no last-good copy
+		}
+		// panes.json never disappears in normal operation (every save is an
+		// atomic rename), so a missing file next to a last-good copy is a loss.
+		restored = s.restoreFromLastGood("missing", err)
+	case err != nil:
 		return err
+	default:
+		list, derr := decodePaneList(b)
+		if derr == nil {
+			s.list = list
+			s.keepLastGood()
+			break
+		}
+		reason := "invalid"
+		if errors.Is(derr, errPanesFileEmpty) {
+			reason = "empty"
+		} else {
+			// A corrupt/torn state file must not brick the daemon at startup
+			// (NewPaneStore's error is fatal in main.go). Quarantine the bad
+			// file for forensics.
+			quarantineCorruptState(s.path, derr)
+		}
+		restored = s.restoreFromLastGood(reason, derr)
 	}
-	if len(b) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(b, &s.list); err != nil {
-		// A corrupt/torn state file must not brick the daemon at startup
-		// (NewPaneStore's error is fatal in main.go). Quarantine the bad
-		// file for forensics and start with an empty list — the daemon
-		// comes up clean and re-persists on the next pane change.
-		quarantineCorruptState(s.path, err)
-		s.list = nil
-		return nil
-	}
-	changed := false
+	// A restored list is written back at once, so the next start reads a
+	// normal panes.json again.
+	changed := restored
 	for i := range s.list {
 		entry := &s.list[i]
 		// Retire all Warden bookmarks before any saved pane is reattached.
@@ -184,9 +254,74 @@ func (s *PaneStore) load() error {
 		}
 	}
 	if changed {
-		return s.saveList(s.list)
+		err := s.saveList(s.list)
+		if err != nil && restored {
+			// The restored list is in memory and sessions may be live: a
+			// failed write-back must not stop the daemon (NewPaneStore's error
+			// is fatal). The next pane change retries the save.
+			slog.Warn("could not write the restored pane list back to panes.json", "path", s.path, "err", err)
+			return nil
+		}
+		return err
 	}
 	return nil
+}
+
+// restoreFromLastGood records that panes.json was unusable at startup and
+// loads the last-good copy in its place. Without a usable copy the daemon
+// starts with no panes, exactly as before; BootProblem still tells startup
+// to leave sockets and agent processes alone.
+func (s *PaneStore) restoreFromLastGood(reason string, cause error) bool {
+	s.bootProblem, s.list = reason, nil
+	b, err := os.ReadFile(s.lastGoodPath())
+	if err == nil {
+		s.list, err = decodePaneList(b)
+	}
+	if err != nil {
+		s.list = nil
+		slog.Warn("panes.json unusable at startup and no last-good copy could be read; starting with no panes",
+			"path", s.path, "problem", reason, "err", cause, "lastGoodErr", err)
+		return false
+	}
+	s.bootRestored = len(s.list)
+	slog.Warn("panes.json unusable at startup; restored panes from the last-good copy",
+		"path", s.path, "problem", reason, "err", cause, "restored", s.bootRestored)
+	return true
+}
+
+// clock is nil-safe so a zero-value store in tests still works.
+func (s *PaneStore) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// keepLastGood copies the current panes.json to panes.json.last-good before
+// a save replaces it, and once at startup. Only content that parses is ever
+// copied, so a damaged file cannot overwrite a good copy. It is a separate
+// file rather than a hard link, so truncating panes.json in place cannot
+// empty both. Best-effort: a failure here never fails the save.
+func (s *PaneStore) keepLastGood() {
+	now := s.clock()
+	settled := s.savedAt.IsZero() || now.Sub(s.savedAt) >= paneLastGoodMinAge
+	if !settled && now.Sub(s.lastGoodAt) < paneLastGoodMaxStale {
+		return
+	}
+	s.lastGoodAt = now
+	b, err := os.ReadFile(s.path)
+	if err != nil {
+		return
+	}
+	if _, err := decodePaneList(b); err != nil {
+		return
+	}
+	if old, err := os.ReadFile(s.lastGoodPath()); err == nil && bytes.Equal(old, b) {
+		return
+	}
+	if err := writeFileAtomicSynced(s.lastGoodPath(), b, 0o600); err != nil {
+		slog.Warn("could not refresh the last-good copy of panes.json", "path", s.lastGoodPath(), "err", err)
+	}
 }
 
 func (s *PaneStore) saveList(list []PersistedPane) error {
@@ -194,7 +329,12 @@ func (s *PaneStore) saveList(list []PersistedPane) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomicSynced(s.path, b, 0o600)
+	s.keepLastGood()
+	if err := writeFileAtomicSynced(s.path, b, 0o600); err != nil {
+		return err
+	}
+	s.savedAt = s.clock()
+	return nil
 }
 
 // writeFileAtomicSynced writes data to a sibling temp file, fsyncs it so

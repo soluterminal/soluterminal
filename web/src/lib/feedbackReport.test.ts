@@ -17,6 +17,14 @@ import {
   FEEDBACK_SEND_ERROR,
 } from './feedbackReport';
 import type { FeedbackContext } from '../api';
+import { readFileSync } from 'node:fs';
+
+// The shared corpus lives outside web/, so it is read when the tests run, not
+// imported: the web image type-checks web/ on its own.
+interface CorpusCase { name: string; input: string; want: string; web?: boolean }
+const redactionCorpus = JSON.parse(
+  readFileSync('../shared/feedbackredact/redacttest/testdata/corpus.json', 'utf8'),
+) as CorpusCase[];
 
 const CTX: FeedbackContext = {
   appVersion: '0.0.1241', daemonVersion: '0.0.1241', clientVersion: '0.0.1241', shellVersion: '',
@@ -53,6 +61,39 @@ describe('feedbackMailto', () => {
 });
 
 describe('feedback report text', () => {
+  // The fallback has a smaller rule set; these cases cover its quoted values.
+  for (const c of redactionCorpus.filter((c) => c.web)) {
+    it(`shares corpus: ${c.name}`, () => {
+      const got = scrubLocalReport(c.input);
+      expect(got).toBe(c.want);
+      expect(scrubLocalReport(got)).toBe(got);
+    });
+  }
+
+  it('handles quoted assignments at the whitespace bound through the line end', () => {
+    const prefix = `password${' '.repeat(64)}`;
+    expect(scrubLocalReport(`${prefix}"fake\\" tail\nnext`))
+      .toBe(`${prefix}"[redacted: token]\nnext`);
+  });
+
+  it('finishes quickly for a secret name followed by 8 KB of spaces and no value', () => {
+    const text = `password${' '.repeat(8 * 1024)}`;
+    const started = performance.now();
+    const got = scrubLocalReport(text);
+    const elapsed = performance.now() - started;
+    expect(got).toBe(text);
+    expect(elapsed).toBeLessThan(50);
+  });
+
+  it('finishes quickly for a secret name followed by 64 KB of spaces and an invalid value', () => {
+    const text = `password${' '.repeat(64 * 1024)}z`;
+    const started = performance.now();
+    const got = scrubLocalReport(text);
+    const elapsed = performance.now() - started;
+    expect(got).toBe(text);
+    expect(elapsed).toBeLessThan(100);
+  });
+
   it('joins the trying-to-do line and the main field', () => {
     expect(composeFeedbackBody('  ', ' main ')).toBe('main');
     expect(composeFeedbackBody('open a pane', 'it hung')).toBe('What I was trying to do: open a pane\n\nit hung');
@@ -61,7 +102,9 @@ describe('feedback report text', () => {
   it('takes the title from the first written line', () => {
     expect(feedbackFirstLine('\n  first line  \nsecond')).toBe('first line');
     expect(feedbackFirstLine('')).toBe('');
-    expect(Array.from(feedbackFirstLine('🙂'.repeat(300)))).toHaveLength(200);
+    expect(feedbackFirstLine('🙂'.repeat(300))).toBe('🙂'.repeat(300));
+    const quoted = `password="${'fake value '.repeat(30)}"`;
+    expect(feedbackFirstLine(`\n${quoted}\nnext`)).toBe(quoted);
   });
 
   it('lists every sent detail, the pane ID only with pane text', () => {
@@ -105,6 +148,13 @@ describe('feedback report text', () => {
     expect(scrubLocalReport('at /Users/dana/app.js')).toBe('at /Users/[redacted: user]/app.js');
     expect(scrubLocalReport('C:\\Users\\Dana\\AppData\\x.js')).toBe('C:\\Users\\[redacted: user]\\AppData\\x.js');
     expect(scrubLocalReport('file:///C:/Users/Dana%20Lee/x.js')).toBe('file:///C:/Users/[redacted: user]/x.js');
+    // A Windows or Mac name with a space goes whole, as in shared/feedbackredact.
+    expect(scrubLocalReport('C:\\Users\\Dana Lee\\AppData\\x.js')).toBe('C:\\Users\\[redacted: user]\\AppData\\x.js');
+    expect(scrubLocalReport('at /Users/Dana Lee/app.js')).toBe('at /Users/[redacted: user]/app.js');
+    expect(scrubLocalReport('saved in C:\\Users\\Dana Lee \nnext')).toBe('saved in C:\\Users\\[redacted: user] \nnext');
+    expect(scrubLocalReport('"C:\\Users\\Dana Lee": not found')).toBe('"C:\\Users\\[redacted: user]": not found');
+    // A Linux name can't hold one, so the line goes on.
+    expect(scrubLocalReport('/home/dana is the folder')).toBe('/home/[redacted: user] is the folder');
     expect(scrubLocalReport('file:///home/dana/x.js')).toBe('file:///home/[redacted: user]/x.js');
     expect(scrubLocalReport('key sk-live_abc123DEF456 end')).toBe('key [redacted: token] end');
     expect(scrubLocalReport(`bearer ${'a1B2'.repeat(10)} end`)).toBe('bearer [redacted: token] end');

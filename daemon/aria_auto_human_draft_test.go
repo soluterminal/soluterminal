@@ -30,8 +30,9 @@ func queueAgentMessageScreen(t *testing.T, id string) (*Pane, <-chan directAutoF
 	var screen, guard atomic.Value
 	screen.Store(codex0166Screen(t, "working_draft"))
 	stubDeliveryScreen(t, &screen)
-	// The draft guard reads the box with Codex's faint placeholder blanked.
-	guard.Store(strings.Replace(codex0166Screen(t, "working"), "› Ask Codex to do anything", "›", 1))
+	// Keep the actual placeholder: the guard must recognise an empty box even
+	// when this plain-text fixture cannot supply its faint SGR attribute.
+	guard.Store(codex0166Screen(t, "working"))
 	stubDraftGuard(t, p, &guard)
 	ended := stubQueueWatch(t)
 	done := make(chan deliveryOutcome, 1)

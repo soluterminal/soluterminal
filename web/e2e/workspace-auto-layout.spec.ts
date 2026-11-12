@@ -104,7 +104,9 @@ test('auto layout retains sessions and balances eight panes after varied opens a
     const priorSaves = saves, newId = `layout_${next + 1}`;
     const id = collectPaneIds(workspace.layout)[0];
     await page.locator(`[data-pane-id="${id}"]`).getByRole('button', { name: 'Pane menu', exact: true }).click();
-    await page.getByRole('menuitem', { name: 'Split right with shell here', exact: true }).click();
+    // A new session names no side, so the workspace places it by its layout policy.
+    await page.getByRole('menuitem', { name: 'New session…', exact: true }).click();
+    await page.locator('form.dialog').getByRole('button', { name: 'Create', exact: true }).click();
     await expect(page.locator(`[data-pane-id="${newId}"] .xterm`)).toBeVisible();
     await expect.poll(() => saves).toBeGreaterThan(priorSaves);
   };
@@ -123,6 +125,26 @@ test('auto layout retains sessions and balances eight panes after varied opens a
   })).toBe(true);
   await expect(page.locator('.toast-host .toast')).toHaveCount(0, { timeout: 10_000 });
   await page.screenshot({ path: testInfo.outputPath('workspace-layout-after.png') });
+
+  // A command that names a side opens the pane on that side of its tile and
+  // selects Custom layout, instead of appending to the balanced grid.
+  const target = collectPaneIds(workspace.layout)[0], beside = `layout_${next + 1}`;
+  await page.locator(`[data-pane-id="${target}"]`).getByRole('button', { name: 'Pane menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Split right with shell here', exact: true }).click();
+  await expect(page.locator(`[data-pane-id="${beside}"] .xterm`)).toBeVisible();
+  await expect.poll(() => workspace.layoutMode).toBe('free');
+  await expect(page.getByRole('button', { name: 'Re-tile panes', exact: true })).toBeVisible();
+  const boxes = () => page.evaluate(ids => ids.map(id => {
+    const box = [...document.querySelectorAll(`[data-pane-id="${id}"]`)].map(node => node.getBoundingClientRect()).find(box => box.width > 0 && box.height > 0);
+    return box ? { left: box.left, right: box.right, top: box.top, height: box.height } : null;
+  }), [target, beside]);
+  await expect.poll(async () => {
+    const [tile, added] = await boxes();
+    if (!tile || !added) return 'not laid out';
+    const gap = added.left - tile.right;
+    return Math.abs(added.top - tile.top) < 3 && Math.abs(added.height - tile.height) < 3 && gap >= 0 && gap < 16 ? 'right of its tile' : JSON.stringify({ tile, added });
+  }).toBe('right of its tile');
+  expect(collectPaneIds(workspace.layout).indexOf(beside)).toBe(collectPaneIds(workspace.layout).indexOf(target) + 1);
 });
 
 test('passive windows retain shared geometry and custom resizing does not publish layout edits', async ({ page, context }) => {

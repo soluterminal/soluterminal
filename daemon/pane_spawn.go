@@ -1074,6 +1074,7 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 			launchCmd = append([]string{opts.Cmd[0]}, codexInlineCmd[1:]...)
 		}
 	}
+	shellDaemonURL := ""
 	if opts.Kind == "" {
 		if codexUnixShellNeedsDaemonAddress(opts.Cmd) && !paneRouteActive(opts.Env) && m.codexDaemonURL != "" {
 			// Non-secret address only; generic Unix shells obtain account and
@@ -1085,8 +1086,9 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 			launchCmd = shellCmd
 			// Non-secret address only; selected account/capability are resolved
 			// afresh inside each typed Codex invocation, never in the shell env.
-			if m.codexDaemonURL != "" {
-				opts.Env = append(opts.Env, paneDaemonURLEnv+"="+m.codexDaemonURL)
+			if daemonURL := paneShellDaemonURL(m.codexDaemonURL); daemonURL != "" {
+				opts.Env = append(opts.Env, paneDaemonURLEnv+"="+daemonURL)
+				shellDaemonURL = daemonURL
 			}
 		}
 	}
@@ -1270,6 +1272,11 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	createdAt := opts.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = now.UTC()
+	}
+	if paneRoute.shellStarted != nil {
+		// Every (re)spawn reports: an empty address clears what an earlier
+		// PowerShell terminal under this pane id was given.
+		paneRoute.shellStarted(id, shellDaemonURL)
 	}
 	p := &Pane{
 		Credential:              launchCredential,

@@ -103,3 +103,33 @@ export async function restartPaneFreshFlow(id: string, reason?: string, action?:
     toastRestartFailure((freshError as Error)?.message || 'try again');
   }
 }
+
+// Reopen a terminal pane's own shell. Always fresh: a plain restart resumes an
+// agent conversation the terminal had adopted, in place of the shell. No
+// extra confirm unless the pane is busy; the caller has already said what a
+// restart ends.
+export async function restartTerminalFlow(id: string): Promise<void> {
+  try {
+    await restart(id, true, false);
+    return;
+  } catch (error) {
+    const failure = parseRestartFailure(error);
+    if (failure.status !== 409) {
+      toastRestartFailure(failure.reason);
+      return;
+    }
+    const detail = failure.reason && failure.reason !== 'try again' ? ` (${failure.reason})` : '';
+    const ok = await confirmDialog({
+      title: 'Restart this terminal anyway?',
+      message: `This terminal looks busy${detail}. Restarting ends whatever is running in it.`,
+      confirmLabel: 'Restart anyway',
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  try {
+    await restart(id, true, true);
+  } catch (error) {
+    toastRestartFailure(parseRestartFailure(error).reason);
+  }
+}

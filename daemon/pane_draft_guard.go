@@ -153,6 +153,27 @@ func typedComposerScreen(screen, blanked string, codex bool) string {
 	return strings.Join(lines, "\n")
 }
 
+// codexComposerPlaceholder is the delivery guard's fallback when faint styling
+// does not identify Codex's known empty-box hint. Match the entire box above a
+// recognised footer, so "Ask ..." drafts, suffixes and continuation text hold.
+// Do not use this for Clear verification: only its version-pinned faint hint
+// can prove that clearing succeeded.
+func codexComposerPlaceholder(screen string) bool {
+	lines := strings.Split(screen, "\n")
+	start := -1
+	for i, line := range lines {
+		if codexComposerLineRE.MatchString(line) {
+			start = i
+		}
+	}
+	footer := codexFooterIndex(lines)
+	if start < 0 || footer <= start {
+		return false
+	}
+	box := strings.TrimSpace(strings.Join(lines[start:footer], "\n"))
+	return strings.TrimSpace(strings.TrimPrefix(box, "›")) == "Ask Codex to do anything"
+}
+
 // claudeComposerRow: the row conditionalClaudeComposer takes as the input
 // box's first row.
 func claudeComposerRow(line string) bool {
@@ -178,10 +199,14 @@ func (p *Pane) draftGuardReason(codex, typing bool, now time.Time, recorder func
 		return "the person is typing"
 	}
 	if screen, blanked, ok := draftGuardScreen(p); ok {
-		if draft, known := composerDraft(typedComposerScreen(screen, blanked, codex), codex); known {
+		typed := typedComposerScreen(screen, blanked, codex)
+		if draft, known := composerDraft(typed, codex); known {
 			if draft != "" {
-				if who := p.unsentMessageInBox(typedComposerScreen(screen, blanked, codex), codex); who != "" {
+				if who := p.unsentMessageInBox(typed, codex); who != "" {
 					return unsentInBoxReason(who)
+				}
+				if codex && codexComposerPlaceholder(typed) {
+					return ""
 				}
 				return heldBoxTextReason
 			}
