@@ -4,7 +4,8 @@ import { api } from '../../api';
 import type { VoiceLocalSettings } from '../../private/voice.api';
 import { useStore } from '../../store';
 import { VOICE_AUTO_SEND_LABEL, VOICE_KEEP_MIC_LABEL,
-  VOICE_READY_TICK_LABEL, VOICE_LOCAL_LABEL, VoiceCleanupSetting, voiceLocalHint } from './VoiceCleanupSetting';
+  VOICE_READY_TICK_LABEL, VOICE_LOCAL_LABEL, VOICE_API_KEY_LABEL, VoiceCleanupSetting, voiceApiKeyHint,
+  voiceLocalHint } from './VoiceCleanupSetting';
 
 const on: VoiceLocalSettings = { enabled: true, available: true, model: 'claude-haiku-4-5' };
 
@@ -13,11 +14,46 @@ afterEach(() => {
 });
 
 describe('VoiceCleanupSetting', () => {
-  it('is on by default and explains where the terminal text goes', async () => {
+  it('shows the opt-in and explains where the terminal text goes', async () => {
     vi.spyOn(api, 'getVoiceLocal').mockResolvedValue(on);
     render(<VoiceCleanupSetting />);
     expect(await screen.findByLabelText(VOICE_LOCAL_LABEL)).toBeChecked();
     expect(screen.getByText(/goes only to Anthropic/)).toBeInTheDocument();
+    expect(screen.getByText(/counts toward your Claude plan’s usage/)).toBeInTheDocument();
+  });
+
+  // ST-181: the Claude plan is never the default.
+  it('is off by default and names what cleans instead', async () => {
+    const off: VoiceLocalSettings = { ...on, enabled: false, available: false, reason: 'off', using: 'cloud' };
+    vi.spyOn(api, 'getVoiceLocal').mockResolvedValue(off);
+    render(<VoiceCleanupSetting />);
+    expect(await screen.findByLabelText(VOICE_LOCAL_LABEL)).not.toBeChecked();
+    expect(screen.getByText(/SoluTerminal’s cloud tidies your dictation/)).toBeInTheDocument();
+    // No key exported: no API-key choice to offer.
+    expect(screen.queryByLabelText(VOICE_API_KEY_LABEL)).toBeNull();
+  });
+
+  // An exported key is offered, never used until the person picks it.
+  it('offers an exported API key as an unticked choice and saves the pick', async () => {
+    const off: VoiceLocalSettings = { ...on, enabled: false, available: false, reason: 'off', using: 'cloud', apiKey: true, apiKeyChosen: false };
+    vi.spyOn(api, 'getVoiceLocal').mockResolvedValue(off);
+    const put = vi.spyOn(api, 'setVoiceApiKey').mockResolvedValue({ ...off, available: true, reason: undefined, using: 'api_key', apiKeyChosen: true });
+    render(<VoiceCleanupSetting />);
+    const key = await screen.findByLabelText(VOICE_API_KEY_LABEL);
+    expect(key).not.toBeChecked();
+    fireEvent.click(key);
+    await waitFor(() => expect(put).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(key).toBeChecked());
+    expect(screen.getByLabelText(VOICE_LOCAL_LABEL)).not.toBeChecked();
+    // The cloud hint would be wrong now.
+    expect(screen.queryByText(/SoluTerminal’s cloud tidies/)).toBeNull();
+  });
+
+  it('says why a chosen API key is not in use', () => {
+    const key: VoiceLocalSettings = { ...on, enabled: false, apiKeyChosen: true, using: 'api_key' };
+    expect(voiceLocalHint(key)).toBeUndefined();
+    expect(voiceApiKeyHint(key)).toBeUndefined();
+    expect(voiceApiKeyHint({ ...key, available: false, reason: 'not_installed' })).toMatch(/Needs Claude Code/);
   });
 
   it('saves the choice to the daemon', async () => {

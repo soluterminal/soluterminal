@@ -68,8 +68,10 @@ export function TopbarToast() {
               type="button"
               className={`topbar-toast toast-${t.kind}${t.action || t.paneId ? ' topbar-toast-clickable' : ''}`}
               data-tauri-drag-region={false}
-              onClick={() => {
-                if (t.action) t.action.run();
+              onClick={(e) => {
+                // The click is the gesture the gated opener checks (embed
+                // links, ST-133/134), as ToastHost passes it.
+                if (t.action) t.action.run(e.nativeEvent);
                 else if (t.paneId) void revealPane(t.paneId);
                 dismissToast(t.id);
               }}

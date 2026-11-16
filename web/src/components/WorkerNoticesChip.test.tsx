@@ -21,7 +21,7 @@ it('dismisses only the visible notes, then refreshes', async () => {
   const refresh = vi.fn().mockResolvedValue(undefined);
   useStore.setState({ refreshPanes: refresh });
   render(<WorkerNoticesChip pane={{ id: 'lead', workerNotices: [note('n1', 'one'), note('n2', 'two')] } as PaneInfo} />);
-  expect(screen.getByText('Workers kept open: 2').parentElement?.title).toBe('• one\n• two');
+  expect(screen.getByText('Worker notes: 2').parentElement?.title).toBe('• one\n• two');
   fireEvent.click(screen.getByRole('button', { name: 'Dismiss notes' }));
   await waitFor(() => expect(refresh).toHaveBeenCalled());
   expect(dismiss.mock.calls.map(([id]) => id)).toEqual(['n1', 'n2']);

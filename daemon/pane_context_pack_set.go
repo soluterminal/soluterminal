@@ -58,7 +58,7 @@ func (a *apiServer) handleSetContextPack(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "context packs are not available for Muse panes", http.StatusConflict)
 		return
 	}
-	if snap.Kind != "native" && !cmdRunsClaude(snap.Cmd) && !cmdStartsCodex(snap.Cmd) {
+	if !cmdRunsClaude(snap.Cmd) && !cmdStartsCodex(snap.Cmd) {
 		http.Error(w, "context packs are not available for this command", http.StatusConflict)
 		return
 	}
@@ -77,7 +77,7 @@ func (a *apiServer) handleSetContextPack(w http.ResponseWriter, r *http.Request)
 	}
 	defer p.releaseRespawn()
 
-	if p.IsAgentWorking() || p.hasNativePending() {
+	if p.IsAgentWorking() {
 		http.Error(w, "agent is busy — finish the current turn (or answer the pending approval) first", http.StatusConflict)
 		return
 	}
@@ -96,11 +96,7 @@ func (a *apiServer) handleSetContextPack(w http.ResponseWriter, r *http.Request)
 			opts.ClaudeSessionID = ""
 			opts.ClaudeTranscriptPath = ""
 			opts.CodexTurnInFlight = false
-			if snap.Kind == "native" {
-				opts.Cmd = nil
-			} else {
-				opts.Cmd = []string{"claude"}
-			}
+			opts.Cmd = []string{"claude"}
 		}
 	}
 

@@ -271,20 +271,14 @@ func TestRunningSessionOwner(t *testing.T) {
 	}
 }
 
-// spawnResumeID picks the provider-specific continuity id from durable native
-// state or the corresponding terminal resume argv.
+// spawnResumeID picks the provider-specific continuity id from the
+// corresponding terminal resume argv.
 func TestSpawnResumeID(t *testing.T) {
-	if got := spawnResumeID(SpawnOpts{Kind: "native", ClaudeSessionID: "sess-n"}); got != "sess-n" {
-		t.Fatalf("native: got %q, want sess-n", got)
-	}
 	if got := spawnResumeID(SpawnOpts{Kind: "", Cmd: []string{"claude", "--resume", "sess-t"}}); got != "sess-t" {
 		t.Fatalf("terminal: got %q, want sess-t", got)
 	}
 	if got := spawnResumeID(SpawnOpts{Kind: "", Cmd: []string{"bash"}}); got != "" {
 		t.Fatalf("terminal no-resume: got %q, want \"\"", got)
-	}
-	if got := spawnResumeID(SpawnOpts{Kind: "native", Agent: agentCodex, CodexThreadID: "thread-n"}); got != "thread-n" {
-		t.Fatalf("native Codex: got %q, want thread-n", got)
 	}
 	if got := spawnResumeID(SpawnOpts{Agent: agentCodex, Cmd: []string{"codex", "resume", "thread-t"}}); got != "thread-t" {
 		t.Fatalf("terminal Codex: got %q, want thread-t", got)

@@ -189,17 +189,6 @@ func TestResumeSpawnOptsDimsDecision(t *testing.T) {
 	if !optsNoLive.DimsUnverified {
 		t.Fatal("no live dims: persisted fallback MUST be unverified (the every-update garble guard)")
 	}
-
-	// Native → unchanged: persisted dims, verified, nil cmd (Spawn rewrites it).
-	nat := base
-	nat.Kind = "native"
-	optsNat := resumeSpawnOpts(nat, 0, 0)
-	if optsNat.DimsUnverified {
-		t.Fatal("native resume must keep prior verified-persisted behavior")
-	}
-	if optsNat.Cmd != nil {
-		t.Fatalf("native resume must leave Cmd nil for the headless rewrite, got %v", optsNat.Cmd)
-	}
 }
 
 // TestSubscribeEmptyFullReplayStillAnnounced guards the ws.go contract: a

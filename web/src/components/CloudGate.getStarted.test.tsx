@@ -84,7 +84,7 @@ describe('hosted app get-started card', () => {
     // The installer file on the website: never the release host, and never
     // /download/ itself, which would lead back here through the account step.
     expect(download).toHaveAttribute('href', INSTALLER);
-    expect(screen.getByText(/74 MB, from soluterminal\.com\./)).toBeInTheDocument();
+    expect(screen.getByText(/42 MB, from soluterminal\.com\./)).toBeInTheDocument();
     expect(screen.getByText('Open it and sign in with the same email.')).toBeInTheDocument();
     expect(screen.getByText('new@example.com')).toBeInTheDocument();
     expect(screen.getByText(/your pc appears here\./i)).toBeInTheDocument();

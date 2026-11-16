@@ -348,9 +348,12 @@ func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
 		return toolErr("pane " + paneID + " is waiting on an approval menu; answer it with answer_prompt first, or tell the user")
 	}
 	agent, claude := paneAgentProvider(p)
+	if !agent && agentMessagingPaused() {
+		return toolErr(agentMessagingRefusal("a message to a pane with no agent cannot be held"))
+	}
 	// A busy pane with no queue SoluTerminal knows gets nothing typed, however
 	// short the message (send_input's guard skips one- and two-letter keys).
-	if !agent && p.Snapshot().Kind != "native" && sendInputPaneBusy(p) {
+	if !agent && sendInputPaneBusy(p) {
 		return a.refuseBusyPaneAs(p, strings.TrimRight(unescapeAriaInput(text), "\r\n"), c)
 	}
 	if !strings.HasSuffix(text, "\n") {
@@ -427,6 +430,10 @@ func noteHeldAsk(p *Pane, heldID string, res *collabResult) {
 	}
 	res.Delivery = string(deliveryHeld)
 	reason := p.heldDeliveryReason()
+	if reason == agentMessagingPausedReason {
+		res.Hint = "held: the person has paused agent messaging, so nothing has been typed yet. Your message is held on the pane with your name and that reason, does not expire while paused, and goes in by itself once they resume. That may take a while: do not resend or poll in a loop; go on with other work, or tell the user what you are waiting for."
+		return
+	}
 	if strings.HasPrefix(reason, unsentInBoxPrefix) {
 		res.Hint = "held: " + reason + ", so nothing has been typed yet. Your message waits on the pane, queued behind it, and goes in once the person sends or clears that message. Call wait_for_pane to keep waiting; do not resend."
 		return
@@ -599,7 +606,7 @@ func (a *apiServer) spawnFollowUp(p *Pane, cmd []string, args map[string]any) ma
 	}
 	if !ready {
 		out["prompt_sent"] = false
-		out["hint"] = "The agent did not show its input box in time, so the prompt was not sent. Check it with get_pane_state, then use ask_pane."
+		out["hint"] = "The agent did not show its input box in time, so the prompt was not sent. Check its state with list_panes, then use ask_pane."
 		return out
 	}
 	if !strings.HasSuffix(prompt, "\n") {

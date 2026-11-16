@@ -18,6 +18,7 @@ PRINT_VERSION=0
 ALLOW_MISSING_SIDECARS=0
 EXTRACT_CHECK=0
 SIDECAR_ROOTS=()
+REQUIRE_BINDING=0
 
 fail() {
   echo "error: $*" >&2
@@ -40,11 +41,15 @@ Options:
   --expect-flavor team|public Every bundled daemon must be this flavour
                               (daemon/update_flavor.go).
   --sidecar-root PATH         Root containing solud.exe and solud-linux.
+  --require-payload-binding   With --extract-check and the sidecar hash
+                              manifest: fail unless the installer's bundled
+                              daemons are the staged sidecars, by sha256
+                              (publish.sh passes it with --sidecar-root).
   --allow-missing-sidecars    Deprecated; refused because release validation
                               must inspect provenance-bearing sidecars.
   --extract-check             Unpack the .exe and assert the bundled
                               solud-linux inside it is a non-empty ELF
-                              (needs 7z/7za/innoextract; SOLU_INSTALLER_EXTRACT_TOOL
+                              (needs 7z/7za/7zr/7zz/innoextract; SOLU_INSTALLER_EXTRACT_TOOL
                               overrides the extractor). Best-effort by default.
   --print-version             Print the validated shell version to stdout.
 EOF
@@ -121,6 +126,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --extract-check)
       EXTRACT_CHECK=1
+      shift
+      ;;
+    --require-payload-binding)
+      REQUIRE_BINDING=1
       shift
       ;;
     --print-version)
@@ -358,12 +367,20 @@ if [[ -f "$SIDECAR_MANIFEST" ]]; then
   # expressions so this also works with older system awk implementations.
   (cd "$manifest_dir" && awk 'length($1) == 64 && $1 ~ /^[[:xdigit:]]+$/ && substr($0, 65, 2) ~ /^ [ *]$/ {print}' "$(basename "$SIDECAR_MANIFEST")" | sha256sum -c --ignore-missing >/dev/null) ||
     fail "sidecar hashes do not match $SIDECAR_MANIFEST"
+  # A copied installer is always newer than the manifest, so this order says
+  # little on its own. The extract check below binds the bundled daemons to
+  # the manifest by sha256; a newer manifest is fatal only without that.
+  MANIFEST_NEWER=0
   if (( $(file_mtime "$SIDECAR_MANIFEST") > $(file_mtime "$INSTALLER") )); then
-    fail "sidecar manifest is newer than installer; rebuild the Tauri installer after rebuilding sidecars"
+    MANIFEST_NEWER=1
   fi
 else
+  [[ "$REQUIRE_BINDING" -eq 0 ]] || fail "--require-payload-binding needs the sidecar hash manifest (.soluterminal-shell-sidecars.sha256) next to the staged sidecars"
   warn "sidecar hash manifest missing near sidecars; run desktop/scripts/build-sidecar-binaries.sh before cargo tauri build"
 fi
+[[ "$REQUIRE_BINDING" -eq 0 || "$EXTRACT_CHECK" -eq 1 ]] ||
+  fail "--require-payload-binding needs --extract-check: only the unpacked installer can show its daemons are the staged ones"
+PAYLOAD_BOUND=0
 
 # Optional payload-extraction check. The checks above validate the sidecars
 # that were *staged* for the bundle — strong, but indirect: they trust that
@@ -384,7 +401,7 @@ fi
 if [[ "$EXTRACT_CHECK" -eq 1 ]]; then
   extract_tool="${SOLU_INSTALLER_EXTRACT_TOOL:-}"
   if [[ -z "$extract_tool" ]]; then
-    for cand in 7z 7za 7zr innoextract; do
+    for cand in 7z 7za 7zr 7zz innoextract; do
       if command -v "$cand" >/dev/null 2>&1; then
         extract_tool="$cand"
         break
@@ -392,7 +409,7 @@ if [[ "$EXTRACT_CHECK" -eq 1 ]]; then
     done
   fi
   if [[ -z "$extract_tool" ]]; then
-    fail "--extract-check requested but no extractor (7z/7za/7zr/innoextract) found — refusing to publish an UNVERIFIED installer (this is the only check of the daemon actually bundled in the .exe). Install one: sudo apt install p7zip-full"
+    fail "--extract-check requested but no extractor (7z/7za/7zr/7zz/innoextract) found — refusing to publish an UNVERIFIED installer (this is the only check of the daemon actually bundled in the .exe). Install one: sudo apt install p7zip-full"
   else
     extract_dir="$(mktemp -d 2>/dev/null || mktemp -d -t soluinstaller)"
     # shellcheck disable=SC2064
@@ -432,7 +449,19 @@ if [[ "$EXTRACT_CHECK" -eq 1 ]]; then
       require_magic "$bytes" "$(printf '\177ELF')" "$label"
       require_marker "$bytes" "$SHELL_VERSION" "$label shell version $SHELL_VERSION"
       solu_require_webdist_parity "$bytes" "$EXPECT_WEB_VERSION" "$RESOLVED_WEB_SOURCE" "$RESOLVED_WEB_DIGEST" || exit 1
+      require_payload_markers "$bytes" "$label"
       echo "==> payload check: $label is a ${sz}-byte ELF (version=$SHELL_VERSION)" >&2
+    }
+    # The staged-sidecar marker checks, run again on what the installer carries.
+    require_payload_markers() { # <bytes> <label>
+      if [[ "${SOLU_ALLOW_NO_AUTH_SIDECAR:-0}" != "1" ]]; then
+        require_marker "$1" "$SOLU_SUPABASE_URL" "$2 Supabase URL"
+        require_marker "$1" "$SOLU_SUPABASE_ANON_KEY" "$2 Supabase anon key"
+      fi
+      [[ -z "$effective_pubkey" ]] || require_marker "$1" "$effective_pubkey" "$2 update manifest public key"
+      if [[ -n "$EXPECT_FLAVOR" && "$(solu_binary_flavor "$1")" != "$EXPECT_FLAVOR" ]]; then
+        fail "--extract-check: $2 is not a ${EXPECT_FLAVOR} build"
+      fi
     }
     payload_linux="$(find "$extract_dir" -type f -name 'solud-linux' -print 2>/dev/null | head -1)"
     if [[ -n "$payload_linux" ]]; then
@@ -463,10 +492,42 @@ if [[ "$EXTRACT_CHECK" -eq 1 ]]; then
       fail "--extract-check: bundled solud.exe does not contain version $SHELL_VERSION — it is likely an unstamped 'dev' build (plain go build, no -ldflags). Run desktop/scripts/build-sidecar-binaries.sh before cargo tauri build."
     fi
     solu_require_webdist_parity "$payload_exe" "$EXPECT_WEB_VERSION" "$RESOLVED_WEB_SOURCE" "$RESOLVED_WEB_DIGEST" || exit 1
-    if [[ -n "$EXPECT_FLAVOR" && "$(solu_binary_flavor "$payload_exe")" != "$EXPECT_FLAVOR" ]]; then
-      fail "--extract-check: bundled solud.exe is not a ${EXPECT_FLAVOR} build"
-    fi
+    require_payload_markers "$payload_exe" "bundled solud.exe"
     echo "==> payload check: bundled solud.exe ($(basename "$payload_exe")) carries version=$SHELL_VERSION" >&2
+
+    # Bind the bundled daemons to the staged sidecars by sha256: the marker,
+    # key and Supabase checks above ran on the staged files, so equal bytes
+    # carry them into the installer. A .gz payload is compared unpacked.
+    if [[ -f "$SIDECAR_MANIFEST" ]]; then
+      manifest_sha() {
+        awk -v n="$1" 'length($1) == 64 && $1 ~ /^[[:xdigit:]]+$/ && ($2 == n || $2 == "*" n) {print tolower($1)}' "$SIDECAR_MANIFEST" | tail -1
+      }
+      # <payload bytes> <staged file the checks above ran on, or ""> <manifest name> <label>
+      bind_payload() {
+        local want got
+        if [[ -n "$2" ]]; then
+          want="$(sha256sum "$2" | awk '{print $1}')"
+          [[ "$(manifest_sha "$3")" == "$want" ]] || fail "--extract-check: the staged $3 does not match its sidecar manifest entry"
+        else
+          # Only the manifest names it; it must be the file sha256sum -c
+          # verified next to the manifest (that check ignores missing files).
+          [[ -s "$manifest_dir/$3" ]] || fail "--extract-check: no staged $3 next to $(basename "$SIDECAR_MANIFEST") to bind the $4 to"
+          want="$(manifest_sha "$3")"
+        fi
+        [[ -n "$want" ]] || fail "--extract-check: the sidecar manifest has no $3 entry to bind the $4 to"
+        got="$(sha256sum "$1" | awk '{print $1}')"
+        [[ "$got" == "$want" ]] || fail "--extract-check: the $4 is not the staged $3 (sha256 $got; staged $want)"
+      }
+      bind_payload "$payload_exe" "$WINDOWS_SIDECAR" solud.exe "bundled Windows daemon"
+      if [[ -n "$payload_linux" ]]; then
+        bind_payload "$payload_linux" "$LINUX_SIDECAR" solud-linux "bundled Linux daemon"
+      else
+        bind_payload "$extract_dir/.$(basename "$payload_amd").unpacked" "$LINUX_SIDECAR" solud-linux "bundled Linux daemon (amd64)"
+        bind_payload "$extract_dir/.$(basename "$payload_arm").unpacked" "" solud-linux-arm64 "bundled Linux daemon (arm64)"
+      fi
+      PAYLOAD_BOUND=1
+      echo "==> payload check: the bundled daemons are the staged sidecars (sha256 = $(basename "$SIDECAR_MANIFEST"))" >&2
+    fi
 
     # Builder paths: a Rust release build embeds panic locations, so without
     # desktop/scripts/tauri-release-build.cmd's --remap-path-prefix the app
@@ -484,6 +545,14 @@ if [[ "$EXTRACT_CHECK" -eq 1 ]]; then
     trap - EXIT
   fi
 fi
+
+if [[ "${MANIFEST_NEWER:-0}" -eq 1 ]]; then
+  [[ "$PAYLOAD_BOUND" -eq 1 ]] ||
+    fail "sidecar manifest is newer than installer; rebuild the Tauri installer after rebuilding sidecars"
+  warn "sidecar manifest is newer than the installer file (a copy?); its bundled daemons match the manifest by sha256"
+fi
+[[ "$REQUIRE_BINDING" -eq 0 || "$PAYLOAD_BOUND" -eq 1 ]] ||
+  fail "--require-payload-binding: the bundled daemons could not be bound to the staged sidecars"
 
 echo "==> shell installer validated: $SHELL_NAME version=$SHELL_VERSION platform=windows-amd64" >&2
 echo "    sidecars: $WINDOWS_SIDECAR, $LINUX_SIDECAR" >&2

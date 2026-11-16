@@ -84,8 +84,8 @@ func TestSetPaneRoleValidationAndGuards(t *testing.T) {
 	})
 
 	t.Run("busy", func(t *testing.T) {
-		p := switchTestPane("role_busy", "native", nil, "session")
-		p.nativeInTurn.Store(true)
+		p := switchTestPane("role_busy", "", []string{"claude"}, "session")
+		markPaneWorking(p)
 		api, spawnOpts, killed := resumeTestServer(t, p)
 		rec := postSetRole(api, p.ID, `{"role":"orchestrator"}`)
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "agent is busy") {
@@ -195,21 +195,10 @@ func TestSetPaneRoleRespawnRecipes(t *testing.T) {
 			body:    `{"role":""}`,
 			wantCmd: []string{"claude", "--resume", "sess-plain"}, wantSession: "sess-plain",
 		},
-		{
-			name: "native starts fresh",
-			pane: func(*testing.T) *Pane {
-				p := switchTestPane("role_native", "native", nil, "")
-				p.Agent = agentClaude
-				return p
-			},
-			body:     `{"role":"orchestrator"}`,
-			wantKind: "native", wantCmd: nil, wantRole: paneRoleOrchestrator,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("SOLU_NATIVE_RENDERER", "1")
 			p := tt.pane(t)
 			api, spawnOpts, killed := resumeTestServer(t, p)
 			rec := postSetRole(api, p.ID, tt.body)
@@ -248,9 +237,6 @@ func TestSetPaneRoleRespawnRecipes(t *testing.T) {
 				if got := resumeSpawnOpts(convertedSnap, 0, 0).Role; got != paneRoleOrchestrator {
 					t.Fatalf("converted role not carried through resume: %q", got)
 				}
-				if got := switchSpawnOpts(convertedSnap, "native", 0, 0).Role; got != paneRoleOrchestrator {
-					t.Fatalf("converted role not carried through renderer switch: %q", got)
-				}
 			}
 		})
 	}
@@ -281,11 +267,6 @@ func TestSetPaneRoleCodexRecipes(t *testing.T) {
 			p.Agent, p.CodexThreadID = agentCodex, thread
 			return p
 		}, role: paneRoleOrchestrator, wantCmd: []string{"codex", "resume", thread}, wantID: thread},
-		{name: "native resume", pane: func() *Pane {
-			p := switchTestPane("codex_role_native", "native", []string{"codex", "app-server", "--stdio"}, "")
-			p.Agent, p.CodexThreadID = agentCodex, thread
-			return p
-		}, role: paneRoleOrchestrator, wantKind: "native", wantID: thread},
 		{name: "fresh terminal", pane: func() *Pane {
 			p := switchTestPane("codex_role_fresh", "", []string{"codex"}, "")
 			p.Agent = agentCodex

@@ -94,9 +94,6 @@ func shouldAutoResumeHarnessOnExit(snap PaneSnapshot, autoResume bool) bool {
 	if !autoResume {
 		return false
 	}
-	if snap.Kind == "native" {
-		return false
-	}
 	if snap.Status != PaneExited || !snap.Resumable {
 		return false
 	}

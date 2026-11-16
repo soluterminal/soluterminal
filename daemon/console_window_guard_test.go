@@ -42,12 +42,11 @@ var consoleWindowAllowlist = map[string]string{
 	"codex_inline_shim.go:runCodexInlineShim:c":           "interactive CLI on the pane's console",
 	"codex_inline_shim.go:runUnknownPaneShim:c":           "command typed in the pane, on the pane's console",
 	"codex_live_supported.go:runCodexLiveTerminal:client": "interactive Codex terminal on the pane's console",
-	"muse_driver.go:runMuseTurn:c":                        "stdout can be the pane's console, which a separate hidden console could not write to",
 
 	// Children that never start on Windows.
 	"background_service.go:serviceCommand":          "Linux only: every caller is behind a runtime.GOOS linux check",
 	"caller_peer_lsof.go:runLsofTCPPort":            "macOS only: its one caller is in caller_peer_darwin.go",
-	"claude_bootstrap.go:detectClaudeCLI":           "Unix path: returns on runtime.GOOS windows before these spawns",
+	"claude_bootstrap.go:probeClaudeCLI":            "Unix path: returns on runtime.GOOS windows before these spawns",
 	"codex_bootstrap.go:detectCodexCLI":             "Unix path: returns on runtime.GOOS windows before this spawn",
 	"codex_bootstrap.go:detectCodexDirect":          "reached only from the Unix path of detectCodexCLI",
 	"muse_bootstrap.go:detectMuseCLI":               "Unix path: returns on runtime.GOOS windows before these spawns",

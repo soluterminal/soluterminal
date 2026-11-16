@@ -6,6 +6,7 @@ permissions = [
     "allow-open-workspace-window",
     "allow-desktop-set-backend-mode",
     "allow-desktop-set-up-wsl",
+    "allow-desktop-wsl-readiness",
     "allow-desktop-set-launch-mode",
     "allow-desktop-get-autostart",
     "allow-desktop-set-autostart",
@@ -27,6 +28,11 @@ commands.allow = ["desktop_set_backend_mode"]
 identifier = "allow-desktop-set-up-wsl"
 description = "Allow the main UI to start the guided Linux (WSL) setup and restart the desktop shell into it."
 commands.allow = ["desktop_set_up_wsl"]
+
+[[permission]]
+identifier = "allow-desktop-wsl-readiness"
+description = "Allow the main UI to check whether Linux (WSL) can run SoluTerminal before it offers Dual or Linux mode."
+commands.allow = ["desktop_wsl_readiness"]
 
 [[permission]]
 identifier = "allow-desktop-set-launch-mode"

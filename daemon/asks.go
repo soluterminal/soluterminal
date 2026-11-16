@@ -509,7 +509,9 @@ func (s *askStore) paneGone(id string) {
 	if _, err := s.closeWhere(askResolved, "pane_closed", func(a Ask) bool { return a.SourcePane == id && a.Kind != askKindWorker }); err != nil {
 		log.Printf("asks: close asks of pane %s: %v", id, err)
 	}
-	if _, err := s.closeWhere(askResolved, "worker_gone", func(a Ask) bool { return a.WorkerPane == id }); err != nil {
+	// An excused-worktree notice is about what the worker left behind, so it
+	// stays after the worker is gone (worker_excused.go).
+	if _, err := s.closeWhere(askResolved, "worker_gone", func(a Ask) bool { return a.WorkerPane == id && !workerExcusedKey(a.Key) }); err != nil {
 		log.Printf("asks: close worker asks about pane %s: %v", id, err)
 	}
 }
@@ -561,7 +563,11 @@ func (s *askStore) closeWorkerKey(lead, key, by string) error {
 }
 
 func (s *askStore) closeWorkerNotice(worker string) {
-	if _, err := s.closeWhere(askResolved, "worker_cleared", func(a Ask) bool { return a.Kind == askKindWorker && a.WorkerPane == worker }); err != nil {
+	// An excused-worktree notice is about an archived worker's leftovers, not
+	// its retention: only its own recheck or a dismissal closes it.
+	if _, err := s.closeWhere(askResolved, "worker_cleared", func(a Ask) bool {
+		return a.Kind == askKindWorker && a.WorkerPane == worker && !workerExcusedKey(a.Key)
+	}); err != nil {
 		log.Printf("worker notice cleanup for %s: %v", worker, err)
 	}
 }

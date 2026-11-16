@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, type SystemStatus } from '../api';
@@ -8,15 +8,8 @@ import type { PaneInfo, Schedule } from '../types';
 import { PaneHeader } from './PaneHeader';
 import { PaneHeaderBadges } from './PaneHeaderBadges';
 import { DialogHost } from './DialogHost';
-import { DETAIL_PRIORITY, MEASURE_SENTINEL } from './PaneHeaderOverflow';
+import { DETAIL_PRIORITY } from './PaneHeaderOverflow';
 import { useStore } from '../store';
-
-// Focus is retired by default (lib/focusAvailability). These suites cover the
-// Focus code paths that still exist behind SOLU_NATIVE_RENDERER=1, so they run
-// with it on unless a test flips focusFlag.on.
-const focusFlag = vi.hoisted(() => ({ on: true }));
-
-vi.mock('../lib/focusAvailability', () => ({ useFocusEnabled: () => focusFlag.on }));
 
 
 const pane: PaneInfo = {
@@ -124,67 +117,32 @@ describe('PaneHeader status label', () => {
   });
 });
 
-describe('PaneHeader Codex Focus toggle', () => {
-  const renderCodex = (overrides: Partial<PaneInfo>) => render(
-    <PaneHeader
-      pane={{ ...pane, agent: 'codex', cmd: ['codex'], ...overrides }}
-      paneIndex={1}
-      activityClass="idle"
-      editingTitle={false}
-      titleDraft={pane.title}
-      unread={false}
-      connStatus="open"
-      setTitleDraft={vi.fn()}
-      setEditingTitle={vi.fn()}
-      onDragStart={vi.fn()}
-      onDragEnd={vi.fn()}
-      onRename={vi.fn()}
-      onClose={vi.fn()}
-      isZoomed={false}
-      canZoom={false}
-      onToggleZoom={vi.fn()}
-      onSwitchMode={vi.fn()}
-    />,
-  );
-
-  it('when Focus is retired, hides the toggle on terminal panes but keeps the way back on native ones', () => {
-    focusFlag.on = false;
-    try {
-      const term = renderCodex({ kind: '', codexThreadId: 'thread-1' });
+describe('PaneHeader renderer toggle (Focus removed)', () => {
+  it('never shows a renderer toggle, even for a pane an older daemon still reports as native', () => {
+    for (const kind of ['', 'native'] as const) {
+      const view = render(
+        <PaneHeader
+          pane={{ ...pane, agent: 'codex', cmd: ['codex'], kind, codexThreadId: 'thread-1' }}
+          paneIndex={1}
+          activityClass="idle"
+          editingTitle={false}
+          titleDraft={pane.title}
+          unread={false}
+          connStatus="open"
+          setTitleDraft={vi.fn()}
+          setEditingTitle={vi.fn()}
+          onDragStart={vi.fn()}
+          onDragEnd={vi.fn()}
+          onRename={vi.fn()}
+          onClose={vi.fn()}
+          isZoomed={false}
+          canZoom={false}
+          onToggleZoom={vi.fn()}
+        />,
+      );
       expect(screen.queryByRole('group', { name: 'Renderer mode' })).toBeNull();
-      term.unmount();
-      renderCodex({ kind: 'native', codexThreadId: 'thread-1' });
-      expect(screen.getByRole('group', { name: 'Renderer mode' })).toBeInTheDocument();
-    } finally {
-      focusFlag.on = true;
+      view.unmount();
     }
-  });
-
-  it('shows for Codex Focus and known-thread Terminal panes', () => {
-    const first = renderCodex({ kind: 'native', codexThreadId: 'thread-1' });
-    expect(screen.getByRole('group', { name: 'Renderer mode' })).toBeInTheDocument();
-    first.unmount();
-    renderCodex({ kind: '', codexThreadId: 'thread-1' });
-    expect(screen.getByRole('group', { name: 'Renderer mode' })).toBeInTheDocument();
-  });
-
-  it('enables Focus immediately for a fresh Terminal Codex before its first thread', () => {
-    renderCodex({ kind: '', hasCodex: true, codexThreadId: undefined });
-    const toggle = screen.getByRole('group', { name: 'Renderer mode' });
-    expect(toggle).not.toHaveAttribute('aria-disabled', 'true');
-    expect(screen.getByRole('button', { name: 'Focus renderer' })).toBeEnabled();
-  });
-
-  it('shows for shell-launched Codex once its thread id is discovered', () => {
-    renderCodex({ agent: undefined, cmd: ['bash'], hasCodex: true, kind: '', codexThreadId: 'thread-shell' });
-    expect(screen.getByRole('group', { name: 'Renderer mode' })).toBeInTheDocument();
-  });
-
-  it('locks Focus while foreground provider ownership is ambiguous', () => {
-    renderCodex({ agent: undefined, cmd: ['bash'], hasClaude: true, hasCodex: true, identityBlocked: true });
-    const toggle = screen.getByRole('group', { name: 'Renderer mode' });
-    expect(toggle).toHaveAttribute('aria-disabled', 'true');
-    expect(toggle).toHaveAttribute('title', expect.stringContaining('conversation ownership is ambiguous'));
   });
 });
 
@@ -483,88 +441,5 @@ describe('PaneHeaderBadges context pack chip', () => {
   it('shows no chip without a context pack', () => {
     render(<PaneHeaderBadges pane={pane} paneIndex={1} />);
     expect(screen.queryByText('pack')).toBeNull();
-  });
-});
-
-
-describe('renderer switch confirmation visibility', () => {
-  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-
-  function setup(available: number) {
-    let resize = () => {};
-    vi.stubGlobal('ResizeObserver', class { constructor(cb: () => void) { resize = cb; } observe() {} disconnect() {} });
-    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => available);
-    // Every chip is 80px wide and the non-collapsing rest of the header needs more than 320px.
-    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(80);
-    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(MEASURE_SENTINEL + 800);
-    const onSwitchMode = vi.fn();
-    const switchPaneMode = vi.spyOn(useStore.getState(), 'switchPaneMode').mockResolvedValue(null);
-    const terminalKeys = vi.fn();
-    render(<>
-      <PaneHeader pane={{ ...pane, hasCodex: true, cmd: ['codex'], state: 'busy' }}
-        paneIndex={1} activityClass="busy" editingTitle={false} titleDraft={pane.title}
-        unread={false} connStatus="open" setTitleDraft={vi.fn()} setEditingTitle={vi.fn()}
-        onDragStart={vi.fn()} onDragEnd={vi.fn()} onRename={vi.fn()} onClose={vi.fn()}
-        isZoomed={false} canZoom={false} onToggleZoom={vi.fn()} onSwitchMode={onSwitchMode} />
-      <textarea aria-label="Terminal input" onKeyDown={e => terminalKeys(e.key, e.defaultPrevented)} />
-    </>);
-    return { onSwitchMode, switchPaneMode, terminalKeys, resize: (width: number) => act(() => { available = width; resize(); }) };
-  }
-
-  function typeInTerminal(terminalKeys: ReturnType<typeof vi.fn>) {
-    const terminal = screen.getByRole('textbox', { name: 'Terminal input' });
-    terminal.focus();
-    expect(fireEvent.keyDown(terminal, { key: 'Enter' })).toBe(true);
-    expect(fireEvent.keyDown(terminal, { key: 'Escape' })).toBe(true);
-    expect(terminalKeys.mock.calls).toEqual([['Enter', false], ['Escape', false]]);
-  }
-
-  it('cancels an inline confirm when its trigger folds, without consuming terminal keys', async () => {
-    const { resize, terminalKeys, switchPaneMode, onSwitchMode } = setup(1200);
-    fireEvent.click(screen.getByRole('button', { name: 'Focus renderer' }));
-    expect(screen.getByRole('alertdialog')).toBeVisible();
-    resize(320);
-    await screen.findByRole('button', { name: /more pane details/ });
-    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
-    typeInTerminal(terminalKeys);
-    expect(switchPaneMode).not.toHaveBeenCalled();
-    expect(onSwitchMode).not.toHaveBeenCalled();
-    resize(1200);
-    await waitFor(() => expect(screen.queryByRole('button', { name: /more pane details/ })).toBeNull());
-    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
-  });
-
-  it('cancels a popover confirm on close and does not restore it when reopened', () => {
-    const { terminalKeys, switchPaneMode, onSwitchMode } = setup(320);
-    const more = screen.getByRole('button', { name: /more pane details/ });
-    fireEvent.click(more);
-    fireEvent.click(screen.getByRole('button', { name: 'Focus renderer' }));
-    expect(screen.getByRole('alertdialog')).toBeVisible();
-    fireEvent.click(more);
-    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
-    typeInTerminal(terminalKeys);
-    expect(switchPaneMode).not.toHaveBeenCalled();
-    expect(onSwitchMode).not.toHaveBeenCalled();
-    fireEvent.click(more);
-    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
-  });
-
-  it('handles Enter and Escape only while focus is inside the confirmation', () => {
-    const { terminalKeys, switchPaneMode, onSwitchMode } = setup(1200);
-    fireEvent.click(screen.getByRole('button', { name: 'Focus renderer' }));
-    typeInTerminal(terminalKeys);
-    expect(screen.getByRole('alertdialog')).toBeVisible();
-    expect(switchPaneMode).not.toHaveBeenCalled();
-    expect(onSwitchMode).not.toHaveBeenCalled();
-    const confirm = screen.getByRole('button', { name: 'Switch when done' });
-    confirm.focus();
-    fireEvent.keyDown(confirm, { key: 'Escape' });
-    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Focus renderer' }));
-    const reopened = screen.getByRole('button', { name: 'Switch when done' });
-    reopened.focus();
-    fireEvent.keyDown(reopened, { key: 'Enter' });
-    expect(switchPaneMode).toHaveBeenCalledOnce();
-    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
   });
 });

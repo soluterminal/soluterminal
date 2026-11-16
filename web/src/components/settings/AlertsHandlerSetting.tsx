@@ -15,7 +15,7 @@ export function alertsHandlerLabel(s: NotificationsHandlerState): string {
 export function alertsHandlerHint(s: NotificationsHandlerState): string {
   const device = s.deviceName ? `the approved device “${s.deviceName}”` : 'an approved device';
   const until = s.expiresAtMs ? ` until ${new Date(s.expiresAtMs).toLocaleTimeString()} unless it renews` : '';
-  return `Code alerts are delivered by an app on ${device}${until}, so this computer doesn't send its own phone push for them. Device and security notices always come from this computer.`;
+  return `Code alerts are delivered by an app on ${device}${until}, so this computer doesn't send its own phone or browser push for them. Device and security notices always come from this computer.`;
 }
 
 // While another app on an approved device delivers Code alerts (daemon

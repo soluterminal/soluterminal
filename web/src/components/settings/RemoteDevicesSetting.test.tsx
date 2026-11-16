@@ -3,14 +3,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DialogHost } from '../DialogHost';
 import { useStore } from '../../store';
 import { api, configureApi, j, setBackend } from '../../api';
-import { markDeviceEnrolled, pinComputerIdentity } from '../../lib/deviceIdentity';
+import { deviceIdentity, markDeviceEnrolled, pinComputerIdentity } from '../../lib/deviceIdentity';
 import { privateRelayEnabled } from '../../lib/privateRelay';
 import { isEmbedded } from '../../embed';
 import { useLocalProof } from '../../lib/useLocalProof';
-import { ALERTS_SCOPE_TEXT, CANNOT_APPROVE_HERE, FULL_SCOPE_TEXT, PRIVATE_RELAY_LABEL, REMOTE_POLICY_LABEL, RemoteDevicesSetting, remoteDevicePendingText } from './RemoteDevicesSetting';
+import { ALERTS_SCOPE_TEXT, CANNOT_APPROVE_HERE, REVIEW_REQUEST_TTL_MS, announceRemoteDeviceRequest, FULL_SCOPE_TEXT, PRIVATE_RELAY_LABEL, REMOTE_POLICY_LABEL, RemoteDevicesSetting, remoteDevicePendingText } from './RemoteDevicesSetting';
 import { CODES_MATCH_APPROVE, NO_CODE_CONFIRM, RECOVERY_BANNER, REQUEST_CHANGED } from './ApproveDeviceDialog';
 
 vi.mock('../../embed', async (orig) => ({ ...(await orig<typeof import('../../embed')>()), isEmbedded: vi.fn(() => false) }));
+// jsdom has no IndexedDB: this browser's identity is a fixed id here.
+vi.mock('../../lib/deviceIdentity', async (orig) => ({
+  ...(await orig<typeof import('../../lib/deviceIdentity')>()),
+  deviceIdentity: vi.fn(async () => ({ id: 'dev_me' })),
+}));
 vi.mock('../../lib/useLocalProof', () => ({
   useLocalProof: vi.fn(() => ({ status: null, backendPrefix: '', reload: async () => {} })),
 }));
@@ -309,5 +314,124 @@ describe('remoteDevicePendingText', () => {
     expect(text).toContain('nothing else');
     expect(text).toContain('same code');
     expect(remoteDevicePendingText('Pixel 8a', '')).not.toContain('push alerts');
+  });
+
+  // @secure (ST-249): under "any" the device is already in; say what
+  // approving adds, and to approve only a device the person is using.
+  it('says under "any" that the device is already let in and approving trusts it more', () => {
+    const text = remoteDevicePendingText('Pixel 8a', '', 'any');
+    expect(text).toContain('asked to be approved');
+    expect(text).toContain('already lets any signed-in device in');
+    expect(text).toContain('private channel');
+    expect(text).toContain("Only approve it if you're using it right now");
+    expect(text).toContain('same code');
+    expect(remoteDevicePendingText('Pixel 8a', '', 'approved')).toBe(remoteDevicePendingText('Pixel 8a'));
+    expect(remoteDevicePendingText('Desktop window', 'alerts', 'any')).toContain('push alerts');
+  });
+});
+
+// release-lead follow-up to ST-248/249: the frame never shows its own
+// request back to itself, and Review opens that request.
+describe('announceRemoteDeviceRequest', () => {
+  it("skips the frame's own request in an embed, and shows anyone else's", async () => {
+    vi.mocked(isEmbedded).mockReturnValue(true);
+    const me = await deviceIdentity();
+    const show = vi.fn();
+    await announceRemoteDeviceRequest({ text: 'Chrome on Windows', deviceId: me.id, reason: 'any' }, show, vi.fn());
+    expect(show).not.toHaveBeenCalled();
+    await announceRemoteDeviceRequest({ text: 'Pixel 8a', deviceId: 'dev_other', reason: 'any' }, show, vi.fn());
+    expect(show).toHaveBeenCalledExactlyOnceWith(remoteDevicePendingText('Pixel 8a', undefined, 'any'), expect.any(Function));
+  });
+
+  it('shows its own request outside an embed, and when the event has no id', async () => {
+    const me = await deviceIdentity();
+    const show = vi.fn();
+    await announceRemoteDeviceRequest({ text: 'This browser', deviceId: me.id }, show, vi.fn());
+    vi.mocked(isEmbedded).mockReturnValue(true);
+    await announceRemoteDeviceRequest({ text: 'Older daemon' }, show, vi.fn());
+    expect(show).toHaveBeenCalledTimes(2);
+  });
+
+  it("Review opens Settings and that request's comparison where this screen can approve", async () => {
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [pendingPhone], canManageDevices: true });
+    const openPrivacy = vi.fn();
+    let review = () => {};
+    await announceRemoteDeviceRequest({ text: pendingPhone.name, deviceId: pendingPhone.id }, (_, r) => { review = r; }, openPrivacy);
+    act(() => review());
+    expect(openPrivacy).toHaveBeenCalledTimes(1);
+    render(<RemoteDevicesSetting />);
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent(pendingPhone.name);
+    // Cancel is focused; nothing was approved.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
+  });
+
+  it('Review in an already open Settings finds a request newer than its list', async () => {
+    const list = vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [], canManageDevices: true });
+    render(<RemoteDevicesSetting />);
+    await waitFor(() => expect(list).toHaveBeenCalled());
+    list.mockResolvedValue({ policy: 'any', devices: [pendingPhone], canManageDevices: true });
+    let review = () => {};
+    await announceRemoteDeviceRequest({ text: pendingPhone.name, deviceId: pendingPhone.id }, (_, r) => { review = r; }, vi.fn());
+    act(() => review());
+    expect(await screen.findByRole('dialog')).toHaveTextContent(pendingPhone.name);
+  });
+
+  it('a stale Review opens nothing later', async () => {
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [pendingPhone], canManageDevices: true });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    let review = () => {};
+    await announceRemoteDeviceRequest({ text: pendingPhone.name, deviceId: pendingPhone.id }, (_, r) => { review = r; }, vi.fn());
+    act(() => review());
+    now.mockReturnValue(1_000_000 + REVIEW_REQUEST_TTL_MS + 1);
+    render(<RemoteDevicesSetting />);
+    expect(await screen.findByRole('button', { name: COMPARE })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  // @secure (a): only a Review click opens the comparison; the event alone never does.
+  it('a new-device event with no Review click opens nothing', async () => {
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [pendingPhone], canManageDevices: true });
+    const show = vi.fn();
+    const openPrivacy = vi.fn();
+    await announceRemoteDeviceRequest({ text: pendingPhone.name, deviceId: pendingPhone.id, reason: 'any' }, show, openPrivacy);
+    expect(show).toHaveBeenCalledTimes(1);
+    render(<RemoteDevicesSetting />);
+    expect(await screen.findByRole('button', { name: COMPARE })).toBeInTheDocument();
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(openPrivacy).not.toHaveBeenCalled();
+  });
+
+  // @secure (b): the opened comparison shows the full code and, under "any",
+  // the notice's wording in full.
+  it('the opened comparison shows the full code and the "any" warning', async () => {
+    const v3 = { ...pendingPhone, codeVersion: 3, enrolmentId: 'enr_AAECAwQFBgcICQoLDA0ODw' };
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [v3], canManageDevices: true });
+    let review = () => {};
+    await announceRemoteDeviceRequest({ text: v3.name, deviceId: v3.id, reason: 'any' }, (_, r) => { review = r; }, vi.fn());
+    act(() => review());
+    render(<RemoteDevicesSetting />);
+    await screen.findByRole('dialog');
+    expect(screen.getByTestId('approve-device-code').textContent).toBe(v3.code);
+    expect(screen.getByTestId('approve-device-policy').textContent).toBe(remoteDevicePendingText(v3.name, undefined, 'any'));
+  });
+
+  it('shows no "any" warning under "Only devices I approve"', async () => {
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'approved', devices: [pendingPhone], canManageDevices: true });
+    render(<RemoteDevicesSetting />);
+    fireEvent.click(await screen.findByRole('button', { name: COMPARE }));
+    await screen.findByRole('dialog');
+    expect(screen.queryByTestId('approve-device-policy')).toBeNull();
+  });
+
+  it('Review only lists the request where this screen cannot approve', async () => {
+    vi.spyOn(api, 'listRemoteDevices').mockResolvedValue({ policy: 'any', devices: [pendingPhone], canManageDevices: false });
+    let review = () => {};
+    await announceRemoteDeviceRequest({ text: pendingPhone.name, deviceId: pendingPhone.id }, (_, r) => { review = r; }, vi.fn());
+    act(() => review());
+    render(<RemoteDevicesSetting />);
+    expect(await screen.findByText(CANNOT_APPROVE_HERE)).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

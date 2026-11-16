@@ -149,21 +149,18 @@ func checkRequireNeedsSignature(t *testing.T, label string, asCaller func(*testi
 	}
 }
 
-// startRenamedBrowser runs a copy of sleep named chrome, orphaned (its shell
-// exits) so that its parent is not this test, which would make it the
-// daemon's own worker. It needs the /proc process names the daemon traces
-// by; elsewhere the stand-in test covers the same rules.
+// startRenamedBrowser runs a copy of the stand-in sleeper (standInSleeper)
+// named chrome, orphaned (its shell exits) so that its parent is not this
+// test, which would make it the daemon's own worker. It needs the /proc
+// process names the daemon traces by; elsewhere the stand-in test covers the
+// same rules.
 func startRenamedBrowser(t *testing.T) int {
 	t.Helper()
 	if _, err := os.Stat("/proc/self/comm"); err != nil {
 		t.Skip("needs /proc process names")
 	}
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skip("no sleep")
-	}
 	name := "chrome"
-	raw, err := os.ReadFile(sleep)
+	raw, err := os.ReadFile(standInSleeper(t))
 	if err != nil {
 		t.Fatal(err)
 	}

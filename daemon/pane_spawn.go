@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -54,11 +53,7 @@ type SpawnOpts struct {
 	Review *PaneReview
 	// Identity carries the pane's handle and working-on line across a respawn.
 	Identity *PaneIdentity
-	// Kind selects the pane's rendering model: "" (terminal, default) or
-	// "native". When "native", the pane runs a headless agent emitting
-	// stream-json and the daemon starts a native parser goroutine. The
-	// native headless-argv rewrite of opts.Cmd is the spawn component's job;
-	// this field only gates ensureNative + p.Kind.
+	// Kind is the retired renderer selector; always "" (terminal).
 	Kind string
 	// Agent identifies the agent protocol independently from the renderer Kind.
 	// "" / "claude" is the legacy Claude default; "codex" selects the durable
@@ -79,17 +74,11 @@ type SpawnOpts struct {
 	HarnessSessionID string
 	HarnessProvider  string
 	// CodexTurnInFlight carries the dead pane's durable "a turn was underway"
-	// record into its RESUME (see Pane.codexTurnInFlight), which Spawn turns
-	// into the "a restart interrupted the previous response" notice. Set only
-	// by the resume paths — a mode switch settles or interrupts its own turn
-	// and stamps its own, more accurate notice.
+	// record into its RESUME (see Pane.codexTurnInFlight). Only Focus's Codex
+	// adapter recorded it; since Focus was removed Spawn no longer reads it and
+	// raises no "a restart interrupted the previous response" notice. Set only
+	// by the resume paths.
 	CodexTurnInFlight bool
-	// NativeAllowlist seeds the pane's "always allow this tool" set on spawn.
-	// Used by switch-mode + rollback to carry the user's opt-ins across a
-	// kill+respawn that continues the SAME conversation (claude --resume), so
-	// a Terminal↔Native flip doesn't silently drop the allowlist. Empty for a
-	// brand-new pane (a genuinely new session starts with no opt-ins).
-	NativeAllowlist []string
 	// Provider routes the spawned `claude` to an LLM backend: "" / "anthropic"
 	// = Anthropic (default, byte-identical to today); "glm" = Z.ai. Carries the
 	// NAME, not a key. When "glm", the daemon passes `--provider glm` to the
@@ -153,98 +142,6 @@ type SpawnOpts struct {
 type SpawnError struct{ msg string }
 
 func (e *SpawnError) Error() string { return e.msg }
-
-// nativeClaudeArgv builds the headless Claude argv for a native-renderer
-// pane. The flags are byte-grounded in the Phase-0 capture (PHASE0-REPORT):
-// the agent runs `-p` (headless / non-interactive), emits stream-json on
-// stdout, accepts stream-json on stdin, and answers permission prompts over
-// stdio. BOTH `--permission-mode default` AND `--permission-prompt-tool
-// stdio` are load-bearing: `default` alone auto-executes tools without ever
-// surfacing a can_use_tool control_request. `--include-partial-messages`
-// yields the streaming content_block_delta frames, `--replay-user-messages`
-// echoes user turns (deduped client-side), and `--verbose` is required for
-// the full event vocabulary. `--effort` bakes the reasoning-effort level into
-// the argv (headless `claude -p` has no /effort command; re-derived on every
-// respawn from the pane's persisted Effort, provider-agnostic). `--prompt-
-// suggestions` (when promptSuggestions is true) makes Claude emit its own
-// model-generated next-prompt suggestions as `prompt_suggestion` lines (a
-// background call ~10-20s after `result`, best-effort — see EvPromptSuggestion),
-// gated on the per-machine native setting (Manager.promptSuggestionsEnabled)
-// read fresh at every (re)spawn, so OFF by default. `--resume <id>` is appended
-// on a session switch/restore so the same conversation continues.
-//
-// This is the role-less wrapper kept for the many callers that never carry one;
-// nativeClaudeArgvRole is the full form.
-func nativeClaudeArgv(sessionID string, narrate bool, effort string, promptSuggestions bool, model string) []string {
-	return nativeClaudeArgvRole(sessionID, narrate, effort, promptSuggestions, model, "")
-}
-
-// nativeClaudeArgvRole is nativeClaudeArgv plus the pane's product role: an
-// orchestrator pane's brief is appended to the SAME --append-system-prompt value
-// as the narration prompt (claude takes one flag — see systemPromptAppend).
-func nativeClaudeArgvRole(sessionID string, narrate bool, effort string, promptSuggestions bool, model string, role string) []string {
-	argv := []string{
-		"claude", "-p",
-		"--output-format", "stream-json",
-		"--input-format", "stream-json",
-		"--permission-mode", "default",
-		"--permission-prompt-tool", "stdio",
-		"--include-partial-messages",
-		"--replay-user-messages",
-		"--verbose",
-	}
-	// Narration (the "vibe coding" generation lever): APPEND a "narrate your
-	// decisions" instruction to Claude's built-in system prompt. --append-system-
-	// prompt is additive — tools and built-in behavior are preserved (verified
-	// against claude 2.1.185 in this exact -p stream-json mode). Off by default;
-	// gated on the per-machine native setting, read fresh at every (re)spawn.
-	// An orchestrator pane's chief-of-staff brief rides the SAME flag, appended
-	// after the narration prompt (claude accepts one --append-system-prompt).
-	if sp := systemPromptAppend(narrate, role); sp != "" {
-		argv = append(argv, "--append-system-prompt", sp)
-	}
-	// Reasoning effort. Headless `claude -p` has no /effort command, so the
-	// level MUST be baked into the argv here; re-derived on every respawn from
-	// the pane's persisted Effort. Provider-agnostic: the flag rides the API
-	// request to whichever backend (Anthropic or a GLM endpoint). "" → omit so
-	// claude keeps its built-in default. Validated at the API boundary
-	// (createPane / handleSetEffort), so this just trusts a non-empty value.
-	if e := strings.TrimSpace(effort); e != "" {
-		argv = append(argv, "--effort", e)
-	}
-	if promptSuggestions {
-		argv = append(argv, "--prompt-suggestions")
-	}
-	// Model. Like effort, headless claude has no /model command so the choice is
-	// argv-only. Note --resume (below) makes the session's stored model sticky:
-	// omitting --model resumes on whatever the session last ran (NOT the settings
-	// default), and passing it rewrites the stored model for future resumes.
-	if m := strings.TrimSpace(model); m != "" {
-		argv = append(argv, "--model", m)
-	}
-	if s := strings.TrimSpace(sessionID); s != "" {
-		argv = append(argv, "--resume", s)
-	}
-	return argv
-}
-
-// nativeClaudeSpawnArgv is the Spawn-side seam over nativeClaudeArgvRole: it
-// reads session / effort / model / ROLE off the SpawnOpts the caller already
-// built, so a test can pin that a Focus orchestrator pane's argv really carries
-// the brief (and that a role-less one is byte-identical to nativeClaudeArgv)
-// without launching a process. narrate and promptSuggestions stay explicit —
-// Spawn derives them from Manager state, not from opts.
-func nativeClaudeSpawnArgv(opts SpawnOpts, narrate, promptSuggestions bool) []string {
-	return nativeClaudeArgvRole(opts.ClaudeSessionID, narrate, opts.Effort, promptSuggestions, opts.Model, opts.Role)
-}
-
-// nativeCodexArgv starts Codex's stateful JSON-RPC app-server over stdio. The
-// daemon owns initialize/thread/turn messages through CodexAdapter; using
-// `codex exec --json` here would create a one-turn process and cannot support
-// interactive approvals, interrupts, steering, or a persistent Focus pane.
-func nativeCodexArgv() []string {
-	return []string{"codex", "app-server", "--stdio"}
-}
 
 // claudeTranscriptOnDisk reports whether sessionID's main transcript exists on
 // disk, via a single os.Stat — NOT a listTranscripts directory walk. It runs on
@@ -388,9 +285,6 @@ func spawnResumeID(opts SpawnOpts) string {
 		}
 		return resumeSessionIDFromMuseCmd(opts.Cmd)
 	}
-	if opts.Kind == "native" {
-		return strings.TrimSpace(opts.ClaudeSessionID)
-	}
 	return resumeSessionIDFromCmd(opts.Cmd)
 }
 
@@ -473,23 +367,17 @@ func resumeSessionIDFromMuseCmd(cmd []string) string {
 func clearSpawnResume(opts *SpawnOpts) {
 	if effectiveAgentKind(opts.Agent) == agentCodex {
 		opts.CodexThreadID = ""
-		if opts.Kind != "native" {
-			opts.Cmd = stripCodexResumeArgv(opts.Cmd)
-		}
+		opts.Cmd = stripCodexResumeArgv(opts.Cmd)
 		return
 	}
 	if effectiveAgentKind(opts.Agent) == agentMuse {
 		opts.MuseSessionID = ""
-		if opts.Kind != "native" {
-			opts.Cmd = stripMuseResumeArgv(opts.Cmd)
-		}
+		opts.Cmd = stripMuseResumeArgv(opts.Cmd)
 		return
 	}
 	opts.ClaudeSessionID = ""
 	opts.ClaudeTranscriptPath = ""
-	if opts.Kind != "native" {
-		opts.Cmd = stripResumeArgv(opts.Cmd)
-	}
+	opts.Cmd = stripResumeArgv(opts.Cmd)
 }
 
 // stripResumeArgv removes the `--resume <id>` pair from a command, leaving a
@@ -563,32 +451,6 @@ func stripWrappedQuotedPair(el, flag string) string {
 	return strings.TrimRight(el[:idx], " ") + rest[end+1:]
 }
 
-// nativeNarrationPrompt is appended to the headless agent's system prompt when
-// native narration is enabled. It asks the agent to surface the why/decisions a
-// "vibe coder" cares about while staying TERSE: HARD rules that apply to EVERY
-// reply (including direct answers like "summarize the session"). It controls SHAPE
-// + ORDER — lead lean, plain formatting, no bold-label bullets, most-important-
-// first — and crucially does NOT tell the agent to WITHHOLD detail: the client
-// Focus prose fold (splitLedeBlocks / FoldableProse) collapses the lower-priority
-// TAIL behind a one-click, lossless "show more", so the agent writes the COMPLETE
-// answer front-loaded and the UI (not a re-ask) is the expansion path. An earlier
-// version told the agent to offer "want the full rundown?" instead of answering —
-// that conflicts with the fold (a stub with nothing behind it), so it's removed.
-// NOTE: a --resume'd pane carries in-context style momentum, so a tightened prompt
-// lands cleanest on a FRESH native pane; the fold works regardless of pane age.
-const nativeNarrationPrompt = `You are working with a "vibe coder" who wants the decision and the outcome fast — not a write-up. They care about the why, the plan, and the trade-offs, and treat code, diffs, and command output as supporting detail. Optimize every reply to be skimmed in seconds.
-
-Hard rules — these override your usual formatting and length instincts:
-- NEVER use markdown headings, section titles, horizontal rules, or bold "Label:" lead-ins, and NEVER structure a reply like a document, report, or multi-section "summary". This applies to EVERY reply, including direct answers to questions like "what did you do?" or "summarize the session" — answer those the same terse way, never as an essay.
-- Do NOT bold words for emphasis, and do NOT open a bullet with a bolded term followed by a dash. Write each bullet as a plain sentence — not "- **Go ~72k** — the backend", but "- Go is ~72k lines, the backend and the riskiest layer". Plain prose and plain bullets only.
-- Lead with the decision or outcome in the FIRST sentence. No preamble, no restating the request, no "Great question".
-- Order by importance and keep the TOP lean: the decision plus the one or two facts that matter most come first, in at most 3 short sentences OR a tight list of at most 5 one-line bullets. Any genuinely secondary detail (caveats, lesser risks, supporting numbers) goes AFTER that lean top.
-- Give the COMPLETE answer — do NOT withhold substance and tell the user to ask again. The interface folds your lower-priority tail behind a one-click "show more", so write the full answer; just lead with what matters most. Only offer to expand when it would be genuinely NEW work (e.g. "want a full file-by-file walkthrough?"), never for detail you could simply include.
-- Narrate intent and trade-offs, not keystrokes or individual tool calls. Skip routine narration ("now I'll read the file", "next I'll run the tests") — just do it. Don't restate what the code, diff, or command output already shows.
-- Prefer few, decisive actions. Batch related shell commands into one call ("a && b && c") instead of many sequential ones, and don't spin up long chains of thinking when a quick decision will do.
-
-This is in addition to your normal work: keep the engineering correct and complete. Only the prose around it gets terse — lead with what matters, plain formatting, no document scaffolding.`
-
 // isHeadlessClaudeCmd reports whether cmd is (or wraps) the native headless
 // Claude invocation — `claude -p --output-format stream-json --input-format
 // stream-json …`. It must recognize BOTH the bare argv AND the login-shell-
@@ -609,24 +471,6 @@ func isHeadlessClaudeCmd(cmd []string) bool {
 	return strings.Contains(joined, "input-format") &&
 		strings.Contains(joined, "output-format") &&
 		strings.Contains(joined, "stream-json")
-}
-
-// healLostNativeKind repairs a persisted pane whose native Kind was lost: Kind
-// reads "" (terminal) but its Cmd is the headless `claude -p … stream-json`
-// argv. This corruption was written by an older daemon's resume path that reused
-// the persisted native command without carrying Kind through; on the next
-// restart such a pane would respawn as a terminal pane, run claude -p under a
-// PTY, crash with "Input must be provided … --print", and drop the Focus pane to
-// a dead bash shell. Returns the pane with Kind forced back to "native" and
-// ok=true when it healed (so the restart loop can resume it as a proper Focus
-// pane); a pane already tagged native, or any non-native command, is returned
-// unchanged with ok=false.
-func healLostNativeKind(info PersistedPane) (PersistedPane, bool) {
-	if info.Kind == "" && isHeadlessClaudeCmd(info.Cmd) {
-		info.Kind = "native"
-		return info, true
-	}
-	return info, false
 }
 
 // resumeSessionIDFromCmd extracts the <id> from a `--resume <id>` in cmd. Used
@@ -651,40 +495,6 @@ func resumeSessionIDFromCmd(cmd []string) string {
 		}
 	}
 	return ""
-}
-
-// isStaleNonPtyNativeAgent reports whether pid is OUR live agent for socketPath
-// but was spawned WITHOUT --no-pty — the broken pre-fix native agent (it ran the
-// headless claude -p under a PTY, which crashes with "Input must be provided …
-// --print" and falls back to a zombie `bash -i`). It verifies identity from
-// /proc/<pid>/cmdline — the process must be a `solud agent` bound to THIS pane's
-// socket — so a recycled or unrelated pid is never matched, and the restart
-// loop's terminatePid can never kill the wrong process. Linux-only; elsewhere it
-// returns false (we can't introspect /proc, so leave the agent alone and let the
-// normal socket-dial reattach decide).
-func isStaleNonPtyNativeAgent(pid int, socketPath string) bool {
-	if pid <= 0 || socketPath == "" || runtime.GOOS != "linux" {
-		return false
-	}
-	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		return false
-	}
-	args := bytes.Split(raw, []byte{0})
-	var isAgent, ownsSocket, hasNoPty bool
-	for i, a := range args {
-		switch string(a) {
-		case "agent":
-			isAgent = true
-		case "--no-pty":
-			hasNoPty = true
-		case "--socket":
-			if i+1 < len(args) && string(args[i+1]) == socketPath {
-				ownsSocket = true
-			}
-		}
-	}
-	return isAgent && ownsSocket && !hasNoPty
 }
 
 // startSupervisedAgentChild starts one daemon-owned `solud agent` and keeps its
@@ -789,9 +599,7 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 		log.Printf("spawn: session %s has no on-disk transcript — starting fresh instead of a doomed --resume", shortSessionID(rid))
 		opts.ClaudeSessionID = ""
 		opts.ClaudeTranscriptPath = ""
-		if opts.Kind != "native" {
-			opts.Cmd = stripResumeArgv(opts.Cmd)
-		}
+		opts.Cmd = stripResumeArgv(opts.Cmd)
 		noticeReason = "fresh-start"
 	}
 
@@ -837,53 +645,23 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	// SessionStart hook, so the duplicate-resume guard above catches a second
 	// spawn arriving milliseconds later and the resume badge is accurate
 	// immediately. Header-attributed hooks stay authoritative and update it later.
-	if opts.Kind != "native" {
-		if rid := spawnResumeID(opts); rid != "" {
-			switch effectiveAgentKind(opts.Agent) {
-			case agentCodex:
-				if strings.TrimSpace(opts.CodexThreadID) == "" {
-					opts.CodexThreadID = rid
-				}
-			case agentMuse:
-				if strings.TrimSpace(opts.MuseSessionID) == "" {
-					opts.MuseSessionID = rid
-				}
-			default:
-				if strings.TrimSpace(opts.ClaudeSessionID) == "" {
-					opts.ClaudeSessionID = rid
-				}
+	if rid := spawnResumeID(opts); rid != "" {
+		switch effectiveAgentKind(opts.Agent) {
+		case agentCodex:
+			if strings.TrimSpace(opts.CodexThreadID) == "" {
+				opts.CodexThreadID = rid
+			}
+		case agentMuse:
+			if strings.TrimSpace(opts.MuseSessionID) == "" {
+				opts.MuseSessionID = rid
+			}
+		default:
+			if strings.TrimSpace(opts.ClaudeSessionID) == "" {
+				opts.ClaudeSessionID = rid
 			}
 		}
 	}
 
-	// Native-renderer panes run a headless Claude emitting stream-json. We rewrite
-	// opts.Cmd to the verified headless argv here, so the rest of Spawn (binary
-	// resolution, the agent/PTY transport, the readLoop) is identical to a terminal
-	// pane — only the bytes on the wire differ (JSONL not VT). The terminal spawn
-	// path is untouched (Kind=="" skips this).
-	narrate := false
-	if opts.Kind == "native" {
-		switch effectiveAgentKind(opts.Agent) {
-		case agentCodex:
-			opts.Cmd = quotaNativeCodexArgv(opts)
-		case agentMuse:
-			// Muse has no long-lived interactive protocol, so the pane's
-			// child is our own muse-driver subcommand bridging one-shot
-			// `muse exec --json --session-id` turns (see muse_driver.go).
-			// The session id is minted HERE so it persists before the first
-			// event ever streams — resume and Terminal-switch need it.
-			if strings.TrimSpace(opts.MuseSessionID) == "" {
-				opts.MuseSessionID = newMuseSessionID()
-			}
-			opts.Cmd = nativeMuseArgv(opts.MuseSessionID, opts.Model, opts.Effort)
-		default:
-			// Narration is the default Claude Focus voice — always on (the
-			// per-machine toggle was removed).
-			narrate = true
-			prompts := m.promptSuggestionsEnabled != nil && m.promptSuggestionsEnabled()
-			opts.Cmd = nativeClaudeSpawnArgv(opts, narrate, prompts)
-		}
-	}
 	if len(opts.Cmd) == 0 {
 		opts.Cmd = []string{defaultShell()}
 	}
@@ -944,64 +722,6 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	}
 	if opts.Title == "" {
 		opts.Title = opts.Cmd[0]
-	}
-
-	// Native resume self-heal: if the on-disk transcript ends with an unanswered
-	// tool_use (the previous agent died mid-approval — e.g. an AskUserQuestion
-	// whose answer was lost when the connection dropped), append a synthetic
-	// tool_result so the resumed `claude --resume` loads a VALID sequence. Without
-	// this the next user turn 400s and poisons the session forever, and the
-	// interrupted turn spins on "thinking" with no recovery. Best-effort: a repair
-	// failure never blocks the spawn (a poisoned resume is still better than no
-	// pane, and the failure is surfaced for diagnosis).
-	// Codex twin of the resume-repair notice below. Codex needs no transcript
-	// repair (thread/resume + excludeTurns always loads), but it also cannot
-	// TELL the user why their response stopped: measured against codex-cli
-	// 0.144.4, a turn orphaned by a crash and a turn the user ESC'd both come
-	// back as status:"interrupted" with identical fields, and both rollouts end
-	// with the same turn_aborted{reason:"interrupted"} record. So the daemon's
-	// own durable flag is the only evidence — and because it is disarmed on
-	// every reported turn end (including a user interrupt), it surviving as
-	// true means precisely "the process died before the turn reported an end".
-	// Reuses the resume-repair reason: the client copy ("A restart interrupted
-	// the previous response." + Continue) is agent-agnostic and exactly right.
-	if opts.Kind == "native" && effectiveAgentKind(opts.Agent) == agentCodex &&
-		opts.CodexTurnInFlight && strings.TrimSpace(opts.CodexThreadID) != "" {
-		log.Printf("native resume: codex thread %s died mid-turn — surfacing the interrupted-turn notice", shortSessionID(opts.CodexThreadID))
-		noticeReason = "resume-repair"
-	}
-
-	if opts.Kind == "native" && effectiveAgentKind(opts.Agent) == agentClaude {
-		if sid := strings.TrimSpace(opts.ClaudeSessionID); sid != "" {
-			// ONE transcript pass repairs a dangling tool_use AND reports whether
-			// the session died owing a reply (they can be 58 MB — see
-			// prepareClaudeResume). A fresh-start guard above wins no conflict
-			// here — it cleared the session id, so this branch (sid != "") never
-			// runs after one.
-			st, err := prepareClaudeResume(opts.Cwd, sid)
-			switch {
-			case err != nil:
-				log.Printf("native resume: transcript inspect failed for %s: %v", sid, err)
-			case st.repairedToolUse:
-				log.Printf("native resume: repaired an unanswered tool_use in session %s", sid)
-				// The previous response was cut off mid-tool (daemon restart /
-				// crash, NOT a mode switch) and we synthetically answered the
-				// dangling tool_use so --resume loads. Surface it: without a
-				// notice the pane just sits idle and the user can't tell why
-				// their in-flight work stopped.
-				noticeReason = "resume-repair"
-			case st.awaitsReply:
-				// The mid-TEXT twin of the repair: killed while streaming prose
-				// or thinking, Claude writes NO assistant record, so there is no
-				// dangling tool_use and the transcript simply stops after the
-				// user's prompt. Nothing needs repairing — the session resumes
-				// fine — but the user's answer silently evaporated, which is
-				// exactly what the notice exists to say. A DELIBERATE stop always
-				// writes an interrupt marker, so it never reaches this branch.
-				log.Printf("native resume: session %s died before answering the last turn — surfacing the interrupted-turn notice", shortSessionID(sid))
-				noticeReason = "resume-repair"
-			}
-		}
 	}
 
 	if info, err := os.Stat(opts.Cwd); err != nil {
@@ -1108,10 +828,27 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	// app-server and its TUI, so the bridge command gets them too. Without
 	// them Codex fell back to the user's own config: no tools at all on a
 	// fresh install, or another SoluTerminal's tools on a machine that has one.
+	// A Codex session also gets SoluTerminal's instructions for this process
+	// only, whether or not the global registration is on: they are never
+	// written into the user's global AGENTS.md (codex_pane_policy.go).
+	team := codexPanePolicyTeam.Load()
+	codexHome := envValueFromList(opts.Env, "CODEX_HOME")
+	pack := envValueFromList(contextPackEnv(contextPack), "SOLU_CONTEXT_PACK")
+	if pack == "" {
+		pack = envValueFromList(opts.Env, "SOLU_CONTEXT_PACK")
+	}
 	if len(codexLiveCmd) == 0 {
 		launchCmd = injectAgentArgsForPane(m.dataDir, id, opts.Env, launchCmd)
+		launchCmd = withCodexPaneInstructionsCmd(launchCmd, team, pack, codexHome)
 	} else {
 		codexLiveCmd = injectAgentArgsForPane(m.dataDir, id, opts.Env, codexLiveCmd)
+		codexLiveCmd = withCodexPaneInstructionsCmd(codexLiveCmd, team, pack, codexHome)
+	}
+	// The pane shim (a separate process) reads this for a typed `codex`. Set
+	// only on team installs, and never inherited otherwise.
+	opts.Env = filterOutEnvKeys(opts.Env, []string{codexPanePolicyEnv})
+	if team {
+		opts.Env = append(opts.Env, codexPanePolicyEnv+"=team")
 	}
 	m.mu.RLock()
 	existing := m.panes[id]
@@ -1175,15 +912,6 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	if opts.Role == paneRoleTaskOwner && opts.Kind == "" {
 		argv = append(argv, "--owner-retirement-pane", opts.ID)
 	}
-	if opts.Kind == "native" || isHeadlessClaudeCmd(opts.Cmd) {
-		// Headless stream-json agents (claude -p) refuse a TTY stdin, so the
-		// agent wrapper must wire the child to pipes, not a PTY. We gate on the
-		// COMMAND as well as Kind (defense-in-depth): if any stale/older-daemon
-		// resume path ever hands us the headless `claude -p` argv with an empty
-		// Kind, claude -p still gets pipes instead of crashing with "Input must
-		// be provided … --print" and dropping the pane to a bash shell.
-		argv = append(argv, "--no-pty")
-	}
 	if opts.Provider == "glm" {
 		// Pass only the NON-SECRET provider name. The agent reads
 		// glm_settings.json from --data-dir below and resolves the token onto the
@@ -1211,11 +939,6 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 			childCmd = codexPaneLaunchCommand(childCmd)
 		}
 		childCmd = routeChildCommand(childCmd, launchRouteOverrides)
-		// Keep the driver command visible to provider/broker planning above;
-		// only adapt argv0 at the final process launch boundary.
-		if opts.Kind == "native" && len(childCmd) > 1 && childCmd[1] == "muse-driver" {
-			childCmd = daemonCommandArgv(childCmd[0], childCmd[1:]...)
-		}
 		argv = append(argv, childCmd...)
 	}
 
@@ -1278,6 +1001,8 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 		// PowerShell terminal under this pane id was given.
 		paneRoute.shellStarted(id, shellDaemonURL)
 	}
+	// A (re)spawned process gets this daemon's current address.
+	paneAddressRespawned(id)
 	p := &Pane{
 		Credential:              launchCredential,
 		credentialSelection:     m.selectedCredentialAccount,
@@ -1324,7 +1049,6 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 
 	p.onPromptsCommit = m.onPromptsCommit
 	p.onClaudeSessionRotated = m.onClaudeSessionRotated
-	p.onTurnStateEdge = m.onTurnStateEdge
 	p.onCodexTurnFlagCommit = m.onCodexTurnFlagCommit
 	p.onDimsCommit = m.onDimsCommit
 	p.onOwnerViewersCommit = m.onOwnerViewersCommit
@@ -1337,9 +1061,6 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	p.ownerViewerKnowledgeKnown = opts.Role == paneRoleTaskOwner
 	p.ContextPack = opts.ContextPack
 	p.ContextPackStatus = contextPack.Status
-	// Stamp the process's actual narration state (false for terminal panes), so
-	// the per-pane "narrating" badge reflects what this agent was spawned with.
-	p.Narrating = narrate
 
 	m.mu.Lock()
 	if m.panes[id] != opts.ReplaceSuspended {
@@ -1350,30 +1071,6 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	}
 	m.panes[id] = p
 	m.mu.Unlock()
-
-	if p.Kind == "native" {
-		p.ensureNative()
-		// Seed the "always allow" set from opts (switch-mode / rollback carry
-		// the user's opt-ins across a same-conversation respawn). A brand-new
-		// pane passes nil here, so it correctly starts with an empty allowlist.
-		p.setNativeAllowlist(opts.NativeAllowlist)
-		if effectiveAgentKind(p.Agent) == agentCodex {
-			if err := p.bootstrapNativeCodex(); err != nil {
-				m.mu.Lock()
-				if m.panes[id] == p {
-					if opts.ReplaceSuspended != nil {
-						m.panes[id] = opts.ReplaceSuspended
-					} else {
-						delete(m.panes, id)
-					}
-				}
-				m.mu.Unlock()
-				_ = conn.Close()
-				_ = terminatePid(agentPid)
-				return nil, fmt.Errorf("bootstrap Codex Focus: %w", err)
-			}
-		}
-	}
 
 	// Surface any resume discontinuity the guards above inflicted (see
 	// noticeReason). fromKind is this pane's own kind; interrupted=true only
@@ -1417,11 +1114,8 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 	}
 
 	// PersistedPane has no proven activity epoch. Terminal replay must not
-	// make reattach time look like new output. Native behavior is unchanged.
+	// make reattach time look like new output.
 	activityMs := int64(0)
-	if info.Kind == "native" {
-		activityMs = time.Now().UnixMilli()
-	}
 	cols, rows := info.Cols, info.Rows
 	if cols == 0 {
 		cols = defaultCols
@@ -1459,7 +1153,6 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 		AnnounceDelegationEvents: info.AnnounceDelegationEvents,
 		AutoMode:                 info.AutoMode,
 		NeverAutoAnswer:          info.NeverAutoAnswer,
-		Narrating:                info.Narrating,
 		Flagged:                  info.Flagged,
 		FlagMemo:                 info.FlagMemo,
 		FlagOwner:                info.FlagOwner,
@@ -1490,7 +1183,6 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 	}
 	p.onPromptsCommit = m.onPromptsCommit
 	p.onClaudeSessionRotated = m.onClaudeSessionRotated
-	p.onTurnStateEdge = m.onTurnStateEdge
 	p.onCodexTurnFlagCommit = m.onCodexTurnFlagCommit
 	p.onDimsCommit = m.onDimsCommit
 	p.onOwnerViewersCommit = m.onOwnerViewersCommit
@@ -1509,42 +1201,6 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 	if p.Snapshot().AutoMode != "" {
 		p.ensureGrid()
 	}
-	// Restore an armed deferred switch ("switch when Claude finishes") — the
-	// restart that interrupted it is most often the update flow itself, exactly
-	// when users arm one. The caller (main.go boot loop) re-creates the watcher
-	// via ensureSwitchWatcher once the API server exists; RequestedAt is the
-	// ORIGINAL arm time so the max-wait cap spans the restart.
-	if info.PendingSwitch != nil {
-		p.setPendingSwitchAt(info.PendingSwitch.Target, info.PendingSwitch.RequestedAt)
-	}
-
-	if p.Kind == "native" {
-		p.ensureNative()
-		// This path reattaches to the SAME surviving app-server process, which
-		// was initialized by the predecessor daemon. Prime only this adapter
-		// instance from the durable thread id; a fresh Spawn must complete the
-		// initialize + thread/resume handshake before it becomes ready.
-		if effectiveAgentKind(p.Agent) == agentCodex {
-			if adapter, ok := p.NativeAdapterRef(); ok {
-				if driver, ok := adapter.(*CodexAdapter); ok {
-					if threadID := strings.TrimSpace(p.CodexThreadID); threadID != "" {
-						driver.RestoreThread(threadID, p.Cwd, p.Model)
-						p.nativeGotInit.Store(true)
-					}
-				}
-			}
-		}
-		// Restore the persisted "always allow" set. Reattach is the SAME
-		// agent + same conversation, so the user's prior opt-ins still apply.
-		p.setNativeAllowlist(info.NativeAllowlist)
-		// Restore the durable Codex turn flag. The agent SURVIVED here (this is
-		// the auto-update / daemon-restart path), so a turn may still be genuinely
-		// in flight: the agent's stdout backlog replays as live state and will
-		// re-drive both edges, but seeding it keeps the record accurate in the gap
-		// before that replay lands — and correct if the agent dies during it.
-		p.codexTurnInFlight.Store(info.CodexTurnInFlight)
-	}
-
 	go p.readLoop(m)
 	go p.pokeBlankReattachAfter(1200 * time.Millisecond)
 	return p, nil
@@ -1618,7 +1274,6 @@ func (m *Manager) SuspendExisting(info *PersistedPane) *Pane {
 		AnnounceDelegationEvents: info.AnnounceDelegationEvents,
 		AutoMode:                 info.AutoMode,
 		NeverAutoAnswer:          info.NeverAutoAnswer,
-		Narrating:                info.Narrating,
 		Flagged:                  info.Flagged,
 		FlagMemo:                 info.FlagMemo,
 		FlagOwner:                info.FlagOwner,
@@ -1644,20 +1299,6 @@ func (m *Manager) SuspendExisting(info *PersistedPane) *Pane {
 	p.codexIdentityBlocked.Store(info.IdentityBlocked)
 	p.onPromptsCommit = m.onPromptsCommit
 	p.onClaudeSessionRotated = m.onClaudeSessionRotated
-	// Carry the native "always allow" set forward so a later resume keeps the
-	// user's per-pane opt-ins (mirrors AttachExisting). Only touches
-	// nativeApprovalMu, so it's safe without a live native renderer; a no-op
-	// for terminal panes.
-	if p.Kind == "native" {
-		p.setNativeAllowlist(info.NativeAllowlist)
-		// Carry the durable Codex turn flag onto the suspended pane. The resume
-		// path reads the PANE's snapshot (not the persisted record), so without
-		// this a mid-turn death would resume with no notice. It is deliberately
-		// NOT mirrored into nativeInTurn: this pane has no process, and lighting
-		// that flag would render a dead pane as "working".
-		p.codexTurnInFlight.Store(info.CodexTurnInFlight)
-	}
-
 	m.mu.Lock()
 	if existing := m.panes[info.ID]; existing != nil {
 		m.mu.Unlock()
@@ -1723,7 +1364,7 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 	// A managed terminal harness resumes by replaying the pane's own launch
 	// command with the durable session on the child env (the client calls
 	// session/resume); it has no Claude/Codex/Muse conversation id to require.
-	harnessResume := harnessProvider != "" && info.Kind != "native"
+	harnessResume := harnessProvider != ""
 	shellResume := !harnessResume && conversationID == "" && plainShellRecovery(info)
 	if !harnessResume && conversationID == "" && !shellResume {
 		return nil, nil
@@ -1766,9 +1407,6 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 			cmd = []string{"codex", "resume", conversationID}
 		case agentMuse:
 			cmd = []string{"muse", "resume", conversationID}
-		}
-		if info.Kind == "native" {
-			cmd = nil
 		}
 	}
 	// Hold the suspended pane's respawn lease before touching its socket;
@@ -1815,9 +1453,8 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 		// Boot-time resume: cols/rows are the persisted panes.json copy with no
 		// live client attached yet. Leave a terminal PTY's dims unverified so the
 		// first client to attach re-measures and drives the real width instead of
-		// inheriting a stale size (every-update garble). Native panes render
-		// headless (no shared-PTY xterm width), so keep their prior behavior.
-		DimsUnverified: info.Kind != "native",
+		// inheriting a stale size (every-update garble).
+		DimsUnverified: true,
 	})
 	if err != nil || p == nil {
 		return p, err
@@ -1832,11 +1469,6 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 	p.mu.Unlock()
 	if p.Snapshot().AutoMode != "" {
 		p.ensureGrid()
-	}
-	if p.Kind == "native" {
-		// Resume continues the SAME conversation (claude --resume <sessionID>),
-		// so the user's "always allow" opt-ins still apply — restore them.
-		p.setNativeAllowlist(info.NativeAllowlist)
 	}
 	return p, nil
 }
@@ -1854,14 +1486,6 @@ func (m *Manager) ResumeClaudePane(info PersistedPane) (*Pane, error) {
 // the standard readline/TUI repaint key: shells redraw the prompt without
 // submitting input, and full-screen apps treat it as a refresh.
 func (p *Pane) pokeBlankReattachAfter(after time.Duration) {
-	// NEVER for native panes: their agent stdin is `claude -p --input-format
-	// stream-json`, where a raw `\x0c` (Ctrl+L) is an invalid NDJSON line that
-	// makes claude self-exit code 1. A native pane also doesn't need this repaint —
-	// it rebuilds its surface from the event ring + the since=0 transcript backfill,
-	// not from raw replay bytes. (The Ctrl+L poke is a terminal/Codex repair only.)
-	if p.Kind == "native" {
-		return
-	}
 	timer := time.NewTimer(after)
 	defer timer.Stop()
 	select {

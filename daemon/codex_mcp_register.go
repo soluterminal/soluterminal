@@ -245,8 +245,7 @@ func ensureCodexMcpRegistration(listenAddr string) {
 	if !shouldSelfRegister(listenAddr) {
 		return
 	}
-	// Opt-in (agent_integration.go): without consent nothing global is written,
-	// neither the MCP server nor the AGENTS.md block.
+	// Opt-in (agent_integration.go): without consent nothing global is written.
 	if !agentIntegrationGlobalOn() {
 		return
 	}
@@ -290,7 +289,8 @@ func ensureCodexMcpRegistration(listenAddr string) {
 		return
 	}
 
-	syncCodexAgentsMd(filepath.Join(filepath.Dir(cfgPath), "AGENTS.md"))
+	// Earlier versions wrote a block into the global AGENTS.md; take it out.
+	cleanupCodexAgentsMd(filepath.Join(filepath.Dir(cfgPath), "AGENTS.md"), agentIntegrationBackupDir(mcpRegistrationDataDir()))
 
 	action := claudeMcpAction(existing) // same URL policy: add / fix / keep
 	if existing == "" && hasTable {

@@ -80,7 +80,7 @@ describe('askAgentIntegrationOnce', () => {
     const copy = [AGENT_INTEGRATION_TITLE, AGENT_INTEGRATION_BODY, AGENT_INTEGRATION_NOTICE].join(' ');
     expect(AGENT_INTEGRATION_BODY).toMatch(/already work together/);
     expect(AGENT_INTEGRATION_BODY).toMatch(/outside SoluTerminal/);
-    expect(AGENT_INTEGRATION_BODY).toMatch(/four entries .* hooks/);
+    expect(AGENT_INTEGRATION_BODY).toMatch(/three entries .* hooks/);
     expect(AGENT_INTEGRATION_BODY).toMatch(/uninstalling, removes them/);
     expect(copy).not.toMatch(/daemon|solud|MCP|\bhost\b|distro/i);
   });

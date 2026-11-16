@@ -28,13 +28,14 @@ launcher=${2-}
 provider=${3-}
 shift 3
 
-# Run the provider's own gate on a candidate. dsh only runs where
-# `import.meta.main` exists (Node >= 24.2); Pi's published floor is Node 22.19.
+# Run the provider's own gate on a candidate. dsh 0.2.2's published floor is
+# Node 24.9 (it also needs `import.meta.main`); Pi's is Node 22.19. Both mirror
+# nodeSupportsDsh / nodeSupportsPi in launch.mjs.
 # A non-Node executable still exits non-zero here, which is the right answer.
 node_capable() {
   case $provider in
     deepseek)
-      "$1" -e 'process.exit(typeof import.meta.main === "boolean" ? 0 : 1)' >/dev/null 2>&1
+      "$1" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(typeof import.meta.main === "boolean" && (major > 24 || (major === 24 && minor >= 9)) ? 0 : 1)' >/dev/null 2>&1
       ;;
     pi|pi-glm)
       "$1" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' >/dev/null 2>&1
@@ -112,7 +113,7 @@ if [ -z "$node" ]; then
   label=$provider
   required='Node.js'
   case $provider in
-    deepseek) label='DeepSeek Harness'; required='Node 24.2 or newer' ;;
+    deepseek) label='DeepSeek Harness'; required='Node 24.9 or newer' ;;
     pi) label='Pi'; required='Node 22.19 or newer' ;;
     pi-glm) label='Pi (GLM)'; required='Node 22.19 or newer' ;;
     glm) label='ZCode' ;;

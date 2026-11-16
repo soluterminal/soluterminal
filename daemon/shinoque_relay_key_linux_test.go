@@ -365,6 +365,8 @@ func TestShinoqueRelayKeySignsForwardsWithPushedKeyOnly(t *testing.T) {
 	}
 	if body := relayKeyHealth(t, a); body["shinoqueRelay"] != true || body["shinoqueRelayKey"] != true {
 		t.Fatalf("pushed health = %v/%v", body["shinoqueRelay"], body["shinoqueRelayKey"])
+	} else if _, present := body["shinoqueRelayReason"]; present {
+		t.Fatalf("healthy relay carries a reason: %v", body["shinoqueRelayReason"])
 	}
 
 	// A rewritten file is never read again in this process.
@@ -462,8 +464,9 @@ func TestShinoqueRelayKeyFailsClosedWithoutPush(t *testing.T) {
 		if s.core.hits() != before {
 			t.Fatalf("%s: a forward reached the core", why)
 		}
-		if body := relayKeyHealth(t, a); body["shinoqueRelay"] != false || body["shinoqueRelayKey"] != false {
-			t.Fatalf("%s: health = %v/%v", why, body["shinoqueRelay"], body["shinoqueRelayKey"])
+		if body := relayKeyHealth(t, a); body["shinoqueRelay"] != false || body["shinoqueRelayKey"] != false ||
+			body["shinoqueRelayReason"] != shinoqueRelayReasonNoKey {
+			t.Fatalf("%s: health = %v/%v/%v", why, body["shinoqueRelay"], body["shinoqueRelayKey"], body["shinoqueRelayReason"])
 		}
 	}
 
@@ -560,6 +563,29 @@ func TestShinoqueRelayKeyRateLimit(t *testing.T) {
 	}
 	if w := relayKeyServe(b, relayKeyPushRequest(s.body(relayKeyTestKey))); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("push after refused burst = %d, want 429", w.Code)
+	}
+
+	// Callers refused as not local, or as untraced, spend nothing: they can't
+	// make the core's push wait while the held key lapses.
+	c := s.server()
+	for i := 0; i < 3*shinoqueRelayKeyBurst; i++ {
+		r := relayKeyPushRequest(s.body(relayKeyTestKey))
+		r.Header.Set("X-Forwarded-For", "127.0.0.1")
+		if w := relayKeyServe(c, r); w.Code != http.StatusForbidden {
+			t.Fatalf("forwarded push %d = %d, want 403", i, w.Code)
+		}
+	}
+	previous := shinoqueRelayKeyPeer
+	t.Cleanup(func() { shinoqueRelayKeyPeer = previous })
+	shinoqueRelayKeyPeer = func(*http.Request) (int, string, bool) { return 0, "", false }
+	for i := 0; i < 3*shinoqueRelayKeyBurst; i++ {
+		if w := relayKeyServe(c, relayKeyPushRequest(s.body(relayKeyTestKey))); w.Code != http.StatusForbidden {
+			t.Fatalf("untraced push %d = %d, want 403", i, w.Code)
+		}
+	}
+	shinoqueRelayKeyPeer = previous
+	for i := 0; i < shinoqueRelayKeyBurst; i++ {
+		s.push(t, c, relayKeyTestKey)
 	}
 }
 
@@ -716,5 +742,58 @@ func TestShinoqueRelayKeyMarker(t *testing.T) {
 		if got := shinoqueRelayKeyMarked(tc.home); got != tc.marked {
 			t.Errorf("%s: marked = %t, want %t", tc.name, got, tc.marked)
 		}
+	}
+}
+
+// ST-256: with SHINOQUE_RELAY_PORT/SHINOQUE_HOME set, health says the relay
+// works only when relay.json vouches for that core, as the relay itself does.
+func TestShinoqueRelayHealthFollowsRelayAuthUnderEnv(t *testing.T) {
+	s := newRelayKeyTest(t)
+	a := s.server()
+	t.Setenv("SHINOQUE_RELAY_PORT", s.port)
+	t.Setenv("SHINOQUE_HOME", s.home)
+
+	// relay.json names the same core: both agree it works.
+	if body := relayKeyHealth(t, a); body["shinoqueRelay"] != true {
+		t.Fatalf("matching relay.json: health = %v/%v", body["shinoqueRelay"], body["shinoqueRelayReason"])
+	}
+	if w := relayKeyForward(a, ""); w.Code != http.StatusOK {
+		t.Fatalf("matching relay.json: forward = %d %q", w.Code, w.Body.String())
+	}
+
+	// Without it the core's relay auth is unknown: the relay refuses, and
+	// health says so instead of true.
+	if err := os.Remove(s.discovery); err != nil {
+		t.Fatal(err)
+	}
+	if w := relayKeyForward(a, ""); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), shinoqueUpdateRequired) {
+		t.Fatalf("no relay.json: forward = %d %q", w.Code, w.Body.String())
+	}
+	body := relayKeyHealth(t, a)
+	if body["shinoqueRelay"] != false || body["shinoqueRelayReason"] != shinoqueRelayReasonRouteUnverified {
+		t.Fatalf("no relay.json: health = %v/%v", body["shinoqueRelay"], body["shinoqueRelayReason"])
+	}
+
+	// A pushed key doesn't change that: the core still hasn't declared it.
+	s.core.setKey(relayKeyTestKey)
+	s.push(t, a, relayKeyTestKey)
+	body = relayKeyHealth(t, a)
+	if body["shinoqueRelay"] != false || body["shinoqueRelayKey"] != true || body["shinoqueRelayReason"] != shinoqueRelayReasonRouteUnverified {
+		t.Fatalf("pushed key, no relay.json: health = %v/%v/%v", body["shinoqueRelay"], body["shinoqueRelayKey"], body["shinoqueRelayReason"])
+	}
+}
+
+// A push naming the core's home with a trailing slash is the same home: it is
+// accepted, and the cleaned home signs forwards.
+func TestShinoqueRelayKeyPushCleansHome(t *testing.T) {
+	s := newRelayKeyTest(t)
+	a := s.server()
+	s.core.setKey(relayKeyTestKey)
+	body := fmt.Sprintf(`{"key":%q,"home":%q,"port":%s}`, relayKeyTestKey, s.home+"/", s.port)
+	if w := relayKeyServe(a, relayKeyPushRequest(body)); w.Code != http.StatusOK {
+		t.Fatalf("push with %q/ = %d %q", s.home, w.Code, w.Body.String())
+	}
+	if w := relayKeyForward(a, ""); w.Code != http.StatusOK || s.core.last(t).Get("X-Shinoque-Relay") != relayKeyTestKey {
+		t.Fatalf("forward after a trailing-slash push = %d", w.Code)
 	}
 }

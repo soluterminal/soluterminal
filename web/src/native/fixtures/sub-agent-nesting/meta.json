@@ -1,1 +1,0 @@
-{"agentMidTurn":true,"pendingCount":0,"paneId":"p","fixtureFormatVersion":1,"description":"a Task's nested sub-agent tool_calls (parentCallId set) are collected under it (childrenByParent) and hidden from the top-level rows; TaskView renders them indented"}

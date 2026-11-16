@@ -74,15 +74,7 @@ func (a *apiServer) searchPanes(w http.ResponseWriter, r *http.Request) {
 		if snap.Status != PaneRunning {
 			continue
 		}
-		// Native panes (Kind=="native") hold raw stream-json JSONL in p.buffer, so
-		// searching that matches JSON envelopes, not conversation text. Search the
-		// PARSED native events instead; terminal panes search the PTY scrollback.
-		var stripped string
-		if snap.Kind == "native" {
-			stripped = nativeSearchText(p)
-		} else {
-			stripped = stripANSI(p.buffer.Snapshot())
-		}
+		stripped := stripANSI(p.buffer.Snapshot())
 		if stripped == "" {
 			continue
 		}
@@ -170,48 +162,6 @@ func (a *apiServer) searchPanes(w http.ResponseWriter, r *http.Request) {
 		Capped:       capped,
 		Results:      results,
 	})
-}
-
-// nativeSearchText concatenates the human-readable text of a native pane's parsed
-// events (the ring — the same recent window the transcript renders), so cross-pane
-// search matches conversation text instead of the raw stream-json JSONL sitting in
-// p.buffer. Each field goes on its own line so line counting + excerpting stay sane
-// and a match never bleeds across two events. Ordered oldest→newest, matching the
-// terminal scrollback, so the caller's newest-first windowing works identically.
-func nativeSearchText(p *Pane) string {
-	events := p.NativeSince(0)
-	if len(events) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for i := range events {
-		writeNativeEventText(&b, &events[i])
-	}
-	return b.String()
-}
-
-func writeNativeEventText(b *strings.Builder, ev *NativeEvent) {
-	write := func(s string) {
-		if s == "" {
-			return
-		}
-		b.WriteString(s)
-		b.WriteByte('\n')
-	}
-	write(ev.Text)    // assistant / user / thinking / slash text
-	write(ev.Content) // tool_result content
-	write(ev.Name)    // tool name
-	write(ev.Message) // error message
-	write(ev.Detail)  // error / status detail
-	if len(ev.Args) > 0 {
-		write(string(ev.Args)) // tool args: commands, file paths, patterns
-	}
-	if len(ev.Output) > 0 {
-		write(string(ev.Output)) // tool_result structured output (stdout/stderr)
-	}
-	for i := range ev.Items {
-		write(ev.Items[i].Text) // todo items
-	}
 }
 
 func buildSearchExcerpt(line string, matchRel int, matchLen int) (string, int, int) {

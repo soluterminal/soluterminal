@@ -50,7 +50,9 @@ import (
 const shinoqueRelayBridgeHost = "host"
 
 const (
-	// A verified owner is reused for health this long before it is re-probed.
+	// A verified owner is reused for health this long before it is re-probed;
+	// a failed health probe is reused as long, so failing probes aren't
+	// repeated for every health read.
 	shinoqueRelayBridgeVerdictTTL = 2 * time.Second
 	// The core refuses ts more than 60 s from its clock; stop well before.
 	shinoqueRelayBridgeSkewMax = 30 * time.Second
@@ -83,8 +85,11 @@ type shinoqueRelayBridge struct {
 	proxyPort string
 	owner     shinoqueRelayOwner
 	verified  time.Time
-	failure   string
-	skewUntil time.Time
+	// probeFailed is when health's own probe last failed (zero once a
+	// push moves the route).
+	probeFailed time.Time
+	failure     string
+	skewUntil   time.Time
 
 	transport *http.Transport
 
@@ -137,9 +142,13 @@ func (b *shinoqueRelayBridge) accept(push shinoqueRelayBridgePush) shinoqueRelay
 	proxyPort := strconv.Itoa(push.ProxyPort)
 	b.mu.Lock()
 	moved := b.config.port != config.port || b.proxyPort != proxyPort
+	if moved || b.key != push.Key {
+		// A new route or key gets a fresh probe, not the old failure.
+		b.probeFailed = time.Time{}
+	}
 	b.config, b.proxyPort, b.pushedAt, b.key = config, proxyPort, b.clock(), push.Key
 	if moved {
-		b.owner, b.verified = shinoqueRelayOwner{}, time.Time{}
+		b.owner, b.verified, b.probeFailed = shinoqueRelayOwner{}, time.Time{}, time.Time{}
 	}
 	b.mu.Unlock()
 	if moved {
@@ -294,11 +303,14 @@ func (b *shinoqueRelayBridge) observe(resp *http.Response) {
 }
 
 // usable reports whether a forward could go now: a push is held, the clocks
-// agree, and the desktop's proxy is verified within the TTL or by a probe.
+// agree, and the desktop's proxy is verified within the TTL or by a probe. A
+// probe that failed within the TTL answers false without probing again.
 func (b *shinoqueRelayBridge) usable() bool {
 	b.mu.Lock()
-	ready := b.config.port != "" && !b.clock().Before(b.skewUntil)
-	fresh := !b.verified.IsZero() && b.clock().Sub(b.verified) < shinoqueRelayBridgeVerdictTTL
+	now := b.clock()
+	ready := b.config.port != "" && !now.Before(b.skewUntil)
+	fresh := !b.verified.IsZero() && now.Sub(b.verified) < shinoqueRelayBridgeVerdictTTL
+	failing := !b.probeFailed.IsZero() && now.Sub(b.probeFailed) < shinoqueRelayBridgeVerdictTTL
 	b.mu.Unlock()
 	if !ready {
 		return false
@@ -306,10 +318,16 @@ func (b *shinoqueRelayBridge) usable() bool {
 	if fresh {
 		return true
 	}
+	if failing {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), shinoqueRelayBridgeProbe)
 	defer cancel()
 	conn, err := b.dialContext(ctx, "tcp", "")
 	if err != nil {
+		b.mu.Lock()
+		b.probeFailed = b.clock()
+		b.mu.Unlock()
 		return false
 	}
 	conn.Close()
@@ -319,7 +337,7 @@ func (b *shinoqueRelayBridge) usable() bool {
 
 // shinoqueRelayBridgePush is the body of a push through the desktop.
 type shinoqueRelayBridgePush struct {
-	Key, Home                                     string
+	Key, Home                                      string
 	Port, ProxyPort, RelayAuth, PrivateDeviceProof int
 }
 

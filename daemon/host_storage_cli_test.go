@@ -17,7 +17,7 @@ func registeredHostStorageSample(path string) hostStorageSample {
 	return hostStorageSample{
 		At: time.Now(), Available: true, State: hostStorageOK, Distro: "Ubuntu", Volume: `C:\`,
 		VHDXPathRaw: path, BasePath: strings.TrimSuffix(path, `\ext4.vhdx`),
-		LocalAppData: `C:\Users\benja\AppData\Local`, OwnerSID: "S-1-5-21-1000", RegistrationCount: 1,
+		LocalAppData: `C:\Users\alice\AppData\Local`, OwnerSID: "S-1-5-21-1000", RegistrationCount: 1,
 		VHDXPhysicalBytes: 600 << 30, VHDXLogicalBytes: 1024 << 30, FreeBytes: 100 << 30, TotalBytes: 2 << 40,
 	}
 }
@@ -48,7 +48,7 @@ func TestHostStorageStatusFallsBackToLocalProbe(t *testing.T) {
 	defer func() { hostStorageCLIGetRequest, hostStorageCLIProber = origGet, origProber }()
 	hostStorageCLIGetRequest = func(string, any) error { return errors.New("offline") }
 	hostStorageCLIProber = func() hostStorageSource {
-		return &fakeHostStorageSource{sample: hostStorageSample{At: time.Now(), Available: true, State: hostStorageOK, Distro: "Ubuntu", Volume: `C:\`, FreeBytes: 100 << 30, TotalBytes: 2 << 40, VHDXPathRaw: `C:\Users\benja\AppData\Local\wsl\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}\ext4.vhdx`}}
+		return &fakeHostStorageSource{sample: hostStorageSample{At: time.Now(), Available: true, State: hostStorageOK, Distro: "Ubuntu", Volume: `C:\`, FreeBytes: 100 << 30, TotalBytes: 2 << 40, VHDXPathRaw: `C:\Users\alice\AppData\Local\wsl\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}\ext4.vhdx`}}
 	}
 	var out, stderr bytes.Buffer
 	if code := runHostStorageCLI("status", nil, &out, &stderr); code != 0 {
@@ -74,7 +74,7 @@ func TestHostStorageCompactRefusesActiveWorkflows(t *testing.T) {
 	origP, origG, origR := hostStorageCLIProber, hostStorageCLIGetRequest, hostStorageCLIRun
 	defer func() { hostStorageCLIProber, hostStorageCLIGetRequest, hostStorageCLIRun = origP, origG, origR }()
 	hostStorageCLIProber = func() hostStorageSource {
-		return &fakeHostStorageSource{sample: registeredHostStorageSample(`C:\Users\benja\AppData\Local\wsl\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}\ext4.vhdx`)}
+		return &fakeHostStorageSource{sample: registeredHostStorageSample(`C:\Users\alice\AppData\Local\wsl\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}\ext4.vhdx`)}
 	}
 	hostStorageCLIGetRequest = func(url string, dst any) error {
 		return json.Unmarshal([]byte(`{"running":1,"heavyRunning":1,"runningInvocations":1,"runningPanes":1}`), dst)
@@ -97,7 +97,7 @@ func TestHostStorageCompactDryRunIsMutationFree(t *testing.T) {
 	defer func() {
 		hostStorageCLIProber, hostStorageCLIRun, hostStorageCLIWSLVersion, hostStorageCLIWindowsScript, hostStorageCLIGetRequest, hostStorageCLILedger = origP, origR, origV, origScript, origGet, origLedger
 	}()
-	path := `C:\Users\benja\AppData\Local\wsl\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}\ext4.vhdx`
+	path := `C:\Users\alice\AppData\Local\wsl\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}\ext4.vhdx`
 	src := &fakeHostStorageSource{sample: registeredHostStorageSample(path)}
 	hostStorageCLIProber = func() hostStorageSource { return src }
 	hostStorageCLIGetRequest = quietHostStorageActivity
@@ -159,7 +159,7 @@ func TestHostStorageCompactNeverEstimatesReclaimWhenDFUnavailable(t *testing.T) 
 		hostStorageCLIProber, hostStorageCLIRun, hostStorageCLIWSLVersion, hostStorageCLIWindowsScript, hostStorageCLIGetRequest, hostStorageCLILedger = origP, origR, origV, origScript, origGet, origLedger
 	}()
 	hostStorageCLIProber = func() hostStorageSource {
-		return &fakeHostStorageSource{sample: registeredHostStorageSample(`C:\Users\benja\AppData\Local\wsl\Ubuntu\ext4.vhdx`)}
+		return &fakeHostStorageSource{sample: registeredHostStorageSample(`C:\Users\alice\AppData\Local\wsl\Ubuntu\ext4.vhdx`)}
 	}
 	hostStorageCLIGetRequest = quietHostStorageActivity
 	ledgerDir := t.TempDir()
@@ -440,7 +440,7 @@ func TestHostStoragePrepareTrimPlanAndExecute(t *testing.T) {
 	defer func() {
 		hostStorageCLIProber, hostStorageCLIRun, hostStorageCLIGetRequest, hostStorageCLILedger = origP, origR, origGet, origLedger
 	}()
-	sample := registeredHostStorageSample(`C:\Users\benja\AppData\Local\wsl\Ubuntu\ext4.vhdx`)
+	sample := registeredHostStorageSample(`C:\Users\alice\AppData\Local\wsl\Ubuntu\ext4.vhdx`)
 	hostStorageCLIProber = func() hostStorageSource { return &fakeHostStorageSource{sample: sample} }
 	hostStorageCLIGetRequest = quietHostStorageActivity
 	ledgerDir := t.TempDir()
@@ -507,7 +507,7 @@ func TestHostStoragePrepareTrimRecordsFreshAfterMeasurement(t *testing.T) {
 		hostStorageCLIProber, hostStorageCLIRun, hostStorageCLIGetRequest, hostStorageCLILedger = origP, origR, origGet, origLedger
 	})
 
-	path := `C:\Users\benja\AppData\Local\wsl\Ubuntu\ext4.vhdx`
+	path := `C:\Users\alice\AppData\Local\wsl\Ubuntu\ext4.vhdx`
 	before := registeredHostStorageSample(path)
 	after := before
 	after.VHDXPhysicalBytes = 500 << 30
@@ -579,7 +579,7 @@ func TestHostStoragePrepareTrimFailureRecordsFreshAfterMeasurement(t *testing.T)
 		hostStorageCLIProber, hostStorageCLIRun, hostStorageCLIGetRequest, hostStorageCLILedger = origP, origR, origGet, origLedger
 	})
 
-	path := `C:\Users\benja\AppData\Local\wsl\Ubuntu\ext4.vhdx`
+	path := `C:\Users\alice\AppData\Local\wsl\Ubuntu\ext4.vhdx`
 	before := registeredHostStorageSample(path)
 	after := before
 	after.VHDXPhysicalBytes = 550 << 30
@@ -637,7 +637,7 @@ func TestHostStoragePrepareTrimFailureRecordedAndUnknownActivityRefused(t *testi
 	defer func() {
 		hostStorageCLIProber, hostStorageCLIRun, hostStorageCLIGetRequest, hostStorageCLILedger = origP, origR, origGet, origLedger
 	}()
-	sample := registeredHostStorageSample(`C:\Users\benja\AppData\Local\wsl\Ubuntu\ext4.vhdx`)
+	sample := registeredHostStorageSample(`C:\Users\alice\AppData\Local\wsl\Ubuntu\ext4.vhdx`)
 	hostStorageCLIProber = func() hostStorageSource { return &fakeHostStorageSource{sample: sample} }
 	ledgerDir := t.TempDir()
 	hostStorageCLILedger = func() *hostStorageLedger { return newHostStorageLedger(ledgerDir) }
@@ -684,7 +684,7 @@ func TestHostStoragePrepareTrimReportsMissingReceipt(t *testing.T) {
 	t.Cleanup(func() {
 		hostStorageCLIProber, hostStorageCLIRun, hostStorageCLIGetRequest, hostStorageCLILedger = origP, origR, origGet, origLedger
 	})
-	sample := registeredHostStorageSample(`C:\Users\benja\AppData\Local\wsl\Ubuntu\ext4.vhdx`)
+	sample := registeredHostStorageSample(`C:\Users\alice\AppData\Local\wsl\Ubuntu\ext4.vhdx`)
 	hostStorageCLIProber = func() hostStorageSource { return &fakeHostStorageSource{sample: sample} }
 	hostStorageCLIGetRequest = quietHostStorageActivity
 	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")

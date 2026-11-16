@@ -58,7 +58,7 @@ func TestSystemStatusHostDiskLayer(t *testing.T) {
 	guestFree, guestTotal, hostFree, hostTotal, hostFloor := int64(667000), int64(1048576), int64(41000), int64(2050000), int64(61500)
 	unexplained, growth := int64(51095), int64(0)
 	sparse := false
-	sample := systemSample{SampledAt: now, DiskFreeMB: &guestFree, DiskTotalMB: &guestTotal, DiskFloorMB: 10240, HostDisk: &systemHostDiskSample{State: hostStorageOK, Volume: `C:\`, Distro: "Ubuntu", FreeMB: &hostFree, TotalMB: &hostTotal, FloorMB: &hostFloor, FloorPct: 3, HysteresisMB: 4096, Low: true, VHDXPhysicalMB: &hostTotal, Sparse: &sparse, SampledAt: &now, BlockingLayer: "host", UnexplainedLossMB: &unexplained, VHDXGrowthMB: &growth, LossWindowMin: 43, Offender: &systemHostOffender{Label: `%TEMP%\wsl-crashes`, Path: `C:\Users\benja\AppData\Local\Temp\wsl-crashes`, MB: 51200, Files: 10, Dumps: 10, Complete: true, Text: `51.0 GB of WSL crash dumps (10 .dmp files) in %TEMP%\wsl-crashes`}}, Levels: systemLevelsDTO{Overall: "critical", Reason: "host disk critical", Areas: map[string]string{"disk": "ok", "hostDisk": "critical"}}}
+	sample := systemSample{SampledAt: now, DiskFreeMB: &guestFree, DiskTotalMB: &guestTotal, DiskFloorMB: 10240, HostDisk: &systemHostDiskSample{State: hostStorageOK, Volume: `C:\`, Distro: "Ubuntu", FreeMB: &hostFree, TotalMB: &hostTotal, FloorMB: &hostFloor, FloorPct: 3, HysteresisMB: 4096, Low: true, VHDXPhysicalMB: &hostTotal, Sparse: &sparse, SampledAt: &now, BlockingLayer: "host", UnexplainedLossMB: &unexplained, VHDXGrowthMB: &growth, LossWindowMin: 43, Offender: &systemHostOffender{Label: `%TEMP%\wsl-crashes`, Path: `C:\Users\alice\AppData\Local\Temp\wsl-crashes`, MB: 51200, Files: 10, Dumps: 10, Complete: true, Text: `51.0 GB of WSL crash dumps (10 .dmp files) in %TEMP%\wsl-crashes`}}, Levels: systemLevelsDTO{Overall: "critical", Reason: "host disk critical", Areas: map[string]string{"disk": "ok", "hostDisk": "critical"}}}
 	a := &apiServer{system: seededSystemSampler(sample), startT: now, dataDir: t.TempDir()}
 	rec := httptest.NewRecorder()
 	a.systemStatus(rec, httptest.NewRequest("GET", "/api/system/status", nil))
@@ -72,7 +72,7 @@ func TestSystemStatusHostDiskLayer(t *testing.T) {
 	if body.Disk.Layer != "guest" || body.Disk.Low || !body.Disk.AnyLow || body.Disk.BlockingLayer != "host" || body.Disk.Host == nil || !body.Disk.Host.Low || body.Level.Areas["hostDisk"] != "critical" {
 		t.Fatalf("body=%+v host=%+v", body, body.Disk.Host)
 	}
-	if body.Disk.Host.UnexplainedLossMB == nil || *body.Disk.Host.UnexplainedLossMB != 51095 || body.Disk.Host.VHDXGrowthMB == nil || *body.Disk.Host.VHDXGrowthMB != 0 || body.Disk.Host.LossWindowMin != 43 || body.Disk.Host.Offender == nil || body.Disk.Host.Offender.Label != `%TEMP%\wsl-crashes` || !strings.HasPrefix(body.Disk.Host.Offender.Path, `~\`) || strings.Contains(strings.ToLower(body.Disk.Host.Offender.Path), "benja") {
+	if body.Disk.Host.UnexplainedLossMB == nil || *body.Disk.Host.UnexplainedLossMB != 51095 || body.Disk.Host.VHDXGrowthMB == nil || *body.Disk.Host.VHDXGrowthMB != 0 || body.Disk.Host.LossWindowMin != 43 || body.Disk.Host.Offender == nil || body.Disk.Host.Offender.Label != `%TEMP%\wsl-crashes` || !strings.HasPrefix(body.Disk.Host.Offender.Path, `~\`) || strings.Contains(strings.ToLower(body.Disk.Host.Offender.Path), "alice") {
 		t.Fatalf("host attribution DTO=%+v", body.Disk.Host)
 	}
 

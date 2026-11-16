@@ -54,7 +54,7 @@ var errPutBackGone = fmt.Errorf("%w: the message is no longer in the input box",
 // also removes the chip after the user submits or edits the draft themselves.
 // Caller holds mu; receipts are immutable, so sharing the pointer is safe.
 func (p *Pane) currentUnsentMessageLocked() *unsentPaneMessage {
-	if p.unsentMessage != nil && !p.unsentMessage.kept && p.Status == PaneRunning && p.Kind != "native" && !p.respawning.Load() && p.unsentMessage.connection == p.agentConn && (p.unsentMessage.NotTyped || p.unsentMessage.revision == p.inputRevision.Load()) {
+	if p.unsentMessage != nil && !p.unsentMessage.kept && p.Status == PaneRunning && !p.respawning.Load() && p.unsentMessage.connection == p.agentConn && (p.unsentMessage.NotTyped || p.unsentMessage.revision == p.inputRevision.Load()) {
 		return p.unsentMessage
 	}
 	return nil
@@ -446,7 +446,7 @@ func (a *apiServer) actOnUnsentMessage(w http.ResponseWriter, r *http.Request) {
 	// The prompt gate again at write time, under the writer lock.
 	_, err := p.writeWithPrecondition([]byte(keys), req.Action == "send", false, bothChecks(a.promptWriteCheck(caller, p, []byte(keys), "rest-unsent"), func() error {
 		snap := p.Snapshot()
-		if snap.Status != PaneRunning || snap.Kind == "native" || snap.UnsentMessage != msg || p.inputRevision.Load() != msg.revision {
+		if snap.Status != PaneRunning || snap.UnsentMessage != msg || p.inputRevision.Load() != msg.revision {
 			return errUnsentChanged
 		}
 		screen := deliveryScreenText(p)

@@ -264,6 +264,43 @@ describe('StatusBar chips', () => {
     expect(chip.getAttribute('aria-label')).not.toMatch(/restart/);
   });
 
+  it('stays a quiet "System" for operators when the only findings are the runtimes count and the retired engine', () => {
+    // What the footer showed on 14 Nov: a yellow "runtimes: 1 unhealthy
+    // runtime" from a local model that had simply not been checked yet.
+    healthRef.current = {
+      version: '1.2.3',
+      system: {
+        level: 'warn',
+        reason: 'runtimes: 1 unhealthy runtime',
+        reasons: [
+          { key: 'runtimes', level: 'warn', text: 'runtimes: 1 unhealthy runtime' },
+          { key: 'engine', level: 'unknown', text: 'engine: unavailable' },
+        ],
+      },
+    } as Health;
+    render(<StatusBar />);
+    const chip = screen.getByRole('button', { name: /All monitored systems healthy/ });
+    expect(chip).toHaveClass('ok');
+    expect(chip).toHaveTextContent('System');
+    expect(screen.queryByText(/unhealthy runtime/)).toBeNull();
+  });
+
+  it('still names a real warning for operators beside a runtimes count', () => {
+    healthRef.current = {
+      version: '1.2.3',
+      system: {
+        level: 'warn',
+        reason: 'runtimes: 1 unhealthy runtime',
+        reasons: [
+          { key: 'runtimes', level: 'warn', text: 'runtimes: 1 unhealthy runtime' },
+          { key: 'disk', level: 'warn', text: 'disk: 3.1 GB free' },
+        ],
+      },
+    } as Health;
+    render(<StatusBar />);
+    expect(screen.getByRole('button', { name: /disk: 3\.1 GB free/ })).toHaveClass('warn');
+  });
+
   it('falls back to the plain System chip in presentation mode', () => {
     presentation.on = true;
     healthRef.current = cpuHealth;

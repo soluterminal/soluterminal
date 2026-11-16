@@ -132,10 +132,4 @@ func TestClearSpawnResumeCodexStripsWrappedArgv(t *testing.T) {
 	if len(bare.Cmd) != 1 || bare.Cmd[0] != "codex" {
 		t.Fatalf("bare resume not stripped: %#v", bare.Cmd)
 	}
-
-	native := SpawnOpts{Agent: agentCodex, Kind: "native", CodexThreadID: thread}
-	clearSpawnResume(&native)
-	if native.CodexThreadID != "" {
-		t.Fatal("native thread id not cleared")
-	}
 }

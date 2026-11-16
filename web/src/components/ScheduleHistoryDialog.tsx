@@ -6,6 +6,7 @@ import type { Schedule, ScheduleRun } from '../types';
 import { relativeTime } from './sidebar/time';
 import { renderReportMarkdown } from '../lib/reportMarkdown';
 import { RunStatusGlyph, runVisualColor, scheduleRunVisual } from './shared/runStatus';
+import { describeChange } from '../lib/scheduleChanges';
 
 // Runs & reports for one schedule — opened by clicking the schedule row
 // (and from the row's right-click menu, and by tapping a notification).
@@ -149,6 +150,9 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
   // change under them.
   const [cursor, setCursor] = useState<string | null>(initialRunAt ?? null);
   const [logs, setLogs] = useState<Record<string, string>>({});
+  // run.at → why its report could not be loaded. Shown in place of the
+  // report, with Retry; cleared when a retry starts.
+  const [logErrors, setLogErrors] = useState<Record<string, string>>({});
   const [showMeta, setShowMeta] = useState(false);
   const fetching = useRef<Set<string>>(new Set());
 
@@ -156,15 +160,26 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
   const run: ScheduleRun | undefined = runs[idx === -1 ? 0 : idx];
   const pos = idx === -1 ? 0 : idx;
 
+  function loadReport(target: ScheduleRun) {
+    if (!target.logFile || fetching.current.has(target.at)) return;
+    fetching.current.add(target.at);
+    setLogErrors((m) => {
+      if (!(target.at in m)) return m;
+      const next = { ...m };
+      delete next[target.at];
+      return next;
+    });
+    api.scheduleRunLog(schedule.id, target.logFile)
+      .then((text) => setLogs((m) => ({ ...m, [target.at]: text })))
+      // The failure stays on the page with Retry. A toast alone left
+      // "Loading…" up for good.
+      .catch((e) => setLogErrors((m) => ({ ...m, [target.at]: (e as Error).message || 'unknown error' })))
+      .finally(() => fetching.current.delete(target.at));
+  }
+
   useEffect(() => {
-    if (!run?.logFile || logs[run.at] !== undefined || fetching.current.has(run.at)) return;
-    fetching.current.add(run.at);
-    api.scheduleRunLog(schedule.id, run.logFile)
-      .then((text) => setLogs((m) => ({ ...m, [run.at]: text })))
-      .catch((e) => {
-        toast(`Report unavailable: ${(e as Error).message}`, { kind: 'warn', icon: '⚠' });
-      })
-      .finally(() => fetching.current.delete(run.at));
+    if (!run?.logFile || logs[run.at] !== undefined || logErrors[run.at] !== undefined) return;
+    loadReport(run);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schedule.id, run?.at, run?.logFile]);
 
@@ -192,6 +207,7 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
   }
 
   const raw = run ? logs[run.at] : undefined;
+  const loadFailure = run && raw === undefined ? logErrors[run.at] : undefined;
   const { meta, body } = raw ? splitTaskLog(raw) : { meta: '', body: '' };
   const newer = pos > 0 ? runs[pos - 1] : null;
   const older = pos < runs.length - 1 ? runs[pos + 1] : null;
@@ -207,7 +223,7 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
     setSpawning(true);
     try {
       const capped = body.length > 12_000 ? body.slice(0, 12_000) + '\n…(report truncated)' : body;
-      const seed = `Here's the report my scheduled task "${schedule.name}" produced (${fmtRunDate(run.at)}). `
+      const seed = `Here's the report my automation "${schedule.name}" produced (${fmtRunDate(run.at)}). `
         + 'Read it, then help me act on it — start with whatever it says needs my decision.\n\n'
         + '--- report ---\n' + capped;
       await createPane({
@@ -274,6 +290,7 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
               Lifetime: ran {schedule.fireCount}× · skipped {schedule.skipCount} · errors {schedule.errorCount}
               {runs.length > 0 && ` · last ${runs.length} kept`}
             </div>
+            <ScheduleChangesList schedule={schedule} />
           </div>
         )}
 
@@ -290,11 +307,20 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
               {run.detail ? ` — ${run.detail}` : ''}
             </div>
           )}
-          {run && run.logFile && raw === undefined && (
-            <div className="report-reader-empty">Loading…</div>
+          {run && run.logFile && raw === undefined && loadFailure === undefined && (
+            <div className="report-reader-empty" role="status">Loading the report…</div>
+          )}
+          {run && loadFailure !== undefined && (
+            <div className="report-reader-empty" role="alert">
+              Couldn&apos;t load this report: {loadFailure}{' '}
+              <button className="reader-btn" onClick={() => loadReport(run)}>Retry</button>
+            </div>
           )}
           {raw !== undefined && body && (
             <div className="report-md report-md-reader">{renderReportMarkdown(body)}</div>
+          )}
+          {raw !== undefined && !body.trim() && (
+            <div className="report-reader-empty">This run&apos;s report is empty.</div>
           )}
           {run && run.status === 'fired' && !run.logFile && (
             <div className="report-reader-empty">This run left no report file.</div>
@@ -338,12 +364,18 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
 
 // -------------------------------------------------------------- run list --
 
+type RunLog =
+  | { state: 'loading' }
+  | { state: 'ready'; text: string }
+  | { state: 'error'; message: string };
+
 function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () => void }) {
   const panes = useStore((s) => s.panes);
   const revealPane = useStore((s) => s.revealPane);
   const toast = useStore((s) => s.toast);
-  // Per-run expanded log text: run.at → content ('' = loading).
-  const [logs, setLogs] = useState<Record<string, string>>({});
+  // Per-run expanded log: run.at → its text, still loading, or why the load
+  // failed (kept on the row with Retry).
+  const [logs, setLogs] = useState<Record<string, RunLog>>({});
   // One auto-expand per schedule per open — never re-fight a user who
   // collapsed the log, and re-arm if the dialog is retargeted.
   const autoExpandedFor = useRef<string | null>(null);
@@ -358,6 +390,20 @@ function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schedule.id]);
 
+  async function loadLog(run: ScheduleRun) {
+    if (!run.logFile) return;
+    setLogs((m) => ({ ...m, [run.at]: { state: 'loading' } }));
+    try {
+      const text = await api.scheduleRunLog(schedule.id, run.logFile);
+      // Only if the row is still open: the person may have hidden it meanwhile.
+      setLogs((m) => (run.at in m ? { ...m, [run.at]: { state: 'ready', text } } : m));
+    } catch (e) {
+      setLogs((m) => (run.at in m
+        ? { ...m, [run.at]: { state: 'error', message: (e as Error).message || 'unknown error' } }
+        : m));
+    }
+  }
+
   async function toggleLog(run: ScheduleRun) {
     if (!run.logFile) return;
     if (logs[run.at] !== undefined) {
@@ -368,18 +414,7 @@ function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () 
       });
       return;
     }
-    setLogs((m) => ({ ...m, [run.at]: '' }));
-    try {
-      const text = await api.scheduleRunLog(schedule.id, run.logFile);
-      setLogs((m) => (run.at in m ? { ...m, [run.at]: text } : m));
-    } catch (e) {
-      setLogs((m) => {
-        const next = { ...m };
-        delete next[run.at];
-        return next;
-      });
-      toast(`Log unavailable: ${(e as Error).message}`, { kind: 'warn', icon: '⚠' });
-    }
+    await loadLog(run);
   }
 
   async function copyLog(text: string) {
@@ -415,9 +450,11 @@ function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () 
           {runs.length > 0 && ` · showing the last ${runs.length}`}
         </div>
 
+        <ScheduleChangesList schedule={schedule} />
+
         {runs.length === 0 && (
           <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 10 }}>
-            No runs yet — this schedule hasn&apos;t fired.
+            No runs yet: this automation hasn&apos;t run.
           </div>
         )}
 
@@ -441,11 +478,11 @@ function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () 
                   <span style={{ color: 'var(--fg-dim)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={run.detail}>
                     {run.detail || run.status}
                   </span>
-                  {!!expanded && (
+                  {expanded?.state === 'ready' && !!expanded.text && (
                     <button
                       style={{ fontSize: 10, padding: '1px 8px' }}
                       title="Copy the full log to the clipboard"
-                      onClick={() => void copyLog(expanded)}
+                      onClick={() => void copyLog(expanded.text)}
                     >copy</button>
                   )}
                   {run.logFile && (
@@ -463,7 +500,16 @@ function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () 
                     >go to pane</button>
                   )}
                 </div>
-                {expanded !== undefined && (
+                {expanded?.state === 'error' && (
+                  <div role="alert" style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 4 }}>
+                    Couldn&apos;t load this log: {expanded.message}{' '}
+                    <button
+                      style={{ fontSize: 10, padding: '1px 8px' }}
+                      onClick={() => void loadLog(run)}
+                    >Retry</button>
+                  </div>
+                )}
+                {expanded !== undefined && expanded.state !== 'error' && (
                   <pre style={{
                     fontSize: 10,
                     fontFamily: "'SF Mono','Menlo',monospace",
@@ -474,7 +520,7 @@ function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () 
                     overflow: 'auto',
                     whiteSpace: 'pre-wrap',
                     wordBreak: 'break-word',
-                  }}>{expanded === '' ? 'Loading…' : expanded}</pre>
+                  }}>{expanded.state === 'loading' ? 'Loading the log…' : expanded.text}</pre>
                 )}
               </div>
             );
@@ -483,5 +529,24 @@ function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () 
       </div>
     </div>,
     document.body,
+  );
+}
+
+// Who turned this automation on or off, newest first: the daemon's record
+// (Schedule.changes). Nothing is shown for one never switched since records
+// began.
+function ScheduleChangesList({ schedule }: { schedule: Schedule }) {
+  const changes = schedule.changes ?? [];
+  if (changes.length === 0) return null;
+  return (
+    <div className="sched-changes" style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 6 }}>
+      <div>Turned on or off:</div>
+      <ul style={{ margin: '2px 0 0', paddingLeft: 16 }}>
+        {changes.slice(0, 5).map((c) => (
+          <li key={`${c.at}-${c.action}`} title={new Date(c.at).toLocaleString()}>{describeChange(c)}</li>
+        ))}
+      </ul>
+      {changes.length > 5 && <div>and {changes.length - 5} earlier</div>}
+    </div>
   );
 }

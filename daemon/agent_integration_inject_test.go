@@ -85,7 +85,7 @@ func TestClaudeInjectArgsSkipsManagementAndOwnConfig(t *testing.T) {
 
 func TestCodexInjectArgs(t *testing.T) {
 	rec := testInjectionRecord()
-	got := codexInjectArgs(rec, "", []string{"resume", "t1"})
+	got := codexInjectArgs(rec, []string{"resume", "t1"})
 	want := []string{"resume", "t1",
 		"-c", `mcp_servers.soluterminal.url="http://127.0.0.1:8787/mcp"`,
 		"-c", `mcp_servers.soluterminal.env_http_headers={"X-Soluterminal-Pane"="SOLU_PANE_ID"}`,
@@ -97,14 +97,11 @@ func TestCodexInjectArgs(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
 	}
-	if pack := codexInjectArgs(rec, "/tmp/pack", nil); !strings.HasPrefix(pack[len(pack)-1], "developer_instructions=") {
-		t.Fatalf("context pack note missing: %v", pack)
-	}
 	for _, args := range [][]string{
 		{"login"}, {"--version"}, {"app-server"},
 		{"-c", `mcp_servers.soluterminal.url="http://127.0.0.1:9/mcp"`},
 	} {
-		if got := codexInjectArgs(rec, "", args); !reflect.DeepEqual(got, args) {
+		if got := codexInjectArgs(rec, args); !reflect.DeepEqual(got, args) {
 			t.Errorf("%v must be untouched, got %v", args, got)
 		}
 	}
@@ -132,7 +129,7 @@ func TestInjectAgentArgsForPaneFollowsTheChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	codex := injectAgentArgsForPane(dataDir, "p1", []string{"SOLU_CONTEXT_PACK=/x"}, []string{"codex"})
-	if len(codex) != 9+2*len(soluReadOnlyMCPTools) || !strings.HasPrefix(codex[len(codex)-1], "developer_instructions=") {
+	if len(codex) != 7+2*len(soluReadOnlyMCPTools) || strings.Contains(strings.Join(codex, " "), "developer_instructions=") {
 		t.Fatalf("codex off: %v", codex)
 	}
 	if got := injectAgentArgsForPane(dataDir, "p1", nil, []string{"bash"}); !reflect.DeepEqual(got, []string{"bash"}) {

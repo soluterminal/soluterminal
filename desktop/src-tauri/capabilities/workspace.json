@@ -26,6 +26,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-is-maximized",
     "allow-desktop-set-backend-mode",
+    "allow-desktop-wsl-readiness",
     "allow-apply-shell-update-silent",
     "allow-app-process-id",
     "allow-exit-for-update",

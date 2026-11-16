@@ -37,7 +37,9 @@ function HeldMessageChip({ pane, actionGuard }: { pane: PaneInfo; actionGuard?: 
   // The box has text and nobody is typing: "while you type" would be wrong,
   // and Send now could only be refused.
   const blocked = behindUnsent(pane) || !!pane.heldStuck;
-  const where = behindUnsent(pane) ? 'waits behind the unsent message' : pane.heldStuck ? 'waits behind the text in the input box' : 'waits while you type';
+  // The person's stop on agent messaging names itself first: it holds the
+  // message whatever the input box shows, until they resume.
+  const where = pane.heldPaused ? 'is held: agent messages are paused' : behindUnsent(pane) ? 'waits behind the unsent message' : pane.heldStuck ? 'waits behind the text in the input box' : 'waits while you type';
   return <span className="pane-unsent-message" role="status" title={msg.text} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
     <span className="pane-unsent-message-label">{`Message from ${msg.sender} ${where}${more}`} —{' '}</span>
     {!blocked && <><button type="button" disabled={pending} title="Type it now. Your input box must be empty." onClick={() => void act('send')}>Send now</button>{' / '}</>}

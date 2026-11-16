@@ -1227,12 +1227,6 @@ func (a *Aria) runTurn(ctx context.Context, req ariaQueryReq, emit func(map[stri
 	// plain string shape there to avoid surprising the compat-layer
 	// parser.
 	tools := ariaAutonomousTools()
-	if req.AutonomousNative {
-		// Native panes are answered with a structured control_response
-		// frame, so the turn gets resolve_permission instead of the
-		// PTY-byte send_input tool.
-		tools = ariaNativeAutonomousTools()
-	}
 	body := map[string]any{
 		"messages":   history,
 		"max_tokens": 4096,

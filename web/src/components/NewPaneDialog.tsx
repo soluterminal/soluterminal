@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { useFocusEnabled } from '../lib/focusAvailability';
 import { PastSessions, pastSessionTitle } from './PastSessions';
 import type { BrowsedSession } from '../types';
 import { api } from '../api';
@@ -112,22 +111,6 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
   const [cwd, setCwd] = useState('');
   const [cwdLoading, setCwdLoading] = useState(false);
   const [cmd, setCmd] = useState(SHELL_DEFAULT);
-  // The user's persisted default renderer for NEW Claude sessions ('' terminal
-  // | 'native' Focus, Preferences → "New Claude sessions"). Feeds
-  // defaultKindFor below; the explicit chips still always win.
-  const focusEnabled = useFocusEnabled();
-  const storedDefaultClaudeMode = useStore((s) => s.nativeSettings?.defaultClaudeMode ?? '');
-  // Focus retired → every new session is a terminal, whatever was stored.
-  const defaultClaudeMode = focusEnabled ? storedDefaultClaudeMode : '';
-  // The kind a given command DEFAULTS to: claude commands follow the user's
-  // preference; everything else is a terminal pane. Applied whenever the
-  // command changes without an explicit Focus choice.
-  const defaultKindFor = (c: string): '' | 'native' =>
-    agentFromCommand(c) === 'claude' ? defaultClaudeMode : '';
-  // '' = terminal pane; 'native' = open Claude directly in Focus (rendered)
-  // mode, no terminal→toggle step. Re-derived via defaultKindFor whenever the
-  // command changes, so Focus sticks when explicitly chosen OR preferred.
-  const [kind, setKind] = useState<'' | 'native'>('');
   // Which LLM backend a claude pane runs against. 'anthropic' is the default;
   // 'glm' routes to Z.ai (the daemon resolves the key from ~/.config/glm/env —
   // we only send the name). Only meaningful for claude commands; ignored for
@@ -169,10 +152,8 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
 
   useEffect(() => {
     if (!open) return;
-    // Reset state each open. kind follows the command's default (a preset
-    // claude cmd honors the user's default-renderer preference).
+    // Reset state each open.
     setCmd(presetCmd || SHELL_DEFAULT);
-    setKind(defaultKindFor(presetCmd || SHELL_DEFAULT));
     setProvider('anthropic');
     setEffort('');
     setEffortFromGlm(false);
@@ -260,7 +241,7 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
         return;
       }
     }
-    // Agent identity is explicit for Codex so a native request can never fall
+    // Agent identity is explicit for Codex so a request can never fall
     // through the legacy default and accidentally spawn Claude. Claude remains
     // the omitted/default wire value to preserve existing request behaviour.
     const commandAgent = agentFromCommand(parts);
@@ -274,9 +255,6 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
       cwd: resolvedCwd,
       cmd: parts,
       title: title.trim() || (role === 'orchestrator' && roleSupport.supported ? 'Orchestrator' : parts[0] ? parts[0] : 'shell'),
-      // Focus pane: the daemon ignores cmd for kind:'native' and builds the
-      // headless Claude argv itself, so cmd:['claude'] is just a sensible label.
-      ...(kind === 'native' && focusEnabled ? { kind: 'native' as const } : {}),
       ...(commandAgent === 'codex' ? { agent: 'codex' as const } : {}),
       ...(provider === 'glm' && isClaudeCmd && glmAllowed ? { provider: 'glm' as const } : {}),
       // Effort rides only on a claude command. '' is omitted so the daemon
@@ -336,7 +314,6 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
   // The shell chip is selected only while the command is the default shell.
   const isDefaultShell = cmd.trim() === SHELL_DEFAULT || cmd.trim() === '';
   const isPackAgent = selectedAgent === 'claude' || selectedAgent === 'codex';
-  const selectedAgentLabel = agentLabel(selectedAgent);
   const selectedOrchestratorSupport = roleHostSupport(selectedAgent, hosts);
   const codexOrchestratorSupport = roleHostSupport('codex', hosts);
 
@@ -416,7 +393,7 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
               const next = e.target.value;
               if (agentFromCommand(next) !== selectedAgent) setRole('');
               setCmd(next);
-              setKind(defaultKindFor(next));
+             
             }}
             placeholder="$SHELL"
             className="dialog-control"
@@ -425,7 +402,7 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
             {/* shells (default + explicit alternatives) */}
             <button
               type="button"
-              onClick={() => { setCmd(SHELL_DEFAULT); setKind(''); setRole(''); }}
+              onClick={() => { setCmd(SHELL_DEFAULT); setRole(''); }}
               className={`dialog-chip${isDefaultShell ? ' dialog-chip-strong' : ''}`}
               title="Use $SHELL (your default shell)"
             >shell</button>
@@ -433,7 +410,7 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
               <button
                 type="button"
                 key={c}
-                onClick={() => { setCmd(c); setKind(''); setRole(''); }}
+                onClick={() => { setCmd(c); setRole(''); }}
                 className={`dialog-chip${cmd.trim() === c ? ' dialog-chip-strong' : ''}`}
                 title={
                   c === 'pwsh.exe' ? 'PowerShell 7+ on Windows (via WSL interop)'
@@ -443,43 +420,25 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
               >{c}</button>
             ))}
             <span className="dialog-chip-separator">·</span>
-            {/* claude quick options — follow the user's default-renderer
-                preference (Preferences → "New Claude sessions"). */}
+            {/* claude quick options */}
             {(resumeChipAllowed ? ['claude', 'claude --resume'] : ['claude']).map((c) => (
               <button
                 type="button"
                 key={c}
-                onClick={() => { if (selectedAgent !== 'claude') setRole(''); setCmd(c); setKind(defaultKindFor(c)); }}
-                className={`dialog-chip${cmd.trim() === c && kind !== 'native' && !role ? ' dialog-chip-strong' : ''}`}
+                onClick={() => { if (selectedAgent !== 'claude') setRole(''); setCmd(c); }}
+                className={`dialog-chip${cmd.trim() === c && !role ? ' dialog-chip-strong' : ''}`}
               >{c}</button>
             ))}
-            {/* Explicit Focus toggle for the claude command — no terminal→toggle
-                step. Toggles kind:'native' (click again for a Terminal claude,
-                which also lets a Focus-by-default user opt out per-session). */}
-            {focusEnabled && (
-            <button
-              type="button"
-              onClick={() => {
-                const active = kind === 'native' && selectedAgent === 'claude';
-                if (selectedAgent !== 'claude') setRole('');
-                setCmd('claude');
-                setKind(active ? '' : 'native');
-              }}
-              className={`dialog-chip${kind === 'native' && selectedAgent === 'claude' ? ' dialog-chip-strong' : ''}`}
-              title="Open Claude directly in Focus (rendered) mode — click again for a Terminal claude"
-            >claude · Focus</button>
-            )}
             {/* The chief-of-staff preset: a claude pane spawned with the
                 orchestrator brief, so it coordinates direct work / schedules
-                while keeping the user informed. Renderer follows the same default
-                as the plain claude chips. */}
+                while keeping the user informed. */}
             {orchestratorAllowed && (
               <button
                 type="button"
                 onClick={() => {
                   const active = role === 'orchestrator' && selectedAgent === 'claude';
                   setCmd('claude');
-                  setKind(defaultKindFor('claude'));
+                 
                   setRole(active ? '' : 'orchestrator');
                 }}
                 className={`dialog-chip${role === 'orchestrator' && selectedAgent === 'claude' ? ' dialog-chip-strong' : ''}`}
@@ -488,23 +447,10 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
             )}
             <button
               type="button"
-              onClick={() => { if (selectedAgent !== 'codex') setRole(''); setCmd('codex'); setKind(''); }}
-              className={`dialog-chip${cmd.trim() === 'codex' && kind !== 'native' && !role ? ' dialog-chip-strong' : ''}`}
+              onClick={() => { if (selectedAgent !== 'codex') setRole(''); setCmd('codex'); }}
+              className={`dialog-chip${cmd.trim() === 'codex' && !role ? ' dialog-chip-strong' : ''}`}
               title="Open Codex in Terminal mode"
             >codex</button>
-            {focusEnabled && (
-            <button
-              type="button"
-              onClick={() => {
-                const active = kind === 'native' && selectedAgent === 'codex';
-                if (selectedAgent !== 'codex') setRole('');
-                setCmd('codex');
-                setKind(active ? '' : 'native');
-              }}
-              className={`dialog-chip${kind === 'native' && selectedAgent === 'codex' ? ' dialog-chip-strong' : ''}`}
-              title="Open Codex directly in Focus (rendered) mode — click again for Terminal mode"
-            >codex · Focus</button>
-            )}
             {orchestratorAllowed && (
               <button
                 type="button"
@@ -512,7 +458,7 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
                 onClick={() => {
                   const active = role === 'orchestrator' && selectedAgent === 'codex';
                   setCmd('codex');
-                  setKind('');
+                 
                   setRole(active ? '' : 'orchestrator');
                 }}
                 className={`dialog-chip${role === 'orchestrator' && selectedAgent === 'codex' ? ' dialog-chip-strong' : ''}`}
@@ -525,23 +471,10 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
             {orchestratorAllowed && (
               <button
                 type="button"
-                onClick={() => { setCmd('muse'); setKind(''); setRole(''); }}
-                className={`dialog-chip${cmd.trim() === 'muse' && kind !== 'native' ? ' dialog-chip-strong' : ''}`}
+                onClick={() => { setCmd('muse'); setRole(''); }}
+                className={`dialog-chip${cmd.trim() === 'muse' ? ' dialog-chip-strong' : ''}`}
                 title="Open Muse Code (Meta) in Terminal mode"
               >muse</button>
-            )}
-            {orchestratorAllowed && focusEnabled && (
-            <button
-              type="button"
-              onClick={() => {
-                const active = kind === 'native' && selectedAgent === 'muse';
-                setCmd('muse');
-                setKind(active ? '' : 'native');
-                setRole('');
-              }}
-              className={`dialog-chip${kind === 'native' && selectedAgent === 'muse' ? ' dialog-chip-strong' : ''}`}
-              title="Open Muse directly in Focus (rendered) mode — click again for Terminal mode"
-            >muse · Focus</button>
             )}
             <span className="dialog-chip-separator">·</span>
             {/* runtimes */}
@@ -549,20 +482,13 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
               <button
                 type="button"
                 key={c}
-                onClick={() => { setCmd(c); setKind(''); setRole(''); }}
+                onClick={() => { setCmd(c); setRole(''); }}
                 className={`dialog-chip${cmd.trim() === c ? ' dialog-chip-strong' : ''}`}
               >{c}</button>
             ))}
           </div>
           {orchestratorAllowed && hosts !== null && !codexOrchestratorSupport.available && (
             <div className="dialog-help">Codex Orchestrator unavailable: {codexOrchestratorSupport.reason}</div>
-          )}
-          {focusEnabled && kind === 'native' && (
-            <div className="dialog-help" style={{ color: 'var(--accent)' }}>
-              → Opens {selectedAgentLabel} in <strong>Focus</strong> (rendered) mode. The command stays
-              “{selectedAgent ?? 'agent'}” — the session is shown as formatted prose
-              instead of a raw terminal.
-            </div>
           )}
           {role === 'orchestrator' && selectedOrchestratorSupport.supported && (
             <div className="dialog-help" style={{ color: 'var(--accent)' }}>
@@ -646,7 +572,7 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
         <div className="dialog-actions">
           <button type="button" onClick={onClose} disabled={submitting}>Cancel</button>
           <button type="submit" className="primary" disabled={submitting || cwdLoading}>
-            {submitting ? 'Creating…' : kind === 'native' && focusEnabled ? 'Create Focus session' : 'Create'}
+            {submitting ? 'Creating…' : 'Create'}
           </button>
         </div>
       </form>

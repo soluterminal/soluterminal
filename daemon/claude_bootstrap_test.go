@@ -474,3 +474,19 @@ func TestRefreshClaudeStatusFoundVersionBestEffort(t *testing.T) {
 		t.Fatalf("fresh version not adopted: %+v", st)
 	}
 }
+
+// An API key signs Claude in for the nudge but is not the plan login a
+// background run may bill (ST-97).
+func TestRefreshClaudeStatusAPIKeyIsNotPlanLogin(t *testing.T) {
+	a := &apiServer{}
+	a.detectClaude = func() (claudeProbeOutcome, string, bool) { return claudeProbeFound, "2.1.310 (Claude Code)", true }
+	a.registerIntegrationsFn = func() {}
+	a.refreshClaudeStatus()
+	st := a.currentClaudeStatus()
+	if !st.authed {
+		t.Fatalf("an API key must count as signed in: %+v", st)
+	}
+	if st.planLogin != (runtime.GOOS == "darwin") {
+		t.Fatalf("an API key alone is not the plan login: %+v", st)
+	}
+}

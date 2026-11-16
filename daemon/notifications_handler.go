@@ -12,7 +12,7 @@ import (
 
 // Notifications-handler lease: another app on an approved device takes over
 // the person's Code alerts, and while the lease is live the daemon asks the
-// cloud not to send its own FCM push for them. The usual holder is a desktop
+// cloud not to send its own FCM or web push for them. The usual holder is a desktop
 // window signing at this computer as a scoped "alerts" device
 // (trustedDevice.Scope), which may do nothing else; the person's own devices
 // (signed here, signed over the relay, or on their private channel) may hold
@@ -489,7 +489,9 @@ func (a *apiServer) handleGetNotificationsHandler(w http.ResponseWriter, r *http
 // codeAlertKinds are the push kinds the notifications handler delivers
 // instead of FCM: a pane's prompt or reply, and agents' asks. Every other
 // kind (schedules, managed agents, workflows, billing, and any device,
-// enrolment or security notice) is always sent.
+// enrolment or security notice) is always sent. The cloud keeps the same
+// list (notifyCodeAlertStates in cloud/push.go); a kind missing there still
+// gets web push, which fails safe.
 var codeAlertKinds = map[string]bool{
 	"choice-prompt":  true,
 	"awaiting-input": true,
@@ -497,8 +499,9 @@ var codeAlertKinds = map[string]bool{
 	"user-ask":       true,
 }
 
-// withSkipFCM marks a notify body so the cloud sends web push but not FCM.
-// Any error leaves the body as it was, so FCM is sent.
+// withSkipFCM marks a notify body so the cloud sends neither FCM nor web
+// push for it (cloud handleNotify). Any error leaves the body as it was, so
+// the alert is sent.
 func withSkipFCM(body []byte) []byte {
 	var m map[string]any
 	if json.Unmarshal(body, &m) != nil || m == nil {

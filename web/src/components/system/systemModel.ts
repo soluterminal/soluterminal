@@ -1,4 +1,4 @@
-import type { SystemDiskBreakdownRow, SystemDiskGrowth, SystemGrowthDelta, SystemGrowthWindow, SystemHostDisk, SystemLevel, SystemStatus } from '../../api';
+import type { SystemDiskBreakdownRow, SystemDiskGrowth, SystemGrowthDelta, SystemGrowthWindow, SystemHostDisk, SystemLevel, SystemRuntime, SystemStatus } from '../../api';
 import type { RunVisual } from '../shared/runStatus';
 
 export interface KpiTile {
@@ -381,6 +381,74 @@ export function cleanupScopeLabel(status: SystemStatus): string {
   return cleanup.scope || 'workflow GC policy scope';
 }
 
+// --- The runtimes card (team installs) --------------------------------------
+// A runtime is a model back-end for headless runs. The card names each one,
+// says in plain words how it is, why, and since when; the footer no longer
+// carries a count of them.
+
+const RUNTIME_NAMES: Record<string, string> = {
+  'claude-headless': 'Claude',
+  'codex-headless': 'Codex',
+  'muse-headless': 'Muse',
+  'gemini-headless': 'Gemini',
+  'local-openai-headless': 'Local model',
+};
+
+export function runtimeName(id: string): string {
+  return RUNTIME_NAMES[id] ?? id.replace(/-headless$/, '');
+}
+
+const RUNTIME_STATUS: Record<string, string> = {
+  healthy: 'Working',
+  unknown: 'Not checked',
+  degraded: 'Not working',
+  quota_exhausted: 'Usage limit reached',
+  auth_error: 'Sign-in rejected',
+  billing_error: 'Billing problem',
+  signed_out: 'Signed out',
+  not_installed: 'Not installed',
+};
+
+// "Not working · connection refused" / "Not set up" / "Working".
+export function runtimeStatusLine(runtime: SystemRuntime): string {
+  const why = (runtime.probeErr || runtime.reason || '').trim();
+  // An unknown row's reason is the whole story ("not set up", "not checked yet").
+  if (runtime.status === 'unknown' && why) return why.charAt(0).toUpperCase() + why.slice(1);
+  const words = RUNTIME_STATUS[runtime.status] ?? runtime.status;
+  return why ? `${words} · ${why}` : words;
+}
+
+// Whether the runtime needs the person. The daemon's own rule when it sends
+// one, so the page marks exactly the runtimes that rule calls a problem (an
+// uninstalled or signed-out runtime nobody uses is not one).
+export function runtimeNeedsAttention(runtime: SystemRuntime): boolean {
+  return runtime.attention ?? (runtime.status !== 'healthy' && runtime.status !== 'unknown');
+}
+
+export function runtimeVisual(runtime: SystemRuntime): RunVisual {
+  if (runtime.status === 'healthy') return 'ok';
+  return runtimeNeedsAttention(runtime) ? 'attention' : 'neutral';
+}
+
+// "since 3h ago": when the service first saw the runtime this way. Left out
+// for a healthy runtime, where the time says nothing the person needs.
+export function runtimeSince(runtime: SystemRuntime, now = Date.now()): string | null {
+  if (!runtime.statusSinceEpoch || runtime.status === 'healthy') return null;
+  return `since ${ageLabel(runtime.statusSinceEpoch * 1000, now)}`;
+}
+
+// The built-in agents line of the Automation card: how many run by
+// themselves, and which installed ones are switched off, by name, so this card
+// and the footer's agents chip never disagree about an agent that is off.
+export function builtinsLine(status: SystemStatus): string {
+  const rows = status.automation.builtins;
+  const installed = rows.filter((row) => row.present);
+  const on = installed.filter((row) => row.on).length;
+  const off = installed.filter((row) => !row.on).map((row) => row.label);
+  const running = rows.filter((row) => row.running).length;
+  return `${on} of ${installed.length} on${off.length ? ` · off: ${off.join(', ')}` : ''} · ${running} running`;
+}
+
 export function automationLine(status: SystemStatus): string {
   // Managed agents were removed; the built-in agents are schedules.
   return `${status.automation.schedules.enabled} automations enabled · ${status.automation.schedules.running} running`;
@@ -394,9 +462,9 @@ export function releaseLine(status: SystemStatus): string {
   return `${status.release.running} is current`;
 }
 
-// Areas that only describe the team's workflow engine and its runtimes. A
-// public install does not run the engine, so they are left out of its
-// verdict and KPI tiles.
+// Areas that only describe the workflow engine and its runtimes. The engine is
+// retired and runtime detail has its own card, so the verdict leaves them out
+// on every install; a public install also drops the engine tile.
 const WORKFLOW_AREAS = new Set(['engine', 'runtimes']);
 
 export function publicSystemLevel(level: SystemStatus['level']): SystemStatus['level'] {
@@ -405,6 +473,14 @@ export function publicSystemLevel(level: SystemStatus['level']): SystemStatus['l
   const areas = Object.fromEntries(Object.entries(level.areas ?? {}).filter(([key]) => !WORKFLOW_AREAS.has(key)));
   const worst = reasons.reduce<SystemStatus['level']['overall']>((acc, r) => (rank[r.level] > rank[acc] ? r.level : acc), 'ok');
   return { overall: worst, reason: reasons.find((r) => r.level === worst)?.text, reasons, areas };
+}
+
+// The operator's verdict: the same areas left out, only when the daemon
+// actually reports one (an older daemon). Its other reasons and the per-area
+// levels the tiles read are kept as sent.
+export function operatorSystemLevel(level: SystemStatus['level']): SystemStatus['level'] {
+  if (!(level.reasons ?? []).some((r) => WORKFLOW_AREAS.has(r.key))) return level;
+  return { ...publicSystemLevel(level), areas: level.areas };
 }
 
 export function publicKpiTiles(tiles: KpiTile[]): KpiTile[] {

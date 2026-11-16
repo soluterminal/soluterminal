@@ -1,0 +1,284 @@
+7[r8[?25h[?25l[?2004h[?2031h[?1004h
+[38;2;255;193;7m────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[2G[38;2;255;193;7m[1mAccessing[12Gworkspace:[22m[39m
+
+[2G[1m/home/exampleuser/wsl-projects/soluterminal/.claude/worktrees/tui-capture-st265/repoB[22m
+
+[2GQuick[8Gsafety[15Gcheck:[22GIs[25Gthis[30Ga[32Gproject[40Gyou[44Gcreated[52Gor[55Gone[59Gyou[63Gtrust?[70G(Like[76Gyour[81Gown[85Gcode,[91Ga
+[2Gwell-known[13Gopen[18Gsource[25Gproject,[34Gor[37Gwork[42Gfrom[47Gyour[52Gteam).[59GIf[62Gnot,[67Gtake[72Ga[74Gmoment[81Gto[84Greview[91Gwhat's[98Gin
+[2Gthis[7Gfolder[14Gfirst.
+
+[2GClaude[9GCode'll[17Gbe[20Gable[25Gto[28Gread,[34Gedit,[40Gand[44Gexecute[52Gfiles[58Ghere.
+
+[2G[38;2;153;153;153mSecurity[11Gguide[39m
+
+[2G[38;2;177;185;249m❯[4GNo,[8Gexit[39m
+[4GYes,[9GI[11Gtrust[17Gthis[22Gfolder
+
+[2G[38;2;153;153;153mEnter[8Gto[11Gconfirm[19G·[21GEsc[25Gto[28Gcancel[39m
+[1C[4A[>0q[?u]7501;?[c(B[?2004h[1D[4B[1C[4A [4GNo, exit[1C[1B[38;2;177;185;249m❯[4GYes, I trust this folder[39m
+
+
+[1C[3A[>4m[?1004l[?2031l[?2004l[1D[3B[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G[1A[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[17A[?2004h[?2031h[?1004h]0;✳ Claude Code[38;2;215;119;87m ▐[48;2;0;0;0m▛███▛█[12G[39m[49m[1mClaude[19GCode[24G[22m[38;2;153;153;153mv2.1.322[39m
+[38;2;215;119;87m▝▜[48;2;0;0;0m█████[49m█▀[12G[38;2;153;153;153mHaiku[18G5.5[22G·[24GClaude[31GUltra[39m
+[38;2;215;119;87m ▝▝[7G▝▝[12G[38;2;153;153;153m~/wsl-projects/soluterminal/.claude/worktrees/tui-capture-st265/repoB[39m
+
+
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+❯ [2mTry[7G"edit[13G<filepath>[24Gto..."[22m
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;2;255;193;7m⚠[5GTranscript[16Gsaving[23Gis[26Goff[30G—[32Ginherited[42GCLAUDE_CODE_CHILD_SESSION[68Gmarker[38;2;153;153;153m ·[77Grestart[85Gwith[90GCLAUDE_C…[39m
+[3G[38;2;153;153;153m⏸[5Gmanual[12Gmode[17Gon[20G·[22G?[24Gfor[28Gshortcuts[81G◐[83Gmedium[90G·[92G/effort[39m
+[2C[4A[?25h[>0q[c(B[?2004h[?25l[2D[4B[2C[4AUse the Bash tool with the dangerouslyDisableSandbox[56Gparameter[66Gset[70Gto[73Gtrue[78Gto[81Grun[85Gexactly[93Gthis[1B  command: touch outside_probe.txt[K[1B[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[2C[1B[38;2;255;193;7m⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker[38;2;153;153;153m · restart w[87Gth[90GCLAUDE_C…[39m
+[3G[38;2;153;153;153m⏸[5Gmanual[12Gmode[17Gon[81G◐[83Gmedium[90G·[92G/effort[39m
+[34C[4A[?25h]0;◐ Claude Code[?25l[34D[4B[6A[48;2;55;55;55m[38;2;153;153;153m❯ [38;2;255;255;255mUse the Bash tool with the dangerouslyDisableSandbox parameter set to true to run exactly this [39m   [1B  [38;2;255;255;255mcommand: touch outside_probe.txt[39m                                                                  [2C[1B[49m[K[1B[38;2;215;119;87m✻[39m [38;2;215;119;87mPou[38;2;235;159;127mnci[38;2;215;119;87mng… [39m[K[2C[1B[K[1B[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[38;2;153;153;153m❯ [39m
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;2;255;193;7m⚠[5GTranscript[16Gsaving[23Gis[26Goff[30G—[32Ginherited[42GCLAUDE_CODE_CHILD_SESSION[68Gmarker[38;2;153;153;153m ·[77Grestart[85Gwith[90GCLAUDE_C…[39m
+[3G[38;2;153;153;153m⏸[5Gmanual[12Gmode[17Gon[20G·[22Gesc[26Gto[29Ginterrupt[81G◐[83Gmedium[90G·[92G/effort[39m
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✽[5G[38;2;235;159;127mu[8G[38;2;215;119;87mi[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[3C[7A[38;2;235;159;127mo[7G[38;2;215;119;87mc[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✻[3G[38;2;235;159;127mP[6G[38;2;215;119;87mn[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[2C[7A[38;2;215;119;87mSke[38;2;235;159;127mtch[38;2;215;119;87ming… [39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✶[5G[38;2;235;159;127me[8G[38;2;215;119;87mh[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m*[39m
+
+
+
+
+
+
+[2C[4A[?25h]0;✳ Claude Code[?25l[2D[4B[7A[38;2;153;153;153m●[3G[39m[1mBash[22m(touch outside_probe.txt)[1B[38;2;153;153;153m  ⎿  Waiting…[1B[39m[K[1B[38;2;177;185;249m────────────────────────────────────────────────────────────────────────────────────────────────────[1B[39m [38;2;177;185;249m[1mBash command[22m[39m[K[1C[1B[1mTip: auto mode handles these prompts for you — choose "switch to auto mode" below[22m[K[1C[1B[38;2;153;153;153mCreate empty file[20Gout[24Gide_prob[33G.txt in working directory[81G[39m[K
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[39m
+[2Gtouch[8Goutside_probe.txt
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[39m
+[2GDo[5Gyou[9Gwant[14Gto[17Gproceed?
+[2G[38;2;177;185;249m❯[4G[38;2;153;153;153m1.[7G[38;2;177;185;249mYes[39m
+[4G[38;2;153;153;153m2.[7G[39mYes,[12Gand[16Galways[23Gallow[29Gaccess[36Gto
+[7G[1m/home/exampleuser/wsl-projects/soluterminal/.claude/worktrees/tui-capture-st265/repoB[93G[22mfrom
+[7Gthis[12Gproject
+[4G[38;2;153;153;153m3.[7G[39mYes,[12Gand[16Gswitch[23Gto[26Gauto[31Gmode[38;2;153;153;153m ·[38Gauto[43Gmode[48Ghandles[56Gthese[62Gprompts[70Gfor[74Gyou[39m
+[4G[38;2;153;153;153m4.[7G[39mNo
+
+[2G[38;2;153;153;153mEsc[6Gto[9Gcancel[16G·[18GTab[22Gto[25Gamend[39m
+[1C[8A]0;✳ Sandbox bypass touch command(B[?2004h[1D[8B[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G[1A[10A[38;2;255;107;128m●[5C[1B[38;2;153;153;153mInterrupted · What should Claude do instead?[2B✻[39m [38;2;153;153;153mBaked for 0s · done 7:44 PM[39m[K[1C[1B[K[1B[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[1B[39m❯ [K[1B[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[1C[1B[39m [38;2;255;193;7m⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker[38;2;153;153;153m · restart with CLAUDE_C…[1B[39m  [38;2;153;153;153m⏸ manual mode on · ? for shortcuts[39m                                            [38;2;153;153;153m◐ medium · /effort[39m[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[8A[2C[4A[?25h[?25l[2D[4B[2C[4AUse[7Gthe[11GBash[16Gtool[21Gto[24Grun[28Gexactly[36Gthis[41Gcommand:[50Gcurl[55G-sI[59Ghttps://example.com[18C[3B                  
+[77C[4A[?25h]0;◐ Sandbox bypass touch command[?25l[77D[4B[5A[48;2;55;55;55m[38;2;153;153;153m❯ [38;2;255;255;255mUse the Bash tool to run exactly this command: curl -sI https://example.com[39m                       [1B[49m[K[1B[38;2;215;119;87m✻[39m [38;2;215;119;87mBe[38;2;235;159;127mami[38;2;215;119;87mng… [39m[K[2C[1B[K[1B[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[38;2;153;153;153m❯ [39m
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;2;255;193;7m⚠[5GTranscript[16Gsaving[23Gis[26Goff[30G—[32Ginherited[42GCLAUDE_CODE_CHILD_SESSION[68Gmarker[38;2;153;153;153m ·[77Grestart[85Gwith[90GCLAUDE_C…[39m
+[3G[38;2;153;153;153m⏸[5Gmanual[12Gmode[17Gon[20G·[22Gesc[26Gto[29Ginterrupt[81G◐[83Gmedium[90G·[92G/effort[39m
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✽[4G[38;2;235;159;127me[7G[38;2;215;119;87mi[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[2C[7A[38;2;235;159;127mB[6G[38;2;215;119;87mm[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✻[5Ga[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✶[4Ge[12G[38;2;153;153;153m(0s · [38;2;185;185;185mthinking[38;2;153;153;153m)[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m*[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✢[3GB[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[17C[7A[38;2;181;181;181mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h]0;◑ Sandbox bypass touch command[?25l[2D[4B[7A[38;2;215;119;87m·[13G[38;2;153;153;153m1[18G[38;2;177;177;177mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[17C[7A[38;2;169;169;169mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[17C[7A[38;2;153;153;153m↓[39m [38;2;153;153;153m25 tokens · [38;2;165;165;165mthinking[38;2;153;153;153m)[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[19C[7A[38;2;153;153;153m63[32G[38;2;161;161;161mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h]0;✳ Sandbox bypass touch command[?25l[2D[4B[7A[38;2;153;153;153m●[3G[39m[1mBash[22m(curl -sI https://example.com)[K[1B[38;2;153;153;153m  ⎿  Waiting…[1B[39m[K[1B[38;2;177;185;249m────────────────────────────────────────────────────────────────────────────────────────────────────[1B[39m [38;2;177;185;249m[1mBash command[22m[39m[K[1C[1B[1mTip: auto mode handles these prompts for you — choose "switch to auto mode" below[22m[K[1C[1B[38;2;153;153;153mFetch HTTP headers from[26Gexampl[33G.com[39m[K
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[39m
+[2Gcurl[7G-sI[11Ghttps://example.com
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[39m
+[2GThis[7Gcommand[15Grequires[24Gapproval
+
+[2GDo[5Gyou[9Gwant[14Gto[17Gproceed?
+[2G[38;2;177;185;249m❯[4G[38;2;153;153;153m1.[7G[38;2;177;185;249mYes[39m
+[4G[38;2;153;153;153m2.[7G[39mYes,[12Gand[16Gdon’t[22Gask[26Gagain[32Gfor:[37Gcurl[42G*
+[4G[38;2;153;153;153m3.[7G[39mYes,[12Gand[16Gswitch[23Gto[26Gauto[31Gmode[38;2;153;153;153m ·[38Gauto[43Gmode[48Ghandles[56Gthese[62Gprompts[70Gfor[74Gyou[39m
+[4G[38;2;153;153;153m4.[7G[39mNo
+
+[2G[38;2;153;153;153mEsc[6Gto[9Gcancel[16G·[18GTab[22Gto[25Gamend[39m
+[1C[6A(B[?2004h[1D[6B[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G[1A[10A[38;2;255;107;128m●[5C[1B[38;2;153;153;153mInterrupted · What should Claude do instead?[2B✻[39m [38;2;153;153;153mCogitated for 1s · done 7:45 PM[39m[K[1C[1B[K[1B[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[1B[39m❯ [K[1B[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[1C[1B[39m [38;2;255;193;7m⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker[38;2;153;153;153m · restart with CLAUDE_C…[1B[39m  [38;2;153;153;153m⏸ manual mode on · ? for shortcuts[39m                                            [38;2;153;153;153m◐ medium · /effort[39m[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[8A[2C[4A[?25h[?25l[2D[4B[2C[4AUse[7Gthe[11GBash[16Gtool[21Gto[24Grun[28Gexactly[36Gthis[41Gcommand:[50Gtouch[56G/tmp/st265_probe_outside[18C[3B                  
+[79C[4A[?25h]0;◑ Sandbox bypass touch command[?25l[79D[4B[5A[48;2;55;55;55m[38;2;153;153;153m❯ [38;2;255;255;255mUse the Bash tool to run exactly this command: touch /tmp/st265_probe_outside[39m                     [1B[49m[K[1B[38;2;215;119;87m✽[39m [38;2;215;119;87mImagining… [39m[K[2C[1B[K[1B[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[38;2;153;153;153m❯ [39m
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;2;255;193;7m⚠[5GTranscript[16Gsaving[23Gis[26Goff[30G—[32Ginherited[42GCLAUDE_CODE_CHILD_SESSION[68Gmarker[38;2;153;153;153m ·[77Grestart[85Gwith[90GCLAUDE_C…[39m
+[3G[38;2;153;153;153m⏸[5Gmanual[12Gmode[17Gon[20G·[22Gesc[26Gto[29Ginterrupt[81G◐[83Gmedium[90G·[92G/effort[39m
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✻[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✶[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m*[14G[38;2;153;153;153m(0s · [38;2;185;185;185mthinking[38;2;153;153;153m)[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✢[20G[38;2;181;181;181mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m·[20G[38;2;177;177;177mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[19C[7A[38;2;173;173;173mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[11C[7A[38;2;235;159;127m…[20G[38;2;165;165;165mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h]0;◐ Sandbox bypass touch command[?25l[2D[4B[14C[7A[38;2;153;153;153m1[20G[38;2;161;161;161mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m✢[11G[38;2;235;159;127mg[20G[38;2;157;157;157mthinking[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[7A[38;2;215;119;87m*[20G[38;2;153;153;153m↓[39m [38;2;153;153;153m25 tokens · thinking)[39m
+
+
+
+
+
+
+[2C[4A[?25h[?25l[2D[4B[9C[7A[38;2;235;159;127mn[22G[38;2;153;153;153m50[39m
+
+
+
+
+
+
+[2C[4A[?25h]0;✳ Sandbox bypass touch command[?25l[2D[4B[7A[38;2;153;153;153m●[3G[39m[1mBash[22m(touch /tmp/st265_probe_outside)[K[1B[38;2;153;153;153m  ⎿  Waiting…[1B[39m[K[1B[38;2;177;185;249m────────────────────────────────────────────────────────────────────────────────────────────────────[1B[39m [38;2;177;185;249m[1mBash command[22m[39m[K[1C[1B[1mTip: auto mode handles these prompts for you — choose "switch to auto mode" below[22m[K[1C[1B[38;2;153;153;153mCreate empty pr[18Gbe file[26Gat[29G/tmp/st265_probe_outside[81G[39m[K
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[39m
+[2Gtouch[8G/tmp/st265_probe_outside
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[39m
+[2GDo[5Gyou[9Gwant[14Gto[17Gproceed?
+[2G[38;2;177;185;249m❯[4G[38;2;153;153;153m1.[7G[38;2;177;185;249mYes[39m
+[4G[38;2;153;153;153m2.[7G[39mYes,[12Gand[16Galways[23Gallow[29Gaccess[36Gto[39G[1m/tmp[44G[22mfrom[49Gthis[54Gproject
+[4G[38;2;153;153;153m3.[7G[39mYes,[12Gand[16Gswitch[23Gto[26Gauto[31Gmode[38;2;153;153;153m ·[38Gauto[43Gmode[48Ghandles[56Gthese[62Gprompts[70Gfor[74Gyou[39m
+[4G[38;2;153;153;153m4.[7G[39mNo
+
+[2G[38;2;153;153;153mEsc[6Gto[9Gcancel[16G·[18GTab[22Gto[25Gamend[39m
+[1C[6A

@@ -171,8 +171,8 @@ function NextScheduleChip({ pane }: { pane: PaneInfo }) {
       className={`pane-schedule-chip${snoozed ? ' is-snoozed' : ''}`}
       title={[
         snoozed
-          ? `Scheduled prompt "${schedule.name}" — next run snoozed`
-          : `Scheduled prompt "${schedule.name}" runs ${when} in this pane`,
+          ? `Automation "${schedule.name}": next run snoozed`
+          : `Automation "${schedule.name}" runs ${when} in this pane`,
         promptPreview && `\n${promptPreview}${(schedule.prompt ?? '').length > 120 ? '…' : ''}`,
       ]
         .filter(Boolean)

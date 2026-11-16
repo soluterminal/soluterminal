@@ -30,7 +30,6 @@ func (f *fakeTurnPane) running() bool {
 	defer f.mu.Unlock()
 	return !f.exited
 }
-func (f *fakeTurnPane) native() bool { return false }
 func (f *fakeTurnPane) state() PaneRuntimeState {
 	f.mu.Lock()
 	defer f.mu.Unlock()

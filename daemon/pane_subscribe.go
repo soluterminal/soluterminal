@@ -1277,6 +1277,20 @@ func (p *Pane) desiredSizeLocked() (uint16, uint16) {
 	p.mobileSizeMu.Lock()
 	defer p.mobileSizeMu.Unlock()
 	p.lastSizeHeld = false
+	// A visible view that has never been active (lastActiveSeq 0: never
+	// focused, typed in, claimed or brought forward) does not take the size
+	// from a hidden desktop view that was. That is a window left open behind
+	// another app (the standalone desktop window behind Shinoque), still
+	// reporting visible; handing it the PTY each time the active view hid
+	// resized the pane back and forth on every workspace switch, and a shell
+	// drew a fresh prompt row on every SIGWINCH (ST-258). Hold the current
+	// size; the idle view takes over as soon as it is used. A hidden PHONE
+	// still hands the width back: pocketing the phone returns it to the
+	// desktop, whose reconnected socket is often unstamped.
+	if visBest != nil && visBest.lastActiveSeq == 0 &&
+		anyBest != nil && anyBest.lastActiveSeq > 0 && !anyBest.isMobile {
+		return 0, 0
+	}
 	if visBest != nil {
 		if visBest.isMobile {
 			// A phone is the active viewer: it wins, and we remember its
@@ -1406,7 +1420,11 @@ func (p *Pane) recomputeSize() {
 	mdbg := p.sizingMobileLog(cols, rows)
 	p.subsMu.RUnlock()
 	if dbg != "" {
-		log.Printf("pane %s: sizing chose %dx%d | %s", p.ID, cols, rows, dbg)
+		if cols == 0 || rows == 0 {
+			log.Printf("pane %s: sizing held | %s", p.ID, dbg)
+		} else {
+			log.Printf("pane %s: sizing chose %dx%d | %s", p.ID, cols, rows, dbg)
+		}
 	}
 	// Mobile-size diagnostic: log only on a TRANSITION so a stable phone
 	// session stays quiet, but reconnect-gap oscillation (the 84⟷62 flip)

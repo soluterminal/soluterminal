@@ -130,7 +130,16 @@ func Redact(s string) string { text, _ := standard.Redact(s); return text }
 // markers are opaque, so a cloud backstop can add markers without rewriting
 // device markers. No input or identity hint is ever included in a diagnostic.
 func (r *Redactor) Redact(s string) (string, int) {
+	// Match on the text as it is AND on a same-length view in which a carriage
+	// return not followed by a newline is an ordinary non-space, non-word
+	// character, then union the spans. The view lets a value run on past a
+	// lone CR instead of leaving what follows it; the text as it is keeps the
+	// CR as a separator, so a value cannot run into a redrawn copy of its line
+	// and swallow the next key. Spans index s and the view alike.
 	spans := r.findSpans(s)
+	if view := loneCRView(s); view != s {
+		spans = merge(spans, r.findSpans(view))
+	}
 	// Match on the complete input: a marker inside a PEM block or header must
 	// not hide its remaining context from the backstop. Then subtract marker
 	// bytes from the removal spans so existing preview markers stay verbatim.
@@ -154,6 +163,23 @@ func (r *Redactor) Redact(s string) (string, int) {
 	}
 	out.WriteString(s[start:])
 	return out.String(), len(spans)
+}
+
+// loneCRView returns s with each carriage return that is not followed by a
+// newline replaced by U+0001 (one byte for one byte). A line end is still
+// "\n" or "\r\n"; U+0001 is neither a word nor a space character, so word
+// boundaries and the long-run rule see what they saw before.
+func loneCRView(s string) string {
+	if !strings.Contains(s, "\r") {
+		return s
+	}
+	b := []byte(s)
+	for i, c := range b {
+		if c == '\r' && (i+1 == len(b) || b[i+1] != '\n') {
+			b[i] = 0x01
+		}
+	}
+	return string(b)
 }
 
 // Both streams are ordered and disjoint. A removal spanning multiple markers

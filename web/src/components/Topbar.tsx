@@ -57,7 +57,7 @@ function InboxBubble() {
   const needs = unread.some((i) => i.needsYou);
   const title = unread.length > 0
     ? `Inbox — ${inboxCountLabel(unread.length)} unread${needs ? ', some need you' : ''}`
-    : 'Inbox — reports from scheduled tasks, feedback updates, send feedback';
+    : 'Inbox — reports from automations, feedback updates, send feedback';
   return (
     <button
       type="button"

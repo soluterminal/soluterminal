@@ -25,12 +25,6 @@ func TestRestartSpawnOptsResumeVsFresh(t *testing.T) {
 		t.Fatalf("fresh restart cmd = %v, want the pane's own command", fresh.Cmd)
 	}
 
-	native := PaneSnapshot{ID: "pane-n", Kind: "native", Cwd: "/repo", ClaudeSessionID: "sess-2", CodexThreadID: "thread-2"}
-	nf := restartSpawnOpts(native, true)
-	if nf.ClaudeSessionID != "" || nf.CodexThreadID != "" || nf.Cmd != nil {
-		t.Fatalf("fresh native restart = %+v, want cleared ids and nil cmd", nf)
-	}
-
 	// A managed harness resume carries the sidecar session on the env and the
 	// fresh variant drops it.
 	harness := PaneSnapshot{

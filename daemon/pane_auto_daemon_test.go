@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -24,6 +25,10 @@ func TestAutoOffAcrossDaemonProcessRestart(t *testing.T) {
 	for _, locked := range []bool{false, true} {
 		t.Run(fmt.Sprint(locked), func(t *testing.T) {
 			home, dir := t.TempDir(), t.TempDir()
+			// Runs after both scratch daemons stop: a pane's agent outlives its
+			// daemon by design, so a failure before the fixture pane is deleted
+			// would otherwise leave it running.
+			t.Cleanup(func() { reapScratchAgents(dir) })
 			exe, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)
@@ -143,6 +148,40 @@ func TestAutoOffAcrossDaemonProcessRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// reapScratchAgents kills the pane agents serving a socket under dataDir,
+// the scratch daemon's own <data>/agents. They run as this test binary
+// (`daemon.test agent --socket ...`), and dataDir is the test's own temp dir,
+// so nothing else matches. Reads /proc; elsewhere there is nothing to find.
+func reapScratchAgents(dataDir string) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	agents := filepath.Join(dataDir, "agents")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if len(args) < 2 || args[1] != "agent" {
+			continue
+		}
+		for i := 2; i+1 < len(args); i++ {
+			if args[i] == "--socket" && socketUnderDir(args[i+1], agents) {
+				if proc, err := os.FindProcess(pid); err == nil {
+					_ = proc.Kill()
+				}
+				break
+			}
+		}
 	}
 }
 

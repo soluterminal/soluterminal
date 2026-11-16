@@ -67,7 +67,14 @@ export function ContextPill() {
       <span className="context-env-text">
         {hostingWord}{sideWord ? ` · ${sideWord}` : ''}
       </span>
-      {osWord && <span className="context-env-os">{osWord}</span>}
+      {osWord && (
+        <span
+          className={`context-env-os${env.modeMismatch ? ' mismatch' : ''}`}
+          title={env.modeMismatch ? 'The saved mode didn’t start. Open to retry it or choose another.' : undefined}
+        >
+          {osWord}
+        </span>
+      )}
     </>
   );
 

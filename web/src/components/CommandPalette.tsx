@@ -2,7 +2,6 @@ import { workspaceViewLayout } from '../lib/workspaceView';
 import { paneRowLabel } from '../lib/paneRowLabel';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useFocusEnabled } from '../lib/focusAvailability';
 import { getHostTheme, useEmbedTheme } from '../lib/useEmbedTheme';
 import { closedPaneHint, closedPaneLabel } from '../lib/closedPanes';
 import { paneUnread } from '../lib/turnChip';
@@ -10,12 +9,10 @@ import { api } from '../api';
 import { paneIdsInOrder, useStore } from '../store';
 import { confirmDialog } from '../lib/dialog';
 import { multiWindowAvailable, openWorkspaceWindow } from '../tauri-browser';
-import { shouldConfirmModeSwitch } from '../native/modeSwitch';
 import { autoModeMenuLabel, nextAutoMode } from '../lib/autoMode';
 import { applyAutoModeChange } from '../lib/autoModeConfirm';
 import { REBINDABLE_ACTIONS } from '../keybindings';
 import type { PaneAutoMode } from '../types';
-import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { roleConvertAllowed, slotList, type PaletteAction } from '../extensions';
 import { operatorFeaturesAllowed, useEntitlements, usePersonalView } from '../entitlements';
 import { useHideIdentities } from '../lib/hideIdentities';
@@ -152,33 +149,9 @@ export function CommandPalette({
     const p = s.focusedPaneId ? s.panes[s.focusedPaneId] : undefined;
     return p?.liveCwd || p?.cwd || '~';
   });
-  // Renderer-mode facts for the focused pane, as subscribed primitives so the
-  // "Switch to Focus / Terminal" action's label + enablement stay live while
-  // the palette is open (the action list itself only re-snapshots on open).
-  // isFocusedNative drives the opposite-of-current label; capable gates the
-  // entry to Claude panes (mirrors PaneHeader.isClaudeCapable).
-  const focusEnabled = useFocusEnabled();
   // Live, so the reopen entries appear once the daemon list arrives.
   const recentlyClosedPanes = useStore((s) => s.recentlyClosedPanes);
-  const isFocusedNative = useStore((s) => {
-    const p = s.focusedPaneId ? s.panes[s.focusedPaneId] : undefined;
-    return p?.kind === 'native';
-  });
-  const isFocusedAgentCapable = useStore((s) => {
-    const p = s.focusedPaneId ? s.panes[s.focusedPaneId] : undefined;
-    if (!p) return false;
-    if (p.identityBlocked) return false;
-    const agent = effectivePaneAgent(p);
-    if (agent === 'codex') return p.kind === 'native' || !!p.codexThreadId || !!p.hasCodex;
-    if (agent === 'muse') return p.kind === 'native' || !!p.museSessionId || !!p.hasMuse;
-    return p.hasClaude === true || agent === 'claude';
-  });
-  const focusedAgentLabel = useStore((s) => {
-    const p = s.focusedPaneId ? s.panes[s.focusedPaneId] : undefined;
-    return agentLabel(p ? effectivePaneAgent(p) : null);
-  });
-  // Auto-approve capability is broader than the renderer toggle:
-  // the daemon auto-answers Codex approval modals too, so the auto-approve
+  // The daemon auto-answers Codex approval modals too, so the auto-approve
   // action shows for Codex panes as well (mirrors PaneHeader.isAutoApproveCapable).
   const isFocusedAutoApproveCapable = useStore((s) => {
     const p = s.focusedPaneId ? s.panes[s.focusedPaneId] : undefined;
@@ -187,7 +160,6 @@ export function CommandPalette({
       p.cmd[0] === 'claude' ||
       p.cmd[0]?.endsWith('/claude') === true ||
       p.hasClaude === true ||
-      p.kind === 'native' ||
       p.hasCodex === true ||
       p.hasMuse === true ||
       p.hasPi === true ||
@@ -195,7 +167,7 @@ export function CommandPalette({
     );
   });
   // Focused pane's auto-approve mode, subscribed so the palette action's
-  // label stays live (mirrors isFocusedNative for the renderer toggle).
+  // label stays live.
   const focusedAutoLocked = useStore((s) => !!(s.focusedPaneId && s.panes[s.focusedPaneId]?.neverAutoAnswer));
   const focusedAutoMode = useStore((s) => {
     const p = s.focusedPaneId ? s.panes[s.focusedPaneId] : undefined;
@@ -649,44 +621,6 @@ export function CommandPalette({
     // decides for itself whether it has anything to offer right now.
     for (const build of slotList('paletteActions')) list.push(...build({ close: onClose }));
 
-    // Renderer toggle for the focused pane. Only meaningful for Claude
-    // panes (the native renderer speaks Claude's stream-json), so it's
-    // gated on the same isClaudeCapable heuristic the pane header uses.
-    // The label shows the OPPOSITE of the current mode so it reads as a
-    // one-tap destination ("Switch to Focus" when you're on Terminal).
-    // Focus retired: only a still-native pane keeps "Switch to Terminal".
-    if (isFocusedAgentCapable && focusedPaneId && (focusEnabled || isFocusedNative)) {
-      const targetKind: '' | 'native' = isFocusedNative ? '' : 'native';
-      list.push({
-        id: 'pane.switchMode',
-        label: isFocusedNative
-          ? 'Switch focused pane to Terminal renderer'
-          : 'Switch focused pane to Focus renderer',
-        hint: isFocusedNative
-          ? 'Back to the raw TUI (xterm). Width is shared across devices.'
-          : `Render this ${focusedAgentLabel} pane as a structured chat that reflows at any width`,
-        category: 'Terminal',
-        keywords: 'focus native terminal renderer mode toggle reflow chat xterm tui switch',
-        // The palette has no inline three-way confirm (it closes on run), so a
-        // switch on a WORKING pane defaults to the LOSSLESS deferred mode (fires
-        // when the turn finishes) rather than silently interrupting; an idle pane
-        // switches immediately as before. A toast tells the user it was armed.
-        run: () => {
-          const st = useStore.getState();
-          const p = st.panes[focusedPaneId];
-          if (p && shouldConfirmModeSwitch(p.state, p.agentMidTurn)) {
-            void st.switchPaneMode(focusedPaneId, targetKind, { when: 'deferred' });
-            st.toast(
-              `Will switch to ${targetKind === 'native' ? 'Focus' : 'Terminal'} when ${focusedAgentLabel} finishes`,
-              { kind: 'info', icon: '⏳', ttlMs: 4000 },
-            );
-            return;
-          }
-          void st.switchPaneMode(focusedPaneId, targetKind);
-        },
-      });
-    }
-
     // Restart the focused pane's agent in place on the installed build. Any
     // running pane; the daemon resumes the conversation, or offers a fresh
     // restart when there's nothing durable to resume.
@@ -895,7 +829,7 @@ export function CommandPalette({
       !(a.id === 'view.theme' && hostTheme));
     // `open` in the deps re-snapshots panes each time the palette opens
     // — see the unread-surface block above for why we don't subscribe.
-  }, [open, hideEmail, hostTheme, recentlyClosedPanes, focusedPaneId, focusedPaneCwd, focusEnabled, isFocusedNative, isFocusedAgentCapable, focusedAgentLabel, isFocusedAutoApproveCapable, focusedAutoMode, focusedAutoLocked, workspaces, wsOrder, activeWorkspace, onClose, onOpenHelp, onOpenNewPane, onOpenBroadcast, onOpenFeedback]);
+  }, [open, hideEmail, hostTheme, recentlyClosedPanes, focusedPaneId, focusedPaneCwd, isFocusedAutoApproveCapable, focusedAutoMode, focusedAutoLocked, workspaces, wsOrder, activeWorkspace, onClose, onOpenHelp, onOpenNewPane, onOpenBroadcast, onOpenFeedback]);
 
   const actionHits = useMemo(() => {
     if (mode !== 'actions') return [];

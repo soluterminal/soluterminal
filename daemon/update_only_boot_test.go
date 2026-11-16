@@ -31,7 +31,7 @@ var updateOnlyBootCalls = map[string]bool{
 	// standard library
 	"context.Background": true, "context.WithTimeout": true, "errors.New": true, "errors.Is": true,
 	"flag.NewFlagSet": true, "fmt.Errorf": true, "log.Printf": true, "log.Print": true,
-	"net.Listen": true, "os.Getenv": true, "os.Unsetenv": true, "os.UserHomeDir": true,
+	"listenDaemon": true, "os.Getenv": true, "os.Unsetenv": true, "os.UserHomeDir": true,
 	"signal.NotifyContext": true, "strings.TrimSpace": true, "json.NewEncoder": true,
 	"make": true, "stop": true, "cancel": true, "h": true,
 	"fs.StringVar": true, "fs.String": true, "fs.Bool": true, "fs.Parse": true, "fs.NArg": true, "fs.Arg": true,
@@ -282,7 +282,7 @@ func TestUpdateOnlyBootWritesOnlyTheUpdatesOwnState(t *testing.T) {
 		switch value.(type) {
 		case bool, float64:
 		case string:
-			if key != "status" && key != "version" && key != "backendID" {
+			if key != "status" && key != "version" && key != "backendID" && key != "goos" {
 				t.Fatalf("health carries a string field %q", key)
 			}
 		default:

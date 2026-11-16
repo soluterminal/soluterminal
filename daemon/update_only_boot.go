@@ -137,7 +137,8 @@ func runUpdateOnlyBootContext(ctx context.Context, args []string, ready chan<- s
 		log.Printf("update-only: %v", err)
 		return 1
 	}
-	ln, err := net.Listen(daemonListenerNetwork(cfg.addr, isInsideWSL()), cfg.addr)
+	// listenDaemon: SO_EXCLUSIVEADDRUSE on Windows, as every daemon listener (ST-233).
+	ln, err := listenDaemon(daemonListenerNetwork(cfg.addr, isInsideWSL()), cfg.addr)
 	if err != nil {
 		log.Print(describeListenConflict(cfg.addr, err))
 		return 1

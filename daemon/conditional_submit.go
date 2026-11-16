@@ -105,6 +105,14 @@ func (a *apiServer) conditionalSubmitPane(w http.ResponseWriter, r *http.Request
 		conditionalNotSent(http.StatusBadRequest, "invalid_request").respond(w)
 		return
 	}
+	// The person's stop on agent messaging: only the person types into a
+	// pane through here while it is on (agent_messaging_pause.go).
+	if agentMessagingPaused() {
+		if caller := a.identifyCaller(r); caller.Kind != callerHuman && !(caller.tracedPane() && caller.PaneID == r.PathValue("id")) {
+			conditionalNotSent(http.StatusConflict, "agent_messaging_paused").respond(w)
+			return
+		}
+	}
 	a.runConditionalSubmit(r.Context(), r.PathValue("id"), &req).respond(w)
 }
 
@@ -417,7 +425,7 @@ func (a *apiServer) conditionalConditionLocked(ctx context.Context, p *Pane, cap
 	if reason != "" || !matches || condition.SessionID == "" {
 		return conditionalSubmitCondition{}, "session_unavailable"
 	}
-	if pending, _ := p.promptRec.draft(); pending != 0 || p.promptRec.inStringControl || p.composerNonEmptyNow(time.Now()) {
+	if pending, _ := p.promptRec.draft(); pending != 0 || p.promptRec.inStringControl {
 		return conditionalSubmitCondition{}, "composer_not_empty"
 	}
 	if !conditionalPromptReady(ctx, p, process.Provider, "", nil, captureTranscript) {
@@ -443,7 +451,7 @@ func conditionalPromptIdle(ctx context.Context, p *Pane, provider string) bool {
 // During a held submission's gap, the visible composer may contain our OWN
 // recorded draft. Recheck busy/approval state without pretending it is empty.
 func conditionalPromptReady(ctx context.Context, p *Pane, provider string, expectedDraft string, expectedTranscript, captureTranscript *string) bool {
-	if p.buffer == nil || p.hasNativePending() {
+	if p.buffer == nil {
 		return false
 	}
 	if p.fleetTurnAdmitted.Load() && atomic.LoadInt64(&p.TotalStrippedChars) <= p.fleetTurnOutputWatermark.Load() {
@@ -561,6 +569,15 @@ func conditionalClaudeComposer(screen string) (transcript, draft string, known b
 		text = text[size:]
 	}
 	parts := []string{text}
+	// Claude Code 2.1.3xx draws the input box between two rules of the same
+	// width. Rows under the closing rule are Claude's notices ("⚠ Transcript
+	// saving is off…"), not the draft: read as box text, a notice held every
+	// agent message to the pane (ST-263b). Claude pads its footer rows: only
+	// padded rows are set aside, and at most claudeFooterRows of them. Any
+	// other row there, and a box whose top rule is not right above the ❯
+	// row, is read as before: as box text, which holds messages.
+	boxed := !legacy && composer > 0 && claudeBoxRule(lines[composer-1])
+	closed, notices := false, 0
 	for i, line := range lines[composer+1:] {
 		if (!legacy && newPromptFooterRE.MatchString(line)) || (legacy && boxBottomRE.MatchString(line)) {
 			for _, below := range lines[composer+i+2:] {
@@ -571,7 +588,15 @@ func conditionalClaudeComposer(screen string) (transcript, draft string, known b
 			return strings.Join(lines[:composer], "\n") + "\n", conditionalDraftText(strings.Join(parts, "")), true
 		}
 		if strings.Trim(strings.TrimSpace(line), "─") == "" {
+			if boxed && sameWidthRule(line, lines[composer-1]) {
+				closed = true
+			}
 			continue
+		}
+		if closed && strings.HasPrefix(line, "  ") {
+			if notices++; notices <= claudeFooterRows {
+				continue
+			}
 		}
 		if legacy {
 			line = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(line), "│"), "│")
@@ -579,6 +604,14 @@ func conditionalClaudeComposer(screen string) (transcript, draft string, known b
 		parts = append(parts, line)
 	}
 	return "", "", false
+}
+
+// sameWidthRule reports that line is a box rule as wide as top, the rule
+// above the input box. A draft row made only of rule characters is indented
+// inside the box, so it is narrower and does not close the box.
+func sameWidthRule(line, top string) bool {
+	return claudeBoxRule(line) &&
+		utf8.RuneCountInString(strings.TrimSpace(line)) == utf8.RuneCountInString(strings.TrimSpace(top))
 }
 
 func conditionalDraftText(text string) string {

@@ -38,8 +38,7 @@ type ariaToolDef struct {
 }
 
 // ariaAutonomousTools is the tool surface a terminal-pane autonomous
-// turn is offered: just send_input. (Native turns get
-// ariaNativeAutonomousTools instead — see aria_native_auto.go.)
+// turn is offered: just send_input.
 func ariaAutonomousTools() []ariaToolDef {
 	return []ariaToolDef{
 		{
@@ -108,19 +107,8 @@ func (a *Aria) executeTool(ctx context.Context, toolUseID, name string, input js
 			return fmt.Sprintf("error: autonomous send_input may only target pane %q", req.AutonomousPaneID)
 		}
 		return a.toolSendInput(ctx, toolUseID, args.PaneID, args.Input, req.AutonomousPromptPos, req.AutonomousPromptHash, req.AutonomousCautious, emit)
-	case "resolve_permission":
-		// Native-pane approval. The model calls this with NO meaningful args to
-		// APPROVE the single pending request bound to this turn; it declines by
-		// not calling the tool at all (responding with a sentence). The daemon
-		// binds the pane + RequestID server-side (AutonomousPaneID /
-		// AutonomousRequestID) so the model can never pick which parallel
-		// approval to resolve — the wrong-tool safety hole.
-		if !req.AutonomousNative {
-			return "error: resolve_permission is only available on native-pane turns"
-		}
-		return a.toolResolvePermission(ctx, toolUseID, req.AutonomousPaneID, req.AutonomousRequestID, req.AutonomousCautious, emit)
 	default:
-		return fmt.Sprintf("error: autonomous ARIA turns may only call send_input or resolve_permission, not %q", name)
+		return fmt.Sprintf("error: autonomous ARIA turns may only call send_input, not %q", name)
 	}
 }
 

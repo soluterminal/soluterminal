@@ -60,18 +60,14 @@ describe('app layout styles', () => {
     }
   });
 
-  it('keeps native composer geometry and suggestion metrics stable', () => {
-    const styles = readFileSync('src/styles.css', 'utf8');
+  it('keeps composer geometry and suggestion metrics stable', () => {
     const composer = readFileSync('src/components/composer/composer.css', 'utf8');
     const ghostBlock = composer.match(/\.composer-ghost\s*\{([^}]*)\}/)?.[1] ?? '';
     const slotBlock = composer.match(/\.composer-primary-slot\s*\{([^}]*)\}/)?.[1] ?? '';
-    const nativeSlotBlock = styles.match(/\.native-pane \.composer-primary-slot\s*\{([^}]*)\}/)?.[1] ?? '';
 
     expect(ghostBlock).toContain('white-space: nowrap');
     expect(ghostBlock).toContain('text-overflow: ellipsis');
     expect(slotBlock).toContain('width: 40px');
-    expect(nativeSlotBlock).toContain('width: 30px');
-    expect(styles).toContain('--composer-font-size: calc(15px * var(--native-focus-scale');
   });
 });
 

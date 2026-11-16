@@ -125,18 +125,18 @@ describe('PaneContextMenu delegation announcements', () => {
 });
 
 describe('PaneContextMenu scheduling', () => {
-  it.each([true, false])('offers New automation for native=%s panes', (isNative) => {
+  it('offers New automation', () => {
     const onCreateSchedule = vi.fn();
-    renderMenu({}, { isNative, onCreateSchedule });
+    renderMenu({}, { onCreateSchedule });
     fireEvent.click(screen.getByRole('menuitem', { name: 'New automation…' }));
     expect(onCreateSchedule).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('PaneContextMenu smart approvals', () => {
-  it.each([false, true])('shows the terminal-only hint for native=%s', (isNative) => {
-    renderMenu({}, { isNative });
-    expect(!!screen.queryByRole('note')).toBe(!isNative);
+  it('shows the smart approvals hint', () => {
+    renderMenu({});
+    expect(screen.getByRole('note')).toBeInTheDocument();
     expect(screen.getByRole('menuitemradio', { name: 'Approve with caution' })).toBeInTheDocument();
   });
 });
@@ -256,10 +256,7 @@ describe('PaneContextMenu Fix display', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Fix display' }));
     expect(fix).toHaveBeenCalledTimes(1);
   });
-  it('hides it on native, exited or unwired panes', () => {
-    const native = renderMenu({}, { isNative: true, onFixDisplay: vi.fn() });
-    expect(screen.queryByRole('menuitem', { name: 'Fix display' })).toBeNull();
-    native.unmount();
+  it('hides it on exited or unwired panes', () => {
     const exited = renderMenu({ status: 'exited' }, { onFixDisplay: vi.fn() });
     expect(screen.queryByRole('menuitem', { name: 'Fix display' })).toBeNull();
     exited.unmount();

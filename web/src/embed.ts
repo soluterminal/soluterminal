@@ -4,7 +4,13 @@ type Theme = 'light' | 'dark';
 type HostMessage =
   | { kind: 'init'; theme: Theme; hostKeys?: string[]; capabilities?: string[] }
   | { kind: 'theme'; theme: Theme }
-  | { kind: 'visibility'; visible: boolean };
+  | { kind: 'visibility'; visible: boolean }
+  | { kind: 'approve-screen' };
+
+/** Why a Type here click was refused (lib/claimFeedback ClaimRefusal). */
+export type EmbedClaimRefusal = 'not-person' | 'view-only' | 'owner-active' | 'regrabbed' | 'unreachable';
+/** This screen's approval on the computer in view, without code or id. */
+export type EmbedScreenApproval = 'none' | 'pending' | 'approved';
 
 type Activation = { origin: string | null; theme: Theme | null; windowId: string };
 type ActivationInput = {
@@ -73,6 +79,7 @@ let hostTheme: Theme | null = active.theme;
 let hostKeys: string[] = [];
 let readySent = false;
 let hostOpensFiles = false;
+let sentApproval: EmbedScreenApproval | null = null;
 export function isEmbedded(): boolean { return active.origin !== null; }
 export function embedWindowIdentity(): string { return active.windowId; }
 export function embedParentOrigin(): string | null { return active.origin; }
@@ -86,6 +93,7 @@ export function __recomputeEmbedForTests(input?: ActivationInput): void {
   hostKeys = [];
   readySent = false;
   hostOpensFiles = false;
+  sentApproval = null;
 }
 
 function plainObject(value: unknown): value is Record<string, unknown> {
@@ -121,6 +129,7 @@ export function parseHostMessage(event: MessageEvent): HostMessage | null {
   if (value.kind === 'visibility' && typeof value.visible === 'boolean') {
     return { kind: 'visibility', visible: value.visible };
   }
+  if (value.kind === 'approve-screen') return { kind: 'approve-screen' };
   return null;
 }
 
@@ -197,6 +206,23 @@ export function sendEmbedNotification(title: string, body: string, paneId?: stri
   send('notify', { title, body, ...(paneId ? { paneId } : {}) });
 }
 
+const CLAIM_REFUSALS: readonly EmbedClaimRefusal[] = ['not-person', 'view-only', 'owner-active', 'regrabbed', 'unreachable'];
+
+/** A Type here click was refused: the reason only. */
+export function sendEmbedClaimRefused(reason: EmbedClaimRefusal): void {
+  if (!isEmbedded() || !CLAIM_REFUSALS.includes(reason)) return;
+  send('claim-refused', { reason });
+}
+
+/** This screen's approval, sent when it changes (and the first time it is
+ *  known). Never a code, device id or name. */
+export function sendEmbedScreenApproval(state: EmbedScreenApproval): void {
+  if (!isEmbedded() || state === sentApproval) return;
+  if (state !== 'none' && state !== 'pending' && state !== 'approved') return;
+  sentApproval = state;
+  send('screen-approval', { state });
+}
+
 export function matchesHostKey(event: KeyboardEvent, keys: readonly string[] = hostKeys): string | null {
   if (!isEmbedded() || event.altKey || event.isComposing || !(navigator.platform.startsWith('Mac') ? event.metaKey : event.ctrlKey)) return null;
   if (navigator.platform.startsWith('Mac') ? event.ctrlKey : event.metaKey) return null;
@@ -236,7 +262,11 @@ export function installEmbedBridge(onTheme: (theme: Theme) => void): () => void 
         detail: { visible: message.visible },
       }));
       if (message.visible) window.dispatchEvent(new Event('solu:embed-visible'));
-
+    } else if (message.kind === 'approve-screen') {
+      // Opens this screen's own approve prompt (ApproveThisScreenPrompt). It
+      // only shows the prompt: asking still needs a click in this frame, and
+      // approving happens on an approved device or at the computer.
+      window.dispatchEvent(new Event('solu:embed-approve-screen'));
     }
   };
   const onClick = (event: MouseEvent) => {

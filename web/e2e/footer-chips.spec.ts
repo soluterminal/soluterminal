@@ -39,7 +39,7 @@ test('the fix agent chip says why it is down and the panel offers one fix', asyn
   // Down is confirmed by a second poll, one minute after the first.
   await page.clock.fastForward(61_000);
   const chip = page.locator('.statusbar-agents.down');
-  await expect(chip).toHaveText(/^Fix agent: no run for 5\d min$/);
+  await expect(chip).toHaveText(/^Fix agent stopped: no run for 5\d min$/);
   await expect(chip).toHaveAttribute('aria-label', /Last attempt failed: agent not installed on this machine · click for the fix$/);
 
   await chip.click();

@@ -59,7 +59,7 @@ func newFakeCleaner(t *testing.T, mode string) (*localCleaner, string) {
 	t.Setenv("FAKE_MODE", mode)
 	c := newLocalCleaner()
 	c.bin = func() (string, error) { return bin, nil }
-	c.env = func(string) []string { return os.Environ() }
+	c.env = func(string, bool) []string { return os.Environ() }
 	c.deadline = 3 * time.Second
 	t.Cleanup(func() {
 		c.mu.Lock()
@@ -147,7 +147,7 @@ func TestLocalCleanupEnvStripsAnthropicKeys(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
 	t.Setenv("MAX_THINKING_TOKENS", "9999")
-	env := localCleanupEnv("/nonexistent/claude")
+	env := localCleanupEnv("/nonexistent/claude", false)
 	joined := strings.Join(env, "\n")
 	if strings.Contains(joined, "ANTHROPIC_") {
 		t.Fatal("ANTHROPIC_* leaked into the cleanup env")
@@ -242,11 +242,25 @@ func TestLocalCleanerIdleExit(t *testing.T) {
 
 // --- handlers ---
 
+// newVoiceAPI is a daemon whose person opted in to clean-up on their Claude
+// plan (ST-181: the plan is never the default) and has no API key exported.
 func newVoiceAPI(t *testing.T, mode string) (*apiServer, string) {
 	c, dir := newFakeCleaner(t, mode)
+	withVoiceAPIKey(t, false)
 	a := withVoice(&apiServer{}, &voiceServerState{localCleaner: c, voiceLocal: newVoiceLocalSettings(t.TempDir())})
-	a.claudeStat = claudeStatus{checked: true, installed: true, authed: true}
+	if err := a.voiceLocal().set(true); err != nil {
+		t.Fatal(err)
+	}
+	c.useAPIKey = func() bool { return a.localCleanupMode() == voiceCleanupAPIKey }
+	a.claudeStat = claudeStatus{checked: true, installed: true, authed: true, planLogin: true}
 	return a, dir
+}
+
+func withVoiceAPIKey(t *testing.T, present bool) {
+	t.Helper()
+	prev := voiceAPIKeyPresent
+	voiceAPIKeyPresent = func() bool { return present }
+	t.Cleanup(func() { voiceAPIKeyPresent = prev })
 }
 
 func postCleanup(a *apiServer, text string) *httptest.ResponseRecorder {
@@ -312,6 +326,12 @@ func TestVoiceLocalUnavailableWithoutClaudeLogin(t *testing.T) {
 	if ok, reason := a.localCleanupAvailable(); ok || reason != "not_signed_in" {
 		t.Fatalf("available=%v reason=%q", ok, reason)
 	}
+	// Signed in on an API key only (ANTHROPIC_API_KEY, or a key Claude stored
+	// itself): cleanup must never bill it (ST-97).
+	a.claudeStat = claudeStatus{checked: true, installed: true, authed: true, planLogin: false}
+	if ok, reason := a.localCleanupAvailable(); ok || reason != "not_signed_in" {
+		t.Fatalf("API-key-only: available=%v reason=%q", ok, reason)
+	}
 	a.claudeStat = claudeStatus{checked: true, installed: false}
 	if ok, reason := a.localCleanupAvailable(); ok || reason != "not_installed" {
 		t.Fatalf("available=%v reason=%q", ok, reason)
@@ -321,8 +341,14 @@ func TestVoiceLocalUnavailableWithoutClaudeLogin(t *testing.T) {
 func TestVoiceLocalSettingPersists(t *testing.T) {
 	dir := t.TempDir()
 	s := newVoiceLocalSettings(dir)
-	if !s.enabled() {
-		t.Fatal("default must be on")
+	if s.enabled() {
+		t.Fatal("the Claude plan must be opt-in (ST-181)")
+	}
+	if err := s.set(true); err != nil {
+		t.Fatal(err)
+	}
+	if !newVoiceLocalSettings(dir).enabled() {
+		t.Fatal("opt-in not persisted")
 	}
 	if err := s.set(false); err != nil {
 		t.Fatal(err)

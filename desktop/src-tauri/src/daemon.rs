@@ -911,6 +911,146 @@ fn supervise(cfg: SupervisorCfg, shutdown: Arc<AtomicBool>, slot: Arc<Mutex<Opti
     }
 }
 
+/// Which Windows daemon a Dual start runs once its WSL half has failed.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DualWindowsFallback {
+    /// The single `host` daemon on 127.0.0.1:8787, as Windows-only mode runs
+    /// it. Shinoque's phone relay works only through this one (ST-245).
+    Host,
+    /// Dual's own `win` daemon on DUAL_WIN_ADDR, because 8787 wasn't free or
+    /// the host daemon didn't come up. Shinoque's relay stays down.
+    DualSide,
+}
+
+/// Set once a Dual start whose WSL half failed runs the host daemon on
+/// 127.0.0.1:8787. That address is then ours, so the WSL recovery watch must
+/// not take it for a WSL daemon (wsl_backend_answers_now).
+#[cfg(windows)]
+static HOST_FALLBACK_OWNS_8787: AtomicBool = AtomicBool::new(false);
+
+/// Whether something holds a loopback address, judged by trying to bind it:
+/// a connect to a closed loopback port on Windows can stall past any short
+/// budget, which read as "held" and would always rule the host fallback out.
+/// A plain bind fails while any other socket listens there, including WSL's
+/// localhost forwarding and its leftover reservations. An address this PC
+/// lacks (no IPv6 loopback) holds nothing.
+#[cfg(any(windows, test))]
+fn loopback_held(bind: std::io::Result<()>) -> bool {
+    match bind {
+        Ok(()) => false,
+        Err(e) => !matches!(e.kind(), io::ErrorKind::AddrNotAvailable | io::ErrorKind::Unsupported),
+    }
+}
+
+/// The networking mode `%USERPROFILE%\.wslconfig` sets under `[wsl2]`,
+/// lowercased, or None when it sets none (WSL's default, NAT).
+#[cfg(any(windows, test))]
+fn wslconfig_networking_mode(text: &str) -> Option<String> {
+    let mut in_wsl2 = false;
+    let mut mode = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_wsl2 = line.eq_ignore_ascii_case("[wsl2]");
+            continue;
+        }
+        if !in_wsl2 || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim().eq_ignore_ascii_case("networkingMode") {
+                let value = value.split(['#', ';']).next().unwrap_or("").trim();
+                mode = Some(value.to_ascii_lowercase());
+            }
+        }
+    }
+    mode
+}
+
+/// Whether a Dual start whose WSL half failed may run the host daemon on
+/// 8787 (ST-245). Off for 0.0.1244 (Benjamin, 16 Nov): it ships after a try on
+/// the Azure rig. While off, a failed WSL start runs Dual's own `win` side on
+/// DUAL_WIN_ADDR exactly as before #1102: no bind test, no .wslconfig read,
+/// nothing on 8787, and the WSL recovery watch probes as it always has.
+#[cfg(any(windows, test))]
+pub const DUAL_HOST_FALLBACK: bool = false;
+
+/// With the fallback enabled, take 8787 only under NAT networking, and only
+/// when nothing holds it on either loopback. Under NAT a late WSL daemon still binds inside the VM and
+/// is forwarded on [::1], and the "WSL is back" offer restarts the app. Under
+/// mirrored (or any other) networking it shares Windows' loopback and could
+/// not bind 8787 while we hold it, so its panes would not come back.
+#[cfg(any(windows, test))]
+fn dual_fallback_choice(enabled: bool, networking_mode: Option<&str>, held: &[bool]) -> DualWindowsFallback {
+    let nat = matches!(networking_mode, None | Some("nat"));
+    if enabled && nat && held.iter().all(|held| !held) {
+        DualWindowsFallback::Host
+    } else {
+        DualWindowsFallback::DualSide
+    }
+}
+
+/// Start the Windows daemon for a Dual launch whose WSL half failed. Dual's
+/// `win` daemon reports `shinoqueRelay: false` (backend `win` never relays),
+/// so it would leave Shinoque's phone access dead for the whole session.
+/// Run the `host` daemon on 8787 instead when dual_fallback_choice allows,
+/// and fall back to Dual's `win` side on DUAL_WIN_ADDR otherwise or when the
+/// host daemon doesn't answer as `host`. Both use the same Windows data
+/// folder, so panes are the same either way. "WSL is back" restarts the app,
+/// which stops this daemon with the app's job, so Dual comes back whole.
+#[cfg(windows)]
+pub fn start_windows_after_dual_wsl_failure() -> (Result<DaemonStart, String>, DualWindowsFallback) {
+    if !DUAL_HOST_FALLBACK {
+        launch_log("Dual fallback: host fallback is off in this release; using Dual's Windows side");
+        return (
+            ensure_daemon_running_on(BACKEND_ID_WIN, DUAL_WIN_ADDR, true),
+            DualWindowsFallback::DualSide,
+        );
+    }
+    let held = WSL_LOOPBACK_CANDIDATES.map(|addr| {
+        loopback_held(std::net::TcpListener::bind(addr).map(|_| ()))
+    });
+    let mode = std::env::var_os("USERPROFILE")
+        .map(|home| PathBuf::from(home).join(".wslconfig"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| wslconfig_networking_mode(&text));
+    match dual_fallback_choice(DUAL_HOST_FALLBACK, mode.as_deref(), &held) {
+        DualWindowsFallback::Host => match ensure_daemon_running(BACKEND_ID_HOST) {
+            Ok(started) => match require_backend(DEFAULT_DAEMON_ADDR, BACKEND_ID_HOST) {
+                Ok(()) => {
+                    HOST_FALLBACK_OWNS_8787.store(true, Ordering::SeqCst);
+                    launch_log("Dual fallback: Windows daemon runs as host on 127.0.0.1:8787");
+                    return (Ok(started), DualWindowsFallback::Host);
+                }
+                Err(e) => {
+                    launch_log(&format!("Dual fallback: host daemon on 8787 didn't answer as host ({e}); using Dual's Windows side"));
+                    // Stops the host daemon and its watchdog before the
+                    // Windows side starts on the same data folder.
+                    drop(started);
+                }
+            },
+            Err(e) => launch_log(&format!("Dual fallback: host daemon didn't start ({e}); using Dual's Windows side")),
+        },
+        DualWindowsFallback::DualSide => launch_log(&format!(
+            "Dual fallback: 8787 held {held:?} or networking mode {mode:?}; using Dual's Windows side, so Shinoque's phone access needs Windows mode"
+        )),
+    }
+    (
+        ensure_daemon_running_on(BACKEND_ID_WIN, DUAL_WIN_ADDR, true),
+        DualWindowsFallback::DualSide,
+    )
+}
+
+/// Whether the Shinoque desktop app is installed for this Windows user, at
+/// the one path solud's relay accepts (docs/shinoque-windows-relay.md).
+#[cfg(windows)]
+pub fn shinoque_installed() -> bool {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .is_some_and(|dir| dir.join("Shinoque").join("Shinoque.exe").is_file())
+}
+
 pub fn ensure_daemon_running(backend_id: &str) -> Result<DaemonStart, String> {
     ensure_daemon_running_on(backend_id, DEFAULT_DAEMON_ADDR, false)
 }
@@ -1432,7 +1572,14 @@ fn probe_wsl_candidate(addr: &str) -> Result<(), String> {
 /// and never asks the daemon to update.
 #[cfg(windows)]
 fn wsl_backend_answers_now() -> bool {
+    let skip_ipv4 = HOST_FALLBACK_OWNS_8787.load(Ordering::SeqCst);
     WSL_LOOPBACK_CANDIDATES.iter().any(|addr| {
+        // Our own host daemon holds 127.0.0.1:8787 after a Dual fallback; it
+        // is never WSL, and reading the WSL token for it would run wsl.exe
+        // on every poll against the WSL that just failed.
+        if skip_ipv4 && *addr == DEFAULT_DAEMON_ADDR {
+            return false;
+        }
         if !port_alive(addr) {
             return false;
         }
@@ -2111,11 +2258,53 @@ pub fn wsl_start_allowed() -> bool {
 /// This is a low-disk rule, not a "never wake WSL" rule: the running check
 /// happens only below the disk floor. With enough free space the command runs
 /// straight away and starts a stopped distribution like any `wsl -e`. Code
-/// that must not start WSL checks `--list --running` itself first
-/// (agent_detect.rs).
+/// that must not start WSL uses run_wsl_probe_if_running (or checks
+/// `--list --running` itself first, as agent_detect.rs does).
 #[cfg(windows)]
 pub(crate) fn run_wsl_probe_bounded(args: &[&str], timeout: Duration) -> Result<std::process::Output, String> {
     run_wsl_probe_bounded_with_stdin(args, None, timeout)
+}
+
+/// Run a bounded read-only WSL command only when the default distribution is
+/// already running, at any disk level: Err without running it when the default
+/// is stopped or missing, or when the listing fails. For checks that must never
+/// wake WSL (ST-232). Neither listing starts a distribution.
+#[cfg(windows)]
+pub(crate) fn run_wsl_probe_if_running(args: &[&str], timeout: Duration) -> Result<std::process::Output, String> {
+    // Listing never starts a distro and answers fast; a short budget keeps the
+    // whole check near the caller's own timeout.
+    let list_budget = Duration::from_secs(3);
+    let verbose = run_wsl_bounded(&["--list", "--verbose"], list_budget)?;
+    let running = run_wsl_bounded(&["--list", "--running", "--quiet"], list_budget)?;
+    default_wsl_running_from_listings(
+        verbose.status.success(),
+        &decode_wsl_listing(&verbose.stdout),
+        running.status.success(),
+        &decode_wsl_listing(&running.stdout),
+    )?;
+    run_wsl_bounded(args, timeout)
+}
+
+/// The decision behind run_wsl_probe_if_running: Ok only when the default
+/// distribution is listed as running. With nothing running, WSL prints a
+/// notice and exits non-zero; that is an empty list, not a failure (as in
+/// agent_detect.rs).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn default_wsl_running_from_listings(
+    verbose_ok: bool,
+    verbose: &str,
+    running_ok: bool,
+    running: &str,
+) -> Result<(), String> {
+    if !verbose_ok {
+        return Err("WSL distribution listing failed".into());
+    }
+    let running = if running_ok { running } else { "" };
+    if default_wsl_is_running(verbose, running) {
+        Ok(())
+    } else {
+        Err("the default WSL distribution is not running".into())
+    }
 }
 
 /// run_wsl_probe_bounded with optional stdin for the command itself.
@@ -5206,6 +5395,20 @@ mod host_disk_tests {
     }
 
     #[test]
+    fn probe_if_running_never_wakes_a_stopped_or_unknown_default() {
+        let verbose = "  NAME      STATE      VERSION\r\n* Ubuntu    Stopped    2\r\n  Debian    Running    2\r\n";
+        assert!(default_wsl_running_from_listings(true, verbose, true, "Ubuntu\r\n").is_ok());
+        // Another distro running is not enough.
+        assert!(default_wsl_running_from_listings(true, verbose, true, "Debian\r\n").is_err());
+        // Nothing running: WSL exits non-zero with a notice, which is not a
+        // name even if it were to match.
+        assert!(default_wsl_running_from_listings(true, verbose, false, "Ubuntu").is_err());
+        // A failed default listing is unknown, so the probe does not run.
+        assert!(default_wsl_running_from_listings(false, verbose, true, "Ubuntu").is_err());
+        assert!(default_wsl_running_from_listings(true, "", true, "Ubuntu").is_err());
+    }
+
+    #[test]
     fn existing_proxy_connection_survives_unavailable_discovery() {
         let (stream, address) = connect_existing_wsl_upstream(
             "172.22.1.2:8787",
@@ -5432,7 +5635,7 @@ mod host_disk_tests {
     }
 }
 
-/// Translate a Windows path like `C:\Users\benja\file` to `/mnt/c/Users/benja/file`.
+/// Translate a Windows path like `C:\Users\alice\file` to `/mnt/c/Users/alice/file`.
 /// Strips the `\\?\` extended-length prefix that `canonicalize` / some Tauri
 /// path APIs produce on Windows. Returns None for UNC `\\server\share` paths.
 #[cfg(windows)]
@@ -7429,7 +7632,7 @@ mod wsl_port_block_tests {
     #[test]
     fn old_daemon_without_backend_id_is_reported_as_holding_the_port() {
         let port = serve_health(
-            r#"{"status":"ok","version":"0.0.1189","pid":999999,"backendID":"","binaryPath":"/home/benja/.local/bin/solud","fleet":{"components":[{"pid":1,"version":"9.9.9"}]}}"#,
+            r#"{"status":"ok","version":"0.0.1189","pid":999999,"backendID":"","binaryPath":"/home/alice/.local/bin/solud","fleet":{"components":[{"pid":1,"version":"9.9.9"}]}}"#,
         );
         let Some(dir) = scratch_dir("port-held") else { return };
         let script = format!(
@@ -7457,7 +7660,7 @@ mod wsl_port_block_tests {
                 backend: String::new(),
                 version: "0.0.1189".into(),
                 pid: Some(999999),
-                binary: "/home/benja/.local/bin/solud".into(),
+                binary: "/home/alice/.local/bin/solud".into(),
                 visible: false,
                 cgroup: String::new(),
                 distro: "Ubuntu".into(),
@@ -7825,7 +8028,7 @@ mod wsl_port_block_tests {
     #[test]
     fn holder_is_the_distro_where_that_pid_is_solud() {
         let block = parse_wsl_start_status(
-            "state=port-held\npid=600\nversion=0.0.1189\nbinary=/home/benja/.local/bin/solud\ndistro=Ubuntu\nvisible=0\n",
+            "state=port-held\npid=600\nversion=0.0.1189\nbinary=/home/alice/.local/bin/solud\ndistro=Ubuntu\nvisible=0\n",
         )
         .unwrap();
         let running: Vec<String> = ["Ubuntu", "docker-desktop", "Debian", "Ubuntu-24.04"]
@@ -7842,14 +8045,14 @@ mod wsl_port_block_tests {
                 // pid 600 is even a solud here, but it does not own the port
                 "Debian" => Some((
                     false,
-                    "/home/benja/.local/bin/solud".into(),
-                    "/home/benja/.local/bin/solud --addr 127.0.0.1:9999 ".into(),
+                    "/home/alice/.local/bin/solud".into(),
+                    "/home/alice/.local/bin/solud --addr 127.0.0.1:9999 ".into(),
                     "0::/system.slice/other.service".into(),
                 )),
                 "Ubuntu-24.04" => Some((
                     true,
-                    "/home/benja/.local/bin/solud".into(),
-                    "/home/benja/.local/bin/solud --addr 127.0.0.1:8787 ".into(),
+                    "/home/alice/.local/bin/solud".into(),
+                    "/home/alice/.local/bin/solud --addr 127.0.0.1:8787 ".into(),
                     "0::/user.slice/user-1000.slice/user@1000.service/app.slice/soluterminal.service".into(),
                 )),
                 _ => None,
@@ -8157,5 +8360,73 @@ mod headless_update_env_tests {
             headless_wslenv(Some("USERPROFILE/p:SOLU_UPDATE_ONLY/w")),
             format!("USERPROFILE/p:{ALL}")
         );
+    }
+}
+
+#[cfg(test)]
+mod dual_fallback_tests {
+    use super::{
+        dual_fallback_choice, loopback_held, wslconfig_networking_mode, DualWindowsFallback, DUAL_HOST_FALLBACK,
+    };
+    use std::io::{Error, ErrorKind};
+
+    // 0.0.1244 ships with the host fallback off (Benjamin, 16 Nov): with the
+    // shipped flag, no networking mode and no free port ever give Host, so a
+    // failed WSL start runs Dual's Windows side as before #1102.
+    #[test]
+    fn the_shipped_build_never_takes_8787_after_a_failed_wsl_start() {
+        assert!(!DUAL_HOST_FALLBACK, "the Dual host fallback waits for the Azure rig try (1245)");
+        for mode in [None, Some("nat"), Some("mirrored"), Some("consomme"), Some("virtioproxy"), Some("")] {
+            for held in [[false, false], [true, false], [false, true], [true, true]] {
+                assert_eq!(
+                    dual_fallback_choice(DUAL_HOST_FALLBACK, mode, &held),
+                    DualWindowsFallback::DualSide,
+                    "{mode:?} {held:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_takes_8787_only_under_nat_with_both_loopbacks_free_when_enabled() {
+        use DualWindowsFallback::*;
+        for mode in [None, Some("nat")] {
+            assert_eq!(dual_fallback_choice(true, mode, &[false, false]), Host, "{mode:?}");
+            assert_eq!(dual_fallback_choice(true, mode, &[true, false]), DualSide, "{mode:?} IPv4 held");
+            assert_eq!(dual_fallback_choice(true, mode, &[false, true]), DualSide, "{mode:?} IPv6 held");
+        }
+        for mode in ["mirrored", "consomme", "virtioproxy", "bridged", ""] {
+            assert_eq!(dual_fallback_choice(true, Some(mode), &[false, false]), DualSide, "{mode}");
+        }
+    }
+
+    #[test]
+    fn a_bind_failure_means_held_unless_the_address_does_not_exist() {
+        assert!(!loopback_held(Ok(())));
+        assert!(loopback_held(Err(Error::from(ErrorKind::AddrInUse))));
+        assert!(loopback_held(Err(Error::from(ErrorKind::PermissionDenied))));
+        assert!(!loopback_held(Err(Error::from(ErrorKind::AddrNotAvailable))));
+        assert!(!loopback_held(Err(Error::from(ErrorKind::Unsupported))));
+    }
+
+    #[test]
+    fn a_listening_socket_reads_as_held() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert!(loopback_held(std::net::TcpListener::bind(addr).map(|_| ())));
+        drop(listener);
+    }
+
+    #[test]
+    fn reads_the_networking_mode_from_the_wsl2_section_only() {
+        assert_eq!(wslconfig_networking_mode(""), None);
+        assert_eq!(wslconfig_networking_mode("[wsl2]\nmemory=8GB\n"), None);
+        assert_eq!(
+            wslconfig_networking_mode("[wsl2]\r\nnetworkingMode = Mirrored # shared ports\r\n").as_deref(),
+            Some("mirrored")
+        );
+        assert_eq!(wslconfig_networking_mode("[WSL2]\nnetworkingmode=nat\n").as_deref(), Some("nat"));
+        assert_eq!(wslconfig_networking_mode("[experimental]\nnetworkingMode=mirrored\n"), None);
+        assert_eq!(wslconfig_networking_mode("[wsl2]\n# networkingMode=mirrored\n"), None);
     }
 }

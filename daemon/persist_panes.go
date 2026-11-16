@@ -54,7 +54,7 @@ type PersistedPane struct {
 	// omitempty keeps every legacy panes.json entry byte-identical.
 	HarnessSessionID string `json:"harnessSessionId,omitempty"`
 	HarnessProvider  string `json:"harnessProvider,omitempty"`
-	// CodexTurnInFlight records that a Codex Focus turn was underway and had
+	// CodexTurnInFlight records that a Codex turn was underway and had
 	// not reported an end when this entry was last written. Surviving as true
 	// across a restart is the daemon's ONLY evidence that the previous process
 	// died mid-turn: Codex resumes a crash-orphaned turn and a user-interrupted
@@ -93,7 +93,6 @@ type PersistedPane struct {
 	// plain bool would erase exactly that choice. Absent unmarshals to nil, so
 	// every legacy panes.json entry stays byte-identical.
 	AnnounceDelegationEvents *bool  `json:"announceDelegationEvents,omitempty"`
-	Narrating                bool   `json:"narrating,omitempty"`
 	Flagged                  bool   `json:"flagged,omitempty"`
 	FlagMemo                 string `json:"flagMemo,omitempty"`
 	FlagOwner                string `json:"flagOwner,omitempty"`
@@ -106,28 +105,10 @@ type PersistedPane struct {
 	Origin   *PaneOrigin   `json:"origin,omitempty"`
 	Review   *PaneReview   `json:"review,omitempty"`
 	Identity *PaneIdentity `json:"identity,omitempty"`
-	// NativeAllowlist persists the native pane's "always allow this tool" set
-	// (sorted tool names) so the user's per-pane opt-ins survive a daemon
-	// restart + resume, mirroring how ClaudeSessionID is persisted.
-	NativeAllowlist []string `json:"nativeAllowlist,omitempty"`
 	// LastPrompts persists the pane's recent submitted-input history
 	// (newest first, capped) so the pane-header strip survives daemon
 	// restarts the same way titles and flags do.
 	LastPrompts []string `json:"lastPrompts,omitempty"`
-	// PendingSwitch persists an ARMED deferred mode switch ("switch to X when
-	// Claude finishes") so a daemon restart — most often the update flow itself,
-	// exactly when users arm one — re-arms it instead of silently dropping the
-	// user's intent. RequestedAt preserves the original arm time so the watcher's
-	// max-wait cap is honored across the restart. omitempty keeps legacy entries
-	// byte-identical; only restored for a live reattach (a dead agent's pending
-	// switch is moot and SuspendExisting drops it).
-	PendingSwitch *PersistedPendingSwitch `json:"pendingSwitch,omitempty"`
-}
-
-// PersistedPendingSwitch is the on-disk shape of an armed deferred switch.
-type PersistedPendingSwitch struct {
-	Target      string `json:"target"` // "" (terminal) | "native"
-	RequestedAt int64  `json:"requestedAt"`
 }
 
 type paneStore interface {
@@ -418,11 +399,6 @@ func (s *PaneStore) FromPane(p *Pane) PersistedPane {
 	}
 	p.subsMu.Unlock()
 	sort.Strings(entry.OwnerRetirementPendingDevices)
-	// Composed ALONGSIDE the snapshot, not inside it: pendingSwitchMu is a LEAF
-	// lock (never taken while holding p.mu), and Snapshot holds p.mu.
-	if pend := p.pendingSwitchSnapshot(); pend != nil {
-		entry.PendingSwitch = &PersistedPendingSwitch{Target: pend.Target, RequestedAt: pend.RequestedAt}
-	}
 	return entry
 }
 
@@ -461,7 +437,6 @@ func persistedFromSnapshot(snap PaneSnapshot) PersistedPane {
 		AutoMode:                 snap.AutoMode,
 		NeverAutoAnswer:          snap.NeverAutoAnswer,
 		AnnounceDelegationEvents: snap.AnnounceDelegationEvents,
-		Narrating:                snap.Narrating,
 		Flagged:                  snap.Flagged,
 		FlagMemo:                 snap.FlagMemo,
 		FlagOwner:                snap.FlagOwner,
@@ -471,7 +446,6 @@ func persistedFromSnapshot(snap PaneSnapshot) PersistedPane {
 		Origin:                   snap.Origin.clone(),
 		Review:                   snap.Review.clone(),
 		Identity:                 snap.Identity.clone(),
-		NativeAllowlist:          snap.NativeAllowlist,
 		LastPrompts:              snap.LastPrompts,
 	}
 }
@@ -521,12 +495,7 @@ func clonePersistedPane(p PersistedPane) PersistedPane {
 	p.ProcessScope = cloneValuePtr(p.ProcessScope)
 	p.Cmd = cloneStringSlice(p.Cmd)
 	p.LastPrompts = cloneStringSlice(p.LastPrompts)
-	p.NativeAllowlist = cloneStringSlice(p.NativeAllowlist)
 	p.OwnerRetirementPendingDevices = cloneStringSlice(p.OwnerRetirementPendingDevices)
-	if p.PendingSwitch != nil {
-		cp := *p.PendingSwitch
-		p.PendingSwitch = &cp
-	}
 	return p
 }
 

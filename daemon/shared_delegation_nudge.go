@@ -21,5 +21,4 @@ const (
 	delegationNudgeTitleFloorRunes = 12
 	delegationIdleSettle           = 3 * time.Second
 	delegationComposerStaleAfter   = 15 * time.Minute
-	delegationComposerPresenceTTL  = 90 * time.Second
 )

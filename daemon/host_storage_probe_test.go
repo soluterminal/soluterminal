@@ -26,8 +26,8 @@ func testHostProber(t *testing.T, output string) (*hostStorageProber, *atomic.In
 }
 
 func TestWfHostStorageProbeParsesAndCaches(t *testing.T) {
-	path := `C:\Users\benja\AppData\Local\wsl\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}\ext4.vhdx`
-	p, calls := testHostProber(t, "noise\n"+`{"ok":true,"distro":"Ubuntu","vhdx":"`+strings.ReplaceAll(path, `\`, `\\`)+`","vhdxUnresolved":false,"volume":"C:\\","freeBytes":42949672960,"totalBytes":2199023255552,"vhdxLogicalBytes":1099511627776,"vhdxPhysicalBytes":593880940544,"sparse":false,"localAppData":"C:\\Users\\benja\\AppData\\Local","ownerSid":"S-1-5-21-1000","basePath":"C:\\Users\\benja\\AppData\\Local\\wsl\\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}","registrationCount":1,"reparsePoint":false,"error":""}`+"\n")
+	path := `C:\Users\alice\AppData\Local\wsl\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}\ext4.vhdx`
+	p, calls := testHostProber(t, "noise\n"+`{"ok":true,"distro":"Ubuntu","vhdx":"`+strings.ReplaceAll(path, `\`, `\\`)+`","vhdxUnresolved":false,"volume":"C:\\","freeBytes":42949672960,"totalBytes":2199023255552,"vhdxLogicalBytes":1099511627776,"vhdxPhysicalBytes":593880940544,"sparse":false,"localAppData":"C:\\Users\\alice\\AppData\\Local","ownerSid":"S-1-5-21-1000","basePath":"C:\\Users\\alice\\AppData\\Local\\wsl\\{5383f6f1-705c-4162-b2bd-40aea9d4a65d}","registrationCount":1,"reparsePoint":false,"error":""}`+"\n")
 	s := p.Sample(context.Background())
 	if !s.Available || s.State != hostStorageOK || s.Volume != `C:\` || s.FreeBytes != 42949672960 || s.VHDXSparse == nil || *s.VHDXSparse {
 		t.Fatalf("unexpected sample: %+v", s)

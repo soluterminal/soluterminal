@@ -10,7 +10,6 @@ it('requires completion evidence instead of an idle timeout', () => {
   expect(paneRowStatus({ ...p, turn: undefined })).toBe('idle');
   expect(paneRowStatus(p)).toBe('finished');
   expect(paneRowStatus({ ...p, turn: { ...p.turn!, active: true } })).toBe('busy');
-  expect(paneRowStatus({ ...p, workflowStatus: { running: true, agentsTotal: 2, agentsDone: 1, lastActivityMs: 0 } })).toBe('busy');
 });
 it('honours daemon attention and suppresses auto-approval alerts', () => {
   expect(paneRowStatus({ ...p, state: 'choice-prompt', attention: 'needs-user' })).toBe('needs-you');

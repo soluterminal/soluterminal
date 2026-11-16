@@ -25,7 +25,7 @@ export function WorkerNoticesChip({ pane }: { pane: PaneInfo }) {
   };
   return <span className="pane-worker-notices" title={notices.map((note) => `• ${note.text}`).join('\n')}
     onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-    <span className="pane-worker-notices-label">{notices.length === 1 ? notices[0].text : `Workers kept open: ${notices.length}`}</span>
+    <span className="pane-worker-notices-label">{notices.length === 1 ? notices[0].text : `Worker notes: ${notices.length}`}</span>
     <button type="button" disabled={pending} onClick={() => void dismiss()}>{notices.length === 1 ? 'Dismiss' : 'Dismiss notes'}</button>
   </span>;
 }

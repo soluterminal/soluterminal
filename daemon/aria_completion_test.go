@@ -273,75 +273,6 @@ func TestCompletionEndpointHasOneBoundary(t *testing.T) {
 	}
 }
 
-func TestNativeCautiousCompletionBoundary(t *testing.T) {
-	completionTestVerdict(t, true)
-	for _, sensitive := range []bool{false, true} {
-		a, calls := completionTestServer(t)
-		p := testPaneWithTail(t, "native-completion", "Fixture", "")
-		p.Kind = "native"
-		input := json.RawMessage(`{"command":"pwd"}`)
-		if sensitive {
-			input = json.RawMessage(`{"command":"echo password=fixture"}`)
-		}
-		ap := &NativeApproval{RequestID: "fixture-request", ToolName: "Bash", RawInput: input}
-		p.setNativePending(ap)
-		a.mgr = testManagerWithPane(p)
-		if fired, _ := a.runNativeApprovalTurn(context.Background(), p.ID, p.Title, ap, "Review", "automode_cautious", 0, true); fired {
-			t.Fatal("text-only or refused decision approved a permission")
-		}
-		if p.peekNativePending(ap.RequestID) == nil {
-			t.Fatal("permission did not remain for the human")
-		}
-		want := int32(1)
-		if sensitive {
-			want = 0
-		}
-		if calls.Load() != want {
-			t.Fatalf("native cautious calls=%d, want %d", calls.Load(), want)
-		}
-	}
-}
-
-func TestNativeCompletionChecksStructuredArguments(t *testing.T) {
-	completionTestVerdict(t, true)
-	for _, tc := range []struct {
-		name, tool, raw string
-		allowed         bool
-	}{
-		{"safe Write", "Write", `{"file_path":"file.txt","content":"ordinary text"}`, true},
-		{"safe Bash", "Bash", `{"command":"printf hello"}`, true},
-		{"safe duplicate field", "Write", `{"content":"one","content":"two"}`, true},
-		{"Write JSON key", "Write", `{"file_path":"file.txt","content":"{\"api_key\":\"fixture-value\"}"}`, false},
-		{"Write escaped JSON key", "Write", `{"content":"{\"\\u0061pi_key\":\"fixture-value\"}"}`, false},
-		{"Write numeric credential", "Write", `{"content":"{\"password\":123456}"}`, false},
-		{"Write large numeric credential", "Write", `{"content":"{\"password\":1e500}"}`, false},
-		{"Bash JSON body", "Bash", `{"command":"curl -d '{\"password\":\"fixture-value\"}'"}`, false},
-		{"duplicate hides credential", "Bash", `{"command":"curl -d '{\"password\":\"fixture-value\"}'","command":"pwd"}`, false},
-		{"malformed arguments", "Write", `{`, false},
-		{"oversize whole arguments", "Write", `{"content":"` + strings.Repeat(" ", ariaJevMaxTailBytes) + `"}`, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a, calls := completionTestServer(t)
-			p := testPaneWithTail(t, "native-structured", "Fixture", "")
-			p.Kind, p.AutoMode = "native", "cautious"
-			ap := &NativeApproval{RequestID: "fixture-request", ToolName: tc.tool, RawInput: json.RawMessage(tc.raw)}
-			p.setNativePending(ap)
-			a.mgr = testManagerWithPane(p)
-			fired, evaluated := a.runNativeApprovalTurn(context.Background(), p.ID, p.Title, ap, "Review", "automode_cautious", 0, true)
-			if fired || p.peekNativePending(ap.RequestID) == nil {
-				t.Fatal("synthetic native approval did not stay with the person")
-			}
-			want := int32(0)
-			if tc.allowed {
-				want = 1
-			}
-			if calls.Load() != want || evaluated != tc.allowed {
-				t.Fatal("structured argument check did not control the native request")
-			}
-		})
-	}
-}
-
 func TestCompletionDecodesJSONEmbeddedInStrings(t *testing.T) {
 	completionTestVerdict(t, true)
 	a, calls := completionTestServer(t)
@@ -591,225 +522,65 @@ func TestCompletionRefusalMemoRearms(t *testing.T) {
 	}
 }
 
-func TestNativeCompletionRefusalIsNeutral(t *testing.T) {
+func TestCompletionModelDeclineStaysOutOfAttentionAndPush(t *testing.T) {
 	completionTestVerdict(t, true)
-	a, calls := completionTestServer(t)
-	p := testPaneWithTail(t, "native-neutral", "Fixture", "")
-	p.Kind = "native"
-	p.AutoMode = "cautious"
-	p.setNativePending(&NativeApproval{RequestID: "fixture-request", ToolName: "Bash", RawInput: json.RawMessage(`{"command":"echo password=fixture"}`)})
-	a.mgr = testManagerWithPane(p)
-	a.evalLog = newAriaEvalLog()
-	a.metrics = NewMetrics()
-	for i := 0; i < 3; i++ {
-		a.evaluateNativeObservation(context.Background(), p.ID, p.Title, p, "Review", "automode_cautious", 0, true)
+	t.Setenv(ariaJevAutoEnv, "0")
+	const marker = "MODEL_DECLINE_MARKER"
+	modelReason := marker + strings.Repeat(" untrusted model explanation", 100)
+	delta, err := json.Marshal(map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": modelReason}})
+	if err != nil {
+		t.Fatal("could not encode synthetic model reply")
 	}
-	if calls.Load() != 0 || a.BackoffStreak(p.ID) != 0 || a.metrics.AriaEvalErrorsTotal.Load() != 0 {
-		t.Fatal("native local refusal sent or counted a provider failure")
-	}
-	if !p.hasNativePending() || !a.completionRefused(p) {
-		t.Fatal("native refusal was not retained for human review")
-	}
-}
-
-func TestNativeCompletionRefusalEndsWhenPersonAnswers(t *testing.T) {
-	completionTestVerdict(t, true)
-	a, calls := completionTestServer(t)
-	p, agentEnd := nativePaneForApproval(t, "native-refusal-answer")
-	p.AutoMode = "cautious"
-	ap := &NativeApproval{RequestID: "refused-request", ToolUseID: "refused-tool", ToolName: "Bash", RawInput: json.RawMessage(`{"command":"echo password=fixture"}`)}
-	p.setNativePending(ap)
-	a.mgr = testManagerWithPane(p)
-	if fired, evaluated := a.runNativeApprovalTurn(context.Background(), p.ID, p.Title, ap, "Review", "automode_cautious", 0, true); fired || evaluated || !a.completionRefused(p) {
-		t.Fatal("native local refusal was not retained")
-	}
-	position := atomic.LoadInt64(&p.LastAckedChoicePromptPos)
-	events := a.uiBus.subscribe()
-	defer a.uiBus.unsubscribe(events)
-	ctx, cancel := context.WithCancel(context.Background())
-	watchDone := make(chan struct{})
-	go func() {
-		defer close(watchDone)
-		startAriaWatcher(ctx, a.mgr, a.uiBus, a)
-	}()
-	defer func() { cancel(); <-watchDone }()
-	// Synchronize the watcher subscription before publishing the real state edge.
-	deadline := time.Now().Add(time.Second)
-	for {
-		a.uiBus.mu.RLock()
-		ready := len(a.uiBus.subscribers) == 2
-		a.uiBus.mu.RUnlock()
-		if ready {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("watcher did not subscribe")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	readDone := make(chan error, 1)
-	go func() {
-		_ = agentEnd.SetReadDeadline(time.Now().Add(2 * time.Second))
-		_, _, err := ReadFrame(agentEnd)
-		readDone <- err
-	}()
-	if _, err := p.resolveApproval(ap.RequestID, false, ""); err != nil {
-		t.Fatal("person could not answer the synthetic approval")
-	}
-	if err := <-readDone; err != nil {
-		t.Fatal("synthetic agent did not receive the answer")
-	}
-	if atomic.LoadInt64(&p.LastAckedChoicePromptPos) != position {
-		t.Fatal("fixture unexpectedly advanced the approval position")
-	}
-	if a.completionRefused(p) {
-		t.Fatal("answered request still suppressed observations")
-	}
-	_, _ = p.buffer.Write([]byte("The next turn needs input?\n"))
-	a.uiBus.publish(uiEvent{Type: "pane-state", PaneID: p.ID, PaneTitle: p.Title, ToState: string(StateAwaitingInput)})
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	for {
-		select {
-		case evt := <-events:
-			if evt.Type == "aria-observation" {
-				if evt.ToState != string(StateAwaitingInput) || !strings.Contains(evt.Text, "The next turn needs input?") {
-					t.Fatal("watcher retained a stale approval observation")
-				}
-				if calls.Load() != 0 {
-					t.Fatal("local refusal or next input observation sent a completion")
-				}
-				return
-			}
-		case <-timer.C:
-			t.Fatal("watcher dropped the post-answer observation")
-		}
-	}
-}
-
-func TestNativeCompletionRefusalDoesNotBlockSiblingRetry(t *testing.T) {
-	completionTestVerdict(t, true)
-	a, _ := completionTestServer(t)
 	var calls atomic.Int32
+	pushBodies := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/aria/complete" {
+		switch r.URL.Path {
+		case "/api/aria/complete":
+			calls.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n"+
+				"data: "+string(delta)+"\n\n"+
+				"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"+
+				"data: {\"type\":\"message_stop\"}\n\n")
+		case "/api/internal/notify":
+			body, _ := io.ReadAll(r.Body)
+			pushBodies <- body
 			w.WriteHeader(http.StatusNoContent)
-			return
+		default:
+			w.WriteHeader(http.StatusNoContent)
 		}
-		if calls.Add(1) == 1 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"message_stop\"}\n\n")
 	}))
 	t.Cleanup(server.Close)
-	a.setCloudCreds(server.URL, "synthetic-credential")
-	p := testPaneWithTail(t, "native-refusal-siblings", "Fixture", "")
-	p.Kind, p.AutoMode = "native", "cautious"
-	refused := &NativeApproval{RequestID: "a-refused", ToolName: "Bash", RawInput: json.RawMessage(`{"command":"echo password=fixture"}`)}
-	retry := &NativeApproval{RequestID: "b-retry", ToolName: "Bash", RawInput: json.RawMessage(`{"command":"ls"}`)}
-	p.setNativePending(refused)
-	p.setNativePending(retry)
-	a.mgr = testManagerWithPane(p)
+	a, p, _, _ := cautiousRenderedFixture(t, cautiousRenderedCodexMenu)
+	a.teamFeatures = func() bool { return true }
+	a.settings = &ariaSettingsStore{}
+	a.evalLog = newAriaEvalLog()
 	a.sweepStreaks = map[string]*sweepStreak{}
-	for i := int32(1); i <= 2; i++ {
-		a.evaluateNativeObservation(context.Background(), p.ID, p.Title, p, "Review", "automode_cautious", 0, true)
-		if calls.Load() != i {
-			t.Fatal("sibling's transient failure was not retried exactly once")
-		}
-		if !a.nativeCompletionRefused(p, refused.RequestID) || a.nativeCompletionRefused(p, retry.RequestID) || a.completionRefused(p) {
-			t.Fatal("local refusal suppressed an unrefused sibling")
-		}
+	a.setCloudCreds(server.URL, "synthetic-credential")
+	a.attention = newAttentionEngine(a.mgr)
+	a.attention.SetAria(a)
+	a.evaluateObservation(context.Background(), p.ID, p.Title, tailOfPane(p, 30))
+	if calls.Load() != 1 {
+		t.Fatal("fixture did not evaluate a model decline")
 	}
-	p.takeNativePending(retry.RequestID)
-	if !a.completionRefused(p) {
-		t.Fatal("unchanged refused request was not suppressed")
+	outcomes := a.recentEvalOutcomes(p.ID)
+	if len(outcomes) == 0 || outcomes[0].Kind != "declined" || !strings.Contains(outcomes[0].Reason, marker) || len(outcomes[0].Reason) > ariaEvalLogReasonMax {
+		t.Fatal("model explanation was not retained in the bounded evaluation record")
 	}
-	p.takeNativePending(refused.RequestID)
-	if a.completionRefused(p) {
-		t.Fatal("empty pending set retained a refusal")
+	if state, reason := p.AttentionNow(); state != AttentionNeedsUser || reason != ariaModelDeclineReason {
+		t.Fatal("attention did not use a fixed local decline reason")
 	}
-}
-
-func TestCompletionModelDeclineStaysOutOfAttentionAndPush(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		t.Run("native="+strconv.FormatBool(native), func(t *testing.T) {
-			completionTestVerdict(t, true)
-			t.Setenv(ariaJevAutoEnv, "0")
-			t.Setenv("SOLU_ARIA_NATIVE_AUTO", "1")
-			const marker = "MODEL_DECLINE_MARKER"
-			modelReason := marker + strings.Repeat(" untrusted model explanation", 100)
-			delta, err := json.Marshal(map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": modelReason}})
-			if err != nil {
-				t.Fatal("could not encode synthetic model reply")
-			}
-			var calls atomic.Int32
-			pushBodies := make(chan []byte, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/api/aria/complete":
-					calls.Add(1)
-					_, _ = io.Copy(io.Discard, r.Body)
-					w.Header().Set("Content-Type", "text/event-stream")
-					_, _ = io.WriteString(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n"+
-						"data: "+string(delta)+"\n\n"+
-						"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"+
-						"data: {\"type\":\"message_stop\"}\n\n")
-				case "/api/internal/notify":
-					body, _ := io.ReadAll(r.Body)
-					pushBodies <- body
-					w.WriteHeader(http.StatusNoContent)
-				default:
-					w.WriteHeader(http.StatusNoContent)
-				}
-			}))
-			t.Cleanup(server.Close)
-			var a *Aria
-			var p *Pane
-			if native {
-				a, _ = completionTestServer(t)
-				p = testPaneWithTail(t, "native-model-decline", "Fixture", "")
-				p.Kind, p.AutoMode = "native", "cautious"
-				p.setNativePending(&NativeApproval{RequestID: "fixture-request", ToolName: "Read", RawInput: json.RawMessage(`{"file_path":"file.txt"}`)})
-				a.mgr = testManagerWithPane(p)
-			} else {
-				a, p, _, _ = cautiousRenderedFixture(t, cautiousRenderedCodexMenu)
-			}
-			a.teamFeatures = func() bool { return true }
-			a.settings = &ariaSettingsStore{}
-			a.evalLog = newAriaEvalLog()
-			a.sweepStreaks = map[string]*sweepStreak{}
-			a.setCloudCreds(server.URL, "synthetic-credential")
-			a.attention = newAttentionEngine(a.mgr)
-			a.attention.SetAria(a)
-			if native {
-				a.evaluateNativeObservation(context.Background(), p.ID, p.Title, p, "Review", "automode_cautious", 0, true)
-			} else {
-				a.evaluateObservation(context.Background(), p.ID, p.Title, tailOfPane(p, 30))
-			}
-			if calls.Load() != 1 {
-				t.Fatal("fixture did not evaluate a model decline")
-			}
-			outcomes := a.recentEvalOutcomes(p.ID)
-			if len(outcomes) == 0 || outcomes[0].Kind != "declined" || !strings.Contains(outcomes[0].Reason, marker) || len(outcomes[0].Reason) > ariaEvalLogReasonMax {
-				t.Fatal("model explanation was not retained in the bounded evaluation record")
-			}
-			if state, reason := p.AttentionNow(); state != AttentionNeedsUser || reason != ariaModelDeclineReason {
-				t.Fatal("attention did not use a fixed local decline reason")
-			}
-			pusher := &Pusher{cloudBase: server.URL, token: "synthetic-credential", client: server.Client()}
-			pusher.fire(p, string(StateChoicePrompt))
-			var body []byte
-			select {
-			case body = <-pushBodies:
-			case <-time.After(2 * time.Second):
-				t.Fatal("synthetic notification was not delivered")
-			}
-			var fields map[string]string
-			if json.Unmarshal(body, &fields) != nil || fields["reason"] != ariaModelDeclineReason || strings.Contains(string(body), marker) {
-				t.Fatal("phone notification included a model explanation")
-			}
-		})
+	pusher := &Pusher{cloudBase: server.URL, token: "synthetic-credential", client: server.Client()}
+	pusher.fire(p, string(StateChoicePrompt))
+	var body []byte
+	select {
+	case body = <-pushBodies:
+	case <-time.After(2 * time.Second):
+		t.Fatal("synthetic notification was not delivered")
+	}
+	var fields map[string]string
+	if json.Unmarshal(body, &fields) != nil || fields["reason"] != ariaModelDeclineReason || strings.Contains(string(body), marker) {
+		t.Fatal("phone notification included a model explanation")
 	}
 }

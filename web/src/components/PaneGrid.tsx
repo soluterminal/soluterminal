@@ -11,14 +11,14 @@ import { currentRoutingScope } from '../api';
 import type { Layout, PaneInfo } from '../types';
 import { PaneRecovery } from './PaneRecovery';
 import { PaneSlot } from './PaneSlot';
-import { NativePane } from './NativePane';
+import { RetiredFocusPane } from './RetiredFocusPane';
 import { BrowserPane } from './BrowserPane';
 import { FileTile } from './FileTile';
 import { DiffTile } from './DiffTile';
 
 function renderPaneLeaf(pane: PaneInfo, _paneIndex: number) {
  if (pane.recoveryError) return <PaneRecovery key={pane.id + ':r'} pane={pane} />;
- if (pane.kind === 'native') return <NativePane key={pane.id + ':n'} pane={pane} />;
+ if (pane.kind === 'native') return <RetiredFocusPane key={pane.id + ':n'} pane={pane} />;
  return <PaneSlot key={pane.id} paneId={pane.id} />;
 }
 

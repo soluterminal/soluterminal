@@ -18,6 +18,7 @@ import { canUpdateThisComputerHere, THIS_COMPUTER_PHASE_LABEL, updateThisCompute
 import { UPDATE_CHECK_FAILED } from '../lib/updateErrors';
 import { useIsMobileDevice } from './useIsMobileView';
 import { useDismiss } from './useDismiss';
+import { AGENT_MESSAGING_UPDATE_WAIT } from './AgentMessagingChip';
 import { useDaemonHealth } from '../lib/useDaemonHealth';
 import { useVersionIdentity } from '../lib/useVersionIdentity';
 
@@ -265,8 +266,14 @@ export function VersionPopover({ anchor, status, currentFallback, onClose, place
     } else {
       buttonSub = `⏳ ${invocationCopy} draining${deadlineCopy}`;
     }
+  } else if (queued && queuedCause === 'agent-messaging-paused') {
+    buttonSub = AGENT_MESSAGING_UPDATE_WAIT;
   } else if (queued) {
     buttonSub = '⏳ Applies when active work finishes';
+  } else if (available && status?.idleWaitCause === 'agent-messaging-paused') {
+    // The automatic update waits on the person's pause; a forgotten pause
+    // must not stall updates silently.
+    buttonSub = AGENT_MESSAGING_UPDATE_WAIT;
   } else if (shellAutoRestart) {
     const seconds = Math.max(0, Math.ceil((shellAutoRestart.deadlineMs - Date.now()) / 1000));
     buttonSub = `↻ Restarts automatically in ${seconds}s`;

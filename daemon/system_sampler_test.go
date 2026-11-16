@@ -61,6 +61,34 @@ func TestSystemLevelsThresholdsHysteresisAndUnknown(t *testing.T) {
 	}
 }
 
+// The retired engine and the runtime table are reported under Areas and never
+// decide the verdict: a machine whose only findings are those two reads ok,
+// with no reasons, so the footer stays a quiet "System".
+func TestSystemLevelsVerdictLeavesOutEngineAndRuntimes(t *testing.T) {
+	free, total, available := int64(50_000), int64(100_000), int64(10_000)
+	rss, cpu := 100.0, 2.0
+	sample := systemSample{
+		DiskFreeMB: &free, DiskTotalMB: &total, DiskFloorMB: 1024,
+		MemAvailableMB: &available, MemFloorMB: 1024,
+		DaemonRssMB: &rss, DaemonCpuPct: &cpu, MemGuardMB: 6144,
+		EngineUnknown: true, RuntimesWarn: true, RuntimesUnhealthy: 1,
+	}
+	_, state := systemLevels(sample, time.Unix(1, 0), levelState{})
+	levels, _ := systemLevels(sample, time.Unix(16, 0), state)
+	if levels.Overall != "ok" || levels.Reason != "" || len(levels.Reasons) != 0 {
+		t.Fatalf("verdict = %q reason %q reasons %+v, want ok with none", levels.Overall, levels.Reason, levels.Reasons)
+	}
+	if levels.Areas["engine"] != "unknown" || levels.Areas["runtimes"] != "warn" {
+		t.Fatalf("areas = %+v, want engine unknown and runtimes warn still reported", levels.Areas)
+	}
+	// A real finding still decides the verdict beside them.
+	sample.AutomationWarn, sample.AutomationErrors24h = true, 2
+	levels, _ = systemLevels(sample, time.Unix(31, 0), state)
+	if levels.Overall != "warn" || len(levels.Reasons) != 1 || levels.Reasons[0].Key != "automation" {
+		t.Fatalf("verdict = %+v, want a warning from automation alone", levels)
+	}
+}
+
 func TestSystemLevelsBoundariesAndDiscreteAreas(t *testing.T) {
 	healthy := func() systemSample {
 		free, total, available := int64(50_000), int64(100_000), int64(10_000)

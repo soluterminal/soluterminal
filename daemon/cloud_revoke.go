@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,6 +23,12 @@ import (
 
 const (
 	cloudRevokeFile = "cloud_revoke_pending.json"
+	// cloudRevokeRefusedFile records that the cloud refused a revoke (a 4xx
+	// other than 404), so the app can tell the person to remove the computer
+	// in Your machines. It holds a time and the cloud base only: no key, no
+	// token.
+	cloudRevokeRefusedFile = "cloud_revoke_refused.json"
+
 	// cloudRevokeMaxAge drops a revoke the cloud never confirmed. By then a
 	// rotated token or a manual "Remove computer" has long made it moot.
 	cloudRevokeMaxAge  = 30 * 24 * time.Hour
@@ -149,6 +154,11 @@ type cloudRevoker struct {
 	queue  *cloudRevokeQueue
 	client *http.Client
 	kick   chan struct{}
+	// inflight holds the revokes being sent right now, so Disconnect's own
+	// attempt and the background flush never send the same one twice (the
+	// second would get 404 and read as "unlisted" after a real removal).
+	inflightMu sync.Mutex
+	inflight   map[pendingCloudRevoke]bool
 	// retryMin and retryMax bound the backoff; tests shrink them.
 	retryMin, retryMax time.Duration
 }
@@ -172,21 +182,61 @@ func (r *cloudRevoker) enqueue(p *pendingCloudRevoke) error {
 	if err := r.queue.add(*p); err != nil {
 		return err
 	}
+	r.wake()
+	return nil
+}
+
+// wake asks the background sender to flush now.
+func (r *cloudRevoker) wake() {
+	if r == nil {
+		return
+	}
 	select {
 	case r.kick <- struct{}{}:
 	default:
 	}
-	return nil
 }
 
-// queueCloudRevoke persists a revoke and wakes the revoker. Without a running
-// revoker (tests) the record is still written, for the next run to send.
+// queued reports whether p is still waiting to be sent.
+func (r *cloudRevoker) queued(p pendingCloudRevoke) bool {
+	for _, it := range r.queue.list() {
+		if it == p {
+			return true
+		}
+	}
+	return false
+}
+
+// claim marks p as being sent; false when it already is.
+func (r *cloudRevoker) claim(p pendingCloudRevoke) bool {
+	r.inflightMu.Lock()
+	defer r.inflightMu.Unlock()
+	if r.inflight[p] {
+		return false
+	}
+	if r.inflight == nil {
+		r.inflight = map[pendingCloudRevoke]bool{}
+	}
+	r.inflight[p] = true
+	return true
+}
+
+func (r *cloudRevoker) release(p pendingCloudRevoke) {
+	r.inflightMu.Lock()
+	defer r.inflightMu.Unlock()
+	delete(r.inflight, p)
+}
+
+// queueCloudRevoke persists a revoke without waking the sender: Disconnect
+// makes the first attempt itself and wakes the sender only if that attempt is
+// still pending. Without a revoker (tests) the record is written for the next
+// run to send.
 func (a *apiServer) queueCloudRevoke(p *pendingCloudRevoke) error {
 	if p == nil {
 		return nil
 	}
 	if a.cloudRevoker != nil {
-		return a.cloudRevoker.enqueue(p)
+		return a.cloudRevoker.queue.add(*p)
 	}
 	return (&cloudRevokeQueue{dataDir: a.dataDir}).add(*p)
 }
@@ -213,6 +263,29 @@ func (r *cloudRevoker) run(ctx context.Context) {
 	}
 }
 
+// cloudRevokeDisconnectWait bounds how long Disconnect waits for the first
+// send, so it can say what happened. The token is already deleted by then.
+// A var so tests can shorten it.
+var cloudRevokeDisconnectWait = 3 * time.Second
+
+// cloudRevokeOutcome is what a revoke came to, as Disconnect reports it.
+type cloudRevokeOutcome string
+
+const (
+	// revokeRemoved: the cloud removed the computer (2xx).
+	revokeRemoved cloudRevokeOutcome = "removed"
+	// revokeUnlisted: the cloud answered 404, which by design means either
+	// "no such computer" or "wrong key" (so the endpoint can't be used to
+	// probe machine ids). Done, but never called a removal.
+	revokeUnlisted cloudRevokeOutcome = "unlisted"
+	// revokeRefused: any other 4xx. The cloud won't accept this request, so
+	// it is dropped and the person is told to remove the computer by hand.
+	revokeRefused cloudRevokeOutcome = "refused"
+	// revokePending: no answer yet (network error, 429, 5xx); retried in the
+	// background.
+	revokePending cloudRevokeOutcome = "pending"
+)
+
 // flush tries every pending revoke once. It reports whether the queue is now
 // empty.
 func (r *cloudRevoker) flush(ctx context.Context) bool {
@@ -223,42 +296,123 @@ func (r *cloudRevoker) flush(ctx context.Context) bool {
 			r.queue.remove(p)
 			continue
 		}
-		if err := r.send(ctx, p); err != nil {
-			slog.Info("cloud revoke: will retry", "machine", p.MachineID, "err", err)
-			continue
+		if !r.claim(p) {
+			continue // Disconnect is sending it right now
 		}
-		r.queue.remove(p)
+		if r.queued(p) { // not settled by Disconnect since the list was read
+			r.settle(p, r.send(ctx, p))
+		}
+		r.release(p)
 	}
 	return len(r.queue.list()) == 0
 }
 
-var errCloudRevokeRetry = errors.New("cloud did not confirm the revoke")
+// attempt sends one revoke now, for Disconnect, and settles it like the
+// background sender would. A pending outcome stays queued for retry.
+func (r *cloudRevoker) attempt(ctx context.Context, p pendingCloudRevoke) cloudRevokeOutcome {
+	if !r.claim(p) {
+		return revokePending // the background sender has it; it will settle it
+	}
+	defer r.release(p)
+	if !r.queued(p) {
+		return revokePending // the background sender already settled it
+	}
+	outcome := r.send(ctx, p)
+	r.settle(p, outcome)
+	if outcome == revokePending {
+		r.wake()
+	}
+	return outcome
+}
 
-// send posts one revoke. nil means done: the cloud removed the machine, or
-// answered that it no longer exists (404) or will never accept this request
-// (other 4xx). A network error, 429 or 5xx is retried.
-func (r *cloudRevoker) send(ctx context.Context, p pendingCloudRevoke) error {
+// settle removes a revoke that is done and records a refusal.
+func (r *cloudRevoker) settle(p pendingCloudRevoke, outcome cloudRevokeOutcome) {
+	switch outcome {
+	case revokePending:
+		return
+	case revokeRefused:
+		if err := writeCloudRevokeRefused(r.queue.dataDir, p.CloudBase, time.Now()); err != nil {
+			slog.Warn("cloud revoke: could not record the refusal", "err", err)
+		}
+	}
+	r.queue.remove(p)
+}
+
+// send posts one revoke and classifies the answer.
+func (r *cloudRevoker) send(ctx context.Context, p pendingCloudRevoke) cloudRevokeOutcome {
 	body, _ := json.Marshal(map[string]string{"machineId": p.MachineID, "revokeKey": p.RevokeKey})
 	ctx, cancel := context.WithTimeout(ctx, cloudRevokeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(p.CloudBase, "/")+machineauth.RevokePath, bytes.NewReader(body))
 	if err != nil {
-		return nil // malformed record: retrying can't help
+		// A malformed record can never be sent: the person has to remove
+		// the computer by hand.
+		slog.Warn("cloud revoke: unusable record; remove this computer in Your machines", "machine", p.MachineID)
+		return revokeRefused
 	}
 	req.Header.Set("Content-Type", machineauth.ContentTypeJSON)
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return err
+		slog.Info("cloud revoke: will retry", "machine", p.MachineID, "err", err)
+		return revokePending
 	}
 	_ = resp.Body.Close()
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		slog.Info("cloud revoke: computer removed from its account", "machine", p.MachineID)
-		return nil
+		return revokeRemoved
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
-		return errCloudRevokeRetry
+		slog.Info("cloud revoke: will retry", "machine", p.MachineID, "http", resp.StatusCode)
+		return revokePending
+	case resp.StatusCode == http.StatusNotFound:
+		slog.Info("cloud revoke: account no longer lists this computer, or didn't accept the key", "machine", p.MachineID)
+		return revokeUnlisted
 	default:
-		slog.Info("cloud revoke: cloud no longer knows this computer", "machine", p.MachineID, "http", resp.StatusCode)
+		slog.Warn("cloud revoke: the cloud refused to remove this computer; remove it in Your machines", "machine", p.MachineID, "http", resp.StatusCode)
+		return revokeRefused
+	}
+}
+
+// cloudRevokeRefusedRecord is what cloud_revoke_refused.json holds.
+type cloudRevokeRefusedRecord struct {
+	CloudBase string `json:"cloudBase"`
+	At        string `json:"at"`
+}
+
+func writeCloudRevokeRefused(dataDir, cloudBase string, at time.Time) error {
+	b, err := json.Marshal(cloudRevokeRefusedRecord{CloudBase: cloudBase, At: at.UTC().Format(time.RFC3339)})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return err
+	}
+	return writeFileAtomicSynced(filepath.Join(dataDir, cloudRevokeRefusedFile), b, 0o600)
+}
+
+func readCloudRevokeRefused(dataDir string) *cloudRevokeRefusedRecord {
+	b, err := os.ReadFile(filepath.Join(dataDir, cloudRevokeRefusedFile))
+	if err != nil {
 		return nil
 	}
+	var rec cloudRevokeRefusedRecord
+	if json.Unmarshal(b, &rec) != nil || rec.At == "" {
+		return nil
+	}
+	return &rec
+}
+
+func clearCloudRevokeRefused(dataDir string) {
+	if err := os.Remove(filepath.Join(dataDir, cloudRevokeRefusedFile)); err != nil && !os.IsNotExist(err) {
+		slog.Warn("cloud revoke: could not clear the refusal record", "err", err)
+	}
+}
+
+// cloudMachinesURL is where a person removes a computer by hand: the account
+// page of the cloud the revoke was sent to.
+func cloudMachinesURL(cloudBase string) string {
+	if cloudBase == "" {
+		return ""
+	}
+	return strings.TrimRight(cloudBase, "/") + "/"
 }

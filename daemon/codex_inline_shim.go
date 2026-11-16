@@ -121,8 +121,12 @@ func runCodexInlineShim(cliArgs []string) int {
 	// Without the machine-wide registration, this pane's Codex still gets
 	// SoluTerminal's tools, for this process only.
 	if rec, ok := agentInjectionRecord(filepath.Dir(shimDir)); ok {
-		cliArgs = codexInjectArgs(rec, os.Getenv("SOLU_CONTEXT_PACK"), cliArgs)
+		cliArgs = codexInjectArgs(rec, cliArgs)
 	}
+	// Instructions reach SoluTerminal's own Codex sessions per process,
+	// never through the global AGENTS.md (codex_pane_policy.go).
+	cliArgs = withCodexPaneInstructions(cliArgs, os.Getenv(codexPanePolicyEnv) == "team",
+		os.Getenv("SOLU_CONTEXT_PACK"), envValueFromList(childEnv, "CODEX_HOME"))
 	args := append([]string{bin}, cliArgs...)
 	if inline := codexInlineTerminalCmd(args); len(inline) > 0 {
 		args = inline

@@ -18,6 +18,16 @@ import { INSTALL_SCRIPT_DEFAULT_CLOUD, INSTALL_SCRIPT_URL } from '../lib/siteLin
 import { WINDOWS_VERSIONS_NOTE } from '../lib/windowsOnlyCopy';
 import { usePollWhileVisible } from '../lib/usePollWhileVisible';
 import { accountNotReadyReportText, feedbackMailto, openMailDraft } from '../lib/feedbackReport';
+import {
+  duplicateNames,
+  duplicateNameWarning,
+  lastSeenText,
+  machineBlocked,
+  platformLabel,
+  policyLabel,
+  refusalText,
+  STRICTEST_WINS_TEXT,
+} from '../lib/machinePolicy';
 
 // How often the machine list re-checks while it is on screen and visible:
 // quicker while the account is waiting for its first PC.
@@ -178,6 +188,33 @@ function MachineVersionLine({ machine }: { machine: CloudMachine }) {
   );
 }
 
+// MachinePolicyLines shows, per daemon of a machine, where it runs and its
+// remote-access policy, and why the account's strictest policy blocks it (or
+// soon will), with the fix, which is always at that computer.
+function MachinePolicyLines({ machine, id }: { machine: CloudMachine; id: string }) {
+  const rows = machine.devicePolicy ?? [];
+  const seen = lastSeenText(machine.online ? undefined : machine.lastSeenAt);
+  if (rows.length === 0 && !seen) return null;
+  return (
+    <span id={id} className="cloud-gate-machine-policy">
+      {seen && <span className="cloud-gate-machine-seen">{seen}</span>}
+      {rows.map((row) => {
+        const where = platformLabel(row);
+        const why = refusalText(row);
+        return (
+          <span key={row.backend || '-'} className="cloud-gate-machine-policy-row">
+            <span>
+              {where ? `${where} · ` : ''}
+              {policyLabel(row.policy, row.connected !== false)}
+            </span>
+            {why && <span className={row.refused ? 'cloud-gate-machine-refused' : 'cloud-gate-machine-warn'}>{why}</span>}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
 function MachinePicker() {
   const machines = useCloud((s) => s.machines);
   const machinesLoaded = useCloud((s) => s.machinesLoaded);
@@ -287,17 +324,28 @@ function MachinePicker() {
           </div>
         )}
 
+        {duplicateNames(machines).map((name) => (
+          <div key={name} className="cloud-gate-notice" role="note">{duplicateNameWarning(name)}</div>
+        ))}
+        {machines.length > 1 && machines.some((m) => m.accountRequiresApproval) && (
+          <div className="cloud-gate-notice" role="note">{STRICTEST_WINS_TEXT}</div>
+        )}
+
         <div className="cloud-gate-machine-list">
           {machines.map((m) => {
-            const selectable = m.online || m.reconnecting === true;
+            const blocked = machineBlocked(m.devicePolicy);
+            const selectable = (m.online || m.reconnecting === true) && !blocked;
             const status = m.reconnecting ? 'reconnecting…' : m.online ? 'online' : 'offline';
             const statusClass = m.reconnecting ? 'is-reconnecting' : m.online ? 'is-online' : 'is-offline';
             return (
-            <div key={m.id} className="cloud-gate-machine-row">
+            <div key={m.id} className="cloud-gate-machine-entry">
+            <div className="cloud-gate-machine-row">
               <button
                 type="button"
                 onClick={() => selectMachine(m.id)}
                 disabled={!selectable}
+                // A blocked machine's reason is in its policy lines below.
+                aria-describedby={blocked ? `machine-policy-${m.id}` : undefined}
                 className="cloud-gate-machine"
               >
                 <span className="cloud-gate-machine-id">
@@ -339,6 +387,8 @@ function MachinePicker() {
               >
                 ×
               </button>
+            </div>
+            <MachinePolicyLines machine={m} id={`machine-policy-${m.id}`} />
             </div>
             );
           })}

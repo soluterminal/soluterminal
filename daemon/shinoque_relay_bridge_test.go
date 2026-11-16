@@ -431,11 +431,69 @@ func TestShinoqueRelayBridgeOwnerCheck(t *testing.T) {
 		t.Fatalf("log lacks the refusal: %s", logs)
 	}
 	s.ownerFail.Store(nil)
+	// Health reuses the failed probe for the verdict TTL, then probes again.
+	s.advance(shinoqueRelayBridgeVerdictTTL)
 	if !s.healthy(t) {
 		t.Fatal("health false once the owner checks out")
 	}
 	if w := s.forward("/shinoque/api/threads", ""); w.Code != http.StatusOK {
 		t.Fatalf("forward = %d", w.Code)
+	}
+}
+
+// A failing health probe is reused for the verdict TTL, so repeated health
+// reads don't each dial and route-check a failing route.
+func TestShinoqueRelayBridgeHealthCachesFailedProbe(t *testing.T) {
+	s := newBridgeTest(t)
+	s.push(t)
+	reason := "owner runs as another Windows user"
+	s.ownerFail.Store(&reason)
+	before := s.dials.Load()
+	for i := 0; i < 5; i++ {
+		if s.healthy(t) {
+			t.Fatal("health true with a refused owner")
+		}
+	}
+	if got := s.dials.Load() - before; got != 1 {
+		t.Fatalf("failing health probes dialed %d times, want 1", got)
+	}
+	s.ownerFail.Store(nil)
+	if s.healthy(t) {
+		t.Fatal("health true within the failed probe's TTL")
+	}
+	s.advance(shinoqueRelayBridgeVerdictTTL)
+	if !s.healthy(t) {
+		t.Fatal("health false after the TTL with a good owner")
+	}
+	if got := s.dials.Load() - before; got != 2 {
+		t.Fatalf("dials = %d, want 2", got)
+	}
+
+	// A push that moves the route forgets the failure at once.
+	s.ownerFail.Store(&reason)
+	s.advance(shinoqueRelayBridgeVerdictTTL)
+	if s.healthy(t) {
+		t.Fatal("health true with a refused owner")
+	}
+	s.ownerFail.Store(nil)
+	s.bridge.accept(shinoqueRelayBridgePush{Key: bridgeTestKey, Home: "/home/tester/.shinoque", Port: bridgeTestCorePort + 1, ProxyPort: s.proxyPort, RelayAuth: 2, PrivateDeviceProof: 1})
+	s.bridge.mu.Lock()
+	cleared := s.bridge.probeFailed.IsZero()
+	s.bridge.mu.Unlock()
+	if !cleared {
+		t.Fatal("a moved route kept the failed probe")
+	}
+
+	// So does a push that rotates only the key.
+	s.bridge.mu.Lock()
+	s.bridge.probeFailed = s.now()
+	s.bridge.mu.Unlock()
+	s.bridge.accept(shinoqueRelayBridgePush{Key: bridgeTestKey + "-rotated", Home: "/home/tester/.shinoque", Port: bridgeTestCorePort + 1, ProxyPort: s.proxyPort, RelayAuth: 2, PrivateDeviceProof: 1})
+	s.bridge.mu.Lock()
+	cleared = s.bridge.probeFailed.IsZero()
+	s.bridge.mu.Unlock()
+	if !cleared {
+		t.Fatal("a rotated key kept the failed probe")
 	}
 }
 
@@ -695,4 +753,111 @@ func TestShinoqueRelayBridgeHealthSeesSkewOnProbe(t *testing.T) {
 	if s.core.checks.Load() != 1 {
 		t.Fatalf("route checks = %d, want the probe's one", s.core.checks.Load())
 	}
+}
+
+func (s *bridgeTest) healthBody(t *testing.T, target string) map[string]any {
+	t.Helper()
+	w := httptest.NewRecorder()
+	s.api.health(w, httptest.NewRequest(http.MethodGet, target, nil))
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+// shinoqueRelayReason (ST-247) names why the relay is down, from a fixed set,
+// only on the full health and only while shinoqueRelay is false.
+func TestShinoqueRelayBridgeHealthReason(t *testing.T) {
+	allowed := map[string]bool{
+		shinoqueRelayReasonNoKey: true, shinoqueRelayReasonNotHost: true,
+		shinoqueRelayReasonClockSkew: true, shinoqueRelayReasonRouteUnverified: true,
+		shinoqueRelayReasonPusherRefused: true,
+	}
+	want := func(t *testing.T, s *bridgeTest, reason string) {
+		t.Helper()
+		body := s.healthBody(t, "/api/health")
+		got, present := body["shinoqueRelayReason"]
+		if reason == "" {
+			if body["shinoqueRelay"] != true || present {
+				t.Fatalf("relay %v, reason %v; want true and no reason", body["shinoqueRelay"], got)
+			}
+		} else if body["shinoqueRelay"] != false || got != reason {
+			t.Fatalf("relay %v, reason %v; want false and %q", body["shinoqueRelay"], got, reason)
+		}
+		if present && !allowed[got.(string)] {
+			t.Fatalf("reason %q is outside the fixed set", got)
+		}
+		if _, leaked := s.healthBody(t, "/api/health?identity=1")["shinoqueRelayReason"]; leaked {
+			t.Fatal("identity probe carries shinoqueRelayReason")
+		}
+	}
+
+	t.Run("no key, then healthy, then expired", func(t *testing.T) {
+		s := newBridgeTest(t)
+		want(t, s, shinoqueRelayReasonNoKey)
+		s.push(t)
+		want(t, s, "")
+		s.advance(shinoqueRelayBridgeKeyTTL + time.Second)
+		want(t, s, shinoqueRelayReasonNoKey)
+	})
+	t.Run("not the host backend", func(t *testing.T) {
+		s := newBridgeTest(t)
+		s.api.backendID = "win"
+		want(t, s, shinoqueRelayReasonNotHost)
+	})
+	t.Run("clock skew", func(t *testing.T) {
+		s := newBridgeTest(t)
+		s.push(t)
+		skewed := s.now().Add(45 * time.Second)
+		s.core.date.Store(&skewed)
+		want(t, s, shinoqueRelayReasonClockSkew)
+	})
+	t.Run("route unproved", func(t *testing.T) {
+		s := newBridgeTest(t)
+		s.push(t)
+		s.core.noCheckProof.Store(true)
+		want(t, s, shinoqueRelayReasonRouteUnverified)
+	})
+	t.Run("route owner refused", func(t *testing.T) {
+		s := newBridgeTest(t)
+		s.push(t)
+		reason := "owner runs as another Windows user"
+		s.ownerFail.Store(&reason)
+		want(t, s, shinoqueRelayReasonRouteUnverified)
+	})
+	t.Run("core without strict relay auth", func(t *testing.T) {
+		s := newBridgeTest(t)
+		if w := s.pushWith(bridgePushRequest(s.body(0))); w.Code != http.StatusOK {
+			t.Fatalf("push = %d", w.Code)
+		}
+		want(t, s, shinoqueRelayReasonRouteUnverified)
+	})
+	t.Run("pusher refused, then lapses", func(t *testing.T) {
+		s := newBridgeTest(t)
+		shinoqueRelayKeyPeer = func(*http.Request) (int, string, bool) { return 0, "", false }
+		if w := s.pushWith(bridgePushRequest(s.body(2))); w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d", w.Code)
+		}
+		want(t, s, shinoqueRelayReasonPusherRefused)
+		s.advance(shinoqueRelayBridgeKeyTTL + time.Second)
+		want(t, s, shinoqueRelayReasonNoKey)
+	})
+	t.Run("a browser-shaped push does not read as the pusher refused", func(t *testing.T) {
+		s := newBridgeTest(t)
+		r := bridgePushRequest(s.body(2))
+		r.Header.Set("Origin", "https://evil.example")
+		if w := s.pushWith(r); w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d", w.Code)
+		}
+		want(t, s, shinoqueRelayReasonNoKey)
+	})
+	t.Run("a fresh key outranks an earlier refusal", func(t *testing.T) {
+		s := newBridgeTest(t)
+		shinoqueRelayKeyPeer = func(*http.Request) (int, string, bool) { return 0, "", false }
+		s.pushWith(bridgePushRequest(s.body(2)))
+		shinoqueRelayKeyPeer = func(*http.Request) (int, string, bool) { return 5150, bridgeTestImage, true }
+		s.push(t)
+		want(t, s, "")
+	})
 }

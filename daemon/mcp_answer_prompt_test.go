@@ -152,39 +152,12 @@ func TestAnswerPromptExitedPane(t *testing.T) {
 	}
 }
 
-func TestAnswerPromptNativeValidatesOptionAndPending(t *testing.T) {
-	t.Parallel()
-	p := &Pane{
-		ID:     "pane_apn",
-		Title:  "focus",
-		Kind:   "native",
-		Status: PaneRunning,
-		buffer: NewRingBuffer(1 << 16),
-		subs:   map[int64]*subEntry{},
-	}
-	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus(), agentAuthority: grantedAgentAuthority(t)}
-
-	// A native pane only takes allow/deny — a menu number is a category error.
-	text, isErr := mcpResultText(t, answerAsPaneForTest(t, a,
-		map[string]any{"pane_id": p.ID, "option": "2"}))
-	if !isErr || !strings.Contains(text, `must be "allow" or "deny"`) {
-		t.Fatalf("native numeric option = (%q, err=%v), want allow/deny guidance", text, isErr)
-	}
-
-	// Valid option but nothing pending → clear refusal, not a silent no-op.
-	text, isErr = mcpResultText(t, answerAsPaneForTest(t, a,
-		map[string]any{"pane_id": p.ID, "option": "allow"}))
-	if !isErr || !strings.Contains(text, "no pending approval") {
-		t.Fatalf("native no-pending answer = (%q, err=%v), want no-pending refusal", text, isErr)
-	}
-}
-
 func TestAnswerPromptScopeGated(t *testing.T) {
 	t.Parallel()
 	// answer_prompt must be in a scoped caller's budget to be callable.
 	p := choicePromptPane(t, "pane_ap5")
 	a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus(), agentAuthority: grantedAgentAuthority(t)}
-	readOnly := &mcpScope{Identity: "reviewer", Tools: map[string]bool{"get_pane_state": true}, Expires: farFuture()}
+	readOnly := &mcpScope{Identity: "reviewer", Tools: map[string]bool{"list_panes": true}, Expires: farFuture()}
 
 	text, isErr := mcpResultText(t, scopedCallForTest(t, a, readOnly, "answer_prompt",
 		map[string]any{"pane_id": p.ID, "option": "1"}))

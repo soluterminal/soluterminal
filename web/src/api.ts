@@ -1,5 +1,5 @@
 import type { ClosedPane } from './lib/closedPanes';
-import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, NativeSettings, OrchestratorHostsInfo, PaneEffort, PaneIdentity, PaneInfo, PaneOrigin, PaneRole, Port, RecoverySettings, ReleaseCheck, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, UpdateSettingsPut, Workspace, WorkspaceSummary } from './types';
+import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, OrchestratorHostsInfo, PaneIdentity, PaneInfo, PaneOrigin, PaneRole, Port, RecoverySettings, ReleaseCheck, RunNowOutcome, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, UpdateSettingsPut, Workspace, WorkspaceSummary } from './types';
 import { isRouterMode, isDesktopRouterMode } from './dualBackend';
 import { setEnterGapConfig } from './ptySubmit';
 import { openTicketedEventSource, type EventStream } from './lib/ticketedEventSource';
@@ -2030,6 +2030,14 @@ export interface SystemHostDisk {
 export interface SystemRuntime {
   id: string; provider: string; status: string; cooldownUntilEpoch?: number; installed: boolean | null;
   lastInvocation?: { at?: string; outcome?: string; failureKind?: string } | null;
+  // Why it is not healthy: the last check's error, or a plain reason such as
+  // "not checked yet". Both absent on a healthy row and on older daemons.
+  probeErr?: string; reason?: string;
+  // When the service first saw the runtime in its current status.
+  statusSinceEpoch?: number;
+  // The daemon's own rule for "this runtime needs you". Absent on older
+  // daemons, where any status but healthy or unknown is marked.
+  attention?: boolean;
 }
 export interface SystemStatus {
   generatedAt: string; sampledAt: string; treeSampledAt: string; sampleIntervalSec: number;
@@ -3139,6 +3147,31 @@ export interface AgentsFixAgent {
   // The last run's own error line; the daemon scrubs and clamps it. Absent on
   // older daemons and when the run recorded no error.
   lastError?: string | null;
+  // The agent's own schedule, read fresh on every request (never from the
+  // daemon's 90-second cache). null = the agent has no schedule; absent = an
+  // older daemon, where the chip falls back to its fixed 35-minute rule.
+  schedule?: AgentsAgentSchedule | null;
+}
+
+// A built-in agent's schedule as the status chip needs it: on or off, since
+// when, and when it counts as down.
+export interface AgentsAgentSchedule {
+  id: string;
+  enabled: boolean;
+  cron?: string;
+  // Who switched it off and when (the schedule's own change record). Absent
+  // while it is on, and for one switched off before changes were recorded.
+  // Typed inline: the shared type-import line at the top of this file is
+  // edited by many branches, and one more name on it conflicts with each.
+  pausedChange?: import('./types').ScheduleChange | null;
+  // Why the daemon paused it; absent when a person switched it off.
+  pausedReason?: string;
+  // The moment after which the agent has missed two runs of this timetable
+  // without completing one. Absent while the schedule is off.
+  downAt?: string | null;
+  // When the schedule was last turned on. Absent while it is off, on older
+  // daemons, and for one that has been on since before this was recorded.
+  armedAt?: string | null;
 }
 
 // One PR the babysitter handled in its LAST run. `url` is rebuilt by the
@@ -3833,6 +3866,14 @@ export interface RemoteDevicesState {
   canManageDevices?: boolean;
 }
 
+// Developer overrides (daemon/developer_overrides.go): in a release build the
+// dev-web marker and local installs work only while this is on.
+export interface DeveloperOverridesSettings {
+  on: boolean;
+  required: boolean;
+  by?: 'settings' | 'channel';
+}
+
 // Agent permissions (daemon/caller_authority.go): whether agents in panes may
 // approve for the person, and until when.
 export interface AgentAuthoritySettings {
@@ -3889,7 +3930,9 @@ const coreApi = {
 	workflowRuntimeSecrets: (runtime: string) =>
 		apiFetch(`/api/workflow/runtimes/${encodeURIComponent(runtime)}/secrets`)
 			.then(j<{ runtime: string; secrets: WorkflowRuntimeSecretStatus[] }>),
-	workflowRuntimesProbe: (body: { runtime?: string; force?: boolean }) =>
+	// observe: the System page's "Test connection". A success then clears no
+	// cooldown; what the check finds is recorded like any check.
+	workflowRuntimesProbe: (body: { runtime?: string; force?: boolean; observe?: boolean }) =>
 		apiFetch('/api/workflow/runtimes/probe', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
@@ -4522,6 +4565,13 @@ const coreApi = {
       method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pinned }),
     }).then(j<{ pinned: boolean }>),
   workerSettings: () => apiFetch('/api/worker-settings').then(j<WorkerSettings>),
+  // The person's stop on agent-to-agent messaging
+  // (daemon/agent_messaging_pause.go). Agents cannot call the PUT.
+  agentMessaging: () => apiFetch('/api/agent-messaging').then(j<AgentMessagingState>),
+  setAgentMessagingPaused: (paused: boolean) =>
+    apiFetch('/api/agent-messaging', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paused }),
+    }).then(j<AgentMessagingState>),
   updateWorkerSettings: (patch: Partial<WorkerSettings>) =>
     apiFetch('/api/worker-settings', {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch),
@@ -4694,68 +4744,9 @@ const coreApi = {
     return openTicketedEventSource(url, relayNeedsTicket(url) ? () => mintRelayTicket(url, 'once') : null, sign);
   },
 
-  // Native renderer WebSocket (replaced an SSE stream). WS lives in a
-  // SEPARATE browser connection pool (the one wsUrl/terminal panes use), so
-  // visible native panes don't exhaust the ~6 HTTP/1.1 connections-per-host on
-  // the Local desktop (which broke reload + health → "daemon disconnect").
-  // Absolute ws/wss URL like wsUrl (WebSocket needs a full origin); auth rides
-  // the Sec-WebSocket-Protocol handshake (see wsProtocols), not the URL.
-  nativeWsUrl: (id: string) =>
-    `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${prefix}${backendPrefix}/api/panes/${id}/native/ws`,
-  nativeHistory: (id: string, since: number) =>
-    apiFetch(`/api/panes/${id}/native/history?since=${since}`)
-      .then(j<import('./native/nativeEvents').NativeHistoryResponse>),
-  nativeInput: (id: string, text: string, localMsgId?: string) =>
-    apiFetch(`/api/panes/${id}/native/input`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(localMsgId ? { text, localMsgId } : { text }),
-    }).then(j<import('./native/nativeEvents').NativeInputResponse>),
-  setPaneComposerState: (id: string, nonEmpty: boolean) =>
-    apiFetch(`/api/panes/${id}/composer-state`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ nonEmpty }),
-    }),
-  resolveNativeApproval: (id: string, reqId: string, allow: boolean, denyReason?: string) =>
-    apiFetch(`/api/panes/${id}/approvals/${reqId}/resolve`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(denyReason ? { allow, denyReason } : { allow }),
-    }).then(j<import('./native/nativeEvents').ResolveApprovalResponse>),
-  nativeInterrupt: (id: string) =>
-    apiFetch(`/api/panes/${id}/native/interrupt`, { method: 'POST' })
-      .then(j<import('./native/nativeEvents').NativeInterruptResponse>),
-  // Per-pane tool "always allow" list. GET reads the current set; POST mutates it
-  // ({tool, action:'add'|'remove'}) and returns the UPDATED set. A tool on this
-  // list auto-approves future permission_requests for that tool. Match by exact
-  // tool name. See daemon/native_api.go (allowlist endpoints).
-  nativeAllowlist: (id: string) =>
-    apiFetch(`/api/panes/${id}/native/allowlist`)
-      .then(j<import('./native/nativeEvents').NativeAllowlistResponse>),
-  nativeSetAllowlist: (id: string, tool: string, action: 'add' | 'remove') =>
-    apiFetch(`/api/panes/${id}/native/allowlist`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ tool, action }),
-    }).then(j<import('./native/nativeEvents').NativeAllowlistResponse>),
-  // Flip a live pane between the xterm terminal renderer and the native
-  // renderer in place. kind:'' (or 'terminal') restores the terminal body;
-  // kind:'native' switches to the structured conversation view. The daemon
-  // updates the pane DTO's kind, which the panes SSE/poll propagates back so
-  // the render dispatch (gated on pane.kind==='native') swaps the body.
-  //
-  // `opts` carries the WIRE CONTRACT's deferred-switch fields (back-compat: no
-  // opts ⇒ today's immediate behavior):
-  //   • when:'now'      — interrupt the current turn and switch immediately.
-  //   • when:'deferred' — arm a LOSSLESS switch that fires when the turn finishes
-  //                       (the daemon returns a DTO carrying pendingSwitch).
-  //   • cancel:true     — disarm a previously-armed deferred switch.
-  //   • cols/rows       — the client's live measured viewport (wire parity with
-  //                       resumePane). Usually absent: a Focus pane has no
-  //                       mounted xterm to measure, so the daemon spawns the
-  //                       switched terminal at persisted dims marked unverified
-  //                       and the first attach re-measures + nudges a redraw.
+  // Move a pane an older daemon still runs as Focus (native) back to a terminal
+  // (RetiredFocusPane). kind:'' with when:'now' interrupts the current turn and
+  // resumes the same conversation in a terminal; the daemon returns the new DTO.
   switchPaneMode: (
     id: string,
     kind: '' | 'native',
@@ -4796,14 +4787,6 @@ const coreApi = {
       body: JSON.stringify({ ...(cols && rows ? { cols, rows } : {}), ...(cwd ? { cwd } : {}) }),
     }).then(j<PaneInfo>),
 
-  // Restart a native (Focus) pane's headless agent in place — kill it and resume
-  // the same Claude session or Codex thread under the SAME pane id — reclaiming
-  // the long-lived process's heap while keeping the conversation. Returns the new running
-  // PaneInfo (CHANGED pid, which drives the client's reconnect/replay, same as
-  // resume). Native-only + settle-gated server-side (409 if busy / no conversation id).
-  refreshPane: (id: string) =>
-    apiFetch(`/api/panes/${id}/refresh`, { method: 'POST' }).then(j<PaneInfo>),
-
   // Restart THIS pane's agent in place on the installed binary, any pane kind:
   // kill the old pane-agent and spawn a new one under the SAME pane id, resuming
   // the same conversation (Claude session / Codex thread / Muse id / harness
@@ -4815,18 +4798,6 @@ const coreApi = {
     const params = [fresh ? 'fresh=1' : '', force ? 'force=1' : ''].filter(Boolean).join('&');
     return workflowFetch(scope, `/api/panes/${id}/restart${params ? `?${params}` : ''}`, { method: 'POST' }).then(j<PaneInfo>);
   },
-
-  // Change a native pane's reasoning-effort level. Like refreshPane this
-  // respawns the headless claude (`--resume` + the new --effort), so it returns
-  // a PaneInfo with a CHANGED pid that drives the client's reconnect/replay.
-  // Native-only + settle-gated server-side (409 if busy / no session). A no-op
-  // (same level) returns the current pane without respawning.
-  setPaneEffort: (id: string, effort: PaneEffort) =>
-    apiFetch(`/api/panes/${id}/effort`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ effort }),
-    }).then(j<PaneInfo>),
 
   setPaneContextPack: (id: string, contextPack: string, cols?: number, rows?: number, scope?: RoutingScope) =>
     workflowFetch(scope, `/api/panes/${id}/context-pack`, {
@@ -4855,18 +4826,6 @@ const coreApi = {
     }).then(j<PaneInfo>),
 
   orchestratorHosts: () => apiFetch('/api/orchestrator-hosts').then(j<OrchestratorHostsInfo>),
-
-  // Change a native pane's Claude model. Same respawn contract as
-  // setPaneEffort (`--resume` + the new --model, changed pid, 409 when busy).
-  // Passing a model also REWRITES the session's stored model, so the choice
-  // survives future bare resumes/switches — this is the only model control for
-  // Focus panes (headless claude has no /model command).
-  setPaneModel: (id: string, model: string) =>
-    apiFetch(`/api/panes/${id}/model`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model }),
-    }).then(j<PaneInfo>),
 
   // Schedules — recurring prompt injection into a pane, or a built-in
   // agent run (kind=agent). See daemon/schedules.go for semantics.
@@ -4902,7 +4861,7 @@ const coreApi = {
     }).then(j<Schedule>),
 
   fireSchedule: (id: string) =>
-    apiFetch(`/api/schedules/${id}/fire`, { method: 'POST' }).then(j<Schedule>),
+    apiFetch(`/api/schedules/${id}/fire`, { method: 'POST' }).then(j<Schedule & { runNow?: RunNowOutcome }>),
 
   snoozeSchedule: (id: string) =>
     apiFetch(`/api/schedules/${id}/snooze`, { method: 'POST' }).then(j<Schedule>),
@@ -5084,6 +5043,19 @@ const coreApi = {
     if (!res.ok) throw new Error(`agent permissions: ${res.status}`);
     return res.json();
   },
+  // null = older daemon without the endpoint, so the row stays hidden.
+  getDeveloperOverrides: async (): Promise<DeveloperOverridesSettings | null> => {
+    const res = await apiFetch('/api/settings/developer-overrides');
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`developer overrides: ${res.status}`);
+    return res.json();
+  },
+  setDeveloperOverrides: (on: boolean): Promise<DeveloperOverridesSettings> =>
+    apiFetch('/api/settings/developer-overrides', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ on }),
+    }).then(j<DeveloperOverridesSettings>),
   // hours 0 = until turned off.
   setAgentAuthority: (change: { panes: boolean; hours?: number }): Promise<AgentAuthoritySettings> =>
     apiFetch('/api/settings/agent-authority', {
@@ -5107,14 +5079,6 @@ const coreApi = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     }).then(j<RecoverySettings>),
-  getNativeSettings: (): Promise<NativeSettings> =>
-    apiFetch('/api/native/settings').then(j<NativeSettings>),
-  putNativeSettings: (body: Partial<NativeSettings>): Promise<NativeSettings> =>
-    apiFetch('/api/native/settings', {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    }).then(j<NativeSettings>),
   getUpdateSettings: (): Promise<UpdateSettings> =>
     apiFetch('/api/update/settings').then(j<UpdateSettings>),
   putUpdateSettings: async (body: UpdateSettingsPut): Promise<UpdateSettings> => {
@@ -5487,6 +5451,16 @@ export interface PaneConfirmRequest {
   message: string;
   createdAt: number;
   expiresAt: number;
+}
+
+// GET/PUT /api/agent-messaging: held counts messages waiting on every pane.
+export interface AgentMessagingState {
+  paused: boolean;
+  since?: number;
+  held: number;
+  // The stop applied, but see this (e.g. its setting couldn't be saved).
+  warning?: string;
+  warningKind?: 'unreadable' | 'unsaved';
 }
 
 export interface PaneConfirmAnswer {

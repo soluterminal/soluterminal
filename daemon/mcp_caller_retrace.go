@@ -84,8 +84,10 @@ const mcpUnconfirmedCallerNotice = "SoluTerminal couldn't confirm which pane you
 
 // mcpRefuseUnconfirmedCaller returns the refusal for a call an unconfirmed
 // caller may not make, or nil. Refused: calls that record the caller as the
-// starter of what they create (spawn_pane, create_schedule) and pane changes
-// that default to the caller's own pane (set_pane_info without pane_id).
+// starter of what they create (spawn_pane, create_schedule), schedule changes
+// that depend on the caller being the creator (set_schedule_enabled,
+// cancel_schedule) and pane changes that default to the caller's own pane
+// (set_pane_info without pane_id).
 func mcpRefuseUnconfirmedCaller(params json.RawMessage) any {
 	var call toolCallParams
 	if json.Unmarshal(params, &call) != nil {
@@ -93,6 +95,9 @@ func mcpRefuseUnconfirmedCaller(params json.RawMessage) any {
 	}
 	switch call.Name {
 	case "spawn_pane", "create_schedule":
+	case "set_schedule_enabled", "cancel_schedule":
+		// These act only for the pane that created the schedule, so a caller
+		// whose pane is unconfirmed is told to retry, as on create.
 	case "set_pane_info":
 		if strings.TrimSpace(mcpArgString(call.Arguments, "pane_id")) != "" {
 			return nil

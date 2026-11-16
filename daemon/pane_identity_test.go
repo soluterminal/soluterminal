@@ -121,9 +121,27 @@ func TestPaneRefsAcceptHandles(t *testing.T) {
 		}
 	}
 	// Every pane tool sees the id: the transport rewrites pane_id first.
-	res := a.mcpCallToolTransport(json.RawMessage(`{"name":"get_pane_state","arguments":{"pane_id":"@api-fix"}}`), nil, "lead", mcpMetaFromCallerPane("lead"))
-	if text, failed := mcpResultText(t, res); failed || strings.Contains(text, "no pane") {
-		t.Fatalf("get_pane_state by handle: %q", text)
+	// list_panes with a pane_id returns just that pane, with its live cwd
+	// (get_pane_state and get_pane_livecwd folded into it): no worker
+	// requests or archive entries, which the full list carries.
+	q := a.workers()
+	q.mu.Lock()
+	q.requests = append(q.requests, &workerRequest{Info: workerInfo{ID: "queued-req", State: "queued"}, Created: time.Now()})
+	q.mu.Unlock()
+	res := a.mcpCallToolTransport(json.RawMessage(`{"name":"list_panes","arguments":{"pane_id":"@api-fix"}}`), nil, "lead", mcpMetaFromCallerPane("lead"))
+	text, failed := mcpResultText(t, res)
+	var one []mcpPaneSummary
+	if failed || json.Unmarshal([]byte(text), &one) != nil || len(one) != 1 || one[0].ID != "worker" || one[0].LiveCwd != one[0].Cwd || one[0].State == "" {
+		t.Fatalf("list_panes by handle: %q", text)
+	}
+	res = a.mcpCallToolTransport(json.RawMessage(`{"name":"list_panes","arguments":{"pane_id":"@nobody"}}`), nil, "lead", mcpMetaFromCallerPane("lead"))
+	if text, failed := mcpResultText(t, res); !failed || !strings.Contains(text, "no pane") {
+		t.Fatalf("list_panes for an unknown pane: %q", text)
+	}
+	res = a.mcpCallToolTransport(json.RawMessage(`{"name":"list_panes","arguments":{}}`), nil, "lead", mcpMetaFromCallerPane("lead"))
+	var all []mcpPaneSummary
+	if text, failed := mcpResultText(t, res); failed || json.Unmarshal([]byte(text), &all) != nil || len(all) < 3 || all[0].LiveCwd != "" || !strings.Contains(text, "queued-req") {
+		t.Fatalf("list_panes without pane_id: %q", text)
 	}
 }
 

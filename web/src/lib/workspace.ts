@@ -20,7 +20,6 @@ export function collectPaneDefs(layout: Layout | null, panes: Record<string, Pan
       flagged: p.flagged,
       flagMemo: p.flagMemo,
       claudeSessionId: p.claudeSessionId,
-      kind: p.kind === 'native' ? 'native' : undefined,
       agent: p.agent,
       codexThreadId: p.codexThreadId,
       museSessionId: p.museSessionId,
@@ -96,8 +95,8 @@ export function isPresentPane(p: PaneInfo | undefined): p is PaneInfo {
 // pid 0, idle state) are overwritten by Phase 2's fresh listPanes and the next
 // 3s poll; the cwd/cmd/title come straight from the saved def, so the pane is
 // functionally correct (and its cwd is right) during the brief seed window.
-// `kind` is carried from the def so a native pane seeds AS native (no
-// terminal-renders-JSONL flash); it's undefined for terminals.
+// A def saved before Focus was removed may still carry kind:'native'; it is
+// ignored, so the pane seeds (and restores) as a terminal.
 export function optimisticPaneFromDef(def: PaneDef): PaneInfo {
   return {
     id: def.id,
@@ -115,7 +114,6 @@ export function optimisticPaneFromDef(def: PaneDef): PaneInfo {
     flagged: def.flagged,
     flagMemo: def.flagMemo,
     claudeSessionId: def.claudeSessionId,
-    kind: def.kind,
     agent: def.agent,
     codexThreadId: def.codexThreadId,
     museSessionId: def.museSessionId,
@@ -154,7 +152,7 @@ export function dropUnconfirmedSeeds(
 // Save a provider resume recipe for a conversation opened inside a shell.
 // Keep ambiguous identities blocked; never infer a thread from directory recency.
 export function paneRecoveryCommand(p: PaneInfo): string[] {
-  if (p.kind === 'native' || p.identityBlocked) return p.cmd;
+  if (p.identityBlocked) return p.cmd;
   const executable = p.cmd?.[0]?.split(/[\\/]/).pop()?.toLowerCase().replace(/\.exe$/, '');
   if (p.agent === 'codex' && p.codexThreadId && executable !== 'codex') return ['codex', 'resume', p.codexThreadId];
   if (p.agent === 'muse' && p.museSessionId && executable !== 'muse') return ['muse', 'resume', p.museSessionId];
@@ -162,8 +160,12 @@ export function paneRecoveryCommand(p: PaneInfo): string[] {
   return p.cmd;
 }
 
+// A def saved before Focus was removed may carry kind:'native'. It is never
+// sent: the daemon refuses native panes, and without it the restore resumes
+// the saved conversation in a terminal (claude --resume / codex resume /
+// muse resume), or asks for the conversation when no id was saved.
 export function paneRestoreRequest(def: PaneDef): CreatePaneReq {
-  const { id: _id, flagged: _flagged, flagMemo: _memo, ...recipe } = def;
+  const { id: _id, flagged: _flagged, flagMemo: _memo, kind: _kind, ...recipe } = def;
   return { ...recipe, restore: true };
 }
 
@@ -180,7 +182,7 @@ export function paneRetryRequest(p: PaneInfo): CreatePaneReq {
   const def = collectPaneDefs({ type: 'pane', paneId: p.id }, { [p.id]: p })[0];
   const req = paneRestoreRequest(def);
   const conversationId = p.agent === 'codex' ? p.codexThreadId : p.agent === 'muse' ? p.museSessionId : p.claudeSessionId;
-  if (p.kind !== 'native' && (p.identityBlocked || !conversationId)) {
+  if (p.identityBlocked || !conversationId) {
     req.codexThreadId = req.claudeSessionId = req.museSessionId = undefined;
     req.identityBlocked = undefined;
     if (p.agent === 'codex') {

@@ -18,10 +18,10 @@ afterEach(() => { vi.restoreAllMocks(); hashing.secure = true; });
 
 it.each(['send', 'clear'] as const)('binds %s to the displayed pane and receipt', async (action) => {
   const act = vi.spyOn(api, 'actOnUnsentMessage').mockResolvedValue({ outcome: action === 'clear' ? 'cleared' : 'submitted' });
-  // refreshPane restarts a native agent; the chip must only reload pane data.
+  // The chip must only reload pane data, never restart the agent.
   const refresh = vi.fn().mockResolvedValue(undefined);
   const restart = vi.fn();
-  useStore.setState({ refreshPanes: refresh, refreshPane: restart });
+  useStore.setState({ refreshPanes: refresh, restartPane: restart });
   render(<UnsentMessageChip pane={pane} />);
   expect(screen.getByRole('status').textContent).toContain('Unsent message from #5 Claude');
   fireEvent.click(screen.getByRole('button', { name: action === 'send' ? 'Send' : 'Clear' }));

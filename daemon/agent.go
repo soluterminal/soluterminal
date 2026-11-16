@@ -552,18 +552,14 @@ func runAgent() int {
 				// queries via the live PTY pipe; we just keep e.out
 				// from growing unbounded.
 				//
-				// Skip it entirely for --no-pty (native/headless) panes:
-				// they carry JSONL, not terminal output, so VT-emulating
-				// it is pure waste — and it runs HERE under subsMu on every
-				// chunk, lengthening the lock hold that addSub/fanout
-				// contend for, across every concurrent native pane. The
-				// grid's only consumer is the synthetic-paint reattach
-				// repair for terminal/Codex panes; a native pane rebuilds
-				// from its NativeEvent re-seed on reconnect and never reads
-				// the paint (the daemon likewise skips its VT models for
-				// native panes via the `if p.Kind == "native"` readLoop
-				// branch in pane.go). An unfed grid stays empty, so addSub
-				// ships no paint for native panes.
+				// Skip it entirely for --no-pty (headless stream-json)
+				// children: they carry JSONL, not terminal output, so
+				// VT-emulating it is pure waste — and it runs HERE under
+				// subsMu on every chunk, lengthening the lock hold that
+				// addSub/fanout contend for. The grid's only consumer is
+				// the synthetic-paint reattach repair for terminal/Codex
+				// panes. An unfed grid stays empty, so addSub ships no
+				// paint for a --no-pty child.
 				if !*noPty {
 					agentGrid.Feed(chunk)
 					_ = agentGrid.DrainReplies()

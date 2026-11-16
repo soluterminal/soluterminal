@@ -22,19 +22,19 @@ import type { Health } from './types';
 // Panes SoluTerminal starts always get its tools per process
 // (daemon/agent_integration_inject.go), so agents in SoluTerminal already work
 // together without this. The copy says what the switch really adds: the same
-// tools for Claude Code and Codex started outside SoluTerminal, through four
+// tools for Claude Code and Codex started outside SoluTerminal, through three
 // entries in their settings files.
 export const AGENT_INTEGRATION_TITLE = 'Let Claude Code and Codex use SoluTerminal everywhere on this PC?';
 export const AGENT_INTEGRATION_BODY = [
   "Agents you start in SoluTerminal already work together. You don't need this for that.",
   'This also lets Claude Code and Codex started outside SoluTerminal (in another terminal, or typed in a ' +
     'Windows PowerShell pane) see and message your panes. It only talks to this PC.',
-  'It adds four entries to their settings files, including Claude Code hooks. Turning it off in Settings, ' +
+  'It adds three entries to their settings files, including Claude Code hooks. Turning it off in Settings, ' +
     'or uninstalling, removes them and keeps a backup of each file.',
 ].join('\n\n');
 export const AGENT_INTEGRATION_NOTICE =
   'SoluTerminal is set up in Claude Code and Codex everywhere on this PC, including ones started outside ' +
-  'SoluTerminal (four entries in their settings files). Turning this off in Settings → Privacy & security removes them.';
+  'SoluTerminal (three entries in their settings files). Turning this off in Settings → Privacy & security removes them.';
 export const AGENT_INTEGRATION_ON_TOAST =
   'Done. Claude Code and Codex started outside SoluTerminal can now use it. You can turn this off in Settings → Privacy & security.';
 export const AGENT_INTEGRATION_OFF_TOAST =

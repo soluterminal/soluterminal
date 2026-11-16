@@ -162,6 +162,9 @@ func TestMCPRefuseUnconfirmedCallerTools(t *testing.T) {
 	}{
 		{`{"name":"spawn_pane","arguments":{"cmd":"bash"}}`, true},
 		{`{"name":"create_schedule","arguments":{}}`, true},
+		{`{"name":"set_schedule_enabled","arguments":{"id":"sched_1","enabled":false}}`, true},
+		{`{"name":"cancel_schedule","arguments":{"id":"sched_1"}}`, true},
+		{`{"name":"list_schedules","arguments":{}}`, false},
 		{`{"name":"set_pane_info","arguments":{"working_on":"x"}}`, true},
 		{`{"name":"set_pane_info","arguments":{"pane_id":"  ","working_on":"x"}}`, true},
 		{`{"name":"set_pane_info","arguments":{"pane_id":"lead","working_on":"x"}}`, false},

@@ -74,14 +74,18 @@ async function tapNotification(data, clients) {
 
 // A window as the worker sees it. `app: true` is a window where the app is
 // mounted: it answers the worker's "are you listening?" on the port it is sent
-// (lib/notificationTap.ts). Any other page never answers.
+// (lib/notificationTap.ts). Any other page never answers. `app: '<machineId>'`
+// answers as a current app showing that machine; `app: true` answers the bare
+// "ready" of an app from before sw v32.
 function windowClient(url, { app = false, ...over } = {}) {
   return {
     url,
     focused: false,
     visibilityState: 'hidden',
     postMessage: vi.fn((message, transfer) => {
-      if (app && message.type === 'solu:notification-tap-ready') transfer[0].postMessage('ready');
+      if (app && message.type === 'solu:notification-tap-ready') {
+        transfer[0].postMessage(typeof app === 'string' ? { ready: true, machineId: app } : 'ready');
+      }
     }),
     focus: vi.fn(() => Promise.resolve()),
     navigate: vi.fn(() => Promise.resolve()),
@@ -136,8 +140,69 @@ describe('service worker feedback notification tap', () => {
   it('still navigates a window on another machine for a pane push', async () => {
     const other = windowClient('https://app.example/m/m_2/');
     await tapNotification({ machineId: 'm_1', paneId: 'pane_9' }, [other]);
-    expect(other.navigate).toHaveBeenCalledWith('/m/m_1/?pane=pane_9');
-    expect(other.postMessage).not.toHaveBeenCalled();
+    expect(other.navigate).toHaveBeenCalledWith('/?machine=m_1&pane=pane_9');
+    expect(tapsSentTo(other)).toEqual([]);
+  });
+
+  // ST-117: "/m/<id>/" is the relay, which a cold load reaches without a
+  // bearer once the 1h session cookie is gone ("missing bearer token"). The
+  // app's own page signs in first, then picks the machine from the query.
+  it('opens the app page, not the relay path, when no window is open', async () => {
+    const { openWindow } = await tapNotification({ machineId: 'm 1', paneId: 'pane_9' }, []);
+    expect(openWindow).toHaveBeenCalledWith('/?machine=m+1&pane=pane_9');
+    const { openWindow: bare } = await tapNotification({ machineId: 'm_1' }, []);
+    expect(bare).toHaveBeenCalledWith('/?machine=m_1');
+  });
+
+  // sw v32: the cloud app runs at "/", so the worker asks which machine an
+  // open window shows instead of reading its URL; that window is not reloaded.
+  it('hands the pane to an open app window showing the tapped machine', async () => {
+    const other = windowClient('https://app.example/', { app: 'm_2', focused: true, visibilityState: 'visible' });
+    const here = windowClient('https://app.example/', { app: 'm_1' });
+    const { openWindow } = await tapNotification({ machineId: 'm_1', paneId: 'pane_9' }, [other, here]);
+    expect(tapsSentTo(here)).toEqual([{ type: 'solu:notification-tap', paneId: 'pane_9', machineId: 'm_1' }]);
+    expect(here.focus).toHaveBeenCalledTimes(1);
+    expect(here.navigate).not.toHaveBeenCalled();
+    expect(tapsSentTo(other)).toEqual([]);
+    expect(other.navigate).not.toHaveBeenCalled();
+    expect(openWindow).not.toHaveBeenCalled();
+  });
+
+  it('loads the target in a window showing another machine', async () => {
+    const other = windowClient('https://app.example/', { app: 'm_2', focused: true, visibilityState: 'visible' });
+    await tapNotification({ machineId: 'm_1', paneId: 'pane_9' }, [other]);
+    expect(tapsSentTo(other)).toEqual([]);
+    expect(other.navigate).toHaveBeenCalledWith('/?machine=m_1&pane=pane_9');
+  });
+
+  it('still focuses a window already on the tapped machine and hands it the pane', async () => {
+    const here = windowClient('https://app.example/m/m_1/');
+    const { openWindow } = await tapNotification({ machineId: 'm_1', paneId: 'pane_9' }, [here]);
+    expect(here.navigate).not.toHaveBeenCalled();
+    expect(tapsSentTo(here)).toEqual([{ type: 'solu:notification-tap', paneId: 'pane_9', machineId: 'm_1' }]);
+    expect(openWindow).not.toHaveBeenCalled();
+  });
+});
+
+// ST-261 renamed schedules to Automations; the lock screen says so, in the
+// same words as the phone's FCM push (cloud/fcm.go fcmDisplay).
+describe('service worker automation push rendering', () => {
+  it('titles a failed automation run "Automation failed"', async () => {
+    const shown = await renderPush({
+      paneId: 'sched:s1',
+      state: 'schedule-error',
+      title: 'nightly backup',
+      summary: 'exit 1',
+      machineName: 'devbox',
+    });
+    expect(shown.title).toBe('⚠️ Automation failed');
+    expect(shown.body).toBe('nightly backup — exit 1\non devbox');
+  });
+
+  it('falls back to "Automation" for an unnamed automation that fired', async () => {
+    const shown = await renderPush({ paneId: 'sched:s2', state: 'schedule-fired' });
+    expect(shown.title).toBe('⏰ Automation');
+    expect(shown.body).toBe('ran just now');
   });
 });
 

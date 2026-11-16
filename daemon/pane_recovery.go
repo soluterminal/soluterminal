@@ -6,7 +6,7 @@ import (
 )
 
 func plainShellRecovery(info PersistedPane) bool {
-	if info.Kind == "native" || info.Agent != "" || info.IdentityBlocked || info.HarnessSessionID != "" {
+	if info.Agent != "" || info.IdentityBlocked || info.HarnessSessionID != "" {
 		return false
 	}
 	if len(info.Cmd) == 0 {
@@ -32,7 +32,7 @@ func plainShellRecovery(info PersistedPane) bool {
 // conversation the user subsequently opened inside it. Persist a resume recipe
 // only when that pane's own conversation identity was verified.
 func paneRecoveryCommand(snap PaneSnapshot) []string {
-	if snap.Kind == "native" || snap.IdentityBlocked {
+	if snap.IdentityBlocked {
 		return cloneStringSlice(snap.Cmd)
 	}
 	switch {
@@ -77,10 +77,10 @@ func preparePaneRestore(req *createPaneReq) error {
 		req.MuseSessionID = resumeSessionIDFromMuseCmd(req.Cmd)
 	}
 	id := conversationIDForAgent(agent, req.ClaudeSessionID, req.CodexThreadID, req.MuseSessionID)
-	if id == "" && (req.Kind == "native" || agent == agentCodex || agent == agentMuse || cmdRunsClaude(req.Cmd) || req.Agent == agentClaude) {
+	if id == "" && (agent == agentCodex || agent == agentMuse || cmdRunsClaude(req.Cmd) || req.Agent == agentClaude) {
 		return &SpawnError{msg: "saved conversation ID is missing; choose the original conversation"}
 	}
-	if req.Kind != "native" && id != "" {
+	if id != "" {
 		switch effectiveAgentKind(agent) {
 		case agentCodex:
 			req.Cmd = []string{"codex", "resume", id}

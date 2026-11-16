@@ -24,7 +24,6 @@ const native = vi.hoisted(() => ({
   exit: vi.fn(),
   appPid: null as number | null,
 }));
-const drafts = vi.hoisted(() => ({ present: false, paneId: undefined as string | undefined }));
 
 vi.mock('./tauri-browser', () => ({
   isDesktopApp: () => native.desktop,
@@ -38,11 +37,6 @@ vi.mock('./tauri-browser', () => ({
     native.exit();
     return Promise.resolve(true);
   },
-}));
-
-vi.mock('./native/useNativePane', () => ({
-  hasAnyUnsentDraft: () => drafts.present,
-  unsentDraftPaneId: () => (drafts.present ? drafts.paneId ?? 'draft-pane' : undefined),
 }));
 
 const pane = (over: Partial<PaneInfo> & { id: string }): PaneInfo => over as PaneInfo;
@@ -82,8 +76,6 @@ describe('desktop shell auto-apply', () => {
     native.outcome = { ok: true };
     native.apply.mockClear();
     native.exit.mockClear();
-    drafts.present = false;
-    drafts.paneId = undefined;
     native.appPid = null;
     resetUnsentInputForTests();
     delete (window as unknown as { __SOLU_BACKEND__?: unknown }).__SOLU_BACKEND__;
@@ -136,7 +128,7 @@ describe('desktop shell auto-apply', () => {
     ['unanswered prompt', () => useStore.setState({ panes: { p: pane({ id: 'p', attention: 'needs-user' }) } })],
     ['workflow invocation', () => useStore.setState({ updateStatus: update({ workflowInflight: 1 }) })],
     ['workflow drain', () => useStore.setState({ updateStatus: update({ workflowDeferred: true }) })],
-    ['unsent draft', () => { drafts.present = true; }],
+    ['unsent draft', () => reportUnsentInput('draft', 'half a sentence')],
   ])('does not arm with the %s hold', async (_name, hold) => {
     await becomeQuiet();
     hold();
@@ -242,7 +234,6 @@ describe('desktop shell auto-apply', () => {
   });
 
   it.each([
-    ['a native pane draft', (on: boolean) => { drafts.present = on; }],
     ['another compose box', (on: boolean) => reportUnsentInput('broadcast', on ? 'tell every pane' : '')],
   ])('waits while %s holds unsent text and arms once it is sent or cleared', async (_name, setDraft) => {
     setDraft(true);
@@ -269,7 +260,7 @@ describe('desktop shell auto-apply', () => {
   it('Restart now with unsent text says why it held instead of vanishing', async () => {
     await becomeQuiet();
     await arm();
-    drafts.present = true;
+    reportUnsentInput('draft', 'half a sentence');
     await useStore.getState().restartShellNowForUpdate();
     expect(native.apply).not.toHaveBeenCalled();
     expect(useStore.getState().toasts.map((t) => t.message).join(' ')).toMatch(/Restart held: a message box has text you have not sent/);
@@ -503,11 +494,7 @@ describe('desktop shell auto-apply', () => {
       expect(shellAutoApplyWaitReason()?.reason).toBe('approval or question waiting in Reviewer');
       useStore.setState({ panes: { n: pane({ id: 'n', kind: 'native', title: 'Codex', agentMidTurn: true }) } });
       expect(shellAutoApplyWaitReason()?.reason).toBe('agent working in Codex');
-      useStore.setState({ panes: { d: pane({ id: 'd', title: 'Notes' }) } });
-      drafts.present = true;
-      drafts.paneId = 'd';
-      expect(shellAutoApplyWaitReason()?.reason).toBe('unsent text in Notes');
-      drafts.present = false;
+      useStore.setState({ panes: {} });
       reportUnsentInput('broadcast', 'tell every pane');
       expect(shellAutoApplyWaitReason()?.reason).toBe('unsent text in a message box');
       reportUnsentInput('broadcast', '');

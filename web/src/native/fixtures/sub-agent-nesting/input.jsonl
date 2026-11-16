@@ -1,8 +1,0 @@
-{"seq":1,"paneId":"p","type":"user_text","text":"investigate with a sub-agent"}
-{"seq":2,"paneId":"p","type":"tool_call","callId":"task1","name":"Task","args":{"description":"explore","prompt":"find the bug"}}
-{"seq":3,"paneId":"p","type":"tool_call","callId":"k1","parentCallId":"task1","name":"Bash","toolKind":"exec","args":{"command":"grep -r foo"}}
-{"seq":4,"paneId":"p","type":"tool_result","callId":"k1","content":"hit"}
-{"seq":5,"paneId":"p","type":"tool_call","callId":"k2","parentCallId":"task1","name":"Read","toolKind":"file","args":{"file_path":"x.ts"}}
-{"seq":6,"paneId":"p","type":"tool_result","callId":"k2","content":"contents"}
-{"seq":7,"paneId":"p","type":"tool_result","callId":"task1","content":"found it"}
-{"seq":8,"paneId":"p","type":"text","messageId":"m1","text":"The bug is in x.ts."}

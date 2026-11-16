@@ -199,6 +199,9 @@ type trustedDevices struct {
 	onPolicyChange func()
 	// announcedAt is when a new request was last announced on this computer.
 	announcedAt time.Time
+	// announced holds the announcements of the last hour
+	// (newRequestAnnouncePerHour).
+	announced []time.Time
 }
 
 // newRequestAnnounceGap spaces announcements of new device requests:
@@ -207,20 +210,40 @@ type trustedDevices struct {
 // waits in Settings → Privacy & security.
 const newRequestAnnounceGap = 30 * time.Second
 
+// newRequestAnnouncePerHour caps announcements in any hour, on top of the
+// gap: under "any" anyone signed in can ask, and each pop-up invites an
+// approval (@secure, ST-249). Requests past the cap still wait in Settings.
+const newRequestAnnouncePerHour = 6
+
 // announceNewRequest reports whether a new device request should be shown on
-// this computer now: only under "Only devices I approve" (under "any" a
-// device needs no approval), and at most once per newRequestAnnounceGap.
-func (s *trustedDevices) announceNewRequest(now time.Time) bool {
+// this computer now: at most once per newRequestAnnounceGap and
+// newRequestAnnouncePerHour times an hour, under either policy. Under "any" a device needs no approval to reach the computer, but
+// approving one still matters there: its private channel and an embedded
+// screen's standing (ST-249). What bounds a flood is unchanged: only a new
+// key is announced (a device asking again is not), at most devicePendingLimit
+// requests wait at once (forwardedPendingLimit of them forwarded unsigned),
+// the gap and the hourly cap. It also returns the policy, so the prompt can
+// say what approving means under it.
+func (s *trustedDevices) announceNewRequest(now time.Time) (bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.record.Policy != remoteAccessApproved {
-		return false
-	}
+	policy := s.record.Policy
 	if !s.announcedAt.IsZero() && now.Sub(s.announcedAt) < newRequestAnnounceGap {
-		return false
+		return false, policy
+	}
+	kept := s.announced[:0]
+	for _, at := range s.announced {
+		if now.Sub(at) < time.Hour {
+			kept = append(kept, at)
+		}
+	}
+	s.announced = kept
+	if len(kept) >= newRequestAnnouncePerHour {
+		return false, policy
 	}
 	s.announcedAt = now
-	return true
+	s.announced = append(s.announced, now)
+	return true, policy
 }
 
 // changes returns a channel closed at the next change that can withdraw a
@@ -1089,6 +1112,59 @@ func relayDeviceExempt(r *http.Request) bool {
 	return false
 }
 
+// relayRefusalLog keeps the unsigned-request refusal line to once per method
+// and path every few minutes: the cloud dashboard's reads of a private machine
+// are refused every 30 s while a phone app is open (ST-223), and the repeat
+// says nothing new. Refused signatures are not rate-limited.
+var relayRefusalLog = &rateLimitedLog{every: 5 * time.Minute}
+
+// rateLimitedLog prints a line the first time its key is seen, then at most
+// once per period, saying how many identical lines it held back.
+type rateLimitedLog struct {
+	every time.Duration
+	mu    sync.Mutex
+	seen  map[string]*rateLimitedLogEntry
+}
+
+type rateLimitedLogEntry struct {
+	last       time.Time
+	suppressed int
+}
+
+func (l *rateLimitedLog) printf(key, format string, args ...any) {
+	now := time.Now()
+	l.mu.Lock()
+	if l.seen == nil {
+		l.seen = map[string]*rateLimitedLogEntry{}
+	}
+	e := l.seen[key]
+	if e != nil && now.Sub(e.last) < l.every {
+		e.suppressed++
+		l.mu.Unlock()
+		return
+	}
+	held := 0
+	if e != nil {
+		held = e.suppressed
+	}
+	if len(l.seen) >= 256 {
+		for k, old := range l.seen {
+			if now.Sub(old.last) >= l.every {
+				delete(l.seen, k)
+			}
+		}
+	}
+	if len(l.seen) < 256 || e != nil {
+		l.seen[key] = &rateLimitedLogEntry{last: now}
+	}
+	l.mu.Unlock()
+	if held > 0 {
+		format += " (%d more like this since the last line)"
+		args = append(args, held)
+	}
+	log.Printf(format, args...)
+}
+
 // relayDeviceGate guards the relay tunnel. Under the "approved" policy every
 // relayed request except enrolment must carry a valid device signature.
 func (a *apiServer) relayDeviceGate(next http.Handler) http.Handler {
@@ -1110,7 +1186,13 @@ func (a *apiServer) relayDeviceGate(next http.Handler) http.Handler {
 		} else {
 			d, err := a.trustedDevices.verifyRequest(r)
 			if err != nil {
-				log.Printf("remote-devices: refused %s %s: %v", r.Method, r.URL.Path, err)
+				if errors.Is(err, errDeviceUnsigned) {
+					// The cloud's own unsigned reads repeat every 30 s.
+					relayRefusalLog.printf(r.Method+" "+r.URL.Path, "remote-devices: refused %s %s: %v", r.Method, r.URL.Path, err)
+				} else {
+					// A bad, stale or misdirected signature is logged every time.
+					log.Printf("remote-devices: refused %s %s: %v", r.Method, r.URL.Path, err)
+				}
 				if isPreviewPageRequest(r) {
 					// A preview frame loads its pages itself, so it cannot sign
 					// them: say why instead of showing raw JSON.
@@ -1451,8 +1533,11 @@ func (a *apiServer) handleEnrollRemoteDevice(w http.ResponseWriter, r *http.Requ
 	log.Printf("remote-devices: enrolment %s (%s) is %s", d.ID, d.Name, d.Status)
 	// A new request is announced on this computer, where it is approved; a
 	// device asking again while it waits is not.
-	if created && a.uiBus != nil && a.trustedDevices.announceNewRequest(time.Now()) {
-		a.uiBus.publish(uiEvent{Type: "remote-device.pending", Text: d.Name, Hint: d.Scope})
+	if created && a.uiBus != nil {
+		if ok, policy := a.trustedDevices.announceNewRequest(time.Now()); ok {
+			// Reason carries the remote access policy ("any" or "approved").
+			a.uiBus.publish(uiEvent{Type: "remote-device.pending", Text: d.Name, Hint: d.Scope, Reason: policy, DeviceID: d.ID})
+		}
 	}
 	a.trustedDevices.mu.Lock()
 	v := viewOfDevice(d)

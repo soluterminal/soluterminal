@@ -797,5 +797,97 @@
     "name": "query key with a quoted value",
     "input": "GET /x?token=\"{{fake6}}\"&page=2",
     "want": "GET /x?token=\"[redacted: token]\"&page=2"
+  },
+  {
+    "name": "quoted JSON with a lone CR inside",
+    "input": "{\"token\":\"fake\rcd\"}",
+    "want": "{\"token\":\"[redacted: token]\"}",
+    "web": true
+  },
+  {
+    "name": "quoted assignment unclosed with a lone CR",
+    "input": "password=\"ab\rc d",
+    "want": "password=[redacted: token]"
+  },
+  {
+    "name": "quoted JSON lone CR before the closing quote",
+    "input": "{\"token\":\"ab\r\",\"x\":\"y\"}",
+    "want": "{\"token\":\"[redacted: token]\",\"x\":\"y\"}",
+    "web": true
+  },
+  {
+    "name": "unquoted assignment with a lone CR",
+    "input": "token=ab\rcd tail",
+    "want": "token=[redacted: token] tail"
+  },
+  {
+    "name": "lone CR keeps a word boundary",
+    "input": "ABC234\rnext",
+    "want": "[redacted: code]\rnext"
+  },
+  {
+    "name": "safe progress lines with lone CRs",
+    "input": "progress 10%\rprogress 20%\r\ndone",
+    "want": "progress 10%\rprogress 20%\r\ndone",
+    "web": true
+  },
+  {
+    "name": "lone CR redraw keeps the second assignment",
+    "input": "password: old\rpassword: hunter2",
+    "want": "password: [redacted: token] [redacted: token]"
+  },
+  {
+    "name": "lone CR redraw keeps the second pairing code",
+    "input": "Pairing code: OLD1\rPairing code: 48213",
+    "want": "Pairing code: [redacted: code] code: [redacted: code]"
+  },
+  {
+    "name": "lone CR after a query value keeps a fragment assignment",
+    "input": "GET /x?token=abc\r#password=hunter2",
+    "want": "GET /x?token=[redacted: token]#password=[redacted: token]"
+  },
+  {
+    "name": "lone CR between unclosed and closed quoted assignments",
+    "input": "password=\"abc\rpassword=\"hunter2\"",
+    "want": "password=[redacted: token]\"[redacted: token]\""
+  },
+  {
+    "name": "quoted JSON ending in a lone CR",
+    "input": "{\"token\":\"ab\r",
+    "want": "{\"token\":\"[redacted: token]",
+    "web": true
+  },
+  {
+    "name": "quoted JSON backslash then lone CR",
+    "input": "\"token\":\"ab\\\rcd\"",
+    "want": "\"token\":\"[redacted: token]\"",
+    "web": true
+  },
+  {
+    "name": "quoted JSON multibyte around a lone CR",
+    "input": "\"token\":\"é\r漢\"",
+    "want": "\"token\":\"[redacted: token]\"",
+    "web": true
+  },
+  {
+    "name": "quoted JSON lone CR before CRLF",
+    "input": "{\"token\":\"a\r\r\nb\"}",
+    "want": "{\"token\":\"[redacted: token]\r\nb\"}",
+    "web": true
+  },
+  {
+    "name": "header value after a lone CR",
+    "input": "Authorization:\rBearer x",
+    "want": "Authorization:[redacted: header]"
+  },
+  {
+    "name": "lone CR before a repeated passphrase prompt",
+    "input": "\rEnter passphrase:\nRe-enter passphrase:\nhunter2",
+    "want": "\rEnter passphrase:\n[redacted: password]\n[redacted: password]"
+  },
+  {
+    "name": "lone CR between Windows home paths",
+    "input": "C:\\Users\\Ben\rD:\\Users\\Alice",
+    "want": "~"
   }
 ]

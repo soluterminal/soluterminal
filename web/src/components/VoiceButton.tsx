@@ -1,6 +1,6 @@
 import { beginTerminalInteraction } from '../lib/terminalInteractionState';
 import { currentRoutingScope, type RoutingScope } from '../api';
-import type { VoiceCleanedBy } from '../private/voice.api';
+import { cleanedByFrom, type VoiceCleanedBy } from '../private/voice.api';
 import { effectiveTerminalTarget, terminalSessionKey } from '../store';
 import { terminalSession, captureSessionGesture } from '../lib/terminalViewSessions';
 import { useEffect, useRef } from 'react';
@@ -163,7 +163,7 @@ export async function terminalRawThenPatch(
   try {
     const res = await api.cleanupVoice(rawText, { context, signal: controller.signal });
     if (res.cleanup === 'ok' && res.text && res.text.trim() !== '') {
-      cleanedBy = res.by;
+      cleanedBy = cleanedByFrom(res);
       if (res.text !== rawText) {
         cleaned = res.text;
         polish = 'cleaned';

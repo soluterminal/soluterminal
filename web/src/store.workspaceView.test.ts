@@ -71,6 +71,12 @@ describe('temporary workspace views', () => {
     expect(useStore.getState().workspaceView).toBeNull();
     expect(useStore.getState().focusedPaneId).toBe('lead');
   });
+  it('never targets a Focus pane an older daemon still reports', () => {
+    useStore.setState(s => ({ panes: { ...s.panes, w2: { ...s.panes.w2, kind: 'native' } } }));
+    useStore.getState().showWorkspacePaneView('w2', false);
+    expect(useStore.getState().focusedPaneId).toBe('w2');
+    expect(effectiveTerminalTarget(useStore.getState())).toBeNull();
+  });
   it('includes a worker missing from the saved layout without adopting it', () => {
     useStore.setState(s => ({ panes: { ...s.panes, lost: pane('lost', 'lead') } }));
     useStore.getState().showWorkspacePaneView('lost', false);

@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../embed', () => ({ sendEmbedClaimRefused: vi.fn() }));
+
+import { sendEmbedClaimRefused } from '../embed';
 import {
   CLAIM_FEEDBACK_TIMEOUT_MS,
+  CLAIM_REFUSED_SETTLE_MS,
   claimAttempt,
   beginTypeHere,
   clearClaimFeedback,
@@ -12,6 +17,7 @@ import {
 beforeEach(() => {
   vi.useFakeTimers();
   clearClaimFeedback();
+  vi.mocked(sendEmbedClaimRefused).mockClear();
 });
 afterEach(() => {
   clearClaimFeedback();
@@ -84,5 +90,46 @@ describe('claimFeedback', () => {
     clearClaimFeedback(true);
     reportClaimRefused('regrabbed', a);
     expect(useClaimFeedback.getState()).toEqual({ state: 'idle' });
+  });
+});
+
+// ST-248: an embedding host hears of each refused click once.
+describe('claim-refused for the host', () => {
+  it('sends the settled reason once per refused click', () => {
+    beginTypeHere();
+    reportClaimRefused('owner-active', claimAttempt());
+    reportClaimRefused('not-person', claimAttempt()); // a later pane raises it
+    reportClaimRefused('not-person', claimAttempt());
+    expect(sendEmbedClaimRefused).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(CLAIM_REFUSED_SETTLE_MS);
+    expect(sendEmbedClaimRefused).toHaveBeenCalledExactlyOnceWith('not-person');
+    vi.advanceTimersByTime(CLAIM_FEEDBACK_TIMEOUT_MS);
+    expect(sendEmbedClaimRefused).toHaveBeenCalledTimes(1);
+    // Try again is a new click.
+    beginTypeHere();
+    vi.advanceTimersByTime(CLAIM_FEEDBACK_TIMEOUT_MS + CLAIM_REFUSED_SETTLE_MS);
+    expect(sendEmbedClaimRefused).toHaveBeenLastCalledWith('unreachable');
+    expect(sendEmbedClaimRefused).toHaveBeenCalledTimes(2);
+  });
+
+  it('sends nothing for a click granted before the reason settles, or one that ended', () => {
+    beginTypeHere();
+    reportClaimRefused('owner-active', claimAttempt());
+    clearClaimFeedback(); // granted: the chip went
+    vi.advanceTimersByTime(CLAIM_REFUSED_SETTLE_MS);
+    beginTypeHere();
+    reportClaimRefused('owner-active', claimAttempt());
+    clearClaimFeedback(true); // the view changed
+    vi.advanceTimersByTime(CLAIM_REFUSED_SETTLE_MS);
+    expect(sendEmbedClaimRefused).not.toHaveBeenCalled();
+  });
+
+  it('reports a re-grab after a grant', () => {
+    beginTypeHere();
+    const from = claimAttempt();
+    clearClaimFeedback(); // granted
+    reportClaimRefused('regrabbed', from);
+    vi.advanceTimersByTime(CLAIM_REFUSED_SETTLE_MS);
+    expect(sendEmbedClaimRefused).toHaveBeenCalledExactlyOnceWith('regrabbed');
   });
 });

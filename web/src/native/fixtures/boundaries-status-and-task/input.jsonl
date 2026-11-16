@@ -1,8 +1,0 @@
-{"seq":1,"paneId":"p","type":"user_text","text":"do stuff"}
-{"seq":2,"paneId":"p","type":"tool_call","callId":"c1","name":"Bash","toolKind":"exec","args":{"command":"ls"}}
-{"seq":3,"paneId":"p","type":"tool_result","callId":"c1","content":"files"}
-{"seq":4,"paneId":"p","type":"status","subtype":"requesting"}
-{"seq":5,"paneId":"p","type":"tool_call","callId":"c2","name":"Grep","toolKind":"search","args":{"pattern":"foo"}}
-{"seq":6,"paneId":"p","type":"tool_result","callId":"c2","content":"match"}
-{"seq":7,"paneId":"p","type":"tool_call","callId":"t1","name":"Task","args":{"description":"sub","prompt":"go"}}
-{"seq":8,"paneId":"p","type":"tool_result","callId":"t1","content":"done"}

@@ -15,6 +15,8 @@ import { PortsPopover } from './PortsPopover';
 import { slotList } from '../extensions';
 import { ranAgo } from '../lib/ranAgo';
 import { PhoneAccessChip } from './PhoneAccessChip';
+import { AgentMessagingChip } from './AgentMessagingChip';
+import { DeveloperOverridesChip } from './DeveloperOverridesChip';
 import { useEntitlements, useOperatorFeatures, usePhoneAccessAllowed } from '../entitlements';
 import { isDesktopShell } from '../cloudPair';
 import { Tooltip } from './Tooltip';
@@ -91,8 +93,11 @@ function BackendChip() {
   );
 }
 
-// System areas that only describe the workflow Tasks engine. A public beta
-// install does not run it, so its health is noise there.
+// System areas that never decide the footer's verdict, on any install: the
+// workflow engine is retired, so its area can never read "ok", and a count of
+// unhealthy runtimes names nothing the person can act on. Runtime detail is on
+// the System page. The daemon leaves both out of its verdict too; this covers
+// an older daemon reached from a newer window.
 const WORKFLOW_SYSTEM_AREAS = new Set(['engine', 'runtimes']);
 
 type SystemSummary = NonNullable<Health['system']>;
@@ -156,7 +161,7 @@ function SystemChip({ health }: { health: Health | null }) {
   const accountKnown = useEntitlements((s) => s.loaded);
   const pairingFix = cloudPairingFix(pairingFixPlace(isDesktopShell(), usePhoneAccessAllowed() || !accountKnown));
   const reported = health?.system;
-  const system = reported && !team ? systemWithoutWorkflow(reported) : reported;
+  const system = reported ? systemWithoutWorkflow(reported) : reported;
   if (!system) return null;
   const age = ranAgo(system.sampledAt);
   const partial = system.level === 'unknown';
@@ -499,6 +504,10 @@ export function StatusBar() {
       <div className="statusbar-right">
         {/* Panes count; the popover carries the pane list + exited cleanup. */}
         <PanesChip />
+        {/* The person's stop on agent-to-agent messaging — public, renders
+            its own leading separator, hidden with fewer than two panes
+            unless paused. */}
+        <AgentMessagingChip paused={health?.agentMessagingPaused} warning={health?.agentMessagingWarning} warningKind={health?.agentMessagingWarningKind} />
         {/* Pane-owned listeners only — renders its own leading separator,
             and nothing when no pane runs a server. */}
         <PortsChip />
@@ -507,6 +516,8 @@ export function StatusBar() {
             pill already names hosting, machine and backend). */}
         <BackendChip />
         <SystemChip health={health} />
+        {/* Shown while Developer overrides is on; nothing otherwise. */}
+        <DeveloperOverridesChip />
         {/* Desktop-only phone-access status — renders its own leading
             separator, and nothing outside the Tauri shell. */}
         <PhoneAccessChip />

@@ -21,7 +21,7 @@ type coordinationLog struct {
 
 type coordinationEvent struct {
 	At   int64  `json:"at"`
-	Kind string `json:"kind"` // spawn | close | deliver | queued | unsent
+	Kind string `json:"kind"` // spawn | close | deliver | queued | unsent | held | messaging
 	Pane string `json:"pane"`
 	// By: the starting or closing pane id, "app" for the app's own close, or
 	// the sender label of a delivered message.
@@ -37,7 +37,9 @@ type coordinationEvent struct {
 	// queued Codex or Claude message leaving the queue) → submitted |
 	// left_in_composer | gone; unsent → send | clear (confirmed) or
 	// send_unresolved | clear_unresolved; held → discarded | gone | expired |
-	// failed, or stuck when a stuck episode starts (heldStuckLocked).
+	// failed, or stuck when a stuck episode starts (heldStuckLocked), or
+	// sent_while_paused (the person's Send now while agent messaging is
+	// paused); messaging → paused | resumed (By "person").
 	Outcome string `json:"outcome,omitempty"`
 	AgeSec  int64  `json:"ageSec,omitempty"`
 }

@@ -427,10 +427,13 @@ func (c *shinoqueDiscoveryCache) readDiscovery() (shinoqueRelayConfig, bool, str
 	if record.Port < 1 || record.Port > 65535 {
 		return fail("discovery port must be from 1 to 65535")
 	}
-	if reason := c.checkHome(record.Home); reason != "" {
+	// A clean path, validated and stored alike, so "/x/" from the core
+	// matches env and pushes naming "/x".
+	home := filepath.Clean(record.Home)
+	if reason := c.checkHome(home); reason != "" {
 		return fail(reason)
 	}
-	config := shinoqueRelayConfig{port: strconv.Itoa(record.Port), home: record.Home, relayAuth: record.RelayAuth, privateDeviceProof: record.PrivateDeviceProof, relayKey: record.RelayKey}
+	config := shinoqueRelayConfig{port: strconv.Itoa(record.Port), home: home, relayAuth: record.RelayAuth, privateDeviceProof: record.PrivateDeviceProof, relayKey: record.RelayKey}
 	c.path, c.identity, c.content, c.config = path, identity, content, config
 	c.invalidate()
 	return config, true, ""

@@ -82,9 +82,9 @@ func ariaCompletionInputAllowed(payload []byte) bool {
 // Short separators and every variable byte remain charged. Matching happens
 // after the complete secret-shape scan and exclusions share the fixed cap.
 var completionCompiledParts = func() []string {
-	parts := map[string]bool{ariaAutoModeCautiousInstruction: true, ariaNativeAutoModeCautiousInstruction: true}
+	parts := map[string]bool{ariaAutoModeCautiousInstruction: true}
 	verbs := regexp.MustCompile(`%[qsd]`)
-	for _, template := range []string{ariaAutoObservationTemplate, ariaNativeObservationTemplate, ariaDryRunObservationTemplate} {
+	for _, template := range []string{ariaAutoObservationTemplate, ariaDryRunObservationTemplate} {
 		for _, part := range verbs.Split(template, -1) {
 			if len(part) >= 64 {
 				parts[part] = true
@@ -136,11 +136,10 @@ func compiledCompletionMessageBytes(raw json.RawMessage) int {
 }
 
 type completionRefusalMemo struct {
-	pos            int64
-	hash           uint64
-	policy         ariaAutoModePolicy
-	operator       bool
-	nativeRequests map[string]bool // pending request IDs only; never input text
+	pos      int64
+	hash     uint64
+	policy   ariaAutoModePolicy
+	operator bool
 }
 
 func completionPromptIdentity(p *Pane) (int64, uint64) {
@@ -161,53 +160,12 @@ func (a *Aria) rememberCompletionRefusal(p *Pane, policy ariaAutoModePolicy, ope
 	a.mu.Unlock()
 }
 
-func (a *Aria) rememberNativeCompletionRefusal(p *Pane, policy ariaAutoModePolicy, operator bool, requestID string) {
-	pending := p.listNativePending()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.completionRefusals == nil {
-		a.completionRefusals = map[string]completionRefusalMemo{}
-	}
-	previous := a.completionRefusals[p.ID]
-	requests := map[string]bool{}
-	for _, ap := range pending {
-		if ap.RequestID == requestID || (previous.policy == policy && previous.operator == operator && previous.nativeRequests[ap.RequestID]) {
-			requests[ap.RequestID] = true
-		}
-	}
-	// Rebuild from the live set so answered requests do not accumulate.
-	a.completionRefusals[p.ID] = completionRefusalMemo{policy: policy, operator: operator, nativeRequests: requests}
-}
-
-func (a *Aria) nativeCompletionRefused(p *Pane, requestID string) bool {
-	if a == nil || p == nil || a.cautiousJevOnly() || p.peekNativePending(requestID) == nil {
-		return false
-	}
-	a.mu.Lock()
-	memo, ok := a.completionRefusals[p.ID]
-	refused := memo.nativeRequests[requestID]
-	a.mu.Unlock()
-	return ok && refused && memo.policy.matches(p) && memo.operator == teamCloudLLMAllowed()
-}
-
 func (a *Aria) completionRefused(p *Pane) bool {
 	if a == nil || p == nil {
 		return false
 	}
 	if a.cautiousJevOnly() {
 		return false
-	}
-	if p.Snapshot().Kind == "native" {
-		pending := p.listNativePending()
-		if len(pending) == 0 {
-			return false
-		}
-		for _, ap := range pending {
-			if !a.nativeCompletionRefused(p, ap.RequestID) {
-				return false // a sibling, including a transient failure, can retry
-			}
-		}
-		return true
 	}
 	a.mu.Lock()
 	memo, ok := a.completionRefusals[p.ID]
@@ -230,8 +188,7 @@ func compiledCompletionField(name string, raw json.RawMessage) bool {
 			{"type": "text", "text": ariaSystemPrompt, "cache_control": map[string]any{"type": "ephemeral"}},
 		}}
 	case "tools":
-		candidates = []any{ariaAutonomousTools(), ariaNativeAutonomousTools(),
-			ariaToolsWithCacheBreakpoint(ariaAutonomousTools()), ariaToolsWithCacheBreakpoint(ariaNativeAutonomousTools())}
+		candidates = []any{ariaAutonomousTools(), ariaToolsWithCacheBreakpoint(ariaAutonomousTools())}
 	}
 	for _, candidate := range candidates {
 		encoded, err := json.Marshal(candidate)
@@ -240,15 +197,6 @@ func compiledCompletionField(name string, raw json.RawMessage) bool {
 		}
 	}
 	return false
-}
-
-// Native arguments are checked in their structured form before formatting.
-// The final serialized completion still passes the same outbound boundary.
-func completionStructuredInputAllowed(raw json.RawMessage) bool {
-	if len(raw) > ariaJevMaxTailBytes {
-		return false
-	}
-	return !completionSensitiveJSON(raw)
 }
 
 type completionSecretScan struct {

@@ -68,22 +68,6 @@ func TestResumeSpawnOptsMuseTerminal(t *testing.T) {
 	}
 }
 
-// Switching a native muse pane back to terminal continues the same session
-// interactively; without a known id it falls back to a fresh `muse`.
-func TestSwitchSpawnOptsMuseToTerminal(t *testing.T) {
-	t.Parallel()
-	snap := PaneSnapshot{ID: "p1", Kind: "native", Agent: agentMuse, MuseSessionID: museUUID}
-	opts := switchSpawnOpts(snap, "", 0, 0)
-	if want := []string{"muse", "resume", museUUID}; !reflect.DeepEqual(opts.Cmd, want) {
-		t.Fatalf("switch argv = %v, want %v", opts.Cmd, want)
-	}
-	snap.MuseSessionID = ""
-	opts = switchSpawnOpts(snap, "", 0, 0)
-	if want := []string{"muse"}; !reflect.DeepEqual(opts.Cmd, want) {
-		t.Fatalf("no-id switch argv = %v, want %v", opts.Cmd, want)
-	}
-}
-
 // The boot-reseed twin: a persisted muse pane that lost its MuseSessionID
 // field but kept the resume argv gets the id back (mirrors Codex).
 func TestMuseSessionIDPersistsRoundTrip(t *testing.T) {

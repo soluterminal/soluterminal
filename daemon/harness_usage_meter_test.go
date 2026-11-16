@@ -17,10 +17,15 @@ import (
 // writeSessionLog writes a zstd session log with the given events.
 func writeSessionLog(t *testing.T, dir string, events []map[string]any) {
 	t.Helper()
+	writeSessionLogNamed(t, dir, "session.v3.jsonl.zstd", events)
+}
+
+func writeSessionLogNamed(t *testing.T, dir, name string, events []map[string]any) {
+	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	f, err := os.Create(filepath.Join(dir, "session.v3.jsonl.zstd"))
+	f, err := os.Create(filepath.Join(dir, name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,5 +207,33 @@ func TestMergeMeterWhollyUnpricedNeverLooksLikeZeroEstimate(t *testing.T) {
 	row := keyRow(t, report, "unknown")
 	if !row.Estimated || row.MeterTokens != 1000 || row.MeterUnpricedTokens != 1000 || row.MeterCurrency != "CNY" || row.MeterCost != 0 {
 		t.Fatalf("unpriced meter row = %+v", row)
+	}
+}
+
+// DeepSeek Harness 0.2.2 writes session.v4.jsonl.zstd with the same usage
+// fields; the meter reads it, preferring it over an older log beside it.
+func TestScanDeepSeekMeterReadsV4SessionLogs(t *testing.T) {
+	root := t.TempDir()
+	sessions := filepath.Join(root, "sessions")
+	accounts := filepath.Join(root, "session-accounts")
+	peak := time.Date(2026, 9, 14, 2, 0, 0, 0, time.UTC)
+	dir := filepath.Join(sessions, "--home-x--", "session-v4")
+	writeSessionLogNamed(t, dir, "session.v4.jsonl.zstd", []map[string]any{
+		meterHeader("deepseek-flash", peak),
+		meterUsage(1_000_000, 0, 0, 0, peak),
+	})
+	writeSessionLog(t, dir, []map[string]any{meterHeader("deepseek-flash", peak), meterUsage(5_000_000, 0, 0, 0, peak)})
+	if err := os.MkdirAll(accounts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(accounts, "session-v4.json"), []byte(`{"account":"alice","model":"deepseek-flash"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := scanDeepSeekMeter(sessions, accounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alice := got["alice"]; alice.CacheMissInputTokens != 1_000_000 {
+		t.Fatalf("v4 log not metered on its own: %+v", got)
 	}
 }

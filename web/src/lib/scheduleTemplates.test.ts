@@ -16,12 +16,26 @@ describe('SCHEDULE_TEMPLATES', () => {
     }
   });
 
-  it('task templates carry a permission and default to read-only', () => {
+  it('task templates carry a permission and never edit files', () => {
     for (const t of SCHEDULE_TEMPLATES.filter((x) => x.preset.kind === 'task')) {
       expect(t.preset.permission, t.id).toBeDefined();
       // No shipped recipe may silently write to the user's working tree.
-      expect(t.preset.permission, t.id).toBe('plan');
+      expect(t.preset.permission, t.id).not.toBe('edit');
     }
+  });
+
+  it('each task recipe gets the least permission its job needs', () => {
+    const perms = Object.fromEntries(
+      SCHEDULE_TEMPLATES.filter((t) => t.preset.kind === 'task').map((t) => [t.id, t.preset.permission]),
+    );
+    expect(perms).toEqual({
+      'morning-digest': 'plan', // read-only git (GitHub preset: ST-277)
+      'nightly-tests': 'check', // the test command runs project code
+      'dependency-audit': 'check', // npm audit / npm outdated obey repo config
+      'stale-branches': 'plan', // read-only git
+      standup: 'plan', // git log
+      'doc-drift': 'plan', // file reads
+    });
   });
 
   it('every task template has a non-empty prompt', () => {

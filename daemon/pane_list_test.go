@@ -43,12 +43,6 @@ func TestResumeCreationTimeCarriedBeforePublication(t *testing.T) {
 	if !opts.CreatedAt.Equal(created) {
 		t.Fatalf("resume timestamp = %v, want %v", opts.CreatedAt, created)
 	}
-	for _, target := range []string{"", "native"} {
-		switched := switchSpawnOpts(snap, target, 0, 0)
-		if !switched.CreatedAt.Equal(created) {
-			t.Fatalf("switch to %q lost creation timestamp", target)
-		}
-	}
 	p := &Pane{CreatedAt: created}
 	restoreResumedState(p, PaneSnapshot{CreatedAt: created.Add(time.Hour)})
 	if !p.CreatedAt.Equal(created) {

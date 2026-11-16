@@ -459,18 +459,10 @@ func TestQuotaWorkerQuickRespawnRefreshesCredentialIncarnation(t *testing.T) {
 		t.Fatalf("lifecycle overwrote new incarnation: %+v releases=%d", got, released)
 	}
 }
-func TestQuotaWorkerCoordinationRedactionAndNativeCodex(t *testing.T) {
+func TestQuotaWorkerCoordinationRedaction(t *testing.T) {
 	w := &workerInfo{ID: "worker", Provider: "codex", Account: "named", ConfigDir: "private-dir", LeaseID: "private-lease", CredentialRevision: "private-revision", State: "running"}
 	got := visibleWorkerInfo(w)
 	if got.ConfigDir != "" || got.LeaseID != "" || got.CredentialRevision != "" || got.Account != "named" || w.ConfigDir == "" {
 		t.Fatalf("bad coordination projection: %+v", got)
-	}
-	plain := strings.Join(quotaNativeCodexArgv(SpawnOpts{}), " ")
-	if plain != "codex app-server --stdio" {
-		t.Fatal(plain)
-	}
-	auto := strings.Join(quotaNativeCodexArgv(SpawnOpts{workerAccount: "named"}), " ")
-	if !strings.Contains(auto, `model_provider="openai"`) || !strings.Contains(auto, `cli_auth_credentials_store="file"`) || !strings.Contains(auto, "app-server --stdio") {
-		t.Fatal(auto)
 	}
 }

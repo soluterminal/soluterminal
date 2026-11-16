@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,7 +49,7 @@ type Pusher struct {
 	// it does, notifications carry no session content (minimisePushBody).
 	private func() bool
 	// alertsHandled reports a live notifications-handler lease: Code alerts
-	// (codeAlertKinds) then ask the cloud to skip FCM. Nil = never.
+	// (codeAlertKinds) then ask the cloud to skip FCM and web push. Nil = never.
 	alertsHandled func() bool
 
 	cloudBase string
@@ -431,30 +432,47 @@ func (p *Pusher) fire(pane *Pane, kind string) {
 			heading = fmt.Sprintf("#%d", ordinal)
 		}
 	}
-	// Native lock-screen one-tap: carry the single open approval's requestId (+ a
-	// tool/summary for the body) so the notification can resolve it directly.
-	// Empty for terminal panes and parallel-approval panes (no safe single reqID).
-	var reqID, toolName, summary string
-	if pending := pane.listNativePending(); len(pending) == 1 {
-		reqID = pending[0].RequestID
-		toolName, summary = nativeApprovalSummary(pending[0])
+	// Terminal Claude Code permission menu (ST-265): a signed promptId only
+	// when every one-tap condition holds now (evaluateTerminalOneTap) and the
+	// signature exists; otherwise no one-tap fields, and the phone shows Review.
+	var promptID, toolName, summary string
+	var widens bool
+	var signed *signedApproval
+	if kind == string(StateChoicePrompt) {
+		if t, why := evaluateTerminalOneTap(pane); why != "" {
+			logTermOneTapDecline(snap.ID, why)
+		} else if t.Widens {
+			widens = true
+		} else if s := signTerminalOneTap(snap.ID, t); s != nil {
+			promptID, toolName, summary, signed = t.PromptID, t.Tool, t.Summary, s
+		}
 	}
 	// Attention reason (WHY the human is needed — a cautious decline, a
 	// never-auto tool, escalation) rides along so the phone notification can
 	// explain itself instead of a generic state line. Empty for plain
 	// no-auto-policy prompts; older clouds ignore the extra field.
 	_, attReason := pane.AttentionNow()
-	body, _ := json.Marshal(map[string]string{
+	fields := map[string]any{
 		"paneId":        snap.ID,
 		"state":         kind,
 		"title":         heading,
 		"workspaceName": workspaceName,
 		"cwd":           snap.Cwd,
-		"requestId":     reqID,
-		"toolName":      toolName,
-		"summary":       summary,
 		"reason":        attReason,
-	})
+	}
+	if widens {
+		fields["widensPermissions"] = true
+	}
+	if promptID != "" && signed != nil {
+		fields["promptId"] = promptID
+		fields["toolName"] = toolName
+		fields["summary"] = summary
+		fields["widensPermissions"] = false
+		fields["approvalSig"] = signed.sig
+		fields["approvalSigV"] = approvalSigVersion
+		fields["approvalIssuedAt"] = strconv.FormatInt(signed.issuedAt, 10)
+	}
+	body, _ := json.Marshal(fields)
 	p.deliver(body, snap.ID, kind)
 }
 
@@ -757,6 +775,11 @@ func minimisePushBody(body []byte) []byte {
 	// Discard legacy model-written fields rather than forwarding them.
 	delete(m, "aiSummary")
 	delete(m, "aiRisk")
+	// The summary is neutralised below, so its signature (ST-193) would not
+	// verify: a private-mode push offers no lock-screen one-tap.
+	delete(m, "approvalSig")
+	delete(m, "approvalSigV")
+	delete(m, "approvalIssuedAt")
 	for k, neutral := range pushContentFields {
 		if _, ok := m[k]; ok {
 			m[k] = neutral
@@ -829,10 +852,17 @@ func (p *Pusher) deliver(body []byte, logKey, kind string) bool {
 	}
 	var r struct {
 		Sent int `json:"sent"`
+		// Handled: the alerts-lease holder shows this alert, so the cloud
+		// sent nothing on purpose (cloud handleNotify).
+		Handled bool `json:"handled"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&r)
 	if p.metrics != nil {
 		p.metrics.PushDeliveriesSum.Add(int64(r.Sent))
+	}
+	if r.Handled {
+		slog.Info("push handled by another app", "pane", logKey, "state", kind)
+		return true
 	}
 	slog.Info("push delivered", "pane", logKey, "state", kind, "http", resp.StatusCode, "sent", r.Sent)
 	if r.Sent == 0 {

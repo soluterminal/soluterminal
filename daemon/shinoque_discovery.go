@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,11 @@ type shinoqueDiscoveryCache struct {
 	source     string
 	lastConfig shinoqueRelayConfig
 	rejection  string
+	// envOutcome is the last env-vs-relay.json result ("" matched, or the
+	// failed check: missing, rejected, port, home), logged once per change
+	// (envNoted: logged at all).
+	envOutcome string
+	envNoted   bool
 
 	// generation changes whenever the discovery file, its home, the token file
 	// or a forwarded connection gives reason to distrust the cached solud verdict.
@@ -124,6 +130,41 @@ func (c *shinoqueDiscoveryCache) resolveWith(tables *shinoqueProcTables) (shinoq
 	_, homeSet := os.LookupEnv("SHINOQUE_HOME")
 	if portSet || homeSet {
 		source = "env"
+		// The environment names the core's port or home, but only the core's
+		// own discovery file says what it verifies (ST-256). Take its
+		// capabilities when that file passes every check and names this same
+		// port and home; otherwise they stay zero and the relay refuses
+		// (shinoqueUpdateRequired), as health then reports.
+		if config.home != "" {
+			// relay.json and pushes name a clean path; "home/" is the same home.
+			config.home = filepath.Clean(config.home)
+		}
+		discovered, found, why := c.discover()
+		// outcome names the check, never a value: logs carry no paths or ports.
+		outcome := ""
+		switch {
+		case !found:
+			outcome = "missing"
+		case why != "":
+			outcome = "rejected"
+		case discovered.port != config.port:
+			outcome = "port"
+		case discovered.home != config.home:
+			outcome = "home"
+		}
+		if outcome == "" {
+			config.relayAuth = discovered.relayAuth
+			config.privateDeviceProof = discovered.privateDeviceProof
+			config.relayKey = discovered.relayKey
+		}
+		if !c.envNoted || outcome != c.envOutcome {
+			c.envOutcome, c.envNoted = outcome, true
+			if outcome == "" {
+				log.Printf("shinoque relay: env core matches relay.json; relay auth from the file")
+			} else {
+				log.Printf("shinoque relay: env core has no matching relay.json (%s); relay refused until the core writes one for this port and home", outcome)
+			}
+		}
 	} else {
 		var found bool
 		var discovered shinoqueRelayConfig

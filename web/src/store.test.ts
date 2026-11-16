@@ -14,7 +14,6 @@ import {
 } from './store';
 import { layoutHasLeaf, leafCount, paneIdsInOrder, pruneLayout } from './lib/layout';
 import { collectPaneDefs, dropUnconfirmedSeeds, isPresentPane, isRunningPane, optimisticPaneFromDef, pickWorkspaceByName } from './lib/workspace';
-import { computeNativeWorking } from './native/nativeTranscript';
 
 const pane = (id: string): Layout => ({ type: 'pane', paneId: id });
 const split = (a: Layout, b: Layout, dir: 'horizontal' | 'vertical' = 'horizontal'): Layout => ({
@@ -209,11 +208,11 @@ describe('workspace helpers', () => {
     expect(sized.rows).toBe(40);
   });
 
-  it('carries kind through optimistic seeds so a native pane seeds as native', () => {
+  it('seeds a def saved as a Focus (native) pane as a terminal', () => {
     const term = optimisticPaneFromDef({ id: 't', cwd: '/x', cmd: ['bash'], title: 't' });
     expect(term.kind).toBeUndefined(); // terminal
-    const native = optimisticPaneFromDef({ id: 'n', cwd: '/x', cmd: ['claude'], title: 'n', kind: 'native' });
-    expect(native.kind).toBe('native'); // renders as NativePane, not a terminal showing JSONL
+    const legacy = optimisticPaneFromDef({ id: 'n', cwd: '/x', cmd: ['claude'], title: 'n', kind: 'native' });
+    expect(legacy.kind).toBeUndefined(); // Focus was removed: a terminal pane
   });
 
   it('drops only the unconfirmed seeds, keeps confirmed, and is no-op on an empty fetch', () => {
@@ -566,87 +565,12 @@ describe('setPaneLastPrompts', () => {
   });
 });
 
-// The synchronous Term↔Focus switch ("now") used to bind the "Switching
-// renderer…" overlay AND the success/failure verdict solely to the switch-mode
-// POST response. Killing+respawning the very pane being switched can lose/delay
-// that response even though the daemon completed and persisted the switch — so
-// the overlay stranded (or, with the 30s fetch cap, falsely rolled back with an
-// error toast on a switch that actually succeeded). switchPaneMode now
-// reconciles against the authoritative pane state: a respawn lands a NEW pid
-// (propagated by the panes poll/SSE); the authoritative kind tells success from
-// a rolled-back respawn; a timeout is the final backstop. These guard that.
-describe('switchPaneMode reconciles the renderer switch off authoritative pane state', () => {
-  const paneInfo = (id: string, over: Partial<PaneInfo> = {}): PaneInfo =>
-    ({ id, cwd: '/x', cmd: ['claude'], kind: '', status: 'running', state: 'idle', pid: 111, ...over } as PaneInfo);
-
-  it('clears the overlay and keeps the target kind when a respawn is observed despite a lost POST', async () => {
-    // The switch-mode POST never resolves (its response was lost in the respawn).
-    vi.spyOn(api, 'switchPaneMode').mockReturnValue(new Promise<PaneInfo>(() => {}));
-    useStore.setState({ layout: null, panes: { p1: paneInfo('p1') }, paneModeSwitching: {}, parkedPaneIds: [] });
-
-    const pending = useStore.getState().switchPaneMode('p1', 'native'); // do NOT await
-    // Optimistic flip + overlay are applied synchronously.
-    expect(useStore.getState().panes.p1.kind).toBe('native');
-    expect(useStore.getState().paneModeSwitching.p1).toBe(true);
-
-    // Authoritative poll/SSE delivers the respawn: a NEW pid (kind already native).
-    useStore.setState((s) => ({ panes: { ...s.panes, p1: { ...s.panes.p1, pid: 222 } } }));
-
-    const result = await pending;
-    expect((result as PaneInfo).kind).toBe('native');
-    expect(useStore.getState().panes.p1.kind).toBe('native'); // not rolled back
-    expect('p1' in useStore.getState().paneModeSwitching).toBe(false); // overlay cleared
-  });
-
-  it('fast path: a normal POST response merges its DTO and clears the overlay (no regression)', async () => {
-    vi.spyOn(api, 'switchPaneMode').mockResolvedValue(paneInfo('p1', { kind: 'native', pid: 222, nativeEpoch: 2 }));
-    useStore.setState({ layout: null, panes: { p1: paneInfo('p1') }, paneModeSwitching: {}, parkedPaneIds: [] });
-
-    const result = await useStore.getState().switchPaneMode('p1', 'native');
-    expect((result as PaneInfo).pid).toBe(222);
-    expect(useStore.getState().panes.p1.nativeEpoch).toBe(2); // DTO merged
-    expect('p1' in useStore.getState().paneModeSwitching).toBe(false);
-  });
-
-  it('rolls back the kind, toasts, and clears the overlay when the daemon fails and rolls back', async () => {
-    vi.spyOn(api, 'switchPaneMode').mockRejectedValue(new Error('boom'));
-    const toastSpy = vi.spyOn(useStore.getState(), 'toast').mockImplementation(() => {});
-    useStore.setState({ layout: null, panes: { p1: paneInfo('p1') }, paneModeSwitching: {}, parkedPaneIds: [] });
-
-    const pending = useStore.getState().switchPaneMode('p1', 'native');
-    // The daemon's rollback respawns the ORIGINAL pane: new pid, kind back to ''.
-    useStore.setState((s) => ({ panes: { ...s.panes, p1: { ...s.panes.p1, pid: 222, kind: '' } } }));
-
-    await expect(pending).rejects.toThrow();
-    expect(useStore.getState().panes.p1.kind).toBe(''); // rolled back to terminal
-    expect(toastSpy).toHaveBeenCalled();
-    expect('p1' in useStore.getState().paneModeSwitching).toBe(false);
-  });
-
-  it('timeout backstop: a lost POST with no respawn still clears the overlay (never strands)', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(api, 'switchPaneMode').mockReturnValue(new Promise<PaneInfo>(() => {}));
-    vi.spyOn(useStore.getState(), 'toast').mockImplementation(() => {});
-    useStore.setState({ layout: null, panes: { p1: paneInfo('p1') }, paneModeSwitching: {}, parkedPaneIds: [] });
-
-    const pending = useStore.getState().switchPaneMode('p1', 'native');
-    pending.catch(() => {}); // a silent no-op switch resolves to a failure; swallow it
-    expect(useStore.getState().paneModeSwitching.p1).toBe(true);
-
-    // Neither the POST nor a respawn ever arrives → the SWITCH_RECONCILE_TIMEOUT_MS
-    // (20s) backstop fires and the overlay clears unconditionally.
-    await vi.advanceTimersByTimeAsync(20_100);
-    expect('p1' in useStore.getState().paneModeSwitching).toBe(false);
-    vi.useRealTimers();
-  });
-});
-
 // The native Focus spinner reads pane.agentMidTurn, which the daemon publishes
 // via the edge-fired `pane-state` SSE event. A settle (working→done) that fires
 // while SSE is briefly dropped is lost forever, so the spinner sticks on a turn
 // the daemon already finished. refreshPanes is the level resync (wired into
 // es.onopen + the 60s fallback in App.tsx) that heals it. This guards that the
-// resync actually flips a stale flag — and that computeNativeWorking then settles.
+// resync actually flips a stale flag.
 describe('refreshPanes keeps a pane whose resume is in flight', () => {
   it('does not drop the tile while the daemon respawns it, and shows the new failure', async () => {
     const lost = { id: 'pane_lost', cwd: '/gone', cmd: ['bash'], kind: '', status: 'exited', state: 'idle',
@@ -679,11 +603,6 @@ describe('refreshPanes heals a stale native agentMidTurn (stuck Focus spinner)',
     } as PaneInfo;
     useStore.setState({ layout: null, panes: { pane_stuck: stuck }, parkedPaneIds: [] });
 
-    // With the stale flag, the spinner reads "working" (non-null status).
-    expect(
-      computeNativeWorking([], 0, useStore.getState().panes.pane_stuck.agentMidTurn, 'pane_stuck'),
-    ).not.toBeNull();
-
     // Daemon now reports the turn finished; the live pane-state SSE that would
     // have carried this was lost during an SSE gap. The level resync heals it.
     vi.spyOn(api, 'listPanes').mockResolvedValue([
@@ -694,8 +613,6 @@ describe('refreshPanes heals a stale native agentMidTurn (stuck Focus spinner)',
 
     const healed = useStore.getState().panes.pane_stuck;
     expect(healed.agentMidTurn).toBe(false);
-    // …and the Focus spinner now settles (no working status).
-    expect(computeNativeWorking([], 0, healed.agentMidTurn, 'pane_stuck')).toBeNull();
   });
 });
 

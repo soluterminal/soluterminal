@@ -168,7 +168,7 @@ type writeLineResp struct {
 }
 
 func (a *apiServer) writeFileLine(w http.ResponseWriter, r *http.Request) {
-	if !a.requireHuman(w, r, "edit a file", "write_file_line") {
+	if !a.requireHuman(w, r, "edit a file") {
 		return
 	}
 	var req writeLineReq
@@ -213,8 +213,7 @@ func (a *apiServer) writeFileLine(w http.ResponseWriter, r *http.Request) {
 
 // writeFileLineAt replaces a single 0-indexed line of a text file in
 // place, atomically, guarded by an optimistic mtime check. It is the
-// shared core behind both the /api/files/write-line HTTP handler and
-// the MCP write_file_line tool — keep the two callers thin.
+// core behind the /api/files/write-line HTTP handler.
 //
 // expectedMtime is the file's mtime (unix millis) the caller last saw;
 // if it's non-zero and no longer matches the file on disk, the write
@@ -367,8 +366,7 @@ func looksLikeEnvFile(p string) bool {
 
 // secretPathRefusal returns a non-empty reason when a path points at a
 // likely secret/credential file that file tools must not touch. It
-// guards BOTH the read path (readFile, below) and the agent write path
-// (mcpWriteFileLineRefusal). The read-path guard matters because the
+// guards the read path (readFile, below). That guard matters because the
 // file endpoints are reachable over the internet-exposed cloud relay
 // without the local auth gate, so an unconfined read is a credential
 // exfiltration primitive (e.g. ~/.solu/token, ~/.ssh/id_rsa).
@@ -421,13 +419,4 @@ func secretPathRefusal(abs string) string {
 		}
 	}
 	return ""
-}
-
-// mcpWriteFileLineRefusal returns a reason when write_file_line should
-// refuse a path before touching disk. This is intentionally MCP-scoped:
-// the local UI file tile may still expose explicit human-driven edits,
-// while agent-initiated writes stay away from env, key, and credential
-// files even when the caller knows the path and mtime.
-func mcpWriteFileLineRefusal(abs string) string {
-	return secretPathRefusal(abs)
 }

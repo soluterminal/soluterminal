@@ -31,7 +31,7 @@ func TestFindAgentDescendantPIDUsesSelectedProvider(t *testing.T) {
 
 func TestPaneDTOEmitsProviderNeutralAndCompatibilityRSS(t *testing.T) {
 	t.Parallel()
-	p := switchTestPane("rss_dto", "native", nil, "session-1")
+	p := switchTestPane("rss_dto", "", []string{"claude"}, "session-1")
 	p.agentRssMB.Store(384)
 
 	dto := makePaneDTO(p, nil, nil)

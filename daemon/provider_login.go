@@ -355,13 +355,7 @@ func (l *claudeCLILogin) LiveCredentialPresent() bool {
 // configJSONPath is Claude Code's .claude.json: inside $CLAUDE_CONFIG_DIR when
 // set, otherwise in the home directory.
 func (l *claudeCLILogin) configJSONPath() string {
-	if v := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); v != "" {
-		return filepath.Join(l.claudeDir, ".claude.json")
-	}
-	if home, herr := os.UserHomeDir(); herr == nil && home != "" {
-		return filepath.Join(home, ".claude.json")
-	}
-	return filepath.Join(filepath.Dir(l.claudeDir), ".claude.json")
+	return claudeConfigJSONPathFor(l.claudeDir)
 }
 
 // liveOauthEmail is the signed-in account's email from .claude.json ("" when

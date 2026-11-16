@@ -1,7 +1,0 @@
-{"seq":1,"paneId":"p","type":"user_text","text":"fix both"}
-{"seq":2,"paneId":"p","type":"permission_request","callId":"e1","requestId":"r1","toolName":"Edit","args":{"file_path":"a.ts","old_string":"x","new_string":"y"}}
-{"seq":3,"paneId":"p","type":"tool_call","callId":"e1","name":"Edit","toolKind":"file","args":{"file_path":"a.ts","old_string":"x","new_string":"y"}}
-{"seq":4,"paneId":"p","type":"tool_result","callId":"e1","content":"ok"}
-{"seq":5,"paneId":"p","type":"permission_request","callId":"e2","requestId":"r2","toolName":"Edit","args":{"file_path":"b.ts","old_string":"p","new_string":"q"}}
-{"seq":6,"paneId":"p","type":"tool_call","callId":"e2","name":"Edit","toolKind":"file","args":{"file_path":"b.ts","old_string":"p","new_string":"q"}}
-{"seq":7,"paneId":"p","type":"tool_result","callId":"e2","content":"ok"}

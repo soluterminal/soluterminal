@@ -1,5 +1,6 @@
 import { useStore } from '../store';
 import type { VoiceTranscription } from '../private/voice.slice';
+import type { VoiceCleanedBy } from '../private/voice.api';
 import { confirmDialog } from '../lib/dialog';
 
 // Voice-history — the last N transcriptions, so a user whose text went to the
@@ -171,13 +172,21 @@ function VoiceHistoryPanel({
   );
 }
 
-export function cleanedByLabel(by: 'local' | 'cloud'): string {
-  return by === 'local' ? 'cleaned on your Claude plan' : 'cleaned by SoluTerminal';
+// Whose login or service cleaned it (ST-181 wording, @cmo 14 Nov). History
+// from before the API-key choice existed says 'local' only for the plan.
+const CLEANED_WITH: Record<VoiceCleanedBy, string> = {
+  local: 'with your Claude plan',
+  api_key: 'with your API key',
+  cloud: 'by SoluTerminal',
+};
+
+export function cleanedByLabel(by: VoiceCleanedBy): string {
+  return `cleaned ${CLEANED_WITH[by] ?? ''}`.trim();
 }
 
 /** One short line saying what happened to the cleanup pass. */
 export function historyStatusLabel(e: VoiceTranscription): string | null {
-  const where = e.cleanedBy === 'local' ? ' on your Claude plan' : e.cleanedBy === 'cloud' ? ' by SoluTerminal' : '';
+  const where = e.cleanedBy && CLEANED_WITH[e.cleanedBy] ? ` ${CLEANED_WITH[e.cleanedBy]}` : '';
   switch (e.polish) {
     case 'cleaned': return e.cleanedBy ? cleanedByLabel(e.cleanedBy) : 'cleaned';
     case 'unchanged': return `checked${where}, nothing to fix`;

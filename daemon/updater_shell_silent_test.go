@@ -404,10 +404,9 @@ func TestSilentCourierUnderPowerShell(t *testing.T) {
 	if pwsh == "" {
 		t.Skip("no PowerShell (pwsh) available")
 	}
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skip("no sleep binary for the stand-in app")
-	}
+	// The stand-in sleeper, not the host's sleep: a multi-call coreutils
+	// exits at once when run under the app's name (standInSleeper).
+	sleep := standInSleeper(t)
 	// Linux truncates a process name to 15 characters, so the stand-ins have
 	// short names; the shipped names are pinned by the script tests above.
 	const appName, otherName = "solucourierapp", "solucourierxyz"

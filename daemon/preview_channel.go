@@ -403,7 +403,18 @@ func (a *apiServer) previewInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json: "+err.Error(), 400)
 		return
 	}
+	if a.channelSwitchWouldBeRefused(r) {
+		http.Error(w, developerOverridesOffMessage, http.StatusForbidden)
+		return
+	}
+	// Both targets install through apply-local, which a release build
+	// allows only with developer overrides on: the person's switch turns it
+	// on for them before follow-main starts, and back off if it can't start.
+	turnedOn := a.turnOnDeveloperOverridesForChannelSwitch(r)
 	if err := a.preview.install(req.Target); err != nil {
+		if turnedOn {
+			a.undoChannelOverrides()
+		}
 		code := 400
 		if errors.Is(err, errPreviewBusy) {
 			code = http.StatusConflict

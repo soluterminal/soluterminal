@@ -93,14 +93,8 @@ func fleetPaneBusyForRestart(p *Pane) bool {
 		return false
 	}
 	p.mu.Lock()
-	kind, agent := p.Kind, p.Agent
+	agent := p.Agent
 	p.mu.Unlock()
-	if kind == "native" {
-		// This restart latch is cleared only by authoritative provider completion
-		// or confirmed process teardown. nativeInTurn also drives UI state and may
-		// settle after prolonged silence, which is not proof that a call ended.
-		return p.fleetTurnAdmitted.Load() || p.hasNativePending()
-	}
 	state := p.computeState()
 	if p.fleetTurnAdmitted.Load() {
 		if atomic.LoadInt64(&p.TotalStrippedChars) <= p.fleetTurnOutputWatermark.Load() {
@@ -158,7 +152,7 @@ const terminalRestartQuietWindow = 10 * time.Second
 // deliberately do NOT use this: their silent stretches can be a live turn, so
 // they keep the strict marker check in fleetPaneBusyForRestart.
 func (p *Pane) terminalPaneQuietForRestart(now time.Time) bool {
-	if p == nil || p.Kind == "native" {
+	if p == nil {
 		return false
 	}
 	// Explicit Codex/Muse panes have their own hand-back detector
@@ -280,9 +274,6 @@ func (a *apiServer) resumeExitedPane(snap PaneSnapshot, liveCols, liveRows uint1
 		opts.ClaudeTranscriptPath = ""
 		opts.HarnessProvider, opts.HarnessSessionID = "", ""
 		opts.Env = nil
-		if snap.Kind == "native" {
-			return nil, fmt.Errorf("conversation identity is missing; choose the original conversation before retrying")
-		}
 		switch {
 		case snap.Agent == agentCodex:
 			opts.Cmd = []string{"codex", "--no-alt-screen", "resume", "--all"}
@@ -345,7 +336,6 @@ func resumeSpawnOpts(snap PaneSnapshot, liveCols, liveRows uint16) SpawnOpts {
 		Model:             snap.Model,
 		Role:              snap.Role,
 		ContextPack:       snap.ContextPack,
-		NativeAllowlist:   snap.NativeAllowlist,
 	}
 	// A managed terminal harness owns its conversation, so resume by rebuilding
 	// its launch with the resume hint on the child env — the harness-client twin
@@ -354,7 +344,7 @@ func resumeSpawnOpts(snap PaneSnapshot, liveCols, liveRows uint16) SpawnOpts {
 	// Claude over a live DeepSeek conversation. A hand-launched harness (the user
 	// typed `deepseek` in a shell) has no managed argv to replay, so rebuild it
 	// from the provider — a bare shell would not reopen the conversation.
-	if (harnessProvider != "" || cmdLaunchesManagedHarness(snap.Cmd)) && snap.Kind != "native" {
+	if harnessProvider != "" || cmdLaunchesManagedHarness(snap.Cmd) {
 		switch {
 		case cmdLaunchesManagedHarness(snap.Cmd):
 			// The pane's own command is already the managed launch.
@@ -383,26 +373,24 @@ func resumeSpawnOpts(snap PaneSnapshot, liveCols, liveRows uint16) SpawnOpts {
 		}
 		return opts
 	}
-	if snap.Kind != "native" {
-		switch agent {
-		case agentCodex:
-			opts.Cmd = []string{"codex", "resume", conversationID}
-		case agentMuse:
-			opts.Cmd = []string{"muse", "resume", conversationID}
-		default:
-			opts.Cmd = []string{"claude", "--resume", conversationID}
-		}
-		// Prefer the client's live measured viewport so the resumed terminal PTY
-		// comes up at the CURRENT window width (verified — a real measurement).
-		// Without it (older/mobile client sent no body), fall back to the
-		// persisted dims but mark them unverified so the first client attach
-		// re-measures and drives the real width — never blow the fresh PTY to a
-		// stale panes.json size, which is the every-update / post-shutdown garble.
-		if liveCols > 0 && liveRows > 0 {
-			opts.Cols, opts.Rows = liveCols, liveRows
-		} else {
-			opts.DimsUnverified = true
-		}
+	switch agent {
+	case agentCodex:
+		opts.Cmd = []string{"codex", "resume", conversationID}
+	case agentMuse:
+		opts.Cmd = []string{"muse", "resume", conversationID}
+	default:
+		opts.Cmd = []string{"claude", "--resume", conversationID}
+	}
+	// Prefer the client's live measured viewport so the resumed terminal PTY
+	// comes up at the CURRENT window width (verified — a real measurement).
+	// Without it (older/mobile client sent no body), fall back to the
+	// persisted dims but mark them unverified so the first client attach
+	// re-measures and drives the real width — never blow the fresh PTY to a
+	// stale panes.json size, which is the every-update / post-shutdown garble.
+	if liveCols > 0 && liveRows > 0 {
+		opts.Cols, opts.Rows = liveCols, liveRows
+	} else {
+		opts.DimsUnverified = true
 	}
 	return opts
 }
@@ -506,7 +494,7 @@ func (a *apiServer) respawnInPlace(snap PaneSnapshot, opts SpawnOpts) (*Pane, er
 		newPane, err = a.spawnPaneForRequest(opts)
 		if err == nil {
 			// Retries wait out the full health grace (see performSwitchMode).
-			err = a.confirmSwitchHealthy(newPane, snap.Kind, attempt > 0)
+			err = a.confirmSwitchHealthy(newPane, attempt > 0)
 		}
 		if err == nil {
 			break

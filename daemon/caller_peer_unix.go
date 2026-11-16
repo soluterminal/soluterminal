@@ -12,6 +12,39 @@ import (
 	"time"
 )
 
+// peerIsWSLInit reports whether pid is WSL's init: inside WSL and owned by
+// root in every uid slot. Its executable (/init) can't be read by a non-root
+// daemon, but /proc/<pid>/status can, and a same-user program can't make its
+// real uid 0. Only called for a peer already named "init".
+func peerIsWSLInit(pid int) bool {
+	return isInsideWSL() && procStatusAllRoot("/proc", pid)
+}
+
+// procStatusAllRoot reports whether the Uid: line of procRoot/<pid>/status
+// reads 0 for the real, effective, saved and filesystem uid.
+func procStatusAllRoot(procRoot string, pid int) bool {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "Uid:") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, "Uid:"))
+		if len(fields) != 4 {
+			return false
+		}
+		for _, f := range fields {
+			if f != "0" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // readPpid reads /proc live, so no snapshot needs refreshing first.
 func refreshProcessTreeForCaller() {}
 

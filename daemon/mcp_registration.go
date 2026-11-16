@@ -41,6 +41,7 @@ type mcpSocketRegistration struct {
 	socket string
 
 	backupDir string
+	dataDir   string
 }
 
 var mcpSocketReg = &mcpSocketRegistration{ready: make(chan struct{})}
@@ -52,7 +53,16 @@ const mcpSocketRegistrationWait = 2 * time.Minute
 func setMCPRegistrationDataDir(dataDir string) {
 	mcpSocketReg.mu.Lock()
 	mcpSocketReg.backupDir = filepath.Join(dataDir, "state", "mcp-registration")
+	mcpSocketReg.dataDir = dataDir
 	mcpSocketReg.mu.Unlock()
+}
+
+// mcpRegistrationDataDir is the data directory setMCPRegistrationDataDir
+// recorded ("" before boot sets it).
+func mcpRegistrationDataDir() string {
+	mcpSocketReg.mu.Lock()
+	defer mcpSocketReg.mu.Unlock()
+	return mcpSocketReg.dataDir
 }
 
 // setMCPSocketServing records the socket outcome: the published path when it

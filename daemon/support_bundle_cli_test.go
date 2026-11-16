@@ -194,3 +194,68 @@ func TestSupportBundleCLIMainDispatch(t *testing.T) {
 		t.Fatalf("CLI created unexpected state: %d entries", len(entries))
 	}
 }
+
+// A side daemon (non-canonical -addr) keeps its durable log in <data>/logs
+// even on the default data directory; --addr finds it and checks that port.
+func TestSupportBundleCLISideDaemonAddr(t *testing.T) {
+	supportBundleCLIEnvironment(t)
+	t.Setenv("SOLU_DURABLE_LOG_DIR", "")
+	data := defaultDataDir()
+	side := &supportBundleOffline{dataDir: data, shellDir: filepath.Join(t.TempDir(), "shell"), addr: "127.0.0.1:9791"}
+	want := filepath.Join(data, "logs", durableLogName)
+	if paths := side.logPaths(); len(paths) == 0 || paths[0] != want {
+		t.Fatalf("side daemon log paths = %v, want first %s", paths, want)
+	}
+	primary := &supportBundleOffline{dataDir: data, shellDir: side.shellDir}
+	if paths := primary.logPaths(); len(paths) == 0 || paths[0] != filepath.Join(side.shellDir, durableLogName) {
+		t.Fatalf("primary log paths = %v, want the shell data dir first", paths)
+	}
+
+	var probed []string
+	supportBundleDial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		probed = append(probed, addr)
+		return nil, errors.New("no daemon listening")
+	}
+	var conn string
+	for _, s := range side.sections() {
+		if s.ID == "connection" {
+			conn = s.Text
+		}
+	}
+	if len(probed) != 1 || probed[0] != "127.0.0.1:9791" || !strings.HasPrefix(conn, "127.0.0.1:9791: ") {
+		t.Fatalf("probed %v, connection %q; want only the side daemon's port", probed, conn)
+	}
+}
+
+func TestSupportBundleLoopbackAddr(t *testing.T) {
+	for in, want := range map[string]string{
+		"127.0.0.1:9791":  "127.0.0.1:9791",
+		" [::1]:38787 ":   "[::1]:38787",
+		"localhost:8787":  "localhost:8787",
+		"127.0.0.2:8787":  "127.0.0.2:8787",
+		"0.0.0.0:8787":    "",
+		"192.168.1.5:80":  "",
+		"example.com:443": "",
+		"127.0.0.1":       "",
+		"127.0.0.1:0":     "",
+		"127.0.0.1:70000": "",
+		"127.0.0.1:http":  "",
+	} {
+		got, ok := supportBundleLoopbackAddr(in)
+		if ok != (want != "") || got != want {
+			t.Errorf("supportBundleLoopbackAddr(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+}
+
+func TestSupportBundleCLIRejectsNonLoopbackAddr(t *testing.T) {
+	data, _ := supportBundleCLIEnvironment(t)
+	var stdout, stderr bytes.Buffer
+	out := filepath.Join(t.TempDir(), "bundle")
+	if code := runSupportBundleCLI([]string{"--data", data, "--addr", "10.0.0.1:8787", "--out", out}, &stdout, &stderr); code != 2 {
+		t.Fatalf("exit %d, want 2 (%s)", code, stderr.String())
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatal("a refused --addr must not write a bundle")
+	}
+}

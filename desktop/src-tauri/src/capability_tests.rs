@@ -39,6 +39,7 @@ fn app() -> tauri::App<tauri::test::MockRuntime> {
             desktop_update_this_computer,
             apply_shell_update,
             desktop_set_backend_mode,
+            desktop_wsl_readiness,
             browser_pane_ping
         ])
         .build(tauri::generate_context!())
@@ -63,15 +64,20 @@ fn desktop_set_backend_mode() -> &'static str {
     "ok"
 }
 #[tauri::command]
+fn desktop_wsl_readiness() -> &'static str {
+    "ok"
+}
+#[tauri::command]
 fn browser_pane_ping() -> &'static str {
     "ok"
 }
 
-const DESKTOP_COMMANDS: [&str; 5] = [
+const DESKTOP_COMMANDS: [&str; 6] = [
     "plugin:app|version",
     "browser_pane_ping",
     "apply_shell_update",
     "desktop_set_backend_mode",
+    "desktop_wsl_readiness",
     "desktop_update_this_computer",
 ];
 

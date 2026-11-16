@@ -483,7 +483,6 @@ describe('e2e smoke server fixtures', () => {
       ['/api/config', {}],
       ['/api/update/status', { available: false, applying: false }],
       ['/api/recovery/settings', { resumeAfterRestart: 'manual' }],
-      ['/api/native/settings', { promptSuggestions: false }],
       ['/api/update/settings', { autoApply: 'off' }],
       ['/api/aria/status', { paused: false }],
       ['/api/aria/auto-pending', { pending: [] }],

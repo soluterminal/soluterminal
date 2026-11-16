@@ -93,8 +93,8 @@ type Schedule struct {
 	// client can author one, preserved across Update, nil for HTTP-created
 	// and legacy schedules. It changes nothing about firing.
 	CreatedBy *ScheduleOrigin `json:"createdBy,omitempty"`
-	// kind=task fields. Permission is a preset name ("plan" | "edit"), never
-	// a raw claude flag. TimeoutMin 0 = the 30-minute default.
+	// kind=task fields. Permission is a preset name ("plan" |
+	// "check" | "edit", scheduleTaskPresets), never a raw claude flag. TimeoutMin 0 = the 30-minute default.
 	Cwd        string `json:"cwd,omitempty"`
 	Permission string `json:"permission,omitempty"`
 	Model      string `json:"model,omitempty"`
@@ -122,13 +122,25 @@ type Schedule struct {
 	// restore that is still in flight at boot.
 	CatchUp bool `json:"catchUp,omitempty"`
 	Enabled bool `json:"enabled"`
+	// WaitingSince is when a scheduled prompt began waiting for its pane
+	// (waitForPane, schedules_runner.go) and WaitingPane what ran in that
+	// pane then. Saved so a restart, an update's included, does not lose the
+	// run without a word: at start the wait is taken up again, or, past its
+	// hour, given up with a notice (resumePaneWaits). Cleared when the wait
+	// ends.
+	WaitingSince *time.Time `json:"waitingSince,omitempty"`
+	WaitingPane  string     `json:"waitingPane,omitempty"`
 	// PausedReason says why the DAEMON paused this schedule (today: its
 	// target pane is gone), so the row can explain itself instead of failing
 	// and paging on every fire. Empty for a schedule the user paused. Cleared
 	// when the schedule is turned back on or retargeted.
-	PausedReason string        `json:"pausedReason,omitempty"`
-	CreatedAt    time.Time     `json:"createdAt"`
-	Runs         []ScheduleRun `json:"runs,omitempty"` // last N runs (newest first)
+	PausedReason string `json:"pausedReason,omitempty"`
+	// Changes records who turned this schedule on or off, newest first
+	// (schedules_changes.go). Written by the store only: absent from
+	// ScheduleInput, so no client can author or erase an entry.
+	Changes   []ScheduleChange `json:"changes,omitempty"`
+	CreatedAt time.Time        `json:"createdAt"`
+	Runs      []ScheduleRun    `json:"runs,omitempty"` // last N runs (newest first)
 
 	// Lifetime counters — every recordRun bumps the one matching the
 	// run's status. Separate from `Runs` because the run-list is capped
@@ -183,6 +195,11 @@ func countMissedFires(sched *Schedule, now time.Time) int {
 	}
 	if len(sched.Runs) > 0 && sched.Runs[0].At.After(anchor) {
 		anchor = sched.Runs[0].At
+	}
+	// A run that was waiting for its pane when the daemon stopped is not a
+	// missed one (the wait is taken up again); the runs after it are.
+	if sched.WaitingSince != nil && sched.WaitingSince.After(anchor) {
+		anchor = *sched.WaitingSince
 	}
 	if anchor.IsZero() || !anchor.Before(now) {
 		return 0
@@ -249,6 +266,14 @@ type ScheduleRun struct {
 	// (the report reaches the phone, not just "it ran") and gives the UI
 	// something readable without opening the full log.
 	Summary string `json:"summary,omitempty"`
+	// tellPerson asks recordRun to push this skip to the phone (a prompt
+	// given up after waiting for its pane). Never saved.
+	tellPerson bool
+	// byRunNow marks a prompt run the person started with Run now. One that
+	// is skipped (nothing typed) leaves a one-time reminder as it was, and
+	// sends no phone push: the person is there and was told (recordRun).
+	// Never saved.
+	byRunNow bool
 }
 
 const maxRunHistory = 20
@@ -372,6 +397,31 @@ type ScheduleStore struct {
 	// usage-limit reset checks it under s.mu, so it can never undo a pause or
 	// edit that landed after it decided (deferOneTime).
 	editSeq map[string]uint64
+
+	// paneWaits holds the scheduled prompts waiting for a busy pane, and
+	// promptRunning the prompt schedules with an attempt to type in flight
+	// (schedules_runner.go). Both are created on first use and memory only:
+	// a restart ends a wait, and the boot sweep records the run as missed.
+	paneWaits     map[string]*paneWait
+	promptRunning map[string]bool
+	// paneTyping names, per pane, the prompt schedule whose attempt to type
+	// is in flight, and paneLastRelease when a scheduled prompt was last
+	// typed into the pane: together they give a pane one prompt per quiet
+	// period however many automations wait for it (paneNotFree).
+	paneTyping      map[string]string
+	paneLastRelease map[string]time.Time
+
+	// wallClock stands in for time.Now in tests of the wall-clock checks
+	// (schedules_runner.go). Nil outside tests. Read and set under s.mu.
+	wallClock func() time.Time
+}
+
+// nowLocked is the wall clock. Caller holds s.mu.
+func (s *ScheduleStore) nowLocked() time.Time {
+	if s.wallClock != nil {
+		return s.wallClock()
+	}
+	return time.Now()
 }
 
 // bumpEditUnlocked records a user pause/resume/edit. Caller holds s.mu.
@@ -497,12 +547,27 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 		return nil, err
 	}
 	now := time.Now()
-	var catchUpIDs []string
+	var catchUpIDs, waitingIDs []string
 	dirty := false
 	for _, id := range s.order {
 		sched := s.items[id]
 		if !sched.Enabled || !scheduleAvailable(sched) {
+			if sched.WaitingSince != nil {
+				sched.WaitingSince, sched.WaitingPane = nil, ""
+				dirty = true
+			}
 			continue
+		}
+		// Its prompt was waiting for its pane when the daemon stopped. The
+		// wait is taken up again once the panes are back (resumePaneWaits),
+		// so the run is neither lost as "missed" nor counted as one
+		// (countMissedFires counts from when it began waiting).
+		waiting := sched.WaitingSince != nil
+		if waiting {
+			waitingIDs = append(waitingIDs, id)
+			if sched.oneTime() && sched.RunAt.Before(now) {
+				continue // no timer: the wait is what runs it
+			}
 		}
 		// One-time schedules whose moment passed while the daemon was
 		// off are recorded as missed and auto-disabled — mirrors the
@@ -557,6 +622,7 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 			// sees a problem in the UI instead of a silent no-op.
 			log.Printf("scheduler: disabling %q (%s): %v", sched.Name, sched.ID, err)
 			sched.Enabled = false
+			sched.noteChange(scheduleChangeDisabled, scheduleActorDaemon, "its timing could not be read", now)
 			dirty = true
 		}
 	}
@@ -571,6 +637,19 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 	s.preFireCancel = cancel
 	s.lifeCtx = ctx
 	go s.watchPreFire(ctx)
+
+	// Prompts that were waiting for their pane when the daemon stopped.
+	if len(waitingIDs) > 0 {
+		delay := paneWaitResumeDelay // read here, not on the goroutine
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+			s.resumePaneWaits(waitingIDs)
+		}()
+	}
 
 	// Catch-up fires, one per opted-in task schedule that missed runs.
 	// Delayed so a boot storm (workspace restore, cloud reconnect) settles
@@ -701,7 +780,12 @@ type ScheduleInput struct {
 	Enabled     *bool            `json:"enabled,omitempty"`     // nil = true
 }
 
-func (in *ScheduleInput) validate() error {
+func (in *ScheduleInput) validate() error { return in.validateInput(false) }
+
+// validateInput is validate; pastRunAtOK waives "runAt must be in the future"
+// for an edit of a one-time automation that is waiting for its pane
+// (UpdateBy).
+func (in *ScheduleInput) validateInput(pastRunAtOK bool) error {
 	if providers.HasRetiredDeepSeekReference(in.Model) {
 		return errors.New("schedule model cannot reference a retired DeepSeek model")
 	}
@@ -731,7 +815,7 @@ func (in *ScheduleInput) validate() error {
 		if in.Until != nil {
 			return errors.New("until only applies to recurring schedules")
 		}
-		if !in.RunAt.After(time.Now()) {
+		if !pastRunAtOK && !in.RunAt.After(time.Now()) {
 			return errors.New("runAt must be in the future")
 		}
 	}
@@ -760,8 +844,8 @@ func (in *ScheduleInput) validate() error {
 		if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
 			return errors.New("cwd is not an existing directory")
 		}
-		if !validTaskPermission(strings.TrimSpace(in.Permission)) {
-			return errors.New(`permission must be "plan" or "edit"`)
+		if !validScheduleTaskPermission(strings.TrimSpace(in.Permission)) {
+			return errors.New(`permission must be "plan", "check" or "edit"`)
 		}
 		if in.TimeoutMin < 0 || time.Duration(in.TimeoutMin)*time.Minute > taskRunTimeoutMax {
 			return fmt.Errorf("timeoutMin must be between 0 and %d", int(taskRunTimeoutMax.Minutes()))
@@ -1036,7 +1120,22 @@ func (s *ScheduleStore) ClearOwnedBy(schedID string) error {
 // Update replaces fields on an existing schedule. Unset optionals are
 // preserved. Returns the updated schedule.
 func (s *ScheduleStore) Update(id string, in ScheduleInput) (*Schedule, error) {
-	if err := in.validate(); err != nil {
+	return s.UpdateBy(id, in, scheduleActorDaemon)
+}
+
+// UpdateBy is Update with the actor recorded when the edit also turns the
+// schedule on or off.
+func (s *ScheduleStore) UpdateBy(id string, in ScheduleInput, actor ScheduleActor) (*Schedule, error) {
+	// A one-time automation waiting for its pane is past its time by
+	// definition. Editing it without moving that time is allowed: the edit
+	// ends the wait, and the edited run is due at once.
+	s.mu.Lock()
+	waitingOneTime := false
+	if cur, ok := s.items[id]; ok && cur.RunAt != nil && in.RunAt != nil && in.RunAt.Equal(*cur.RunAt) {
+		_, waitingOneTime = s.paneWaits[id]
+	}
+	s.mu.Unlock()
+	if err := in.validateInput(waitingOneTime); err != nil {
 		return nil, err
 	}
 	// Switching another kind to a Claude task needs Claude here, as creating
@@ -1057,6 +1156,12 @@ func (s *ScheduleStore) Update(id string, in ScheduleInput) (*Schedule, error) {
 	if !scheduleAvailable(sched) {
 		s.mu.Unlock()
 		return nil, errScheduleUnavailable
+	}
+	if _, still := s.paneWaits[id]; waitingOneTime && !still {
+		// It ran (or was given up) between the check above and here: its
+		// time is simply past now.
+		s.mu.Unlock()
+		return nil, errors.New("runAt must be in the future")
 	}
 	enabled := sched.Enabled
 	if in.Enabled != nil {
@@ -1099,6 +1204,9 @@ func (s *ScheduleStore) Update(id string, in ScheduleInput) (*Schedule, error) {
 			return nil, err
 		}
 	}
+	if enabled != wasEnabled {
+		sched.noteChange(scheduleChangeFor(enabled), actor, "", time.Now())
+	}
 	if err := s.saveUnlocked(); err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -1109,6 +1217,13 @@ func (s *ScheduleStore) Update(id string, in ScheduleInput) (*Schedule, error) {
 }
 
 func (s *ScheduleStore) Delete(id string) error {
+	return s.DeleteBy(id, scheduleActorDaemon)
+}
+
+// DeleteBy is Delete with the actor recorded. The schedule's own record goes
+// with it, so the deletion is kept in the data folder's deleted-schedules
+// file (schedules_changes.go).
+func (s *ScheduleStore) DeleteBy(id string, actor ScheduleActor) error {
 	s.mu.Lock()
 	sched, ok := s.items[id]
 	if !ok {
@@ -1120,6 +1235,7 @@ func (s *ScheduleStore) Delete(id string) error {
 		return errScheduleUnavailable
 	}
 	isTask := sched.isTask()
+	gone := *sched
 	s.unscheduleUnlocked(id)
 	delete(s.items, id)
 	s.order = removeString(s.order, id)
@@ -1127,6 +1243,7 @@ func (s *ScheduleStore) Delete(id string) error {
 		s.mu.Unlock()
 		return err
 	}
+	s.recordDeletedUnlocked(gone, actor, time.Now())
 	s.mu.Unlock()
 	// Task run logs live in a per-schedule directory keyed by this ID; with
 	// the schedule gone nothing can ever reference them again.
@@ -1169,6 +1286,12 @@ func (s *ScheduleStore) MarkRead(id string, at time.Time) (*Schedule, error) {
 // SetEnabled toggles a schedule on/off without touching any other
 // fields. Faster than a full Update for the common sidebar-checkbox path.
 func (s *ScheduleStore) SetEnabled(id string, enabled bool) (*Schedule, error) {
+	return s.SetEnabledBy(id, enabled, scheduleActorDaemon)
+}
+
+// SetEnabledBy is SetEnabled with the actor recorded on the schedule
+// (Schedule.Changes) when the call really turns it on or off.
+func (s *ScheduleStore) SetEnabledBy(id string, enabled bool, actor ScheduleActor) (*Schedule, error) {
 	s.mu.Lock()
 	sched, ok := s.items[id]
 	if !ok {
@@ -1178,6 +1301,19 @@ func (s *ScheduleStore) SetEnabled(id string, enabled bool) (*Schedule, error) {
 	if !scheduleAvailable(sched) {
 		s.mu.Unlock()
 		return nil, errScheduleUnavailable
+	}
+	// Turning off a schedule the stop on agent messaging holds keeps it off:
+	// the hold is dropped, so resume will not run or re-arm it.
+	if !enabled && sched.PausedReason == agentMessagingScheduleReason {
+		sched.PausedReason = ""
+		s.bumpEditUnlocked(id)
+		err := s.saveUnlocked()
+		s.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		s.notifyScheduleChanged(id)
+		return sched, nil
 	}
 	if sched.Enabled == enabled {
 		s.mu.Unlock()
@@ -1207,6 +1343,7 @@ func (s *ScheduleStore) SetEnabled(id string, enabled bool) (*Schedule, error) {
 			return nil, err
 		}
 	}
+	sched.noteChange(scheduleChangeFor(enabled), actor, "", time.Now())
 	if err := s.saveUnlocked(); err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -1257,9 +1394,26 @@ func (s *ScheduleStore) SnoozeNext(id string) (*Schedule, error) {
 	return sched, nil
 }
 
+// runNowOutcome is what Run now did, known by the time FireNow returns.
+// Outcome is "started" (the prompt went into its pane, or the task or agent
+// run began), "skipped" or "failed"; Detail says where or why.
+type runNowOutcome struct {
+	Outcome string `json:"outcome"`
+	Detail  string `json:"detail,omitempty"`
+}
+
 // FireNow triggers a one-off run, outside the cron schedule. Useful for
-// testing a job from the UI. Respects the same gating as a normal fire.
+// testing a job from the UI. Respects the same gating as a normal fire,
+// except that it never waits for a busy pane: the person is told at once.
+// (The outcome type sits above it; RunNow below is the same call with the
+// outcome returned.)
 func (s *ScheduleStore) FireNow(id string) (*Schedule, error) {
+	sched, _, err := s.RunNow(id)
+	return sched, err
+}
+
+// RunNow is FireNow, and also says what the run did.
+func (s *ScheduleStore) RunNow(id string) (*Schedule, runNowOutcome, error) {
 	s.mu.Lock()
 	sched, ok := s.items[id]
 	if ok && sched.isTask() {
@@ -1267,15 +1421,52 @@ func (s *ScheduleStore) FireNow(id string) (*Schedule, error) {
 		// is still spent, this run fails and sets the hold again.
 		s.usageLimitUntil = time.Time{}
 	}
+	recorded := 0
+	if ok {
+		recorded = sched.FireCount + sched.SkipCount + sched.ErrorCount
+	}
 	s.mu.Unlock()
 	if !ok {
-		return nil, errors.New("schedule not found")
+		return nil, runNowOutcome{}, errors.New("schedule not found")
 	}
 	if !scheduleAvailable(sched) {
-		return nil, errScheduleUnavailable
+		return nil, runNowOutcome{}, errScheduleUnavailable
 	}
-	s.fire(sched.ID)
-	return sched, nil
+	// The person's Run now on a schedule the stop on agent messaging holds
+	// releases that hold for it: it runs now and is armed again.
+	s.mu.Lock()
+	if sched.PausedReason == agentMessagingScheduleReason {
+		s.releaseAgentMessagingHoldLocked(sched, time.Now())
+		_ = s.saveUnlocked()
+	}
+	s.mu.Unlock()
+	s.fireAs(sched.ID, firePerson)
+
+	// fireAs has decided by the time it returns: every refusal is recorded
+	// as a run before then, and a task or agent run that began holds its
+	// run slot. So the answer is the run it recorded, else the run in
+	// flight. (A timetable run of the same schedule recorded in the instant
+	// between fireAs returning and this read would be reported instead; the
+	// row and history are right either way.)
+	cur, ok := s.Get(sched.ID)
+	if !ok {
+		return sched, runNowOutcome{Outcome: "skipped", Detail: "the automation was deleted"}, nil
+	}
+	if cur.FireCount+cur.SkipCount+cur.ErrorCount > recorded && len(cur.Runs) > 0 {
+		run := cur.Runs[0]
+		switch run.Status {
+		case "fired":
+			return sched, runNowOutcome{Outcome: "started", Detail: run.Detail}, nil
+		case "error":
+			return sched, runNowOutcome{Outcome: "failed", Detail: run.Detail}, nil
+		}
+		s.keepSkippedReminderDue(sched.ID, run.Detail)
+		return sched, runNowOutcome{Outcome: "skipped", Detail: run.Detail}, nil
+	}
+	if s.scheduleRunning(cur) {
+		return sched, runNowOutcome{Outcome: "started"}, nil
+	}
+	return sched, runNowOutcome{Outcome: "skipped", Detail: "the run did not start"}, nil
 }
 
 func (s *ScheduleStore) notifyChanged() {

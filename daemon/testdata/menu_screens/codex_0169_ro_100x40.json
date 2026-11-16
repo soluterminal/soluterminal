@@ -1,0 +1,26 @@
+{
+ "cols": 100,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "idle",
+   "bytes": 4451
+  },
+  {
+   "name": "write_command",
+   "bytes": 30555
+  },
+  {
+   "name": "network_command",
+   "bytes": 46137
+  },
+  {
+   "name": "patch_approval",
+   "bytes": 65462
+  },
+  {
+   "name": "escalated_command",
+   "bytes": 90033
+  }
+ ]
+}

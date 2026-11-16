@@ -52,6 +52,47 @@ export const INSTALL_THEN = 'Then open SoluTerminal from its new icon. It opens 
 
 const PROMPT_STASH = '__SOLU_INSTALL_PROMPT__';
 
+// F-016: a normal Chrome tab cannot see that the app is installed (only the
+// installed window runs standalone), and Chrome stops offering the install
+// prompt once it is, so the tab kept showing "Install app". The installed app
+// shares the browser's storage for this site, so it leaves a note here that
+// the tab reads. A fresh install prompt means it is not installed (any more),
+// and clears the note.
+const INSTALLED_KEY = 'solu.pwaInstalled';
+
+function rememberInstalled(installed: boolean) {
+  try {
+    if (installed) localStorage.setItem(INSTALLED_KEY, '1');
+    else localStorage.removeItem(INSTALLED_KEY);
+  } catch { /* storage unavailable: the button just stays */ }
+}
+
+function rememberedInstalled(): boolean {
+  try { return localStorage.getItem(INSTALLED_KEY) === '1'; } catch { return false; }
+}
+
+// F-015: the steps open in a popover the screen reader is not on, so its title
+// was never read out. Moving focus into it reads the dialog's name and steps;
+// on close, focus goes back to where it was (the Install button) if nothing
+// else took it.
+let focusBeforeOpen: HTMLElement | null = null;
+let openDialog: HTMLDivElement | null = null;
+const focusOnOpen = (el: HTMLDivElement | null) => {
+  if (el) {
+    focusBeforeOpen = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    openDialog = el;
+    el.focus({ preventScroll: true });
+    return;
+  }
+  const back = focusBeforeOpen;
+  const dialog = openDialog;
+  focusBeforeOpen = null;
+  openDialog = null;
+  const focus = document.activeElement;
+  const lost = !focus || focus === document.body || !!dialog?.contains(focus);
+  if (back?.isConnected && lost) back.focus({ preventScroll: true });
+};
+
 function installSteps(): string {
   if (isFirefox()) return INSTALL_STEPS_FIREFOX;
   return /Android/i.test(navigator.userAgent) ? INSTALL_STEPS_ANDROID : INSTALL_STEPS_DESKTOP;
@@ -101,6 +142,7 @@ export function InstallButton() {
 
   useEffect(() => {
     if (isTauri()) return;
+    if (isStandalone()) rememberInstalled(true);
 
     // Pick up a prompt that fired BEFORE we mounted (stashed by
     // main.tsx's early window listener). Critical for Chrome — it
@@ -118,6 +160,7 @@ export function InstallButton() {
       // on top of ours — we want the button to be the single install
       // affordance, not a competing toast from the browser chrome.
       e.preventDefault();
+      rememberInstalled(false);
       setDeferred(e as BeforeInstallPromptEvent);
       setPromptFiredAt(Date.now());
     };
@@ -133,6 +176,7 @@ export function InstallButton() {
       // browser's own menu, etc.): the button disappears for this session.
       setDeferred(null);
       setInstalled(true);
+      rememberInstalled(true);
     };
 
     window.addEventListener('beforeinstallprompt', onBeforeInstall as EventListener);
@@ -184,6 +228,8 @@ export function InstallButton() {
     if (isStandalone() || installed) return { kind: 'hidden' };
     if (isIosDevice()) return { kind: 'ios-help' };
     if (deferred) return { kind: 'prompt-ready' };
+    // Firefox never offers the prompt that clears the note after an uninstall.
+    if (!isFirefox() && rememberedInstalled()) return { kind: 'hidden' };
     if (sw === 'missing' || sw === 'unsupported') return { kind: 'sw-missing', sw };
     return { kind: 'criteria-not-met', sw };
   })();
@@ -224,7 +270,7 @@ export function InstallButton() {
           </button>
         )}
       >
-        <div className="install-help" role="dialog" aria-label="Add SoluTerminal to your Home Screen">
+        <div className="install-help" role="dialog" aria-label="Add SoluTerminal to your Home Screen" tabIndex={-1} ref={focusOnOpen}>
           <p>{IOS_ADD_TO_HOME_SCREEN_STEPS}</p>
           <p>Then open SoluTerminal from its Home Screen icon. It runs full screen there, and you can turn on alerts from the Alerts bell.</p>
         </div>
@@ -260,7 +306,7 @@ export function InstallButton() {
         </button>
       )}
     >
-      <div className="install-help" role="dialog" aria-label={INSTALL_HELP_TITLE}>
+      <div className="install-help" role="dialog" aria-label={INSTALL_HELP_TITLE} tabIndex={-1} ref={focusOnOpen}>
         <p>{installSteps()}</p>
         <p>{INSTALL_THEN}</p>
       </div>

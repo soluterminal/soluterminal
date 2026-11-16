@@ -51,7 +51,7 @@ func TestHostStorageLedgerAppendTailDedupeAndRedaction(t *testing.T) {
 	p.HostFreeMB += 100
 	l.AppendSample("boot-a", p)
 	l.AppendAdmissionBlocked("boot-a", `token=abcdefghijklmnopqrstuvwx1234567890`, "verify", p)
-	l.AppendMaintenance("boot-a", "dry-run", `C:\Users\benja\AppData\Local\wsl\x`)
+	l.AppendMaintenance("boot-a", "dry-run", `C:\Users\alice\AppData\Local\wsl\x`)
 	events := l.Tail(20)
 	if len(events) != 4 {
 		t.Fatalf("dedupe failed: %#v", events)
@@ -61,7 +61,7 @@ func TestHostStorageLedgerAppendTailDedupeAndRedaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(b)
-	if strings.Contains(text, "abcdefghijklmnopqrst") || strings.Contains(text, `C:\\Users\\benja`) {
+	if strings.Contains(text, "abcdefghijklmnopqrst") || strings.Contains(text, `C:\\Users\\alice`) {
 		t.Fatalf("secret/path leaked: %s", text)
 	}
 	if st, _ := os.Stat(l.path); st.Mode().Perm() != 0600 {
@@ -76,7 +76,7 @@ func TestHostStorageLedgerAttributionAndHostLossEvents(t *testing.T) {
 		HostState: hostStorageOK, HostVolume: `C:\`, HostKnown: true, HostLow: true,
 		HostFreeMB: 65865, HostFloorMB: 102400, VHDXPhysicalMB: 543380, BlockingLayer: "host",
 		HostLoss:     hostLossAssessment{Detected: true, WindowStart: start, WindowEnd: start.Add(43 * time.Minute), Samples: 5, HostLossMB: 51095, UnexplainedMB: 51095, VHDXKnown: true},
-		HostOffender: &hostDirUsage{Label: `%TEMP%\wsl-crashes`, Path: `C:\Users\benja\AppData\Local\Temp\wsl-crashes`, Exists: true, Bytes: 50 << 30, Files: 10, DumpFiles: 10, Complete: true},
+		HostOffender: &hostDirUsage{Label: `%TEMP%\wsl-crashes`, Path: `C:\Users\alice\AppData\Local\Temp\wsl-crashes`, Exists: true, Bytes: 50 << 30, Files: 10, DumpFiles: 10, Complete: true},
 	}
 	ledger.AppendSample("boot", p)
 	ledger.AppendAdmissionBlocked("boot", "capture-screens", "verify", p)
@@ -92,7 +92,7 @@ func TestHostStorageLedgerAttributionAndHostLossEvents(t *testing.T) {
 		if ev.UnexplainedLossMB != 51095 || ev.Offender != `%TEMP%\wsl-crashes` || ev.OffenderMB != 51200 || ev.OffenderDumps != 10 || ev.OffenderComplete == nil || !*ev.OffenderComplete {
 			t.Fatalf("missing attribution: %+v", ev)
 		}
-		if !strings.HasPrefix(ev.SuggestedPath, `~\`) || strings.Contains(strings.ToLower(ev.SuggestedPath), "benja") {
+		if !strings.HasPrefix(ev.SuggestedPath, `~\`) || strings.Contains(strings.ToLower(ev.SuggestedPath), "alice") {
 			t.Fatalf("unredacted suggested path: %+v", ev)
 		}
 	}
@@ -159,12 +159,12 @@ func TestHostStorageLauncherTailReadsBoundedRedactedFixture(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	fixture := fmt.Sprintf("{\"at\":\"2026-08-25T10:00:00Z\",\"kind\":\"preflight\",\"verdict\":\"block\",\"freeBytes\":123,\"totalBytes\":456,\"floorBytes\":234,\"detail\":\"C:\\\\Users\\\\benja\\\\secret\"}\n")
+	fixture := fmt.Sprintf("{\"at\":\"2026-08-25T10:00:00Z\",\"kind\":\"preflight\",\"verdict\":\"block\",\"freeBytes\":123,\"totalBytes\":456,\"floorBytes\":234,\"detail\":\"C:\\\\Users\\\\alice\\\\secret\"}\n")
 	if err := os.WriteFile(filepath.Join(dir, "host-disk.jsonl"), []byte(fixture), 0600); err != nil {
 		t.Fatal(err)
 	}
-	events := hostStorageLauncherTail(`C:\Users\benja\AppData\Local`, 10)
-	if len(events) != 1 || events[0].Source != "launcher" || events[0].Verdict != "block" || events[0].FreeBytes != 123 || strings.Contains(events[0].Detail, "benja") {
+	events := hostStorageLauncherTail(`C:\Users\alice\AppData\Local`, 10)
+	if len(events) != 1 || events[0].Source != "launcher" || events[0].Verdict != "block" || events[0].FreeBytes != 123 || strings.Contains(events[0].Detail, "alice") {
 		t.Fatalf("events=%+v", events)
 	}
 	hostStorageWSLPath = func(context.Context, string) ([]byte, error) { return nil, fmt.Errorf("missing") }
@@ -431,7 +431,7 @@ func TestPublishLauncherPolicyRetriesFailedWriteAndInvalidatesChangedValues(t *t
 		return []byte(root + "\n"), nil
 	}
 	e := hostPressureEngine(nil, 667*1024)
-	p := diskPressureState{LocalAppData: `C:\Users\benja\AppData\Local`}
+	p := diskPressureState{LocalAppData: `C:\Users\alice\AppData\Local`}
 	e.publishLauncherPolicy(p)
 	e.publishLauncherPolicy(p)
 	policyPath := filepath.Join(root, "soluterminal", "host-disk-policy.json")
@@ -463,13 +463,13 @@ func TestHostStorageLedgerProducerOperationSeparationAndCaps(t *testing.T) {
 	l := newHostStorageLedger(dir)
 	l.now = func() time.Time { return time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC) }
 	l.AppendBoot("boot-a", "1")
-	cats := map[string]int64{storageCatWorkflowWorktrees: 42, `C:\Users\benja\secret`: 100}
+	cats := map[string]int64{storageCatWorkflowWorktrees: 42, `C:\Users\alice\secret`: 100}
 	l.AppendProducerSample("boot-a", storageProducerSample{At: l.now(), Complete: true, Categories: cats})
 	skips := []storageCleanupSkip{}
 	for i := 0; i < hostStorageOperationReasonCap+4; i++ {
 		skips = append(skips, storageCleanupSkip{Reason: "reason" + itoa64(int64(i)), Count: 1})
 	}
-	l.AppendCleanupOperation(storageCleanupOperation{At: l.now(), Kind: "worktree_gc", Layer: "guest", Executed: true, Complete: true, Skipped: skips, Detail: `C:\Users\benja\secret`})
+	l.AppendCleanupOperation(storageCleanupOperation{At: l.now(), Kind: "worktree_gc", Layer: "guest", Executed: true, Complete: true, Skipped: skips, Detail: `C:\Users\alice\secret`})
 
 	producers := l.TailProducerSamples(10)
 	if len(producers) != 1 || len(producers[0].Categories) != 1 || producers[0].Categories[storageCatWorkflowWorktrees] != 42 {
@@ -490,7 +490,7 @@ func TestHostStorageLedgerProducerOperationSeparationAndCaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "benja") || !strings.Contains(string(b), `"kind":"boot"`) || !strings.Contains(string(b), `"kind":"producer_sample"`) || !strings.Contains(string(b), `"kind":"cleanup_operation"`) {
+	if strings.Contains(string(b), "alice") || !strings.Contains(string(b), `"kind":"boot"`) || !strings.Contains(string(b), `"kind":"producer_sample"`) || !strings.Contains(string(b), `"kind":"cleanup_operation"`) {
 		t.Fatalf("ledger leak or lost rows: %s", b)
 	}
 }

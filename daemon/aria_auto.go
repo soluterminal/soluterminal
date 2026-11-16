@@ -172,13 +172,6 @@ func (a *Aria) evaluateObservation(ctx context.Context, paneID, paneTitle, obser
 		orderID     string
 		countdownMs = ariaAutoCountdownMs
 	)
-	// Native-renderer panes answer permission requests with a structured
-	// control_response frame, not PTY keystrokes — they need a dedicated
-	// decision path (resolve_permission + the parked NativeApproval). The
-	// aria-watcher fires the same for native and terminal panes (both report
-	// StateChoicePrompt), but the terminal grid-scrape machinery
-	// (directAutoFire / send_input) cannot act on a native pane, so detect the
-	// kind up front and branch below.
 	p, found := a.mgr.Get(paneID)
 	if !found {
 		return
@@ -190,51 +183,26 @@ func (a *Aria) evaluateObservation(ctx context.Context, paneID, paneTitle, obser
 		return
 	}
 	ctx, policy := withAriaAutoModePolicy(ctx, p)
-	isNative := p.Snapshot().Kind == "native"
-	if !isNative && p.Snapshot().AutoMode == "cautious" {
+	if p.Snapshot().AutoMode == "cautious" {
 		observationText = cautiousPromptText(p, observationText)
 	}
-	if !isNative && p.Snapshot().AutoMode == "cautious" && a.cautiousPromptCancelled(p) {
+	if p.Snapshot().AutoMode == "cautious" && a.cautiousPromptCancelled(p) {
 		return
 	}
-	if isNative && !nativeAriaAutoEnabled() {
-		// Kill-switch off: leave native panes for the human (pre-wiring
-		// behaviour). Returning here also keeps a native pane from falling
-		// through to the terminal grid/PTY path, which can't act on it.
-		return
-	}
-	if !isNative && a.tryJevAmbiguousTerminal(ctx, p, paneID, paneTitle, start) {
+	if a.tryJevAmbiguousTerminal(ctx, p, paneID, paneTitle, start) {
 		return
 	}
 	switch p.Snapshot().AutoMode {
 	case "always":
 		// Jev gets the first decision on eligible terminal permissions above.
 		// Recognized prompts still progress when Jev abstains, is unavailable,
-		// or cannot receive the screen text. Native requests stay structured.
-		if isNative {
-			a.directAutoFireNative(ctx, paneID, paneTitle)
-		} else {
-			a.directAutoFire(ctx, paneID, paneTitle)
-		}
+		// or cannot receive the screen text.
+		a.directAutoFire(ctx, paneID, paneTitle)
 		return
 	case "cautious":
 		instruction = ariaAutoModeCautiousInstruction
 		orderID = "automode_cautious"
 	default:
-		return
-	}
-
-	// Native LLM path (cautious mode): a dedicated handler evaluates
-	// each parked approval by its exact RequestID and resolves via
-	// resolve_permission. The terminal grid/PTY machinery below does not
-	// apply to native panes. Non-team installs can't reach that model, so
-	// their native permissions stay with the human.
-	if isNative && a.cautiousJevOnly() {
-		a.recordEvalOutcomeDedup(AriaEvalOutcome{PaneID: paneID, Kind: "declined", Reason: jevCautiousReason("native_fallback"), LatencyMs: time.Since(start).Milliseconds()})
-		return
-	}
-	if isNative {
-		a.evaluateNativeObservation(ctx, paneID, paneTitle, p, instruction, orderID, countdownMs, orderID == "automode_cautious")
 		return
 	}
 

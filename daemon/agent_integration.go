@@ -14,13 +14,14 @@ import (
 
 // Agent integration consent. SoluTerminal can add itself to Claude Code and
 // Codex machine-wide: the "soluterminal" MCP server in ~/.claude.json, hooks in
-// ~/.claude/settings.json, the server in ~/.codex/config.toml and a marked
-// block in ~/.codex/AGENTS.md. Those reach every Claude/Codex session on the
-// computer, including ones outside SoluTerminal, so they are opt-in.
+// ~/.claude/settings.json and the server in ~/.codex/config.toml. Those reach
+// every Claude/Codex session on the computer, including ones outside
+// SoluTerminal, so they are opt-in. (Earlier versions also wrote a marked block
+// into ~/.codex/AGENTS.md; it is removed now, codex_agents_md.go.)
 //
 // The choice lives in <dataDir>/agent_integration.json:
 //
-//   - "on"  → the four global entries are written (today's behaviour).
+//   - "on"  → the three global entries are written (today's behaviour).
 //   - "off" → none are written; turning it off removes them. Panes started by
 //     SoluTerminal still get the tools and hooks per process (see
 //     agent_integration_inject.go), so the app keeps working.

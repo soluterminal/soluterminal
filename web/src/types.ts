@@ -33,18 +33,6 @@ export interface ShellAutoRestart {
   deadlineMs: number;
 }
 
-// Per-machine native (Focus-renderer) toggles. promptSuggestions is the opt-in
-// for Claude's own "next-prompt" suggestions (ghost text in the composer);
-// default OFF — enabling it adds one cached background model call per turn.
-export interface NativeSettings {
-  promptSuggestions: boolean;
-  // The renderer NEW Claude sessions preselect in the new-session dialog:
-  // '' (terminal, the shipping default) or 'native' (Focus). A client-default
-  // hint only — the per-session choice always wins. Optional so older daemons
-  // (which won't echo the field) keep working.
-  defaultClaudeMode?: '' | 'native';
-}
-
 export type PaneRuntimeState =
   | 'busy'
   | 'awaiting-input'
@@ -171,6 +159,8 @@ export interface PaneInfo {
   /** The held messages wait behind text in the input box that nobody is
    *  working on: only the person can clear it, so the pane reads nothing. */
   heldStuck?: boolean;
+  // Held because the person paused agent messaging (AgentMessagingChip).
+  heldPaused?: boolean;
 	// Current live-auth evidence, distinct from selection captured at launch.
 	codexAuth?: {
 		state: string; account?: string; canReconnect?: boolean; recovery?: string; retryAt?: number;
@@ -202,6 +192,10 @@ export interface PaneInfo {
   // A PowerShell terminal holding a daemon address the daemon no longer
   // serves: agents typed in it cannot start until the terminal is restarted.
   terminalAddressLost?: boolean;
+  // An agent pane started before the Backend setting moved the daemon's
+  // port: its SoluTerminal tools and hooks call the old address until it is
+  // restarted.
+  addressLost?: boolean;
   titleOverride?: string;
   socketPath?: string;
   id: string;
@@ -301,7 +295,15 @@ export interface PaneInfo {
   // present only for a native pane with exactly one open approval, so
   // notifications can say WHAT is being asked ("Bash: git push …") without
   // a history fetch. Absent for terminal / zero / parallel approvals.
-  pendingApproval?: { requestId: string; toolName: string; summary?: string };
+  pendingApproval?: {
+    requestId: string;
+    toolName: string;
+    summary?: string;
+    widensPermissions?: boolean;
+    approvalSig?: string;
+    approvalSigV?: string;
+    approvalIssuedAt?: string;
+  };
   // Reasoning-effort level baked into a native pane's `claude --effort` argv.
   // Surfaced here so the Focus header can show/seed the current level. '' or
   // absent = claude's built-in default. Only meaningful for native panes.
@@ -379,13 +381,10 @@ export interface PaneInfo {
   // daemon, i.e. restarting the pane would actually change its behavior. A
   // daemon-only release never sets it. Omitted when false.
   agentStale?: boolean;
-  // Renderer kind. Absent / '' = the default terminal (xterm/grid) pane —
-  // EVERY existing pane keeps this path byte-identically. 'native' = the
-  // native-renderer pane (headless Claude over stream-json, normalized to
-  // NativeEvents and rendered as markdown/tool-cards/approvals at the
-  // browser's own width). Daemon emits json:"kind,omitempty" (pane.go); the
-  // native render path engages purely on `pane.kind === 'native'`. Gated
-  // server-side behind SOLU_NATIVE_RENDERER for creation.
+  // Renderer kind. Absent / '' = the terminal pane. 'native' was the Focus
+  // renderer, now removed: an older daemon may still report it. The web shows
+  // such a pane as a retired-Focus card (RetiredFocusPane) and never sends it
+  // keys (effectiveTerminalTarget).
   kind?: '' | 'native';
   // Agent protocol, independent from the renderer. Omitted means the legacy
   // Claude default; Codex / Muse are explicit so they survive workspace persistence.
@@ -409,16 +408,9 @@ export interface PaneInfo {
     at: number;
     reason?: 'resume-repair' | 'fresh-start';
   } | null;
-  // Set by the daemon when a DEFERRED ("switch when the turn finishes") renderer
-  // switch is ARMED and waiting for the current turn to settle. `target` is the
-  // renderer being switched TO ('native' | 'terminal'). The daemon clears it
-  // (→ null/absent) the moment the switch fires OR is cancelled. Distinct from
-  // paneModeSwitching (a client-only "flip in flight" flag for the now-switch
-  // round-trip): pendingSwitch is an armed-but-not-yet-fired server state.
-  pendingSwitch?: { target: 'native' | 'terminal'; at: number } | null;
   // Daemon-computed count of "[solu] delegated work" updates buffered for
   // this pane (held while a turn is in flight or the composer has text;
-  // delivered when idle or with the next Focus message).
+  // delivered when the pane is idle).
   delegatedPending?: { count: number; needsYou: number; oldestAt: number } | null;
   // Prompt-aware "switching the renderer now would interrupt live agent work".
   // The daemon computes this from a visible Claude prompt box, so it does NOT
@@ -429,14 +421,6 @@ export interface PaneInfo {
   // current daemon (false is meaningful); absent only against an older daemon,
   // where shouldConfirmModeSwitch falls back to the recency states.
   agentMidTurn?: boolean;
-  // The daemon's per-process id. Changes only on a daemon restart — exactly when
-  // a native pane's event ring is rebuilt from seq 1 (AttachExisting) while the
-  // surviving agent keeps its pid, so pid-based respawn detection can't see the
-  // reset. useNativePane resets + re-seeds its fold cache on a change (same path
-  // as a pid respawn) to make a mid-turn daemon swap reattach losslessly. Absent
-  // against an older daemon → never triggers a reset (resets only on a
-  // defined→defined change).
-  nativeEpoch?: number;
   // Last-sampled resident memory (MB) of the pane's selected Claude or Codex
   // process — the heap "Restart agent" reclaims. Refreshed by the daemon's slow
   // RSS sampler (~60s), so it can lag up to a minute. Drives the Focus header
@@ -445,19 +429,6 @@ export interface PaneInfo {
   // Compatibility alias emitted by older daemons and during the rollout that
   // introduced agentRssMB. New UI code prefers agentRssMB.
   claudeRssMB?: number;
-  // A background Claude Code Workflow still running after the launching turn
-  // ended. The Workflow tool returns immediately and notifies on completion, so
-  // agentMidTurn settles to idle while its subagents keep churning — the pane
-  // would otherwise look done. Present only while a workflow is in flight; the
-  // footer renders "workflow · N/M agents · active Xs ago" and infers
-  // stalled-vs-working from lastActivityMs (freshest workflow file mtime, unix-ms;
-  // 0 = nothing written yet). See daemon/workflow_status.go.
-  workflowStatus?: {
-    running: boolean;
-    agentsTotal: number;
-    agentsDone: number;
-    lastActivityMs: number;
-  } | null;
   // Terminal-mode agent turn tracking (daemon/turns.go): whether a turn is
   // running and since when, plus the last completed turn's change stats.
   // Absent on older daemons and on panes that never ran an agent turn.
@@ -538,9 +509,11 @@ export interface OrchestratorHostsInfo {
 export type ScheduleRunStatus = 'fired' | 'skipped' | 'error';
 
 // Permission preset for kind='task' runs. 'plan' reads and plans but writes
-// nothing; 'edit' lets Claude change files. The daemon maps these to
-// --permission-mode; bypassPermissions is deliberately not offered.
-export type SchedulePermission = 'plan' | 'edit';
+// nothing; 'check' also runs the
+// project's tests and dependency reports; 'edit' lets Claude change files. The daemon maps each to --permission-mode plus its own allow/deny
+// lists (schedules_task.go scheduleTaskPresets); bypassPermissions is
+// deliberately not offered.
+export type SchedulePermission = 'plan' | 'check' | 'edit';
 
 export interface ScheduleRun {
   at: string;
@@ -549,6 +522,14 @@ export interface ScheduleRun {
   paneId?: string;   // prompt runs: the pane the prompt was delivered into
   logFile?: string;  // agent/task runs: captured-output file for /api/schedules/{id}/runlog
   summary?: string;  // task runs: the report's opening lines (also the push body)
+}
+
+// What POST /api/schedules/{id}/fire (Run now) did, at once. 'started': the
+// prompt went into its pane, or the task or agent run began. 'skipped' and
+// 'failed' carry the reason in detail.
+export interface RunNowOutcome {
+  outcome: 'started' | 'skipped' | 'failed';
+  detail?: string;
 }
 
 export interface Schedule {
@@ -578,6 +559,12 @@ export interface Schedule {
   createdBy?: { source: string; paneId?: string; paneTitle?: string };
   apply?: boolean;        // agent write-mode (--apply); off = dry-run
   agentRunning?: boolean; // server-computed: a spawned run (agent or task) is in flight
+  // server-computed: a scheduled prompt could not go into its pane and is
+  // waiting for it; it goes in when the pane is free, or is skipped after an
+  // hour. waitingReason says why ("the pane is busy", "you are typing in the
+  // pane").
+  waitingForPane?: boolean;
+  waitingReason?: string;
   // kind='task' fields. permission is a preset name, never a raw claude flag.
   cwd?: string;
   permission?: SchedulePermission;
@@ -608,6 +595,21 @@ export interface Schedule {
   // Why the DAEMON paused it (e.g. "its target pane is gone"); absent when
   // the user paused it. Cleared when it is turned back on or retargeted.
   pausedReason?: string;
+  // Who turned it on or off, newest first (capped at 20 by the daemon).
+  // Absent for an automation that was never switched since records began.
+  changes?: ScheduleChange[];
+}
+
+// One recorded change of an automation's state. `by` is "person" for the
+// person in the app, the acting pane's @handle or label for an agent, or
+// "SoluTerminal" for a change the daemon made itself (with `reason`).
+export interface ScheduleChange {
+  at: string;
+  action: 'enabled' | 'disabled' | 'deleted';
+  by: string;
+  paneId?: string;
+  source: 'ui' | 'mcp' | 'daemon';
+  reason?: string;
 }
 
 export interface ScheduleInput {
@@ -717,9 +719,8 @@ export interface PaneDef {
   flagged?: boolean;
   flagMemo?: string;
   claudeSessionId?: string;
-  // Rendering model: 'native' for a Focus pane, undefined for a terminal.
-  // Persisted so restore + the cached-first switch's optimistic seed recreate
-  // a native pane AS native (not a terminal showing raw JSONL).
+  // Legacy: defs saved before Focus (the native renderer) was removed may
+  // carry 'native'. Read-only; never sent back (see paneRestoreRequest).
   kind?: 'native';
   // Agent protocol. Omitted means legacy/default Claude.
   agent?: 'claude' | 'codex' | 'muse';
@@ -813,13 +814,17 @@ export interface Port {
 }
 
 export interface Health {
+  // The person has paused agent-to-agent messaging (AgentMessagingChip).
+  agentMessagingPaused?: boolean;
+  // Shown to the person: the saved setting couldn't be read, or the state in
+  // force couldn't be saved (a restart would undo it).
+  agentMessagingWarning?: string;
+  agentMessagingWarningKind?: 'unreadable' | 'unsaved';
   // Temporary desktop-router update compatibility usage, for release rollout.
   routerSkewRequests?: number;
   // Live workflow task-engine availability, independent of shared services.
   workflowEngineAvailable?: boolean;
   status: string;
-  // Focus (native renderer) availability — false/absent once Focus is retired.
-  focusEnabled?: boolean;
   shinoqueRelay?: boolean;
   version: string;
   uptimeSec: number;
@@ -988,6 +993,9 @@ export interface UpdateStatus {
   notes?: string;
   workflowDeferred?: boolean;
   workflowDeferReason?: string;
+  // Why the last automatic apply waited (daemon updateBusyError cause/reason).
+  idleWaitCause?: string;
+  idleWaitReason?: string;
   workflowDeferSinceMs?: number;
   workflowDeferDeadlineMs?: number;
   workflowInflight?: number;
@@ -1043,7 +1051,9 @@ export interface UpdateStatus {
   shellAutoApplyPausedReason?: string;
 }
 
-export type UpdateHoldCause = 'focus' | 'workflow' | 'unknown';
+// agent-messaging-paused: the person paused agent messaging and messages are
+// held in memory; the update waits for them (daemon update_busy.go).
+export type UpdateHoldCause = 'focus' | 'workflow' | 'agent-messaging-paused' | 'unknown';
 
 export interface UpdateHold {
   cause: UpdateHoldCause;
@@ -1177,12 +1187,7 @@ export interface CreatePaneReq {
   workspace?: string;
   workspaceTarget?: string;
   workspaceSplit?: 'horizontal' | 'vertical';
-  // Request a native-renderer pane instead of a terminal pane. Gated
-  // server-side by SOLU_NATIVE_RENDERER (400 if requested while disabled);
-  // omit for the default terminal pane. See daemon/api.go createPane.
-  kind?: 'native';
-  // Agent protocol, independent from renderer kind. Codex Focus uses the
-  // app-server adapter; omitted remains the legacy/default Claude identity.
+  // Agent protocol. Omitted remains the legacy/default Claude identity.
   agent?: 'claude' | 'codex' | 'muse';
   codexThreadId?: string;
   // Durable Muse session UUID (muse resume <id> / muse exec --session-id).

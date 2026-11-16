@@ -1,0 +1,26 @@
+{
+ "cols": 100,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "trust",
+   "bytes": 1288
+  },
+  {
+   "name": "idle",
+   "bytes": 3250
+  },
+  {
+   "name": "sandbox_off_permission",
+   "bytes": 8355
+  },
+  {
+   "name": "sandboxed_network",
+   "bytes": 14540
+  },
+  {
+   "name": "sandboxed_outside_write",
+   "bytes": 20711
+  }
+ ]
+}

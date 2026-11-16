@@ -16,8 +16,8 @@ import (
 //     --strict-mcp-config) and --settings <json> carrying our hooks. Windows
 //     .cmd launches materialize those values as user-private JSON files at
 //     the child boundary (claudeConfigFileArgs).
-//   - Codex: -c mcp_servers.soluterminal.url=… and its pane header, plus the
-//     context-pack note as developer_instructions when a pack is attached.
+//   - Codex: -c mcp_servers.soluterminal.url=… and its pane header. The
+//     instructions are added separately (codex_pane_policy.go).
 //
 // Applied where SoluTerminal starts the CLI: the pane spawn for a direct
 // `claude`/`codex` pane, and the pane-local shims that `claude`/`codex` typed
@@ -38,9 +38,8 @@ var claudeSkipInjectSubcommands = map[string]bool{
 // rule, Codex through per-tool approval_mode. Tools that act (send_input,
 // ask_pane, answer_prompt, spawn_pane, kill_pane, …) still ask.
 var soluReadOnlyMCPTools = []string{
-	"list_panes", "get_pane_state", "read_pane_tail", "wait_for_pane", "get_pane_livecwd",
-	"list_workspaces", "list_ports", "read_file", "search_files", "git_status",
-	"read_activity", "list_schedules",
+	"list_panes", "read_pane_tail", "wait_for_pane",
+	"list_workspaces", "list_ports", "read_activity", "list_schedules",
 }
 
 // codexSoluToolTimeoutSec lifts Codex's 60 s default MCP tool timeout so an
@@ -124,9 +123,10 @@ func claudeInjectArgs(rec agentIntegrationRecord, paneID string, args []string) 
 	return out
 }
 
-// codexInjectArgs appends the per-process MCP server (and the context-pack
-// note when a pack is attached) to a Codex argv (without the binary).
-func codexInjectArgs(rec agentIntegrationRecord, contextPack string, args []string) []string {
+// codexInjectArgs appends the per-process MCP server to a Codex argv (without
+// the binary). Instructions are added separately, with or without the global
+// registration (withCodexPaneInstructions).
+func codexInjectArgs(rec agentIntegrationRecord, args []string) []string {
 	if len(args) > 0 && codexSkipInjectSubcommands[args[0]] {
 		return args
 	}
@@ -147,9 +147,6 @@ func codexInjectArgs(rec agentIntegrationRecord, contextPack string, args []stri
 	for _, t := range soluReadOnlyMCPTools {
 		out = append(out, "-c", "mcp_servers.soluterminal.tools."+t+`.approval_mode="approve"`)
 	}
-	if strings.TrimSpace(contextPack) != "" {
-		out = append(out, "-c", "developer_instructions="+strconv.Quote(strings.TrimSpace(codexAgentsContextPackLine)))
-	}
 	return out
 }
 
@@ -167,7 +164,7 @@ func injectAgentArgsForPane(dataDir, paneID string, env []string, cmd []string) 
 	case cmdStartsClaude(cmd):
 		return append([]string{cmd[0]}, claudeInjectArgs(rec, paneID, cmd[1:])...)
 	case cmdStartsCodex(cmd):
-		return append([]string{cmd[0]}, codexInjectArgs(rec, envValueFromList(env, "SOLU_CONTEXT_PACK"), cmd[1:])...)
+		return append([]string{cmd[0]}, codexInjectArgs(rec, cmd[1:])...)
 	}
 	return cmd
 }

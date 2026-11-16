@@ -8,7 +8,7 @@ import (
 
 const codexIdleTerminalScreen = "• You have 1 usage limit reset available. Run /usage to use one.\n\n" +
 	"› Find and fix a bug in @filename\n\n" +
-	"  gpt-5.6-sol xhigh · /mnt/c/users/benja/soluterminal · gpt-5.6-so…\n"
+	"  gpt-5.6-sol xhigh · /mnt/c/users/alice/soluterminal · gpt-5.6-so…\n"
 
 func codexTerminalStatePane(output string) *Pane {
 	p := deferredTestPane("codex-terminal-state", "")
@@ -30,9 +30,6 @@ func TestIdleTerminalCodexDoesNotConfirmOrStampInterrupted(t *testing.T) {
 	if p.agentMidTurnForState(StateBusy) || p.IsAgentWorking() {
 		t.Fatal("idle Terminal Codex must not ask to switch when done or stamp interrupted")
 	}
-	if !p.turnSettledForSwitch() {
-		t.Fatal("idle Terminal Codex must immediately satisfy a deferred switch")
-	}
 }
 
 func TestTerminalCodexStartupIsNotAConversationTurn(t *testing.T) {
@@ -53,9 +50,6 @@ func TestWorkingTerminalCodexStillConfirmsAndInterrupts(t *testing.T) {
 	}
 	if !p.agentMidTurnForState(StateBusy) || !p.IsAgentWorking() {
 		t.Fatal("a real Terminal Codex turn must retain the switch confirmation and interrupt path")
-	}
-	if p.turnSettledForSwitch() {
-		t.Fatal("a deferred switch must wait for a real Terminal Codex turn")
 	}
 }
 

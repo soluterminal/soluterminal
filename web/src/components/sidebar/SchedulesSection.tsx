@@ -11,7 +11,9 @@ import { ScheduleHistoryDialog } from '../ScheduleHistoryDialog';
 import { useClampedMenuPosition } from '../useClampedMenuPosition';
 import { scheduleUnread } from '../../lib/scheduleUnread';
 import { finishedLabel, scheduleFinished, scheduleSpent } from '../../lib/scheduleFinished';
+import { schedulePermissionChoice } from '../../lib/schedulePermission';
 import { RunStatusDot, RunStatusGlyph, scheduleRunVisual } from '../shared/runStatus';
+import { describeChange, pausedSince } from '../../lib/scheduleChanges';
 
 interface SchedulesSectionProps {
   collapsed: boolean;
@@ -45,8 +47,19 @@ function endConditionHint(s: Schedule): string | null {
 
 export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps) {
   const schedules = useStore((s) => s.schedules);
+  const loaded = useStore((s) => s.schedulesLoaded);
+  const loadError = useStore((s) => s.schedulesError);
+  const refreshSchedules = useStore((s) => s.refreshSchedules);
+  const [retrying, setRetrying] = useState(false);
+  async function retryLoad() {
+    setRetrying(true);
+    try {
+      await refreshSchedules();
+    } finally {
+      setRetrying(false);
+    }
+  }
   const panes = useStore((s) => s.panes);
-  const focusedPaneId = useStore((s) => s.focusedPaneId);
   const setAgentsPanelOpen = useStore((s) => s.setAgentsPanelOpen);
   const setEnabled = useStore((s) => s.setScheduleEnabled);
   const fireSchedule = useStore((s) => s.fireSchedule);
@@ -56,6 +69,15 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
   const [dialog, setDialog] = useState<{ open: boolean; editing: Schedule | null; paneId?: string; fromPaneMenu: boolean }>({
     open: false,
     editing: null,
+    fromPaneMenu: false,
+  });
+  // A new automation is seeded from the pane focused when the form opens, read
+  // once here: following focus while the form is open would re-seed it under
+  // what the person is typing.
+  const openNewDialog = () => setDialog({
+    open: true,
+    editing: null,
+    paneId: useStore.getState().focusedPaneId ?? undefined,
     fromPaneMenu: false,
   });
   // Run-history dialog target. Stored as an ID (not the object) so the
@@ -214,19 +236,38 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
             )}
             <button
               className="iconbtn"
-              onClick={(e) => { e.stopPropagation(); setDialog({ open: true, editing: null, fromPaneMenu: false }); }}
+              onClick={(e) => { e.stopPropagation(); openNewDialog(); }}
               title="New automation"
               aria-label="New automation"
             ><IconPlus size={14} /></button>
           </>
         }
       />
-      {!collapsed && schedules.length === 0 && (
+      {/* An empty list means "none" only once a load has succeeded. Before
+          that it is still loading, or the load failed; say which. */}
+      {!collapsed && loadError && (
+        <div role="alert" style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
+          {loaded
+            ? 'Couldn’t refresh automations. This list may be out of date.'
+            : 'Couldn’t load automations.'}{' '}
+          <button
+            className="linklike"
+            disabled={retrying}
+            title={loadError}
+            onClick={() => void retryLoad()}
+            style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline' }}
+          >{retrying ? 'Retrying…' : 'Retry'}</button>
+        </div>
+      )}
+      {!collapsed && !loaded && !loadError && schedules.length === 0 && (
+        <div role="status" style={{ fontSize: 11, color: 'var(--fg-dim)' }}>Loading automations…</div>
+      )}
+      {!collapsed && loaded && schedules.length === 0 && (
         <div style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
           No automations yet.{' '}
           <button
             className="linklike"
-            onClick={() => setDialog({ open: true, editing: null, fromPaneMenu: false })}
+            onClick={() => openNewDialog()}
             style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline' }}
           >Pick a recipe</button>
           {' '}such as a morning digest or a nightly test run, and Claude runs it on time.
@@ -246,8 +287,8 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
         const targetLabel = isAgent
           ? `${s.agentId || 'agent'}${s.apply ? '' : ' (dry-run)'}`
           : isTask
-            ? `${shortCwd.split('/').pop() || shortCwd}${s.permission === 'edit' ? '' : ' (plan)'}`
-            : target?.title || target?.cmd?.join(' ') || '(pane missing)';
+            ? `${shortCwd.split('/').pop() || shortCwd}${schedulePermissionChoice(s.permission).rowTag}`
+            : target?.title || target?.cmd?.join(' ') || '(closed pane)';
         const targetIcon = isAgent
           ? <IconDiamond size={11} style={{ verticalAlign: '-1px', marginRight: 3 }} />
           : isTask
@@ -263,6 +304,8 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
               ? 'paused'
               : s.agentRunning
                 ? 'running…'
+                : s.waitingForPane
+                  ? (s.waitingReason ? `waiting: ${s.waitingReason}` : 'waiting for pane')
                 : snoozeActive
                   ? 'snoozed'
                   : formatNextFire(s.nextFire));
@@ -288,15 +331,24 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
               ? `Ends at ${new Date(s.until).toLocaleString()}`
               : null;
         const promptText = s.prompt || '';
+        // A paused automation says since when and by whom, when the daemon
+        // recorded it. A paused built-in agent is a standing warning: the
+        // agent does nothing until someone turns it back on.
+        const since = pausedSince(s);
+        const paused = !s.enabled && !done && !lastRunGoing;
+        const agentPaused = isAgent && paused;
+        const recentChanges = (s.changes ?? []).slice(0, 3).map(describeChange);
         const tip = [
           triggerLine,
           endLine,
           isAgent
             ? `Agent: ${s.agentId} · mode: ${s.apply ? 'apply (writes to GitHub)' : 'dry-run'}${s.agentRunning ? ' · running now' : ''}`
             : isTask
-              ? `Claude task in ${shortCwd} · ${s.permission === 'edit' ? 'may edit files' : 'read & plan only'}${s.catchUp ? ' · catches up after downtime' : ''}${s.agentRunning ? ' · running now' : ''}`
+              ? `Claude task in ${shortCwd} · ${schedulePermissionChoice(s.permission).summary}${s.catchUp ? ' · catches up after downtime' : ''}${s.agentRunning ? ' · running now' : ''}`
               : `Target: ${targetLabel}`,
-          s.enabled ? `Next: ${s.nextFire ? new Date(s.nextFire).toLocaleString() : '—'}` : done ? 'Finished' : lastRunGoing ? 'Last run still going' : 'Paused',
+          s.waitingForPane ? `Waiting for the pane${s.waitingReason ? `: ${s.waitingReason}` : ''}. It goes in when the pane is free, or is skipped after an hour.` : null,
+          s.enabled ? `Next: ${s.nextFire ? new Date(s.nextFire).toLocaleString() : '—'}` : done ? 'Finished' : lastRunGoing ? 'Last run still going' : since ? `Paused ${since}` : 'Paused',
+          recentChanges.length > 0 ? `Changes: ${recentChanges.join(' · ')}` : null,
           `Created: ${createdRel} (${new Date(s.createdAt).toLocaleString()})`,
           `Ran: ${s.fireCount}${s.skipCount ? ` · Skipped: ${s.skipCount}` : ''}${s.errorCount ? ` · Errors: ${s.errorCount}` : ''}`,
           lastFiredRel ? `Last ran: ${lastFiredRel}` : 'Never ran',
@@ -372,10 +424,18 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                       className="sched-paused-tag"
                       title={`Paused automatically: ${s.pausedReason}. Edit it to pick another pane, then turn it back on.`}
                     > · paused: {s.pausedReason}</span>
+                  ) : agentPaused ? (
+                    <span
+                      className="sched-paused-tag sched-warn"
+                      title={`This built-in agent is paused${since ? ` ${since}` : ''}. It does nothing until you turn it back on.`}
+                    > · <IconAlertTriangle size={11} style={{ verticalAlign: '-1px' }} /> paused{since ? ` ${since}` : ''}</span>
                   ) : (
-                    <span className="sched-paused-tag" title="Paused — it will not run again until re-enabled"> · paused</span>
+                    <span
+                      className="sched-paused-tag"
+                      title={`Paused${since ? ` ${since}` : ''} — it will not run again until re-enabled`}
+                    > · paused</span>
                   ))}
-                  {targetMissing && <span className="sched-warn" title="Target pane no longer exists"> <IconAlertTriangle size={11} style={{ verticalAlign: '-1px' }} /></span>}
+                  {targetMissing && <span className="sched-warn" title="The pane this automation types into is closed. Edit it to pick another pane."> <IconAlertTriangle size={11} style={{ verticalAlign: '-1px' }} /></span>}
                 </div>
                 <div className="sched-sub">
                   <span className="sched-cadence">{cadenceLabel(s)}</span>
@@ -505,7 +565,7 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
       <ScheduleDialog
         open={dialog.open}
         editing={dialog.editing}
-        initialPaneId={dialog.paneId ?? focusedPaneId}
+        initialPaneId={dialog.paneId}
         fromPaneMenu={dialog.fromPaneMenu}
         onClose={() => setDialog({ open: false, editing: null, fromPaneMenu: false })}
       />

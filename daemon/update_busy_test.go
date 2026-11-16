@@ -20,7 +20,6 @@ func TestUpdateBusy(t *testing.T) {
 	}{
 		{name: "idle"},
 		{name: "terminal turn", edit: func(p *Pane, _ *apiServer) { p.LastActivityMs = time.Now().UnixMilli() }},
-		{name: "native turn", edit: func(p *Pane, _ *apiServer) { p.Kind = "native"; p.nativeInTurn.Store(true) }, want: "Focus pane"},
 		{name: "held", edit: func(p *Pane, _ *apiServer) { p.heldDeliveries = []*heldDelivery{{At: time.Now().UnixMilli()}} }, want: "held delivery"},
 		{name: "expired held", edit: func(p *Pane, _ *apiServer) {
 			p.heldDeliveries = []*heldDelivery{{At: time.Now().Add(-heldDeliveryLimit).UnixMilli()}}
@@ -52,7 +51,6 @@ func TestUpdateBusy(t *testing.T) {
 			p.respawning.Store(true)
 			p.unsentMessage = &unsentPaneMessage{PutBack: true}
 		}},
-		{name: "native put back", edit: func(p *Pane, _ *apiServer) { p.Kind = "native"; p.unsentMessage = &unsentPaneMessage{PutBack: true} }},
 		{name: "other unsent", edit: func(p *Pane, _ *apiServer) { p.unsentMessage = &unsentPaneMessage{NotTyped: true} }},
 		{name: "inflight", edit: func(_ *Pane, a *apiServer) { a.collabInflight.Store(2) }, want: "call is in flight"},
 	} {
@@ -84,25 +82,6 @@ func TestUpdateBusy(t *testing.T) {
 				t.Fatalf("pane = %q", paneID)
 			}
 		})
-	}
-}
-
-func TestUpdateBusyFocusOutlastsCollaborationGrace(t *testing.T) {
-	p := &Pane{ID: "focus", Kind: "native"}
-	p.nativeInTurn.Store(true)
-	a := &apiServer{mgr: testManagerWithPane(p)}
-	// A concurrent ask must not hide the higher-priority Focus gate.
-	a.collabInflight.Store(1)
-	u := NewUpdater("1.0.0", "", "", nil, nil)
-	u.busyCheck = a.updateBusy
-	u.busySince = time.Now().Add(-2 * updateBusyGrace)
-	u.busyLastObserved = time.Now()
-	if busy := u.checkBusy(); busy == nil || busy.cause != updateBusyCauseFocus || busy.paneID != p.ID {
-		t.Fatalf("Focus gate after expired collaboration grace = %+v", busy)
-	}
-	p.nativeInTurn.Store(false)
-	if busy := u.checkBusy(); busy != nil {
-		t.Fatalf("settled Focus still blocked expired collaboration grace: %+v", busy)
 	}
 }
 

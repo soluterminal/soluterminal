@@ -639,46 +639,72 @@ else if(m.method==='session/close')send({id:m.id,result:{}});
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
-test('3. Always allow remembers the tool and skips the next menu', async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-acp-allow-'));
-  try {
-    const runtime = path.join(root, 'fake.mjs');
-    await fs.writeFile(runtime, `import readline from 'node:readline';
-const input=readline.createInterface({input:process.stdin});let promptId;
+// A fake runtime that asks one permission per kind in `kinds`, in order, then
+// ends the turn with each outcome ("allow"/"deny"/"cancel") in one line.
+function permissionRuntime(kinds) {
+  return `import readline from 'node:readline';
+const input=readline.createInterface({input:process.stdin});let promptId;const kinds=${JSON.stringify(kinds)};const outcomes=[];
 const send=x=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',...x})+'\\n');
-const ask=id=>send({id,method:'session/request_permission',params:{sessionId:'s',toolCall:{title:'Run command',kind:'execute',rawInput:{command:'ls'}},options:[{optionId:'allow',kind:'allow_once'},{optionId:'deny',kind:'reject_once'}]}});
+const ask=i=>send({id:100+i,method:'session/request_permission',params:{sessionId:'s',toolCall:{title:'Tool '+kinds[i],kind:kinds[i],rawInput:{command:'rm -rf /tmp/x'}},options:[{optionId:'allow',kind:'allow_once'},{optionId:'deny',kind:'reject_once'}]}});
 input.on('line',line=>{const m=JSON.parse(line);
 if(m.method==='initialize')send({id:m.id,result:{protocolVersion:1,agentCapabilities:{promptCapabilities:{image:false}}}});
 else if(m.method==='session/new')send({id:m.id,result:{sessionId:'s',configOptions:[]}});
-else if(m.method==='session/prompt'){promptId=m.id;ask(99);}
-else if(m.id===99){ask(100);}
-else if(m.id===100){send({method:'session/update',params:{sessionId:'s',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'BOTH_DONE'}}}});send({id:promptId,result:{stopReason:'end_turn'}});}
+else if(m.method==='session/prompt'){promptId=m.id;ask(0);}
+else if(typeof m.id==='number'&&m.id>=100&&m.id<100+kinds.length){const o=m.result.outcome;outcomes.push(o.outcome==='selected'?o.optionId:'cancel');const next=m.id-100+1;
+if(next<kinds.length)ask(next);else{send({method:'session/update',params:{sessionId:'s',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'OUTCOMES:'+outcomes.join(',')}}}});send({id:promptId,result:{stopReason:'end_turn'}});}}
 else if(m.method==='session/close')send({id:m.id,result:{}});
-});input.on('close',()=>process.exit(0));`);
-    const child = spawn(process.execPath, [fileURLToPath(new URL('./deepseek-terminal.mjs', import.meta.url)), runtime, 'deepseek-flash'], { env: { ...process.env, DSH_HOME: root, DEEPSEEK_API_KEY: 'synthetic-key' }, stdio: ['pipe', 'pipe', 'pipe'] });
-    let output = '', errors = '', stage = 0;
-    const prompts = () => (output.match(/▸ /g) || []).length;
-    child.stdout.on('data', data => {
-      output += data.toString();
-      if (stage === 0 && prompts() >= 1) { stage = 1; child.stdin.write('go\n'); }
-      else if (stage === 1 && output.includes('Tool approval:')) { stage = 2; child.stdin.write('3\n'); }
-      else if (stage === 2 && output.includes('allowed automatically') && prompts() >= 2) { stage = 3; child.stdin.write('/allow\n'); }
-      else if (stage === 3 && output.includes('Always allow: Bash') && prompts() >= 3) { stage = 4; child.stdin.write('/exit\n'); }
-    });
-    child.stderr.on('data', data => { errors += data; });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 12000);
-    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); }); clearTimeout(timer);
-    assert.equal(code, 0, errors);
-    // The first request drew the menu with the new option; the second was
-    // answered from memory, so the menu must appear exactly once.
-    assert.ok(output.includes('3. Always allow Bash'));
-    assert.equal((output.match(/Tool approval:/g) || []).length, 1);
-    assert.ok(output.includes('✔ Bash allowed automatically (always allow)'));
-    assert.ok(output.includes('BOTH_DONE'));
-    // The choice is persisted for the next client process, and /allow lists it.
+});input.on('close',()=>process.exit(0));`;
+}
+
+// Drives one turn: answers each approval menu with the next key in `keys`,
+// then runs /allow and exits. Returns the output and the menus drawn.
+async function runPermissionTurn(root, kinds, keys) {
+  const runtime = path.join(root, 'fake.mjs');
+  await fs.writeFile(runtime, permissionRuntime(kinds));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./deepseek-terminal.mjs', import.meta.url)), runtime, 'deepseek-flash'], { env: { ...process.env, DSH_HOME: root, DEEPSEEK_API_KEY: 'synthetic-key' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let output = '', errors = '', stage = 0, answered = 0;
+  const prompts = () => (output.match(/▸ /g) || []).length;
+  const menus = () => (output.match(/Tool approval:/g) || []).length;
+  child.stdout.on('data', data => {
+    output += data.toString();
+    if (stage === 0 && prompts() >= 1) { stage = 1; child.stdin.write('go\n'); }
+    if (stage === 1) {
+      while (answered < menus() && answered < keys.length) { child.stdin.write(`${keys[answered]}\n`); answered++; }
+      if (output.includes('OUTCOMES:') && prompts() >= 2) { stage = 2; child.stdin.write('/allow\n'); }
+    } else if (stage === 2 && prompts() >= 3) { stage = 3; child.stdin.write('/exit\n'); }
+  });
+  child.stderr.on('data', data => { errors += data; });
+  const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
+  const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); }); clearTimeout(timer);
+  assert.equal(code, 0, errors);
+  return { output, menus: menus(), outcomes: (output.match(/OUTCOMES:([a-z,]*)/) || [])[1] };
+}
+
+test('no DeepSeek tool is offered Always allow; an unoffered 3 rejects and nothing is remembered', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-acp-allow-'));
+  try {
+    const { output, menus, outcomes } = await runPermissionTurn(root, ['read', 'execute', 'edit', 'fetch', 'search'], ['3', '3', '3', '3', '3']);
+    assert.ok(!output.includes('Always allow '));
+    assert.ok(!output.includes('allowed automatically'));
+    assert.equal(menus, 5);
+    assert.equal(outcomes, 'deny,deny,deny,deny,deny');
+    await assert.rejects(fs.readFile(path.join(root, 'terminal-allow.json'), 'utf8'));
+    assert.ok(output.includes('No always-allow tools: DeepSeek tools ask each time.'));
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('an older allow file auto-answers nothing; its entries are dropped with a notice', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-acp-allow-old-'));
+  try {
+    await fs.writeFile(path.join(root, 'terminal-allow.json'), JSON.stringify({ execute: 'Bash', edit: 'Edit', fetch: 'Web', read: 'Read' }));
+    const { output, menus, outcomes } = await runPermissionTurn(root, ['execute', 'edit', 'fetch', 'read'], ['n', 'n', 'n', 'y']);
+    assert.equal(menus, 4);
+    assert.equal(outcomes, 'deny,deny,deny,allow');
+    assert.ok(!output.includes('allowed automatically'));
+    assert.ok(output.includes('Always allow is no longer available for DeepSeek tools; Bash, Edit, Web, Read will ask each time now.'));
     const saved = JSON.parse(await fs.readFile(path.join(root, 'terminal-allow.json'), 'utf8'));
-    assert.deepEqual(saved, { execute: 'Bash' });
-    assert.ok(output.includes('Always allow: Bash'));
+    assert.deepEqual(saved, {});
+    assert.ok(output.includes('No always-allow tools'));
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
@@ -1876,5 +1902,115 @@ else if(m.method==='session/close')send({id:m.id,result:{}});
     assert.equal(code, 0, `errors=${errors}\nOUTPUT:\n${output}`);
     const saved = await fs.readFile(capture, 'utf8');
     assert.equal(saved, 'hello\n---\nworld\n---\n', `tail after Enter was lost:\n${JSON.stringify(saved)}`);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+// Against the real pinned DeepSeek Harness (gated: it needs the managed install
+// and Node 24.9+, which CI's Node 20 lacks). A local fake Messages server
+// records every request: the pane client's patch must keep the session log and
+// the plugin list out of all of them.
+test('the pinned DeepSeek Harness sends no session log or plugin list from a pane', async t => {
+  const { runtimeRoot, nodeSupportsDsh } = await import('./launch.mjs');
+  const { PINS } = await import('./pins.mjs');
+  const runtime = path.join(runtimeRoot, 'deepseek/node_modules/@deepseek-ai/dsh/lib/bin.js');
+  const version = await fs.readFile(path.join(path.dirname(runtime), '..', 'package.json'), 'utf8').then(raw => JSON.parse(raw).version, () => '');
+  if (!nodeSupportsDsh() || version !== PINS.deepseek) return t.skip(`needs DeepSeek Harness ${PINS.deepseek} installed and Node 24.9+`);
+  const { createServer } = await import('node:http');
+  const seen = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', data => { body += data; });
+    req.on('end', () => {
+      let keys = [];
+      try { keys = Object.keys(JSON.parse(body)); } catch {}
+      seen.push({ url: req.url, keys, telemetry: /dsh_session_log|dsh_plugin_packages/.test(body) });
+      if (!req.url.endsWith('/v1/messages')) { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"type":"error","error":{"type":"not_found_error","message":"no"}}'); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const ev = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+      ev('message_start', { message: { id: 'msg_1', type: 'message', role: 'assistant', model: 'deepseek-flash', content: [], stop_reason: null, usage: { input_tokens: 3, output_tokens: 0 } } });
+      ev('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+      ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'pong' } });
+      ev('content_block_stop', { index: 0 });
+      ev('message_delta', { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } });
+      ev('message_stop', {});
+      res.end();
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-dsh-privacy-'));
+  try {
+    const env = { ...process.env, DSH_HOME: root, DEEPSEEK_API_KEY: 'synthetic-key', DEEPSEEK_BASE_URL: `http://127.0.0.1:${server.address().port}/anthropic` };
+    delete env.DSH_TELEMETRY_DISABLED; delete env.DSH_TELEMETRY_MODE;
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./deepseek-terminal.mjs', import.meta.url)), runtime, 'deepseek-flash'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let output = '', errors = '', stage = 0;
+    const prompts = () => (output.match(/▸ /g) || []).length;
+    child.stdout.on('data', data => {
+      output += data.toString();
+      if (stage === 0 && prompts() >= 1) { stage = 1; child.stdin.write('say pong\n'); }
+      else if (stage === 1 && output.includes('✓ end_turn') && prompts() >= 2) { stage = 2; child.stdin.write('/exit\n'); }
+    });
+    child.stderr.on('data', data => { errors += data; });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 90000);
+    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); }); clearTimeout(timer);
+    assert.equal(code, 0, `${output}\n${errors}`);
+    assert.ok(output.includes('pong'), output);
+    const messages = seen.filter(row => row.url.endsWith('/anthropic/v1/messages'));
+    assert.ok(messages.length >= 1, JSON.stringify(seen));
+    for (const row of seen) {
+      assert.ok(!row.keys.includes('dsh_session_log') && !row.keys.includes('dsh_plugin_packages') && !row.telemetry, JSON.stringify(row));
+    }
+  } finally {
+    server.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('0.2.2 model pairs decode to the official model and refuse other providers', async () => {
+  const { decodeDshModelValue, encodeDshModelValue } = await import('./deepseek-model.mjs');
+  assert.deepEqual(decodeDshModelValue('["deepseek-official","deepseek-flash"]'), { model: 'deepseek-flash', pair: true });
+  assert.deepEqual(decodeDshModelValue('deepseek-flash'), { model: 'deepseek-flash', pair: false });
+  assert.equal(encodeDshModelValue('deepseek-flash', true), '["deepseek-official","deepseek-flash"]');
+  assert.equal(encodeDshModelValue('deepseek-flash', false), 'deepseek-flash');
+  for (const bad of ['["openai","gpt-5"]', '["deepseek-official"]', '["deepseek-official",1]', '[not json']) {
+    assert.throws(() => decodeDshModelValue(bad), /Unsupported DeepSeek model/, bad);
+  }
+});
+
+test('a stale 0.2.2 model pair is recovered to the Flash pair before the prompt', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-acp-pair-'));
+  try {
+    const capture = path.join(root, 'captured.jsonl');
+    const runtime = path.join(root, 'fake.mjs');
+    await fs.writeFile(runtime, `import readline from 'node:readline';
+import fs from 'node:fs';
+const input=readline.createInterface({input:process.stdin});
+const send=x=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',...x})+'\\n');
+const pair=m=>JSON.stringify(['deepseek-official',m]);
+const models=v=>({id:'model',category:'model',currentValue:v,options:[{group:'deepseek-official',name:'DeepSeek',options:[{value:pair('deepseek-v4-flash'),name:'deepseek-v4-flash'},{value:pair('deepseek-flash'),name:'DeepSeek-V4.1-Flash'},{value:pair('deepseek-v4-pro'),name:'DeepSeek-V4-Pro'}]}]});
+input.on('line',line=>{const m=JSON.parse(line);
+if(m.method==='initialize')send({id:m.id,result:{protocolVersion:1,agentCapabilities:{promptCapabilities:{image:false}}}});
+else if(m.method==='session/new')send({id:m.id,result:{sessionId:'pair',configOptions:[models(pair('deepseek-v4-flash'))]}});
+else if(m.method==='session/set_config_option'){fs.appendFileSync(process.env.CAPTURE_FILE,JSON.stringify({set:m.params.value})+'\\n');send({id:m.id,result:{configOptions:[models(m.params.value)]}});}
+else if(m.method==='session/prompt'){fs.appendFileSync(process.env.CAPTURE_FILE,JSON.stringify({prompt:true})+'\\n');send({id:m.id,result:{stopReason:'end_turn'}});}
+else if(m.method==='session/close')send({id:m.id,result:{}});
+});input.on('close',()=>process.exit(0));`);
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./deepseek-terminal.mjs', import.meta.url)), runtime, 'deepseek-flash'], { env: { ...process.env, DSH_HOME: root, DEEPSEEK_API_KEY: 'synthetic-key', CAPTURE_FILE: capture }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let output = '', errors = '', stage = 0;
+    const prompts = () => (output.match(/▸ /g) || []).length;
+    child.stdout.on('data', data => {
+      output += data.toString();
+      if (stage === 0 && prompts() >= 1) { stage = 1; child.stdin.write('/model\n'); }
+      else if (stage === 1 && output.includes('Use /model NUMBER') && prompts() >= 2) { stage = 2; child.stdin.write('hi\n'); }
+      else if (stage === 2 && output.includes('✓ end_turn') && prompts() >= 3) { stage = 3; child.stdin.write('/exit\n'); }
+    });
+    child.stderr.on('data', data => { errors += data; });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 12000);
+    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); }); clearTimeout(timer);
+    assert.equal(code, 0, `${output}\n${errors}`);
+    const sent = (await fs.readFile(capture, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(sent, [{ set: '["deepseek-official","deepseek-flash"]' }, { prompt: true }]);
+    // Only the current Flash id is offered: not the retired v4-flash, not Pro.
+    assert.ok(output.includes('1. DeepSeek-V4.1-Flash'), output);
+    assert.ok(!/\d\. deepseek-v4-flash|\d\. DeepSeek-V4-Pro/.test(output), output);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

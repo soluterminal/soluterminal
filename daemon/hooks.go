@@ -44,8 +44,11 @@ type hookPayload struct {
 	HookEventName string         `json:"hook_event_name"`
 	ToolName      string         `json:"tool_name"`
 	ToolInput     map[string]any `json:"tool_input"`
-	SessionID     string         `json:"session_id"`
-	CWD           string         `json:"cwd"`
+	// ToolUseID pairs a PreToolUse with its PostToolUse (terminal one-tap's
+	// hook records, terminal_one_tap.go).
+	ToolUseID string `json:"tool_use_id"`
+	SessionID string `json:"session_id"`
+	CWD       string `json:"cwd"`
 	// TranscriptPath is the .jsonl Claude Code is writing for THIS event.
 	// We use only its shape (top-level conversation vs nested subagent/
 	// workflow) to decide whether the event may (re)pin the pane's
@@ -228,6 +231,12 @@ func (a *apiServer) hookToolCall(w http.ResponseWriter, r *http.Request) {
 	// they must NOT publish a tool-call Activity row or record an edited file.
 	// SessionStart is what lets the daemon learn a freshly-started session's id
 	// before its first tool call (see ensureClaudeHooksRegistered).
+	if payload.HookEventName == "PreToolUse" && paneID != "" {
+		a.recordTermPreToolFromHook(r, paneID, payload)
+	}
+	if payload.HookEventName == "PostToolUse" && paneID != "" {
+		a.forgetTermPreToolFromHook(r, paneID, payload)
+	}
 	if payload.HookEventName == "PreToolUse" || payload.HookEventName == "SessionStart" {
 		// A permission menu, if this tool needs one, paints right after
 		// PreToolUse returns. Arm the fast prompt wake for auto-mode panes.

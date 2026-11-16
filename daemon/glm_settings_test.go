@@ -194,7 +194,7 @@ func TestTryLoginShellWrapGlmPrefixNoTokenLeak(t *testing.T) {
 }
 
 func TestPersistedPaneProviderRoundTrip(t *testing.T) {
-	pp := persistedFromSnapshot(PaneSnapshot{ID: "p1", Provider: "glm", Kind: "native"})
+	pp := persistedFromSnapshot(PaneSnapshot{ID: "p1", Provider: "glm"})
 	if pp.Provider != "glm" {
 		t.Fatalf("persistedFromSnapshot Provider = %q", pp.Provider)
 	}

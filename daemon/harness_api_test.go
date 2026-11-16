@@ -59,7 +59,7 @@ func TestHarnessLauncherOverwritesStaleAssets(t *testing.T) {
 	if want := filepath.Join(launcherDir, "launch.mjs"); path != want {
 		t.Fatalf("launcher path = %q, want %q", path, want)
 	}
-	for _, name := range []string{"pins.mjs", "launch.mjs", "pi-approval.mjs", "deepseek-model.mjs", "deepseek-terminal.mjs", "install.mjs", "harness-shortcut.sh"} {
+	for _, name := range []string{"pins.mjs", "launch.mjs", "pi-approval.mjs", "deepseek-model.mjs", "deepseek-terminal.mjs", "install.mjs", "harness-shortcut.sh", "pi-lock.json", "dsh-lock.json"} {
 		got, err := os.ReadFile(filepath.Join(launcherDir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)

@@ -339,13 +339,6 @@ type Pane struct {
 	// relay) two redundant prompt events per Codex turn. Nil in tests.
 	onCodexTurnFlagCommit func(*Pane)
 
-	// onTurnStateEdge fires (outside mu) when a native pane's nativeInTurn flag
-	// flips true↔false, so the Manager can publish a real-time pane-state
-	// (AgentMidTurn) edge instead of the client waiting on the 2s activity ticker
-	// / 3s poll. Wired alongside onPromptsCommit at spawn/attach. Nil in tests and
-	// on paths that don't wire it (a no-op then).
-	onTurnStateEdge func(*Pane)
-
 	// onDimsCommit fires (outside mu) after Cols/Rows change — from a client
 	// resize or an agent FrameDims adoption. Wired in main.go to a debounced
 	// paneStore.Put so panes.json tracks the live PTY size; without it the
@@ -370,14 +363,9 @@ type Pane struct {
 	// agentWriteMu (Write is its only caller).
 	promptRec promptRecorder
 
-	// composerNonEmptyUntil is the native delegation-nudge composer seam. The
-	// browser reasserts presence while a draft exists; expiry releases a draft
-	// abandoned by a vanished client.
-	composerNonEmptyUntil atomic.Int64
 	// composerReconcileAfterMs throttles reconcileComposerDraft's screen read
 	// while the input box visibly holds text (atomic).
 	composerReconcileAfterMs int64
-
 	// delegationPending is the daemon-computed buffered-update snapshot exposed
 	// to pane DTOs for the compact header chip.
 	delegationPending atomic.Pointer[delegationPendingInfo]
@@ -530,37 +518,6 @@ type Pane struct {
 	// drift smaller on every rapid click. Flag prevents that.
 	redrawInProgress atomic.Bool
 
-	// nativePendingApprovals holds EVERY currently-open native permission
-	// request for a native pane (Kind=="native"), keyed by RequestID. Claude can
-	// emit several can_use_tool requests concurrently (parallel tool calls —
-	// e.g. two WebSearch / multiple Read), so a single slot is wrong: the 2nd
-	// would overwrite the 1st, leaving the agent hung forever waiting for an
-	// approval the daemon can no longer deliver. Set by the native parser
-	// goroutine on a control_request[can_use_tool]; entries cleared on
-	// resolve / control_cancel_request / interrupt / turn_end / pane exit.
-	// Guarded by nativeApprovalMu — computeState must NOT take this lock on its
-	// hot path, so nativePendingCount mirrors len(map) for a lock-free check.
-	nativeApprovalMu       sync.Mutex
-	nativePendingApprovals map[string]*NativeApproval
-	// nativeAllowlist is the per-pane "always allow this tool" set: a set of
-	// EXACT tool names (e.g. "Read", "Bash") the user has opted into
-	// auto-approving for THIS pane's conversation. When a can_use_tool arrives
-	// for a tool in this set, the daemon resolves it as ALLOW immediately
-	// (silent, like ARIA auto-approve) instead of parking a pending approval
-	// card for the user. Guarded by nativeApprovalMu — the same lock that
-	// guards the pending-approval map — because the allowlist check and the
-	// park/resolve decision are one atomic step in the approval domain.
-	// Persisted with the pane (PersistedPane.NativeAllowlist) so it survives
-	// reconnect + daemon-restart-resume; cleared only when a genuinely NEW
-	// session starts (see clearNativeAllowlist call in persistNativeSessionID).
-	nativeAllowlist map[string]bool
-	// nativePendingCount is the lock-free hot-path mirror of
-	// len(nativePendingApprovals): read at the very top of computeState (one
-	// atomic load) so a pending approval short-circuits to StateChoicePrompt
-	// without the 64KB byte scan. For terminal panes it stays 0 forever — a
-	// single cache-hot int read, preserving the zero-cost fallback guarantee.
-	nativePendingCount atomic.Int32
-
 	// attention is the last-computed "who needs to act" signal (see
 	// attention.go). Written only by the attentionEngine; read lock-free by
 	// DTO builds and the pusher. Nil until the first evaluation — consumers
@@ -583,13 +540,9 @@ type Pane struct {
 	autoDeclineReason string
 	autoDeclinePos    int64
 
-	// Kind selects the pane's rendering model. The default ("") is the
-	// terminal pane: raw PTY bytes fanned out to clients, byte-identical
-	// to the pre-native behavior (the fallback guarantee). "native" runs
-	// a headless Claude agent emitting stream-json that the daemon
-	// normalizes to the NativeEvent schema; clients render the model at
-	// their own width. Set at spawn and immutable after.
-	// Persisted so a native pane reattaches as native across restart.
+	// Kind is the retired renderer selector; always "" (terminal) since Focus
+	// was removed. A saved "native" pane is converted at boot
+	// (focus_migration.go).
 	Kind string `json:"kind,omitempty"`
 
 	// Agent identifies the agent protocol independently from Kind. Claude is
@@ -690,15 +643,6 @@ type Pane struct {
 	// not historical audit.
 	AutoModeLastFiredMs int64 `json:"autoModeLastFiredMs,omitempty"`
 
-	// Narrating records whether this native pane's agent process was spawned with
-	// the narration system prompt (--append-system-prompt). It's a property of the
-	// running process — set at spawn from the global native setting, and a live
-	// agent keeps it for its lifetime — so the UI can show a per-pane "narrating"
-	// badge reflecting the TRUTH of the process, not the (possibly newer) global
-	// toggle. Persisted so a survived-agent reattach across restart keeps the
-	// correct badge; a respawn recomputes it from the current setting.
-	Narrating bool `json:"narrating,omitempty"`
-
 	// Flagged is the user's "come back to this later" marker. When true
 	// the pane gets an orange highlight on screen and counts toward the
 	// flagged-pane badge in the sidebar so the user can spot pending
@@ -761,69 +705,16 @@ type Pane struct {
 	// gridReplyStop stops the OSC-reply pump goroutine when the pane exits.
 	gridReplyStop chan struct{}
 
-	// --- native-renderer state (Kind=="native" only) ---
-	//
-	// All of these are guarded by nativeMu — a DEDICATED mutex, NOT subsMu.
-	// The ONLY point native state touches the subsMu hot path is the single
-	// non-blocking tee send (pane.go readLoop): the parser goroutine itself
-	// runs entirely off-lock, draining nativeTeeCh. Terminal panes (Kind=="")
-	// never allocate any of these — they stay nil, so the hot-path tee guard
-	// (`p.nativeTeeCh != nil`) is one cache-hot pointer compare, preserving
-	// the byte-identical fallback guarantee.
-	nativeMu sync.Mutex
-
-	// nativeAdapter normalizes this pane's raw agent JSONL into NativeEvents
-	// (Claude stream-json today). Set once by ensureNative; pure transform.
-	nativeAdapter NativeAdapter
-
-	// nativeTeeCh carries raw PTY payload copies (tagged with whether they came
-	// from an agent stdout-ring backlog replay — see nativeChunk) from the
-	// readLoop hot path to the parser goroutine. Buffered + drop-on-full (the
-	// readLoop NEVER blocks on it). nil for terminal panes. Closed by
-	// shutdownNative.
-	nativeTeeCh chan nativeChunk
-
-	// nativeStop signals the parser goroutine to exit. Closed by shutdownNative.
-	nativeStop chan struct{}
-
-	// nativeSubs are native-event subscribers (the SSE /api/panes/{id}/native
-	// fan-out). Each gets every NativeEvent after it joins; the bounded ring
-	// backfills history on connect. Buffered + drop-on-full. Guarded by nativeMu.
-	nativeSubs    map[int64]chan NativeEvent
-	nextNativeSub int64
-
-	// nativeRing is the bounded per-pane event history (drop-oldest by count
-	// AND bytes) so late SSE joiners and ?since= gap-fill have recent events
-	// without re-parsing the transcript. Guarded by nativeMu.
-	nativeRing      []NativeEvent
-	nativeRingBytes int
-
-	// nativeSeq is the monotonic per-pane sequence counter the parser goroutine
-	// stamps onto every egress NativeEvent. Guarded by nativeMu.
-	nativeSeq uint64
-
-	// nativeEpoch is this pane's unique "agent spawn" id, stamped once by
-	// ensureNative (see nextNativeEpoch). Surfaced as PaneSnapshot.NativeEpoch so
-	// the client detects a respawn (mode switch / daemon swap) and re-seeds.
-	nativeEpoch atomic.Uint64
-
-	// nativeInTurn is the explicit "the agent is mid-turn" flag for native panes
-	// — set true when a user turn is written (paneNativeInput) OR when an
-	// assistant message starts streaming (first text/thinking/tool_call of a
-	// turn), and cleared on turn_end / result / error. This is MORE precise than
-	// recency for native panes: a native pane emits no PTY bytes once the agent
-	// is headless, so LastActivityMs would read "idle" the instant streaming
-	// pauses even though the turn is still in flight. IsAgentWorking() reads it
-	// lock-free (one atomic load) for the graceful-switch busy guard. For
-	// terminal panes it stays false forever (the parser never runs), so the
-	// terminal arm of IsAgentWorking falls back to computeState recency.
-	nativeInTurn atomic.Bool
-
-	// codexTurnInFlight is the DURABLE twin of nativeInTurn for Codex Focus
-	// panes: it mirrors the same turn edges but is persisted (panes.json
-	// codexTurnInFlight) and, unlike nativeInTurn, is NEVER read by
+	// codexTurnInFlight records that a Codex turn was underway; it is persisted
+	// (panes.json codexTurnInFlight) and is NEVER read by
 	// computeState — a suspended pane restores it to know its last turn died
 	// mid-flight without thereby rendering as "working".
+	//
+	// Only the Focus (native) Codex adapter ever set it, and Focus was removed:
+	// nothing stores it now, so it reads false. SpawnOpts.CodexTurnInFlight
+	// still carries a value an older release wrote to panes.json, but Spawn no
+	// longer reads it, so the "resume-repair" notice described below is never
+	// raised (Spawn sets only "fresh-start").
 	//
 	// It exists because Codex CANNOT distinguish a crash-orphaned turn from a
 	// deliberate user interrupt: measured against codex-cli 0.144.4, a turn
@@ -837,80 +728,16 @@ type Pane struct {
 	// turn/completed (including a user interrupt). Surviving as true across a
 	// respawn therefore means exactly one thing — the process died mid-turn
 	// without ever reporting an end — which Spawn turns into the
-	// "resume-repair" notice (Claude reads its transcript instead — prepareClaudeResume).
+	// "resume-repair" notice.
 	codexTurnInFlight atomic.Bool
 
-	// nativeGotInit flips true when this pane's live stream produces its FIRST
-	// system/init (EvSessionInit) — the earliest positive proof that a headless
-	// `claude --resume` came up healthy rather than dying on a bad session id.
-	// Per-Pane (a respawn is a fresh struct), so it needs no reset. Read by
-	// confirmSwitchHealthy to end the post-respawn health grace early instead of
-	// always burning the full window on every mode switch / resume / refresh.
-	nativeGotInit atomic.Bool
-
-	// nativeEchoSuppress holds the texts of FRESH-turn prompts the daemon emitted
-	// as user_text at INPUT time (paneNativeInput) so they precede the reply in
-	// seq order — Claude's `--replay-user-messages` echo is NOT ordered before the
-	// reply on stdout, so a late echo would render the prompt below the answer.
-	// Each entry is consumed (dropped) when its matching live echo arrives, so we
-	// don't double-render it. Content-FIFO (mirrors the client's reconcilePending);
-	// mid-turn STEER inputs are NOT registered here (their echo flows through and
-	// the client anchors it to the next turn). Guarded by nativeEchoMu; bounded.
-	nativeEchoMu       sync.Mutex
-	nativeEchoSuppress []string
-
-	// nativeLastEventNano is the unix-nano timestamp of the last LIVE native event
-	// (and of a freshly-submitted user turn). nativeOpenTools counts tool_calls
-	// that haven't yet seen their tool_result (a tool the agent is waiting on).
-	// Together they let agentMidTurnForState SETTLE a stuck nativeInTurn: the
-	// deny-with-reason AskUserQuestion answer path emits no turn_end, so the flag
-	// can hang true after the agent has gone idle. When no tool is in flight AND no
-	// event has streamed for longer than any plausible tool_result→next-message
-	// gap, the turn has settled. The open-tool guard is what keeps a long, silent
-	// tool run (event-less but genuinely working) from being mistaken for idle.
-	nativeLastEventNano atomic.Int64
-	nativeOpenTools     atomic.Int32
-	// nativeLastWasToolResult is true when the most recent live event was a
-	// tool_result — i.e. the model is in the event-less gap before it resumes its
-	// next message. That gap gets a longer settle allowance so the FAST normal
-	// settle (after a finished response) doesn't flicker the spinner mid-gap.
-	nativeLastWasToolResult atomic.Bool
-
-	// nativeWorkflowActive is set when this pane launched a Claude Code Workflow
-	// (a `Workflow` tool_call streamed by). A Workflow runs its subagents in the
-	// BACKGROUND: the tool returns a task id immediately and the launching turn
-	// then settles to idle (nativeInTurn → false) while the subagents keep
-	// churning — so the pane would look done even though work is ongoing. While
-	// this flag is set the DTO carries a WorkflowStatus (scanned from the session's
-	// subagents/workflows dir) so the footer shows "workflow · N/M agents · active
-	// Xs ago". Cleared on the NEXT turn start (false→true edge) — the workflow's
-	// completion injects exactly such a turn, and a user steer is an explicit move
-	// on. Not persisted: a daemon restart drops it (the agent process is gone too).
-	nativeWorkflowActive atomic.Bool
-
-	// pendingSwitchNotice records that the most recent Terminal↔Native switch
-	// INTERRUPTED an in-flight turn, so the client can show a "previous response
-	// interrupted — Continue" marker on the pane. Set under switchNoticeMu when a
-	// graceful switch interrupts a working agent; cleared when the next user turn
-	// is written (paneNativeInput / the terminal input path) or on an explicit
-	// ack. nil when there's no outstanding notice. Rides the pane DTO as
+	// pendingSwitchNotice records a conversation discontinuity (a resume that
+	// repaired a cut-off response, or a dropped --resume) so the client can show
+	// a banner on the pane. Cleared when the next user turn is written or on an
+	// explicit ack. nil when there's no outstanding notice. Rides the pane DTO as
 	// switchNotice (see makePaneDTO).
 	switchNoticeMu      sync.Mutex
 	pendingSwitchNotice *switchNotice
-
-	// pendingSwitch holds an ARMED but not-yet-fired deferred mode switch
-	// (when:"deferred"): the user asked to flip Terminal↔Native but wants it
-	// to wait for the agent's current turn to finish rather than force-
-	// interrupting it. A standalone watcher goroutine (deferredSwitchWatcher)
-	// polls turnSettledForSwitch and runs performSwitchMode once the turn has
-	// settled. pendingSwitchMu is a LEAF lock — never held while taking
-	// nativeMu/subsMu/p.mu — so it can be read from the DTO path and the
-	// watcher without deadlock risk. pendingSwitchWatching gates a single
-	// watcher goroutine per pane (CAS false→true on arm). nil pendingSwitch =
-	// nothing armed; the watcher exits when it observes nil.
-	pendingSwitchMu       sync.Mutex
-	pendingSwitch         *pendingDeferredSwitch
-	pendingSwitchWatching atomic.Bool
 
 	// replayEmu tracks the current visible terminal grid for bytes-mode
 	// reattach fallback. The raw ring buffer remains the primary replay
@@ -1025,23 +852,6 @@ func (p *Pane) composerPendingSnapshot() (int, int64) {
 	return p.promptRec.draft()
 }
 
-// SetComposerNonEmpty records the native composer's current presence with a
-// TTL so an unmounted or disconnected client cannot hold delivery forever.
-func (p *Pane) SetComposerNonEmpty(nonEmpty bool, now time.Time) {
-	if p == nil {
-		return
-	}
-	if !nonEmpty {
-		p.composerNonEmptyUntil.Store(0)
-		return
-	}
-	p.composerNonEmptyUntil.Store(now.Add(delegationComposerPresenceTTL).UnixMilli())
-}
-
-func (p *Pane) composerNonEmptyNow(now time.Time) bool {
-	return p != nil && p.composerNonEmptyUntil.Load() > now.UnixMilli()
-}
-
 func (p *Pane) setDelegationPending(count, needsYou int, oldest time.Time) {
 	if p == nil {
 		return
@@ -1095,6 +905,9 @@ type PaneSnapshot struct {
 	HeldMessages []heldDelivery `json:"heldMessages,omitempty"`
 	// HeldStuck: they wait behind text nobody is working on (heldStuckLocked).
 	HeldStuck  bool                `json:"heldStuck,omitempty"`
+	// HeldPaused: they wait because the person paused agent messaging
+	// (agent_messaging_pause.go), whatever else holds them.
+	HeldPaused bool `json:"heldPaused,omitempty"`
 	Credential *paneCredentialInfo `json:"credential,omitempty"`
 
 	ID              string     `json:"id"`
@@ -1131,7 +944,7 @@ type PaneSnapshot struct {
 	HarnessSessionID string `json:"harnessSessionId,omitempty"`
 	HarnessProvider  string `json:"harnessProvider,omitempty"`
 	// CodexTurnInFlight mirrors Pane.codexTurnInFlight (see its doc): a Codex
-	// Focus turn was underway and had not reported an end. Carried so the
+	// turn was underway and had not reported an end. Carried so the
 	// resume path can tell a crash-orphaned turn from a user interrupt —
 	// Codex's own resumed history reports both identically.
 	CodexTurnInFlight bool   `json:"codexTurnInFlight,omitempty"`
@@ -1148,7 +961,6 @@ type PaneSnapshot struct {
 	AutoMode                 string               `json:"autoMode,omitempty"`
 	NeverAutoAnswer          bool                 `json:"neverAutoAnswer,omitempty"`
 	AutoModeLastFiredMs      int64                `json:"autoModeLastFiredMs,omitempty"`
-	Narrating                bool                 `json:"narrating,omitempty"`
 	Flagged                  bool                 `json:"flagged,omitempty"`
 	FlagMemo                 string               `json:"flagMemo,omitempty"`
 	FlagOwner                string               `json:"flagOwner,omitempty"`
@@ -1159,10 +971,6 @@ type PaneSnapshot struct {
 	Review                   *PaneReview          `json:"review,omitempty"`
 	Identity                 *PaneIdentity        `json:"identity,omitempty"`
 	LastAgentMessage         *agentMessageReceipt `json:"lastAgentMessage,omitempty"`
-	// NativeAllowlist is the pane's "always allow this tool" set (sorted tool
-	// names) for native panes. Rides the snapshot so it persists with the pane
-	// and so any DTO/persist path observes a coherent copy.
-	NativeAllowlist []string `json:"nativeAllowlist,omitempty"`
 	// LastPrompts is the pane's recent submitted-input history, newest
 	// first (see Pane.LastPrompts). Rides the DTO so every client —
 	// desktop, phone over the relay — renders the same strip.
@@ -1173,18 +981,13 @@ type PaneSnapshot struct {
 // under p.mu. Callers should use this — not the *Pane directly — when
 // marshaling or persisting, to avoid racing with mutators.
 func (p *Pane) Snapshot() PaneSnapshot {
-	// Read the allowlist under its OWN lock (nativeApprovalMu) BEFORE taking
-	// p.mu — it's guarded by a different mutex than the rest of the fields, and
-	// taking it first keeps a single, fixed lock order (nativeApprovalMu →
-	// p.mu) so Snapshot can't deadlock against any path that holds p.mu and
-	// then touches the allowlist (none does today, but the order is now pinned).
-	allowlist := p.allowlistTools()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return PaneSnapshot{
 		UnsentMessage:            p.currentUnsentMessageLocked(),
 		HeldMessages:             p.heldDeliveriesLocked(),
 		HeldStuck:                p.heldStuckLocked(time.Now()),
+		HeldPaused:               len(p.heldDeliveries) > 0 && agentMessagingPaused(),
 		Credential:               clonePaneCredential(p.Credential),
 		ID:                       p.ID,
 		Cwd:                      p.Cwd,
@@ -1221,7 +1024,6 @@ func (p *Pane) Snapshot() PaneSnapshot {
 		AutoMode:                 p.AutoMode,
 		NeverAutoAnswer:          p.NeverAutoAnswer,
 		AutoModeLastFiredMs:      p.AutoModeLastFiredMs,
-		Narrating:                p.Narrating,
 		Flagged:                  p.Flagged,
 		FlagMemo:                 p.FlagMemo,
 		FlagOwner:                p.FlagOwner,
@@ -1232,7 +1034,6 @@ func (p *Pane) Snapshot() PaneSnapshot {
 		Review:                   p.Review.clone(),
 		Identity:                 p.Identity.clone(),
 		LastAgentMessage:         p.lastAgentMessage.clone(),
-		NativeAllowlist:          allowlist,
 		// sanitizePrompts so menu-choice noise ("11"/"111") that was
 		// recorded and persisted before the observe()-time filter clears
 		// from every client's strip on the next read, not after three
@@ -1260,10 +1061,6 @@ type Manager struct {
 	// after the pane's LastPrompts history changes. Wired in main.go to
 	// persist the pane and publish a "pane-prompt" UI event.
 	onPromptsCommit func(*Pane)
-	// onTurnStateEdge is copied onto each pane at spawn/attach; fires when a
-	// native pane's in-turn flag flips. Wired in main.go to publish a real-time
-	// pane-state (AgentMidTurn) edge.
-	onTurnStateEdge func(*Pane)
 	// onClaudeSessionRotated is copied onto each pane at spawn/attach; fires
 	// when a pane's Claude session id rotates to a genuinely new value. Wired
 	// in main.go to the delegation nudger's session-start digest.
@@ -1693,75 +1490,13 @@ func (p *Pane) readLoop(m *Manager) {
 				// channel sends are non-blocking (drop-on-full). No
 				// slow-subscriber backpressure reaches this lock.
 				p.subsMu.Lock()
-				if p.Kind == "native" {
-					// Native panes (Kind=="native", the DEFAULT) carry
-					// claude -p stream-json, NOT terminal bytes. They render
-					// exclusively via the per-pane native SSE stream
-					// (SubscribeNative → nativeParseLoop), so the whole
-					// terminal-rendering machinery is dead weight here and was
-					// the heaviest always-on per-payload cost at scale:
-					//   - replayEmu.Feed / DrainReplies  (VT emulation)
-					//   - countStrippedChars              (state-detection counter)
-					//   - trackModes                      (alt-screen tracking)
-					//   - fanoutPayloadLocked             (bytes-WS subscribers)
-					// none of which a native pane ever consults. We MUST still:
-					//   - tee to nativeTeeCh (this is how native rendering works)
-					//   - keep the ring buffer current (debug-tail / export read it)
-					//   - stamp LastActivityMs (state freshness)
-					//
-					// The bytes-fanout / replayEmu skip is gated on
-					// len(p.subs)==0: native panes are served by NativePane on
-					// the client (never the xterm bytes path, see PaneGrid.tsx /
-					// WarmPaneLayer.tsx), so p.subs is always empty for them. The
-					// guard makes the skip self-correcting and zero-risk: if a
-					// bytes subscriber ever did attach, we fall back to feeding
-					// the emulator and fanning out so reattach/lag-repair stays
-					// correct.
-					p.buffer.Write(payload)
-					if p.nativeTeeCh != nil {
-						// Raw native bytes are a machine protocol. Backpressure the
-						// local reader rather than dropping an approval/turn boundary;
-						// normalized browser fanout remains Seq-resynchronizable.
-						p.nativeTeeCh <- nativeChunk{data: append([]byte(nil), payload...), replay: t == FrameReplay}
-					}
-					if len(p.subs) > 0 {
-						if p.replayEmu != nil {
-							p.replayEmu.Feed(payload)
-							_ = p.replayEmu.DrainReplies()
-						}
-						p.fanoutPayloadLocked(payload)
-					}
-					if t == FrameData {
-						p.stampLiveFrameActivity()
-					}
-					p.subsMu.Unlock()
-					break
-				}
 				p.buffer.Write(payload)
-				// Native panes (Kind=="native") emit JSONL, not terminal
-				// output: the VT scrollback emulator (replayEmu) and the
-				// stripped-char counter (TotalStrippedChars) are pure waste
-				// for them. The native renderer consumes the PARSED event ring
-				// (fed by the nativeTeeCh tee below), never these VT models, so
-				// skipping them costs a native pane nothing it reads while
-				// removing per-payload Feed/DrainReplies CPU and a stripANSI
-				// allocation. `p.nativeTeeCh != nil` is the SAME native signal
-				// the tee uses; for terminal panes (Kind=="") it stays nil
-				// forever, so the terminal branch below is byte-identical to
-				// the prior unconditional path — the fallback guarantee. We
-				// KEEP buffer.Write, the grid tee, the native tee, trackModes,
-				// LastActivityMs, and fanout for BOTH kinds (each gated on its
-				// own already-existing nil/enabled check), so nothing a native
-				// pane genuinely needs is dropped.
-				if p.nativeTeeCh == nil {
-					// Terminal-pane VT machinery. Order preserved exactly.
-					if vtPaintEnabled && p.vt != nil {
-						_, _ = p.vt.Write(payload)
-					}
-					if p.replayEmu != nil {
-						p.replayEmu.Feed(payload)
-						_ = p.replayEmu.DrainReplies()
-					}
+				if vtPaintEnabled && p.vt != nil {
+					_, _ = p.vt.Write(payload)
+				}
+				if p.replayEmu != nil {
+					p.replayEmu.Feed(payload)
+					_ = p.replayEmu.DrainReplies()
 				}
 				// Grid-emulator tee: same byte stream, independent model.
 				// Only costs CPU when the emulator is initialised (ARIA
@@ -1770,26 +1505,11 @@ func (p *Pane) readLoop(m *Manager) {
 				if p.gridEmu != nil {
 					p.feedGridPayloadLocked(payload, t == FrameData)
 				}
-				// Native-mode tee: hand a payload copy to the parser
-				// goroutine, which runs the adapter OFF this lock. Only
-				// non-nil for Kind=="native" panes; terminal panes pay one
-				// pointer compare. The send is lossless and can backpressure:
-				// dropping raw machine-protocol bytes can orphan approvals or
-				// turn boundaries. No JSON work happens under this lock.
-				if p.nativeTeeCh != nil {
-					p.nativeTeeCh <- nativeChunk{data: append([]byte(nil), payload...), replay: t == FrameReplay}
-				} else {
-					// TotalStrippedChars feeds the stripped-char position math
-					// in computeState's TUI byte-scan and the auto-approve
-					// recheck — both terminal-only. A native pane short-circuits
-					// computeState on its pending-approval count and never scans
-					// the buffer for a TUI menu, so this strip-count is skipped
-					// for native panes. Kept inside the same terminal-only guard
-					// so the counter only advances when the scan that reads it
-					// can run. countStrippedChars is the allocation-free
-					// equivalent of len(stripANSI(payload)).
-					atomic.AddInt64(&p.TotalStrippedChars, int64(countStrippedChars(payload)))
-				}
+				// TotalStrippedChars feeds the stripped-char position math in
+				// computeState's TUI byte-scan and the auto-approve recheck.
+				// countStrippedChars is the allocation-free equivalent of
+				// len(stripANSI(payload)).
+				atomic.AddInt64(&p.TotalStrippedChars, int64(countStrippedChars(payload)))
 				p.trackModes(payload)
 				if t == FrameData {
 					p.stampLiveFrameActivity()
@@ -1888,20 +1608,6 @@ func (p *Pane) readLoop(m *Manager) {
 				p.resetGridPromptLifecycleLocked(p.gridEmu)
 			}
 			p.subsMu.Unlock()
-			if p.Kind == "native" {
-				p.subsMu.RLock()
-				tee := p.nativeTeeCh
-				p.subsMu.RUnlock()
-				if tee != nil {
-					// Unlike raw client fanout, this protocol boundary is
-					// load-bearing and must never be dropped.
-					select {
-					case tee <- nativeChunk{replayEnd: true}:
-					case <-p.done:
-						return
-					}
-				}
-			}
 			p.emitCodexReplayRepair()
 		case FrameExit:
 			var parsed struct {
@@ -2258,7 +1964,10 @@ func (p *Pane) markExited(code *int) {
 	p.subsMu.Unlock()
 
 	p.shutdownGrid()
-	p.shutdownNative()
+	// An exited pane is not mid-turn. Clear the fleet-turn latch so restart
+	// safety never reads a dead pane as busy (this lived in the native
+	// teardown, which ran for every pane).
+	p.setFleetTurnAdmission(false)
 
 	p.resizeSettleMu.Lock()
 	if p.resizeSettleTimer != nil {
@@ -2367,14 +2076,14 @@ func (p *Pane) writeWithFleetAdmissionPolicy(b []byte, recordPrompt, nativeTurn 
 	// a menu rather than typing into the composer? Not under agentWriteMu: the
 	// screen helpers take subsMu.
 	menu := menuInputNone
-	if recordPrompt && p.Kind != "native" && !isTerminalReplyOnly(b) {
+	if recordPrompt && !isTerminalReplyOnly(b) {
 		menu = p.menuInputState()
 	}
 	// A key answering a menu leaves a put-back message in the input box as
 	// it was (carryPutBackPastMenuKey). Unrecorded keys (an agent's menu
 	// answer) are classified too, only while there is one.
 	putBackMenuKey := menu != menuInputNone
-	if !recordPrompt && p.Kind != "native" && !isTerminalReplyOnly(b) && p.putBackReceipt() != nil {
+	if !recordPrompt && !isTerminalReplyOnly(b) && p.putBackReceipt() != nil {
 		putBackMenuKey = p.menuInputState() != menuInputNone
 	}
 	p.mu.Lock()
@@ -2558,7 +2267,7 @@ func (p *Pane) observeSuccessfulInputLocked(b []byte, recordPrompt bool, menu me
 			p.promptRec.agentOwned = false
 		}
 	}
-	if p.Kind != "native" && len(commits) > 0 {
+	if len(commits) > 0 {
 		// Track every terminal submission, not only writes that happen after an
 		// explicit restart request. That closes the otherwise unobservable race
 		// where a provider accepts a prompt immediately before the coordinator
@@ -3135,6 +2844,7 @@ func (m *Manager) Kill(id string) error {
 	<-p.done
 	m.mu.Lock()
 	delete(m.panes, id)
+	forgetTerminalOneTapPane(id)
 	removed := m.onPaneRemoved
 	m.mu.Unlock()
 	if removed != nil {

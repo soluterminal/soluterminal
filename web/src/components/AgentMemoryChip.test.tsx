@@ -134,4 +134,30 @@ describe('AgentMemoryChip', () => {
     const { container } = render(<AgentMemoryChip pane={{ ...codexPane, agentRssMB: 0 }} />);
     expect(container).toBeEmptyDOMElement();
   });
+  // ST-204: growth is sampled from the pane list, not only while a header is
+  // shown, so a pane shown again after an hour hidden does not compare today's
+  // reading with the one from before it was hidden.
+  it('does not call slow growth fast after the pane was hidden', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const priorPanes = useStore.getState().panes;
+    try {
+      const min = 60_000;
+      const start = new Date('2026-11-14T00:00:00Z').getTime();
+      vi.setSystemTime(start);
+      const at = (mb: number) => ({ ...codexPane, agentRssMB: mb });
+      useStore.setState({ panes: { [codexPane.id]: at(700) } });
+      const shown = render(<AgentMemoryChip pane={at(700)} onRestart={vi.fn()} />);
+      shown.unmount();
+      for (const [minute, mb] of [[11, 900], [22, 1100], [33, 1300]] as const) {
+        vi.setSystemTime(start + minute * min);
+        act(() => useStore.setState({ panes: { [codexPane.id]: at(mb) } }));
+      }
+      render(<AgentMemoryChip pane={at(1300)} onRestart={vi.fn()} />);
+      await act(async () => {});
+      expect(screen.queryByRole('button', { name: /Restart\?/ })).toBeNull();
+    } finally {
+      useStore.setState({ panes: priorPanes });
+      vi.useRealTimers();
+    }
+  });
 });

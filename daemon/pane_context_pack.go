@@ -101,14 +101,14 @@ func resolveContextPack(dir, cwd, kind, agent string, cmd []string) contextPackI
 	}
 
 	effective := effectiveAgentKind(agent)
-	if effective == agentClaude && (kind == "native" || cmdStartsClaude(cmd)) {
+	if effective == agentClaude && cmdStartsClaude(cmd) {
 		briefing := "AGENTS.md"
 		if info, statErr := os.Stat(filepath.Join(abs, "CLAUDE.md")); statErr == nil && info.Mode().IsRegular() {
 			briefing = "CLAUDE.md"
 		}
 		return contextPackInjection{Dir: abs, Briefing: briefing, Status: contextPackInjected}
 	}
-	if effective == agentCodex && (kind == "native" || cmdStartsCodex(cmd)) {
+	if effective == agentCodex && cmdStartsCodex(cmd) {
 		briefing := "CLAUDE.md"
 		if info, statErr := os.Stat(filepath.Join(abs, "AGENTS.md")); statErr == nil && info.Mode().IsRegular() {
 			briefing = "AGENTS.md"

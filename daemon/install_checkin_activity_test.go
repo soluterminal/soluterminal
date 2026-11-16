@@ -10,7 +10,7 @@ import (
 )
 
 func TestCheckinActivityFlagsLastADayAndSurviveRestarts(t *testing.T) {
-	t.Setenv(checkinDisabledEnv, "")
+	allowCheckinForTest(t)
 	sink, srv := newCheckinSink(t)
 	dir := t.TempDir()
 	base := func() string { return srv.URL }
@@ -75,7 +75,7 @@ func TestCheckinActivityFlagsLastADayAndSurviveRestarts(t *testing.T) {
 }
 
 func TestCheckinActivityIsNotRecordedWhenCheckinsAreOff(t *testing.T) {
-	t.Setenv(checkinDisabledEnv, "")
+	allowCheckinForTest(t)
 	dir := t.TempDir()
 	c := newInstallCheckin(dir, "0.0.1215", nil, nil)
 	if err := c.setEnabled(false); err != nil {
@@ -106,9 +106,6 @@ func TestCheckinAgentPaneKinds(t *testing.T) {
 		snap PaneSnapshot
 		want bool
 	}{
-		{"native claude", PaneSnapshot{Kind: "native"}, true},
-		{"native codex", PaneSnapshot{Kind: "native", Agent: agentCodex}, true},
-		{"native muse", PaneSnapshot{Kind: "native", Agent: agentMuse}, false},
 		{"plain shell", PaneSnapshot{Cmd: []string{"bash"}}, false},
 		{"empty terminal", PaneSnapshot{}, false},
 		{"claude terminal", PaneSnapshot{Cmd: []string{"claude"}}, true},
@@ -124,7 +121,7 @@ func TestCheckinAgentPaneKinds(t *testing.T) {
 }
 
 func TestSpawnPaneForRequestNotesAgentPanes(t *testing.T) {
-	t.Setenv(checkinDisabledEnv, "")
+	allowCheckinForTest(t)
 	a := &apiServer{checkin: newInstallCheckin(t.TempDir(), "0.0.1215", nil, nil)}
 	a.spawnPane = func(opts SpawnOpts) (*Pane, error) {
 		return &Pane{ID: "p_new", Cmd: opts.Cmd, Kind: opts.Kind, Agent: opts.Agent}, nil
@@ -145,7 +142,7 @@ func TestSpawnPaneForRequestNotesAgentPanes(t *testing.T) {
 
 func crossPaneServer(t *testing.T) *apiServer {
 	t.Helper()
-	t.Setenv(checkinDisabledEnv, "")
+	allowCheckinForTest(t)
 	a := &apiServer{mgr: NewManager(""), uiBus: newUIBus()}
 	for _, id := range []string{"pane_lead", "pane_helper"} {
 		a.mgr.panes[id] = testPaneWithTail(t, id, "bash", "$ ready\n")
@@ -205,7 +202,7 @@ func TestCrossPaneTargetCoversTheCollaborationTools(t *testing.T) {
 	if got := a.crossPaneTarget("spawn_pane", map[string]any{"cmd": "claude"}, "pane_lead"); got != "" {
 		t.Error("spawn_pane without a task must not count")
 	}
-	for _, tool := range []string{"list_panes", "get_pane_state", "kill_pane", "rename_pane"} {
+	for _, tool := range []string{"list_panes", "kill_pane", "rename_pane"} {
 		if got := a.crossPaneTarget(tool, map[string]any{"pane_id": "pane_helper"}, "pane_lead"); got != "" {
 			t.Errorf("%s must not count: %q", tool, got)
 		}

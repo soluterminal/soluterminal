@@ -7,8 +7,11 @@ import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { endpoint, selectedAccount, resolveAccountKey, loadedBrokerAccount, configurePiBroker, clearPiBroker, cleanEnvironment, configureZcode, nodeSupportsDsh, nodeSupportsPi, deepseekPlan, piPlan, piGlmPlan, verifyPinnedRuntime, verifyDeepseekConfig, verifyPiConfig, readDshProvenance, readPiProvenance, writeDshProvenance, writePiProvenance, clientBuildVersion, managedNpmrc, writeManagedNpmrc, runtimeRoot, shortcutDataDir, shortcutDisposition, renderManagedShortcut, releaseBrokerCapability } from './launch.mjs';
+import { endpoint, selectedAccount, resolveAccountKey, loadedBrokerAccount, configurePiBroker, clearPiBroker, ensurePiCacheWarmingOff, cleanEnvironment, configureZcode, nodeSupportsDsh, nodeSupportsPi, deepseekPlan, piPlan, piGlmPlan, verifyPinnedRuntime, verifyDeepseekConfig, verifyPiConfig, readDshProvenance, readPiProvenance, writeDshProvenance, writePiProvenance, clientBuildVersion, managedNpmrc, writeManagedNpmrc, runtimeRoot, shortcutDataDir, shortcutDisposition, renderManagedShortcut, releaseBrokerCapability } from './launch.mjs';
 import piApproval from './pi-approval.mjs';
+import { PINS, DSH_LOCK_SHA256, DSH_SPAWN_HELPER } from './pins.mjs';
+import { deepseekBaseURL, formatHarnessLock, prepareDshLock, dshRootPackageJSON, writeDshVerified, clearDshVerified, dshInstallVerified, ensureDshSpawnHelper } from './launch.mjs';
+import { DSH_PRIVACY_ROWS, dshPatchEntries, rotateDshAnonymousId } from './deepseek-model.mjs';
 
 test('keyless broker metadata launches with a local capability and Pi provider override', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-broker-launch-'));
@@ -130,7 +133,9 @@ test('a dsh launch keeps the key in the environment, never in argv', () => {
   const account = { name: 'main', apiKey: 'key-sentinel', billing: 'api', model: 'deepseek-flash' };
   const plan = deepseekPlan(account, '/data', ['--help'], { PATH: '/bin', DEEPSEEK_API_KEY: 'ambient', NODE_OPTIONS: '--require inject' });
   assert.equal(plan.env.DEEPSEEK_API_KEY, 'key-sentinel');
-  assert.equal(plan.env.DEEPSEEK_BASE_URL, 'https://api.deepseek.com');
+  assert.equal(plan.env.DEEPSEEK_BASE_URL, 'https://api.deepseek.com/anthropic');
+  assert.equal(plan.env.DSH_TELEMETRY_DISABLED, '1');
+  assert.equal(plan.env.DSH_TELEMETRY_MODE, 'DISABLED');
   assert.equal(plan.env.DSH_HOME, '/data/harness-state/deepseek');
   assert.equal(plan.env.PATH, '/bin');
   assert.equal(plan.env.NODE_OPTIONS, undefined);
@@ -170,11 +175,15 @@ test('a sealed store without its local key fails closed', async () => {
     await assert.rejects(resolveAccountKey('enc:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==', root), /local key is missing/);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
-test('the supported-Node gate reflects the runtime capability', () => {
+test('the supported-Node gate needs Node 24.9 and import.meta.main', () => {
   assert.equal(typeof nodeSupportsDsh(), 'boolean');
-  // The gate must agree with the running Node: true only where import.meta.main
-  // exists. CI runs an older Node, where correctly returning false is the pass.
-  assert.equal(nodeSupportsDsh(), typeof import.meta.main === 'boolean');
+  // dsh 0.2.2 publishes engines node >=24.9.0.
+  assert.equal(nodeSupportsDsh('24.9.0', true), true);
+  assert.equal(nodeSupportsDsh('25.0.0', true), true);
+  assert.equal(nodeSupportsDsh('24.8.1', true), false);
+  assert.equal(nodeSupportsDsh('24.2.0', true), false);
+  assert.equal(nodeSupportsDsh('22.19.0', true), false);
+  assert.equal(nodeSupportsDsh('26.1.0', false), false);
 });
 test('a Pi launch keeps the key in the environment and pins the provider and model', () => {
   const account = { name: 'main', apiKey: 'pi-key-sentinel', billing: 'api', model: 'deepseek-v4-flash' };
@@ -266,8 +275,10 @@ test('DeepSeek launch plans canonicalize safe legacy models and fail closed on u
     assert.equal(piPlan({ ...account, model: raw }, '/data', []).argv[4], 'deepseek-flash', raw);
   }
   const vision = 'deepseek-v4-flash-vision-exp';
-  assert.equal(deepseekPlan({ ...account, model: vision }, '/data', []).argv[2], vision);
-  assert.equal(piPlan({ ...account, model: vision }, '/data', []).argv[4], vision);
+  // DeepSeek Harness 0.2.2 dropped vision-exp too; its deepseek-flash takes images.
+  assert.equal(deepseekPlan({ ...account, model: vision }, '/data', []).argv[2], 'deepseek-flash');
+  // Pi 1.5's DeepSeek catalog has no vision-exp; its deepseek-flash takes images.
+  assert.equal(piPlan({ ...account, model: vision }, '/data', []).argv[4], 'deepseek-flash');
   for (const raw of ['deepseek-v4-pro-preview', 'deepseek/future-model', 'deepseek//deepseek-v4-pro']) {
     assert.throws(() => deepseekPlan({ ...account, model: raw }, '/data', []), /unsupported|malformed/i, raw);
     assert.throws(() => piPlan({ ...account, model: raw }, '/data', []), /unsupported|malformed/i, raw);
@@ -290,7 +301,7 @@ test('verifyPinnedRuntime compares the installed manifest to the pin', async () 
 });
 test('launch refuses a managed runtime that drifted from the pin', async t => {
   // launch() gates on the Node capability before it reaches the pin check.
-  if (!nodeSupportsDsh()) return t.skip('this host cannot run dsh (Node < 24.2)');
+  if (!nodeSupportsDsh()) return t.skip('this host cannot run dsh (Node < 24.9)');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-launch-drift-'));
   const harnessRoot = path.join(root, 'harnesses');
   const dataDir = path.join(root, 'data');
@@ -307,7 +318,7 @@ test('launch refuses a managed runtime that drifted from the pin', async t => {
     child.stderr.on('data', data => { errors += data; });
     const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); });
     assert.equal(code, 1, `expected the launch to refuse a drifted runtime: ${errors}`);
-    assert.match(errors, /0\.1\.4 is installed but 0\.1\.5-rc\.1 is required/);
+    assert.ok(errors.includes(`0.1.4 is installed but ${PINS.deepseek} is required`), errors);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 test('the pinned Pi runtime boots offline through the managed home', async t => {
@@ -330,7 +341,7 @@ test('the pinned runtime composes its ACP profile offline', async t => {
 test('a rotated account stops the managed process group', async t => {
   // The managed launcher refuses on a Node without import.meta.main, which is
   // the correct behavior — there is no process group to observe on such a host.
-  if (!nodeSupportsDsh()) return t.skip('this host cannot run dsh (Node < 24.2)');
+  if (!nodeSupportsDsh()) return t.skip('this host cannot run dsh (Node < 24.9)');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-launch-life-'));
   const harnessRoot = path.join(root, 'harnesses');
   const dataDir = path.join(root, 'data');
@@ -341,6 +352,7 @@ test('a rotated account stops the managed process group', async t => {
     const started = path.join(root, 'started');
     await fs.mkdir(path.dirname(runtime), { recursive: true });
     await fs.writeFile(runtime, `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(started)},'1');process.stdin.resume();setInterval(()=>{},1000);`);
+    await writeDshVerified(path.join(harnessRoot, 'deepseek'));
     await fs.mkdir(path.join(dataDir, 'harness-accounts'), { recursive: true });
     const accountFile = path.join(dataDir, 'harness-accounts', 'deepseek.json');
     const state = { version: 1, selected: 'personal/main', personal: { main: { name: 'main', apiKey: 'first-key', billing: 'api', model: 'deepseek-flash' } }, team: {} };
@@ -590,4 +602,281 @@ test('releaseBrokerCapability hands the capability back to the local daemon', as
   await releaseBrokerCapability({ apiKey: 'sk-personal', baseURL: 'http://127.0.0.1:8787/x' }, fetchImpl);
   assert.equal(calls.length, 1);
   await releaseBrokerCapability({ apiKey: token, baseURL: 'http://127.0.0.1:8787/x' }, async () => { throw new Error('offline'); });
+});
+
+test('the managed Pi home pins prompt-cache warming off and keeps other settings', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-pi-settings-'));
+  const file = path.join(home, 'settings.json');
+  try {
+    await ensurePiCacheWarmingOff(home);
+    assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { cacheWarming: 'off' });
+    if (process.platform !== 'win32') assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+    await fs.writeFile(file, JSON.stringify({ cacheWarming: 'idle', theme: 'dark' }));
+    await ensurePiCacheWarmingOff(home);
+    assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { cacheWarming: 'off', theme: 'dark' });
+    const before = (await fs.stat(file)).mtimeMs;
+    await ensurePiCacheWarmingOff(home); // already off: no rewrite
+    assert.equal((await fs.stat(file)).mtimeMs, before);
+    await fs.writeFile(file, '{not json');
+    await assert.rejects(ensurePiCacheWarmingOff(home), /unreadable/);
+    await fs.writeFile(file, '[]');
+    await assert.rejects(ensurePiCacheWarmingOff(home), /unreadable/);
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
+});
+
+test('the Pi lockfile is hash-pinned: a tampered integrity line is refused before npm runs', async () => {
+  const { preparePiLock, piRootPackageJSON } = await import('./launch.mjs');
+  const { PI_LOCK_SHA256 } = await import('./pins.mjs');
+  const lockBytes = await fs.readFile(new URL('./pi-lock.json', import.meta.url));
+  assert.equal(crypto.createHash('sha256').update(lockBytes).digest('hex'), PI_LOCK_SHA256, 'pi-lock.json must match PI_LOCK_SHA256');
+  const prefix = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-pi-lock-'));
+  try {
+    const lock = await preparePiLock(prefix, lockBytes);
+    assert.equal(lock.packages['node_modules/@earendil-works/pi-coding-agent'].version, PINS.pi);
+    for (const [key, entry] of Object.entries(lock.packages)) {
+      if (!key) continue;
+      assert.match(entry.integrity || '', /^sha512-/, `${key} has no sha512 integrity`);
+      assert.match(entry.resolved || '', /^https:\/\/registry\.npmjs\.org\//, `${key} not from the npm registry`);
+    }
+    assert.equal(await fs.readFile(path.join(prefix, 'package.json'), 'utf8'), piRootPackageJSON());
+    assert.deepEqual(await fs.readFile(path.join(prefix, 'package-lock.json')), lockBytes);
+    assert.equal(lock.packages[''].dependencies['@earendil-works/pi-coding-agent'], PINS.pi, 'root dependency must match the generated package.json');
+
+    // Change one character of one integrity hash.
+    const text = String(lockBytes);
+    const at = text.indexOf('"integrity": "sha512-') + '"integrity": "sha512-'.length;
+    const tampered = Buffer.from(text.slice(0, at) + (text[at] === 'A' ? 'B' : 'A') + text.slice(at + 1));
+    const other = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-pi-lock-'));
+    try {
+      await assert.rejects(preparePiLock(other, tampered), /does not match the pinned hash/);
+      await assert.rejects(fs.stat(path.join(other, 'package-lock.json')), 'a refused lockfile must not be written');
+    } finally { await fs.rm(other, { recursive: true, force: true }); }
+    await assert.rejects(preparePiLock(prefix, lockBytes, { pin: '9.9.9' }), /does not resolve Pi 9\.9\.9/);
+  } finally { await fs.rm(prefix, { recursive: true, force: true }); }
+});
+
+test('piTreeMatchesLock accepts only the locked tree', async () => {
+  const { piTreeMatchesLock } = await import('./launch.mjs');
+  const prefix = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-pi-tree-'));
+  const lock = { packages: {
+    '': { name: 'root' },
+    'node_modules/a': { version: '1.0.0', integrity: 'sha512-a' },
+    'node_modules/b': { version: '2.0.0', integrity: 'sha512-b', optional: true },
+  } };
+  const writeHidden = async packages => {
+    await fs.mkdir(path.join(prefix, 'node_modules'), { recursive: true });
+    await fs.writeFile(path.join(prefix, 'node_modules', '.package-lock.json'), JSON.stringify({ packages }));
+  };
+  try {
+    assert.equal(await piTreeMatchesLock(prefix, lock), false, 'nothing installed');
+    await writeHidden({ 'node_modules/a': { version: '1.0.0', integrity: 'sha512-a' } });
+    assert.equal(await piTreeMatchesLock(prefix, lock), true, 'an optional package for another platform may be absent');
+    await writeHidden({ 'node_modules/a': { version: '1.0.1', integrity: 'sha512-a' } });
+    assert.equal(await piTreeMatchesLock(prefix, lock), false, 'wrong version');
+    await writeHidden({ 'node_modules/a': { version: '1.0.0', integrity: 'sha512-x' } });
+    assert.equal(await piTreeMatchesLock(prefix, lock), false, 'wrong integrity');
+    await writeHidden({ 'node_modules/a': { version: '1.0.0', integrity: 'sha512-a' }, 'node_modules/extra': { version: '1.0.0', integrity: 'sha512-e' } });
+    assert.equal(await piTreeMatchesLock(prefix, lock), false, 'a package the lockfile does not list');
+    await writeHidden({});
+    assert.equal(await piTreeMatchesLock(prefix, lock), false, 'a required package missing');
+  } finally { await fs.rm(prefix, { recursive: true, force: true }); }
+});
+
+test('a Pi install counts as verified only with a marker for this pin and lockfile', async () => {
+  const { writePiVerified, clearPiVerified, piInstallVerified } = await import('./launch.mjs');
+  const prefix = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-pi-verified-'));
+  try {
+    assert.equal(await piInstallVerified(prefix), false, 'no marker');
+    await writePiVerified(prefix);
+    assert.equal(await piInstallVerified(prefix), true);
+    assert.equal(await piInstallVerified(prefix, { pin: '9.9.9' }), false, 'another pin');
+    assert.equal(await piInstallVerified(prefix, { sha256: 'f'.repeat(64) }), false, 'another lockfile');
+    await clearPiVerified(prefix);
+    assert.equal(await piInstallVerified(prefix), false, 'cleared before a reinstall');
+  } finally { await fs.rm(prefix, { recursive: true, force: true }); }
+});
+
+test('launch refuses a Pi runtime whose install did not pass every check', async t => {
+  if (!nodeSupportsPi()) return t.skip('this host cannot run Pi');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-launch-pi-unverified-'));
+  const harnessRoot = path.join(root, 'harnesses');
+  const dataDir = path.join(root, 'data');
+  try {
+      const pkgRoot = path.join(harnessRoot, 'pi/node_modules/@earendil-works/pi-coding-agent');
+    const runtime = path.join(pkgRoot, 'dist/bundle/cli.js');
+    await fs.mkdir(path.dirname(runtime), { recursive: true });
+    await fs.writeFile(path.join(pkgRoot, 'package.json'), JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: PINS.pi }));
+    await fs.writeFile(runtime, 'process.exit(0);');
+    await fs.mkdir(path.join(dataDir, 'harness-accounts'), { recursive: true });
+    await fs.writeFile(path.join(dataDir, 'harness-accounts', 'pi.json'), JSON.stringify({ version: 1, selected: 'personal/main', personal: { main: { name: 'main', apiKey: 'k', billing: 'api', model: 'deepseek-flash' } }, team: {} }));
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./launch.mjs', import.meta.url)), 'pi', '--data-dir', dataDir], { env: { ...process.env, SOLU_HARNESS_ROOT: harnessRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let errors = '';
+    child.stderr.on('data', data => { errors += data; });
+    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); });
+    assert.equal(code, 1, `expected the launch to refuse an unverified Pi: ${errors}`);
+    assert.match(errors, /Pi is not verified on this computer/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('DeepSeek Harness talks Messages under /anthropic; saved official roots move there', () => {
+  assert.equal(endpoint('deepseek', 'api'), 'https://api.deepseek.com/anthropic');
+  assert.equal(endpoint('pi', 'api'), 'https://api.deepseek.com', 'Pi stays on Chat Completions');
+  for (const saved of ['', 'https://api.deepseek.com', 'https://api.deepseek.com/', 'https://API.deepseek.com/v1', '  https://api.deepseek.com/v1/ ']) {
+    assert.equal(deepseekBaseURL(saved), 'https://api.deepseek.com/anthropic', saved);
+  }
+  assert.equal(deepseekBaseURL('https://api.deepseek.com/anthropic'), 'https://api.deepseek.com/anthropic');
+  assert.equal(deepseekBaseURL('https://gateway.example/deepseek'), 'https://gateway.example/deepseek');
+  const broker = 'http://127.0.0.1:8787/api/team-broker/deepseek/main';
+  assert.equal(deepseekPlan({ name: 'main', apiKey: 'cap', billing: 'api', model: '', baseURL: broker, broker: true }, '/data', []).env.DEEPSEEK_BASE_URL, broker);
+});
+
+test('the pane client patch turns off the session log and plugin inventory', async () => {
+  assert.deepEqual(DSH_PRIVACY_ROWS, [
+    { id: 'session-log-deepseek', config: { enabled: false } },
+    { id: 'plugin-package-inventory-deepseek', config: { enabled: false } },
+  ]);
+  assert.deepEqual(dshPatchEntries('deepseek-flash'), [{ id: 'acp', config: { provider: 'deepseek-official', model: 'deepseek-flash' } }, ...DSH_PRIVACY_ROWS]);
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-dsh-anon-'));
+  try {
+    await rotateDshAnonymousId(home);
+    const first = (await fs.readFile(path.join(home, '.anonymous-user-id'), 'utf8')).trim();
+    await rotateDshAnonymousId(home);
+    const second = (await fs.readFile(path.join(home, '.anonymous-user-id'), 'utf8')).trim();
+    assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.notEqual(first, second, 'each launch gets a fresh id');
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
+});
+
+test('the DeepSeek Harness lockfile is hash-pinned: a tampered integrity line is refused before npm runs', async () => {
+  const lockBytes = await fs.readFile(new URL('./dsh-lock.json', import.meta.url));
+  assert.equal(crypto.createHash('sha256').update(lockBytes).digest('hex'), DSH_LOCK_SHA256, 'dsh-lock.json must match DSH_LOCK_SHA256');
+  const prefix = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-dsh-lock-'));
+  try {
+    const lock = await prepareDshLock(prefix, lockBytes);
+    assert.equal(lock.packages['node_modules/@deepseek-ai/dsh'].version, PINS.deepseek);
+    assert.equal(lock.packages['node_modules/node-pty'].version, DSH_SPAWN_HELPER.nodePty, 'DSH_SPAWN_HELPER is pinned for the locked node-pty');
+    for (const [key, entry] of Object.entries(lock.packages)) {
+      if (!key) continue;
+      assert.match(entry.integrity || '', /^sha512-/, `${key} has no sha512 integrity`);
+      assert.match(entry.resolved || '', /^https:\/\/registry\.npmjs\.org\//, `${key} not from the npm registry`);
+    }
+    assert.equal(await fs.readFile(path.join(prefix, 'package.json'), 'utf8'), dshRootPackageJSON());
+    assert.deepEqual(await fs.readFile(path.join(prefix, 'package-lock.json')), lockBytes);
+    assert.equal(lock.packages[''].dependencies['@deepseek-ai/dsh'], PINS.deepseek, 'root dependency must match the generated package.json');
+    const text = String(lockBytes);
+    const marker = '"integrity":"sha512-';
+    assert.ok(text.includes(marker));
+    const at = text.indexOf(marker) + marker.length;
+    const tampered = Buffer.from(text.slice(0, at) + (text[at] === 'A' ? 'B' : 'A') + text.slice(at + 1));
+    const other = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-dsh-lock-'));
+    try {
+      await assert.rejects(prepareDshLock(other, tampered), /DeepSeek Harness install refused: its lockfile does not match the pinned hash/);
+      await assert.rejects(fs.stat(path.join(other, 'package-lock.json')), 'a refused lockfile must not be written');
+    } finally { await fs.rm(other, { recursive: true, force: true }); }
+    await assert.rejects(prepareDshLock(prefix, lockBytes, { pin: '9.9.9' }), /does not resolve DeepSeek Harness 9\.9\.9/);
+  } finally { await fs.rm(prefix, { recursive: true, force: true }); }
+});
+
+test('a DeepSeek Harness install counts as verified only with a marker for this pin and lockfile', async () => {
+  const prefix = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-dsh-verified-'));
+  try {
+    assert.equal(await dshInstallVerified(prefix), false, 'no marker');
+    await writeDshVerified(prefix);
+    assert.equal(await dshInstallVerified(prefix), true);
+    assert.equal(await dshInstallVerified(prefix, { pin: '9.9.9' }), false, 'another pin');
+    assert.equal(await dshInstallVerified(prefix, { sha256: 'f'.repeat(64) }), false, 'another lockfile');
+    const { piInstallVerified } = await import('./launch.mjs');
+    assert.equal(await piInstallVerified(prefix), false, 'a DeepSeek Harness marker is not a Pi marker');
+    await clearDshVerified(prefix);
+    assert.equal(await dshInstallVerified(prefix), false, 'cleared before a reinstall');
+  } finally { await fs.rm(prefix, { recursive: true, force: true }); }
+});
+
+test('the installer sets the spawn-helper mode only for the pinned node-pty and a pinned hash', async () => {
+  const prefix = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-dsh-helper-'));
+  const body = Buffer.from('helper-bytes');
+  const sha = crypto.createHash('sha256').update(body).digest('hex');
+  const spec = { nodePty: '1.2.0-beta.15', mode: 0o755, sha256: { 'darwin-arm64': sha } };
+  const lock = { packages: { 'node_modules/node-pty': { version: '1.2.0-beta.15' } } };
+  const helper = (plat) => path.join(prefix, 'node_modules', 'node-pty', 'prebuilds', plat, 'spawn-helper');
+  try {
+    // Linux and Windows prebuilds ship no helper: nothing to do, and an
+    // unexpected one is refused.
+    assert.equal(await ensureDshSpawnHelper(prefix, lock, { platform: 'linux', arch: 'x64', spec }), null);
+    await fs.mkdir(path.dirname(helper('linux-x64')), { recursive: true });
+    await fs.writeFile(helper('linux-x64'), body, { mode: 0o644 });
+    await assert.rejects(ensureDshSpawnHelper(prefix, lock, { platform: 'linux', arch: 'x64', spec }), /unexpected spawn-helper/);
+    await assert.rejects(ensureDshSpawnHelper(prefix, { packages: { 'node_modules/node-pty': { version: '1.2.0' } } }, { platform: 'darwin', arch: 'arm64', spec }), /does not pin node-pty 1\.2\.0-beta\.15/);
+    await assert.rejects(ensureDshSpawnHelper(prefix, lock, { platform: 'darwin', arch: 'arm64', spec }), /spawn-helper is missing/);
+    await fs.mkdir(path.dirname(helper('darwin-arm64')), { recursive: true });
+    await fs.writeFile(helper('darwin-arm64'), Buffer.from('tampered'), { mode: 0o644 });
+    await assert.rejects(ensureDshSpawnHelper(prefix, lock, { platform: 'darwin', arch: 'arm64', spec }), /does not match its pinned hash/);
+    assert.equal((await fs.stat(helper('darwin-arm64'))).mode & 0o777, 0o644, 'a mismatched helper is not made executable');
+    await fs.writeFile(helper('darwin-arm64'), body, { mode: 0o644 });
+    await fs.chmod(helper('darwin-arm64'), 0o644);
+    assert.equal(await ensureDshSpawnHelper(prefix, lock, { platform: 'darwin', arch: 'arm64', spec }), helper('darwin-arm64'));
+    if (process.platform !== 'win32') assert.equal((await fs.stat(helper('darwin-arm64'))).mode & 0o7777, 0o755);
+  } finally { await fs.rm(prefix, { recursive: true, force: true }); }
+});
+
+test('the pinned macOS spawn-helper hashes cover both shipped prebuilds', () => {
+  assert.deepEqual(Object.keys(DSH_SPAWN_HELPER.sha256).sort(), ['darwin-arm64', 'darwin-x64']);
+  for (const sha of Object.values(DSH_SPAWN_HELPER.sha256)) assert.match(sha, /^[0-9a-f]{64}$/);
+  assert.equal(DSH_SPAWN_HELPER.mode, 0o755, 'dsh-subprocess-local sets 0755');
+});
+
+test('launch refuses a DeepSeek Harness runtime whose install did not pass every check', async t => {
+  if (!nodeSupportsDsh()) return t.skip('this host cannot run dsh (Node < 24.9)');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-launch-dsh-unverified-'));
+  const harnessRoot = path.join(root, 'harnesses');
+  const dataDir = path.join(root, 'data');
+  try {
+    const pkgRoot = path.join(harnessRoot, 'deepseek/node_modules/@deepseek-ai/dsh');
+    const runtime = path.join(pkgRoot, 'lib/bin.js');
+    const ran = path.join(root, 'ran');
+    await fs.mkdir(path.dirname(runtime), { recursive: true });
+    await fs.writeFile(path.join(pkgRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: PINS.deepseek }));
+    await fs.writeFile(runtime, `require('node:fs').writeFileSync(${JSON.stringify(ran)}, '1');`);
+    await fs.mkdir(path.join(dataDir, 'harness-accounts'), { recursive: true });
+    await fs.writeFile(path.join(dataDir, 'harness-accounts', 'deepseek.json'), JSON.stringify({ version: 1, selected: 'personal/main', personal: { main: { name: 'main', apiKey: 'k', billing: 'api', model: 'deepseek-flash' } }, team: {} }));
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./launch.mjs', import.meta.url)), 'deepseek', '--data-dir', dataDir], { env: { ...process.env, SOLU_HARNESS_ROOT: harnessRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let errors = '';
+    child.stderr.on('data', data => { errors += data; });
+    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); });
+    assert.equal(code, 1, errors);
+    assert.match(errors, /DeepSeek Harness is not verified on this computer/);
+    await assert.rejects(fs.stat(ran), 'an unverified bin.js must never run');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('the DeepSeek Harness lockfile keeps the one-entry-per-line layout', async () => {
+  const lockBytes = await fs.readFile(new URL('./dsh-lock.json', import.meta.url), 'utf8');
+  assert.equal(formatHarnessLock(JSON.parse(lockBytes)), lockBytes, 'regenerate dsh-lock.json with formatHarnessLock (see launch.mjs)');
+  assert.ok(lockBytes.split('\n').length < 1000, 'one line per package keeps a bump reviewable');
+});
+
+test('the install privacy check refuses a dump where a privacy row is missing or on', async () => {
+  const { dshPrivacyRowsOff, verifyDshPrivacy } = await import('./launch.mjs');
+  const off = ['- id: session', "  name: '@deepseek-ai/dsh-session'", '- id: session-log-deepseek', "  name: '@deepseek-ai/dsh-session-log-deepseek'", '  config:', '    enabled: false',
+    '- id: plugin-package-inventory-deepseek', "  name: '@deepseek-ai/dsh-plugin-package-inventory-deepseek'", '  disabled: true', '- id: typert'].join('\n');
+  assert.deepEqual(dshPrivacyRowsOff(off), []);
+  assert.deepEqual(dshPrivacyRowsOff(off.replace('    enabled: false', '    enabled: true')), ['session-log-deepseek is not switched off']);
+  assert.deepEqual(dshPrivacyRowsOff(off.replace('- id: session-log-deepseek', '- id: session-log-deepseek-v2')), ['session-log-deepseek is missing']);
+  // A nested setting that is off does not vouch for a row that is on.
+  assert.deepEqual(dshPrivacyRowsOff(off.replace('    enabled: false', '    enabled: true\n    nested:\n      enabled: false')), ['session-log-deepseek is not switched off']);
+  // A later section's `enabled: false` does not vouch for the last row.
+  assert.deepEqual(dshPrivacyRowsOff(['- id: session-log-deepseek', '  config:', '    enabled: false', '- id: plugin-package-inventory-deepseek', "  name: 'x'", 'other:', '  enabled: false'].join('\n')), ['plugin-package-inventory-deepseek is not switched off']);
+  // A fake runtime whose dump no longer has the session-log row (as a future
+  // rename would) fails the install check.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'solu-dsh-privacy-check-'));
+  try {
+    const runtime = path.join(root, 'bin.mjs');
+    await fs.writeFile(runtime, `process.stdout.write(${JSON.stringify(off.replace('- id: session-log-deepseek', '- id: renamed-session-log'))});`);
+    await assert.rejects(verifyDshPrivacy(runtime, path.join(root, 'home')), error => /install refused: in its acp profile, session-log-deepseek is missing/.test(error.message) && error.privacyRows === true);
+    // A runtime that fails to run is not a row finding.
+    await fs.writeFile(runtime, 'process.exit(3);');
+    await assert.rejects(verifyDshPrivacy(runtime, path.join(root, 'home')), error => /privacy check exited 3/.test(error.message) && !error.privacyRows);
+    await fs.writeFile(runtime, `process.stdout.write(${JSON.stringify(off)});`);
+    await verifyDshPrivacy(runtime, path.join(root, 'home'));
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

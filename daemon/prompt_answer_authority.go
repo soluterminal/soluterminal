@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"slices"
-	"strings"
 	"time"
 )
 
@@ -84,21 +82,32 @@ func (a *apiServer) decidePromptAnswer(m mcpCallMeta, scoped bool, target *Pane)
 	return promptAnswerVerdict{allowed: true, pane: m.id.PaneID}
 }
 
+// promptAnswerRecheck is decidePromptAnswer again at write time, run under
+// the pane's writer lock with the answer's write: a grant revoked after the
+// answer was admitted wins, and nothing is written (ST-52).
+func (a *apiServer) promptAnswerRecheck(m mcpCallMeta, scoped bool, target *Pane) func() error {
+	return func() error {
+		if v := a.decidePromptAnswer(m, scoped, target); !v.allowed {
+			targetID := ""
+			if target != nil {
+				targetID = target.ID
+			}
+			log.Printf("authority: refused at write time caller=%s pane=%s pid=%d target=%s transport=%s", m.id.Kind, m.id.PaneID, m.id.PID, targetID, m.transport)
+			return errPromptAnswerRevoked{v.refusal}
+		}
+		return nil
+	}
+}
+
+// errPromptAnswerRevoked: an admitted answer refused at write time.
+type errPromptAnswerRevoked struct{ refusal string }
+
+func (e errPromptAnswerRevoked) Error() string { return e.refusal }
+
 // promptRevID names a terminal pane's prompt by its input revision, which an
 // answer's write moves on: read it before the write.
 func promptRevID(p *Pane) string {
 	return fmt.Sprintf("rev:%d", p.inputRevision.Load())
-}
-
-// approvalPromptID names a native pane's approval by its concrete request id.
-func approvalPromptID(reqID string) string {
-	return "approval:" + reqID
-}
-
-// approvalsPromptID names every approval an act answered at once.
-func approvalsPromptID(reqIDs []string) string {
-	ids := slices.Sorted(slices.Values(reqIDs))
-	return approvalPromptID(strings.Join(ids, ","))
 }
 
 // logPromptAct is the audit line of an agent's act on a prompt under the

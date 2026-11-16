@@ -1,0 +1,14 @@
+{
+ "cols": 120,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "idle",
+   "bytes": 3716
+  },
+  {
+   "name": "teach_dialog",
+   "bytes": 8030
+  }
+ ]
+}

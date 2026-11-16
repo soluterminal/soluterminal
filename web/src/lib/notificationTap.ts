@@ -1,4 +1,5 @@
 import { useStore } from '../store';
+import { useCloud } from '../cloud';
 import { openInbox, openInboxAt } from '../components/inbox/InboxPanel';
 import { markFeedbackEventRead } from './useFeedbackInbox';
 
@@ -89,7 +90,10 @@ export function onServiceWorkerTapMessage(e: MessageEvent): void {
   const d = e.data as { type?: string; paneId?: string } | null;
   if (!d) return;
   if (d.type === 'solu:notification-tap-ready') {
-    e.ports[0]?.postMessage('ready');
+    // The machine this window shows, so a pane tap for it is handed over here
+    // instead of reloading the window (sw v32). The app runs at "/" in the
+    // cloud, so the worker can't tell it from the URL.
+    e.ports[0]?.postMessage({ ready: true, machineId: useCloud.getState().selectedMachineId ?? null });
     return;
   }
   if (d.type !== 'solu:notification-tap' || !d.paneId) return;

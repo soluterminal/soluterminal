@@ -1,13 +1,11 @@
 package main
 
 import (
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,77 +30,6 @@ func TestFleetRespawnRequiresDurableIdentityAndPostSubmitEvidence(t *testing.T) 
 	atomic.AddInt64(&p.TotalStrippedChars, 1)
 	if !fleetPaneBusyForRestart(p) {
 		t.Fatal("output without a terminal hand-back prompt was treated as settled")
-	}
-}
-
-func TestFleetRestartSeesNativeSubmissionBeforePromptPersistenceFinishes(t *testing.T) {
-	daemonConn, agentConn := net.Pipe()
-	p := &Pane{
-		ID: "native-submit-race", Kind: "native", Agent: agentClaude, Status: PaneRunning,
-		ClaudeSessionID: "session-a", agentConn: daemonConn, done: make(chan struct{}),
-		buffer: NewRingBuffer(1024), nativeAdapter: NewClaudeAdapter(),
-		nativeSubs: map[int64]chan NativeEvent{}, nativeStop: make(chan struct{}),
-	}
-	persisting := make(chan struct{})
-	releasePersistence := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releasePersistence) }) }
-	p.onPromptsCommit = func(*Pane) {
-		close(persisting)
-		<-releasePersistence
-	}
-	t.Cleanup(func() {
-		release()
-		p.shutdownNative()
-		_ = daemonConn.Close()
-		_ = agentConn.Close()
-	})
-	submitDone := make(chan error, 1)
-	go func() {
-		_, err := p.submitNativeInput("start a provider turn before persistence")
-		submitDone <- err
-	}()
-	if _, _, err := ReadFrame(agentConn); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-persisting:
-	case <-time.After(time.Second):
-		t.Fatal("submission did not reach prompt persistence")
-	}
-	if !fleetPaneBusyForRestart(p) {
-		t.Fatal("transport-committed native turn was invisible during prompt persistence")
-	}
-	release()
-	if err := <-submitDone; err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestFleetRestartNativeTurnLatchSurvivesDisplaySilence(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		silence   time.Duration
-		afterTool bool
-	}{
-		{name: "plain silence beyond display settle", silence: nativeSettleTimeout + time.Second},
-		{name: "post-tool silence beyond gap allowance", silence: nativeGapAllowance + time.Second, afterTool: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			p := newTestNativePane()
-			p.MuseSessionID = "muse-active"
-			p.nativeInTurn.Store(true)
-			p.fleetTurnAdmitted.Store(true)
-			p.nativeLastWasToolResult.Store(tt.afterTool)
-			p.nativeLastEventNano.Store(time.Now().Add(-tt.silence).UnixNano())
-			if !fleetPaneBusyForRestart(p) {
-				t.Fatal("silent provider turn was treated as safe to terminate")
-			}
-			p.emitNativeEvent(NativeEvent{Type: EvTurnEnd, Subtype: "success"})
-			if fleetPaneBusyForRestart(p) {
-				t.Fatal("authoritative turn completion did not release restart latch")
-			}
-		})
 	}
 }
 
@@ -171,11 +98,6 @@ func resumeTestServer(t *testing.T, exited *Pane) (*apiServer, *[]SpawnOpts, *[]
 			if o.ContextPack != "" {
 				np.ContextPackStatus = contextPackInjected
 			}
-			if o.Kind == "native" && effectiveAgentKind(o.Agent) == agentCodex {
-				// The fake spawn has no app-server to emit thread/start|resume.
-				// Model the positive readiness signal a healthy real spawn produces.
-				np.nativeGotInit.Store(true)
-			}
 			mgr.panes[np.ID] = np
 			return np, nil
 		},
@@ -194,45 +116,6 @@ func postResume(api *apiServer, id string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	api.handleResumePane(rec, req)
 	return rec
-}
-
-// A native exited-but-resumable pane respawns under the SAME id + kind, resuming
-// the same session (nil cmd → Spawn rewrites the headless --resume argv), and the
-// id is freed (killed) before the respawn so Spawn's duplicate-id guard passes.
-func TestResumePaneNativeRespawns(t *testing.T) {
-	t.Setenv("SOLU_NATIVE_RENDERER", "1")
-	exited := switchTestPane("pane_resume", "native", nil, "sess-xyz")
-	exited.Status = PaneExited
-	exited.Resumable = true
-	exited.Flagged = true
-	exited.FlagMemo = "keep me"
-	api, spawnOpts, killed := resumeTestServer(t, exited)
-
-	rec := postResume(api, "pane_resume")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
-	}
-	if len(*killed) != 1 || (*killed)[0] != "pane_resume" {
-		t.Fatalf("killed = %#v, want [pane_resume] (id freed before respawn)", *killed)
-	}
-	if len(*spawnOpts) != 1 {
-		t.Fatalf("spawnOpts len = %d, want 1: %#v", len(*spawnOpts), *spawnOpts)
-	}
-	o := (*spawnOpts)[0]
-	if o.ID != "pane_resume" || o.Kind != "native" || o.ClaudeSessionID != "sess-xyz" {
-		t.Fatalf("respawn opts = %+v, want id=pane_resume kind=native session=sess-xyz", o)
-	}
-	if o.Cmd != nil {
-		t.Fatalf("native respawn cmd = %#v, want nil (Spawn owns the headless --resume argv)", o.Cmd)
-	}
-	// Flag + memo (which SpawnOpts doesn't carry) are restored onto the new pane.
-	np, ok := api.mgr.Get("pane_resume")
-	if !ok {
-		t.Fatal("resumed pane missing from manager")
-	}
-	if snap := np.Snapshot(); !snap.Flagged || snap.FlagMemo != "keep me" {
-		t.Fatalf("restored state flagged=%v memo=%q, want true/\"keep me\"", snap.Flagged, snap.FlagMemo)
-	}
 }
 
 // A terminal (kind "") resume rebuilds the interactive `claude --resume <id>` TUI.
@@ -258,7 +141,6 @@ func TestResumePaneCodexUsesThreadIdentity(t *testing.T) {
 		name string
 		kind string
 	}{
-		{name: "native app server", kind: "native"},
 		{name: "terminal TUI", kind: ""},
 	}
 	for _, tt := range tests {
@@ -281,11 +163,7 @@ func TestResumePaneCodexUsesThreadIdentity(t *testing.T) {
 			if o.Agent != agentCodex || o.CodexThreadID != "thread-123" || o.ClaudeSessionID != "" {
 				t.Fatalf("Codex identity crossed providers: %+v", o)
 			}
-			if tt.kind == "native" {
-				if o.Cmd != nil {
-					t.Fatalf("native Codex cmd = %#v, want nil for Spawn app-server rewrite", o.Cmd)
-				}
-			} else if len(o.Cmd) != 3 || o.Cmd[0] != "codex" || o.Cmd[1] != "resume" || o.Cmd[2] != "thread-123" {
+			if len(o.Cmd) != 3 || o.Cmd[0] != "codex" || o.Cmd[1] != "resume" || o.Cmd[2] != "thread-123" {
 				t.Fatalf("terminal Codex cmd = %#v", o.Cmd)
 			}
 		})
@@ -294,7 +172,7 @@ func TestResumePaneCodexUsesThreadIdentity(t *testing.T) {
 
 // Resuming a running pane is an idempotent no-op (200, no spawn).
 func TestResumePaneRunningIsNoop(t *testing.T) {
-	running := switchTestPane("pane_run", "native", nil, "sess-1") // Status=PaneRunning
+	running := switchTestPane("pane_run", "", []string{"claude"}, "sess-1") // Status=PaneRunning
 	api, spawnOpts, killed := resumeTestServer(t, running)
 	rec := postResume(api, "pane_run")
 	if rec.Code != http.StatusOK {
@@ -321,7 +199,7 @@ func TestResumePaneNoSessionRejected(t *testing.T) {
 
 // Resuming an unknown pane → 404.
 func TestResumePaneNotFound(t *testing.T) {
-	exited := switchTestPane("pane_real", "native", nil, "s")
+	exited := switchTestPane("pane_real", "", []string{"claude"}, "s")
 	exited.Status = PaneExited
 	exited.Resumable = true
 	api, _, _ := resumeTestServer(t, exited)
@@ -393,13 +271,11 @@ func TestSuspendExistingMaterializesResumablePane(t *testing.T) {
 	mgr := NewManager(t.TempDir())
 	info := &PersistedPane{
 		ID:              "pane_susp",
-		Kind:            "native",
 		ClaudeSessionID: "sess-susp",
 		Title:           "claude",
 		AgentPid:        999999, // stale: the real agent died across the restart
 		Flagged:         true,
 		FlagMemo:        "keep",
-		NativeAllowlist: []string{"Bash"},
 	}
 	p := mgr.SuspendExisting(info)
 	if p == nil {
@@ -421,16 +297,12 @@ func TestSuspendExistingMaterializesResumablePane(t *testing.T) {
 	if !snap.Flagged || snap.FlagMemo != "keep" {
 		t.Fatalf("flag state lost: flagged=%v memo=%q", snap.Flagged, snap.FlagMemo)
 	}
-	// The native allowlist must survive so a later resume keeps the user's opt-ins.
-	if len(snap.NativeAllowlist) != 1 || snap.NativeAllowlist[0] != "Bash" {
-		t.Fatalf("native allowlist not carried forward: %#v", snap.NativeAllowlist)
-	}
 }
 
 func TestSuspendExistingCodexPreservesThread(t *testing.T) {
 	mgr := NewManager(t.TempDir())
 	p := mgr.SuspendExisting(&PersistedPane{
-		ID: "pane_codex_susp", Kind: "native", Agent: agentCodex,
+		ID: "pane_codex_susp", Agent: agentCodex,
 		CodexThreadID: "thread-susp", ClaudeSessionID: "",
 	})
 	if p == nil {

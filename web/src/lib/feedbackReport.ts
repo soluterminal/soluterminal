@@ -252,17 +252,27 @@ function mergeLocalQuoted(a: LocalQuotedSpan[], b: LocalQuotedSpan[]): LocalQuot
   return out;
 }
 
+// The rules run on the text as it is and on a same-length view in which a
+// carriage return not followed by a newline is an ordinary character
+// (U+0001), and the spans are merged: a quoted value runs on past a lone CR,
+// and a value cut at the CR (a redrawn line) still counts, as in
+// shared/feedbackredact.
+const LOCAL_LONE_CR = /\r(?!\n)/g;
+
 function scrubLocalQuoted(text: string): string {
   let spans: LocalQuotedSpan[] = [];
-  for (const { pattern, kind } of LOCAL_QUOTED_RULES) {
-    const matches: LocalQuotedSpan[] = [];
-    for (const match of text.matchAll(pattern)) {
-      const value = match[2] ?? match[4];
-      if (!value) continue;
-      const start = match.index + match[1].length + 1;
-      matches.push({ start, end: start + value.length, kind });
+  const view = text.replace(LOCAL_LONE_CR, '\u0001');
+  for (const source of view === text ? [text] : [text, view]) {
+    for (const { pattern, kind } of LOCAL_QUOTED_RULES) {
+      const matches: LocalQuotedSpan[] = [];
+      for (const match of source.matchAll(pattern)) {
+        const value = match[2] ?? match[4];
+        if (!value) continue;
+        const start = match.index + match[1].length + 1;
+        matches.push({ start, end: start + value.length, kind });
+      }
+      spans = mergeLocalQuoted(spans, matches);
     }
-    spans = mergeLocalQuoted(spans, matches);
   }
   const out: string[] = [];
   let start = 0;

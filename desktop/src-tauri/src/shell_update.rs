@@ -396,10 +396,12 @@ fn active_rollback_hold_refusal(installer_version: &str) -> Option<UpdateHoldRef
     // The primary Windows topology runs solud inside the default WSL distro;
     // inspect its daemon-local hold as well. This is read-only and never starts
     // an installer or mutates either filesystem.
-    // Bounded, so an install check cannot hang on a stuck VM. It is skipped
-    // for a stopped distro only while low disk space blocks WSL
-    // (run_wsl_probe_bounded); with enough free space it starts the distro.
-    if let Ok(out) = crate::daemon::run_wsl_probe_bounded(
+    // Bounded, so an install check cannot hang on a stuck VM, and only while
+    // the default distro is already running: an install check never wakes a
+    // stopped distro (ST-232). While the distro is stopped only the
+    // Windows-side hold above is checked here; the WSL daemon stays held by
+    // its launcher's own check (docs/RUNBOOK-update-rollback.md).
+    if let Ok(out) = crate::daemon::run_wsl_probe_if_running(
         &[
             "-e",
             "sh",

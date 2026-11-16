@@ -58,12 +58,6 @@ func (m *Manager) retireOwnerPane(ctx context.Context, paneID, conversation stri
 	if err := ownerRetirementPaneGuard(snapshot, conversation); err != nil {
 		return result, err
 	}
-	p.pendingSwitchMu.Lock()
-	pending := p.pendingSwitch != nil
-	p.pendingSwitchMu.Unlock()
-	if pending {
-		return result, fmt.Errorf("owner has a pending terminal mode switch")
-	}
 	p.mu.Lock()
 	supported := p.ownerRetirementSupported
 	conn := p.agentConn
@@ -90,8 +84,8 @@ func (m *Manager) retireOwnerPane(ctx context.Context, paneID, conversation stri
 			p.agentWriteMu.Unlock()
 		}
 	}()
-	if pending, _ := p.promptRec.draft(); pending != 0 || p.composerNonEmptyUntil.Load() > time.Now().UnixMilli() {
-		return result, fmt.Errorf("owner retains unsent terminal input or a composer draft")
+	if pending, _ := p.promptRec.draft(); pending != 0 {
+		return result, fmt.Errorf("owner retains unsent terminal input")
 	}
 	if p.codexLiveMigrating.Load() {
 		return result, fmt.Errorf("owner connection is being upgraded")
@@ -254,6 +248,7 @@ func (m *Manager) retireOwnerPane(ctx context.Context, paneID, conversation stri
 	m.mu.Lock()
 	if m.panes[paneID] == p {
 		delete(m.panes, paneID)
+		forgetTerminalOneTapPane(paneID)
 	}
 	m.mu.Unlock()
 	p.detachSubscribers()

@@ -198,72 +198,12 @@ func TestWithOrchestratorBriefSurvivesLoginShellWrap(t *testing.T) {
 	}
 }
 
-func TestNativeClaudeArgvRoleConcatenatesNarrationAndBrief(t *testing.T) {
-	both := nativeClaudeArgvRole("sess", true, "", false, "", paneRoleOrchestrator)
-	value := appendedSystemPrompt(t, both)
-	if !strings.HasPrefix(value, nativeNarrationPrompt) {
-		t.Fatal("concatenated prompt does not lead with the narration prompt")
-	}
-	if idx := strings.Index(value, orchestratorBriefMarker); idx <= 0 {
-		t.Fatalf("orchestrator brief missing or not after the narration prompt (idx=%d)", idx)
-	}
-	if !strings.HasSuffix(value, orchestratorBrief) {
-		t.Fatal("concatenated prompt does not end with the orchestrator brief")
-	}
-
-	narrateOnly := nativeClaudeArgvRole("sess", true, "", false, "", "")
-	if got := appendedSystemPrompt(t, narrateOnly); got != nativeNarrationPrompt {
-		t.Fatal("role-less native argv should carry exactly the narration prompt")
-	}
-	roleOnly := nativeClaudeArgvRole("sess", false, "", false, "", paneRoleOrchestrator)
-	if got := appendedSystemPrompt(t, roleOnly); got != orchestratorBrief {
-		t.Fatal("narration-less orchestrator argv should carry exactly the brief")
-	}
-	plain := nativeClaudeArgvRole("sess", false, "", false, "", "")
-	if n := countFlag(plain, "--append-system-prompt"); n != 0 {
-		t.Fatalf("plain native argv carries %d --append-system-prompt flags, want 0", n)
-	}
-	if got, want := nativeClaudeArgv("sess", true, "high", true, "claude-fable-5"),
-		nativeClaudeArgvRole("sess", true, "high", true, "claude-fable-5", ""); !slices.Equal(got, want) {
-		t.Fatal("nativeClaudeArgv wrapper diverged from the role-less nativeClaudeArgvRole")
-	}
-	for name, argv := range map[string][]string{
-		"both": both, "narrate": narrateOnly, "role": roleOnly, "plain": plain,
-	} {
-		if !isHeadlessClaudeCmd(argv) {
-			t.Fatalf("%s native argv no longer reads as headless", name)
-		}
-	}
-}
-
-func TestSystemPromptAppend(t *testing.T) {
-	tests := []struct {
-		name    string
-		narrate bool
-		role    string
-		want    string
-	}{
-		{name: "neither", want: ""},
-		{name: "narration only", narrate: true, want: nativeNarrationPrompt},
-		{name: "role only", role: paneRoleOrchestrator, want: orchestratorBrief},
-		{name: "both", narrate: true, role: paneRoleOrchestrator, want: nativeNarrationPrompt + "\n\n" + orchestratorBrief},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := systemPromptAppend(tt.narrate, tt.role); got != tt.want {
-				t.Fatalf("systemPromptAppend(%v, %q) length = %d, want %d", tt.narrate, tt.role, len(got), len(tt.want))
-			}
-		})
-	}
-}
-
 // TestSpawnCmdForRole pins the kind/role→argv decision Manager.Spawn delegates
 // to. The decoration itself is covered above; what this adds is that the WIRING
 // discriminates correctly — native argvs (already decorated by
 // nativeClaudeArgvRole) and role-less panes must come back untouched, or a Focus
 // orchestrator would carry the brief twice.
 func TestSpawnCmdForRole(t *testing.T) {
-	nativeArgv := nativeClaudeArgvRole("s", true, "", false, "", paneRoleOrchestrator)
 	tests := []struct {
 		name string
 		kind string
@@ -281,8 +221,6 @@ func TestSpawnCmdForRole(t *testing.T) {
 			cmd: []string{"bash"}, want: []string{"bash"}},
 		{name: "role-less claude is untouched",
 			cmd: []string{"claude"}, want: []string{"claude"}},
-		{name: "native argv is left to nativeClaudeArgvRole", kind: "native", role: paneRoleOrchestrator,
-			cmd: nativeArgv, want: nativeArgv},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -291,37 +229,6 @@ func TestSpawnCmdForRole(t *testing.T) {
 				t.Fatalf("spawnCmdForRole(%q, %q, %v) = %v, want %v", tt.kind, tt.role, tt.cmd, got, tt.want)
 			}
 		})
-	}
-	// The native pass-through must not have doubled the flag.
-	if n := countFlag(spawnCmdForRole("native", paneRoleOrchestrator, agentClaude, nativeArgv), "--append-system-prompt"); n != 1 {
-		t.Fatalf("native argv carries %d --append-system-prompt flags after spawnCmdForRole, want 1", n)
-	}
-}
-
-// TestNativeClaudeSpawnArgvCarriesRole pins the OTHER half of the Spawn wiring:
-// the native branch builds its argv from opts, so the pane's Role has to reach
-// the brief without any other opts field being disturbed.
-func TestNativeClaudeSpawnArgvCarriesRole(t *testing.T) {
-	opts := SpawnOpts{ClaudeSessionID: "s", Effort: "high", Model: "claude-fable-5", Role: paneRoleOrchestrator}
-	argv := nativeClaudeSpawnArgv(opts, true, false)
-	if got, want := appendedSystemPrompt(t, argv), nativeNarrationPrompt+"\n\n"+orchestratorBrief; got != want {
-		t.Fatalf("appended system prompt length = %d, want %d (narration + brief)", len(got), len(want))
-	}
-	for _, pair := range [][2]string{{"--effort", "high"}, {"--model", "claude-fable-5"}, {"--resume", "s"}} {
-		i := slices.Index(argv, pair[0])
-		if i < 0 || i+1 >= len(argv) || argv[i+1] != pair[1] {
-			t.Fatalf("argv lost %s %s: %v", pair[0], pair[1], argv)
-		}
-	}
-	if !isHeadlessClaudeCmd(argv) {
-		t.Fatalf("orchestrator native argv no longer reads as headless: %v", argv)
-	}
-
-	plain := opts
-	plain.Role = ""
-	if got, want := nativeClaudeSpawnArgv(plain, true, false),
-		nativeClaudeArgv("s", true, "high", false, "claude-fable-5"); !slices.Equal(got, want) {
-		t.Fatalf("role-less nativeClaudeSpawnArgv diverged from nativeClaudeArgv:\n got=%v\nwant=%v", got, want)
 	}
 }
 
@@ -393,14 +300,6 @@ func TestPaneRoleRoundTripsPersistRestartResume(t *testing.T) {
 	if want := []string{"claude", "--resume", "sess-r"}; !slices.Equal(resumed.Cmd, want) {
 		t.Fatalf("resumeSpawnOpts Cmd = %v, want the bare %v that Spawn re-decorates", resumed.Cmd, want)
 	}
-	if got := switchSpawnOpts(snap, "native", 0, 0).Role; got != paneRoleOrchestrator {
-		t.Fatalf("switchSpawnOpts(→native) Role = %q, want orchestrator", got)
-	}
-	nativeSnap := snap
-	nativeSnap.Kind = "native"
-	if got := switchSpawnOpts(nativeSnap, "", 0, 0).Role; got != paneRoleOrchestrator {
-		t.Fatalf("switchSpawnOpts(→terminal) Role = %q, want orchestrator", got)
-	}
 
 	codex := mgr.SuspendExisting(&PersistedPane{
 		ID: "pane_codex_r", Agent: agentCodex, CodexThreadID: "thr-1",
@@ -413,15 +312,9 @@ func TestPaneRoleRoundTripsPersistRestartResume(t *testing.T) {
 	if opts := resumeSpawnOpts(codexSnap, 0, 0); opts.Agent != agentCodex || opts.Role != paneRoleOrchestrator || !slices.Equal(opts.Cmd, []string{"codex", "resume", "thr-1"}) {
 		t.Fatalf("Codex resume opts = %+v", opts)
 	}
-	toNative := switchSpawnOpts(codexSnap, "native", 0, 0)
-	toTerminal := switchSpawnOpts(PaneSnapshot{Agent: toNative.Agent, Role: toNative.Role, Kind: "native", CodexThreadID: toNative.CodexThreadID}, "", 0, 0)
-	if toNative.Agent != agentCodex || toNative.Role != paneRoleOrchestrator || toTerminal.Agent != agentCodex || toTerminal.Role != paneRoleOrchestrator {
-		t.Fatalf("Codex switch fidelity native=%+v terminal=%+v", toNative, toTerminal)
-	}
 }
 
 func TestCreatePaneRoleValidationAndPassthrough(t *testing.T) {
-	t.Setenv("SOLU_NATIVE_RENDERER", "1") // covers native-pane roles while Focus can still be re-enabled
 	wrappedDefRestore := `{"role":"orchestrator","cmd":["/usr/bin/bash","-lc","init; 'claude' '--resume' 'x'; exec /usr/bin/bash -i"]}`
 	wrappedCodexRestore := `{"role":"orchestrator","agent":"codex","cmd":["/usr/bin/bash","-lc","init; 'codex' 'resume' '019f5697-154c-7a92-8b61-ad2f9b68476d'; exec /usr/bin/bash -i"]}`
 	tests := []struct {
@@ -436,15 +329,10 @@ func TestCreatePaneRoleValidationAndPassthrough(t *testing.T) {
 			wantStatus: http.StatusBadRequest, wantBody: "unknown role: conductor\n"},
 		{name: "role on a Codex pane", body: `{"role":"orchestrator","agent":"codex","cmd":["codex"]}`,
 			wantStatus: http.StatusCreated, wantRole: paneRoleOrchestrator, wantAgent: agentCodex},
-		// Muse and a NATIVE non-Claude agent are the paths the first review found
-		// untested: each carries a cmd that starts its own agent, so the agent/cmd
-		// checks upstream pass and the ROLE check is demonstrably what rejects it.
+		// Muse carries a cmd that starts its own agent, so the agent/cmd checks
+		// upstream pass and the ROLE check is demonstrably what rejects it.
 		{name: "role on a Muse pane", body: `{"role":"orchestrator","agent":"muse","cmd":["muse"]}`,
 			wantStatus: http.StatusBadRequest, wantBody: "Muse Code has no MCP client"},
-		{name: "role on a native Muse pane", body: `{"role":"orchestrator","kind":"native","agent":"muse","cmd":["muse"]}`,
-			wantStatus: http.StatusBadRequest, wantBody: "Muse Code has no MCP client"},
-		{name: "role on a native Codex pane", body: `{"role":"orchestrator","kind":"native","agent":"codex"}`,
-			wantStatus: http.StatusCreated, wantRole: paneRoleOrchestrator, wantAgent: agentCodex},
 		{name: "role on a shell pane", body: `{"role":"orchestrator","cmd":["bash"]}`,
 			wantStatus: http.StatusBadRequest, wantBody: "orchestrator role requires a claude or codex command"},
 		{name: "role without a command", body: `{"role":"orchestrator"}`,
@@ -452,8 +340,6 @@ func TestCreatePaneRoleValidationAndPassthrough(t *testing.T) {
 		{name: "terminal claude", body: `{"role":"orchestrator","cmd":["claude"]}`,
 			wantStatus: http.StatusCreated, wantRole: paneRoleOrchestrator},
 		{name: "terminal claude resume", body: `{"role":"orchestrator","cmd":["claude","--resume","abc"]}`,
-			wantStatus: http.StatusCreated, wantRole: paneRoleOrchestrator},
-		{name: "native claude", body: `{"role":"orchestrator","kind":"native"}`,
 			wantStatus: http.StatusCreated, wantRole: paneRoleOrchestrator},
 		{name: "workspace def restore of a wrapped cmd", body: wrappedDefRestore,
 			wantStatus: http.StatusCreated, wantRole: paneRoleOrchestrator},

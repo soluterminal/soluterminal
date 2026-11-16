@@ -16,9 +16,12 @@ import (
 	"time"
 )
 
-// harnessEndpoint is the Go mirror of launch.mjs endpoint(): the base URL the
-// selected account's billing mode uses. Endpoints come from the provider facts
-// table; an unknown provider or billing mode is rejected.
+// harnessEndpoint is the provider API root for the selected account's billing
+// mode, used by Check/Test, the balance query and the model gateway. Endpoints
+// come from the provider facts table; an unknown provider or billing mode is
+// rejected. For DeepSeek this is the root API (Chat Completions, /models,
+// /user/balance); only the DeepSeek Harness launcher uses the Messages root
+// under /anthropic (launch.mjs endpoint()).
 func harnessEndpoint(provider, billing string) (string, error) {
 	p, ok := providers.Get(provider)
 	if !ok || p.Harness == nil {

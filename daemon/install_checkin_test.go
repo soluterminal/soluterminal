@@ -76,7 +76,7 @@ func TestCheckinInstallIDIsPersistedUUIDv4(t *testing.T) {
 }
 
 func TestCheckinSendsOncePerDayWithMinimalPayload(t *testing.T) {
-	t.Setenv(checkinDisabledEnv, "")
+	allowCheckinForTest(t)
 	sink, srv := newCheckinSink(t)
 	dir := t.TempDir()
 	signedIn := false
@@ -130,7 +130,7 @@ func TestCheckinOptOutsAndDevBuilds(t *testing.T) {
 	if sent, _ := c.sendOnce(context.Background()); sent {
 		t.Fatal("SOLU_DISABLE_CHECKIN=1 must suppress the check-in")
 	}
-	t.Setenv(checkinDisabledEnv, "")
+	allowCheckinForTest(t)
 
 	dev := newInstallCheckin(t.TempDir(), "dev", base, nil)
 	if sent, _ := dev.sendOnce(context.Background()); sent {
@@ -156,7 +156,7 @@ func TestCheckinOptOutsAndDevBuilds(t *testing.T) {
 }
 
 func TestCheckinSettingsEndpointIsLocalOnly(t *testing.T) {
-	t.Setenv(checkinDisabledEnv, "")
+	allowCheckinForTest(t)
 	dir := t.TempDir()
 	a := &apiServer{checkin: newInstallCheckin(dir, "0.0.1200", nil, nil)}
 
@@ -219,5 +219,78 @@ func TestCheckinOSFamily(t *testing.T) {
 		if got := checkinOSFamily(goos); got != want {
 			t.Errorf("%s -> %s, want %s", goos, got, want)
 		}
+	}
+}
+
+// allowCheckinForTest clears every check-in opt-out the environment can set,
+// including the CI-runner signals of the runner this test may itself run on.
+func allowCheckinForTest(t *testing.T) {
+	t.Helper()
+	t.Setenv(checkinDisabledEnv, "")
+	for _, k := range checkinCIRunnerEnv {
+		t.Setenv(k, "")
+	}
+	prev := checkinUsername
+	checkinUsername = func() string { return "someone" }
+	t.Cleanup(func() { checkinUsername = prev })
+}
+
+func TestCheckinSkipsCIRunners(t *testing.T) {
+	env := map[string]string{}
+	getenv := func(k string) string { return env[k] }
+	user := "alice"
+	username := func() string { return user }
+	if checkinOnCIRunner(getenv, username) {
+		t.Fatal("an ordinary machine is not a CI runner")
+	}
+	for _, k := range checkinCIRunnerEnv {
+		env = map[string]string{k: "x"}
+		if !checkinOnCIRunner(getenv, username) {
+			t.Fatalf("%s set must mark a CI runner", k)
+		}
+	}
+	env = map[string]string{"GITHUB_ACTIONS": "  "}
+	if checkinOnCIRunner(getenv, username) {
+		t.Fatal("a blank variable is not a signal")
+	}
+	env = map[string]string{}
+	for _, name := range []string{"runneradmin", "RunnerAdmin"} {
+		user = name
+		if !checkinOnCIRunner(getenv, username) {
+			t.Fatalf("user %q must mark a CI runner", name)
+		}
+	}
+	user = "runneradmins"
+	if checkinOnCIRunner(getenv, username) {
+		t.Fatal("only the exact runner account name counts")
+	}
+}
+
+func TestCheckinCIRunnerSuppressesSendAndShowsEnvDisabled(t *testing.T) {
+	allowCheckinForTest(t)
+	sink, srv := newCheckinSink(t)
+	t.Setenv("GITHUB_ACTIONS", "true")
+	c := newInstallCheckin(t.TempDir(), "0.0.1200", func() string { return srv.URL }, nil)
+	if sent, _ := c.sendOnce(context.Background()); sent || sink.count() != 0 {
+		t.Fatal("a GitHub Actions job must not check in")
+	}
+	t.Setenv("GITHUB_ACTIONS", "")
+	checkinUsername = func() string { return "runneradmin" }
+	if sent, _ := c.sendOnce(context.Background()); sent || sink.count() != 0 {
+		t.Fatal("the hosted runner account must not check in")
+	}
+	a := &apiServer{checkin: c}
+	if snap := a.checkinSettingsSnapshot(); snap.Enabled || !snap.EnvDisabled {
+		t.Fatalf("settings on a runner = %+v, want off by environment", snap)
+	}
+	checkinUsername = func() string { return "someone" }
+	if sent, err := c.sendOnce(context.Background()); !sent || err != nil {
+		t.Fatalf("an ordinary install sends: sent=%v err=%v", sent, err)
+	}
+}
+
+func TestCurrentUsernameDropsDomain(t *testing.T) {
+	if n := currentUsername(); strings.ContainsAny(n, `\/`) {
+		t.Fatalf("currentUsername kept a domain prefix: %q", n)
 	}
 }

@@ -434,10 +434,9 @@ func TestShinoqueDiscoveryRejectsSoludListener(t *testing.T) {
 			// Inherit a real listening socket into a process named solud. The
 			// socket inode is unchanged, so the cached verdict covers it until
 			// it expires (the documented residual); then ownership is rechecked.
-			sleep, err := exec.LookPath("sleep")
-			if err != nil {
-				t.Fatal(err)
-			}
+			// The stand-in, not the host's sleep: a multi-call coreutils exits at
+			// once when run under another name (standInSleeper).
+			sleep := standInSleeper(t)
 			binary := filepath.Join(t.TempDir(), name)
 			if err := os.Symlink(sleep, binary); err != nil {
 				t.Fatal(err)
@@ -545,6 +544,98 @@ func (b *shinoqueLogBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.Buffer.String()
+}
+
+// ST-256: an env override takes the core's capabilities from relay.json only
+// when that file passes its checks and names the same port and home.
+func TestShinoqueDiscoveryEnvTakesMatchingFileCapabilities(t *testing.T) {
+	path, home := shinoqueDiscoveryFixture(t)
+	cache := &shinoqueDiscoveryCache{}
+	caps := func(wantAuth, wantProof int) {
+		t.Helper()
+		got, ok := cache.resolve()
+		if !ok || cache.source != "env" || got.relayAuth != wantAuth || got.privateDeviceProof != wantProof {
+			t.Fatalf("config = %+v ok=%t source=%s, want relayAuth %d proof %d", got, ok, cache.source, wantAuth, wantProof)
+		}
+	}
+	t.Setenv("SHINOQUE_RELAY_PORT", "5555")
+	t.Setenv("SHINOQUE_HOME", home)
+	caps(0, 0) // no relay.json
+	writeShinoqueDiscovery(t, path, home, 5555)
+	caps(2, 1)
+	t.Setenv("SHINOQUE_HOME", home+"/")
+	caps(2, 1) // the same home, written with a trailing slash
+	t.Setenv("SHINOQUE_HOME", home)
+	writeShinoqueDiscovery(t, path, home, 5556)
+	caps(0, 0) // another port
+	writeShinoqueDiscovery(t, path, t.TempDir(), 5555)
+	caps(0, 0) // another home
+	writeShinoqueDiscovery(t, path, home, 5555)
+	caps(2, 1)
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	caps(0, 0) // a file discovery rejects vouches for nothing
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	caps(2, 1)
+	// Only the port from the environment: home is the default ~/.shinoque.
+	if err := os.Unsetenv("SHINOQUE_HOME"); err != nil {
+		t.Fatal(err)
+	}
+	caps(0, 0)
+}
+
+// A relay.json home with a trailing slash names the same, cleaned home, and
+// the env mismatch log names the failed check, never a path or port.
+func TestShinoqueDiscoveryCleanHomesAndEnvMismatchLog(t *testing.T) {
+	path, home := shinoqueDiscoveryFixture(t)
+	var logs shinoqueLogBuffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	cache := &shinoqueDiscoveryCache{}
+
+	writeShinoqueDiscovery(t, path, home+"/", 5555)
+	if got, ok := cache.resolve(); !ok || cache.source != "file" || got.home != home {
+		t.Fatalf("file source home = %q ok=%t source=%s, want %q", got.home, ok, cache.source, home)
+	}
+	t.Setenv("SHINOQUE_RELAY_PORT", "5555")
+	t.Setenv("SHINOQUE_HOME", home)
+	if got, ok := cache.resolve(); !ok || got.relayAuth != 2 {
+		t.Fatalf("env with relay.json naming %q/: relayAuth %d", home, got.relayAuth)
+	}
+
+	for _, c := range []struct {
+		outcome string
+		set     func()
+	}{
+		{"port", func() { writeShinoqueDiscovery(t, path, home, 5556) }},
+		{"home", func() { writeShinoqueDiscovery(t, path, t.TempDir(), 5555) }},
+		{"rejected", func() {
+			writeShinoqueDiscovery(t, path, home, 5555)
+			if err := os.Chmod(path, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"missing", func() {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		c.set()
+		if got, _ := cache.resolve(); got.relayAuth != 0 {
+			t.Fatalf("%s: relayAuth %d, want 0", c.outcome, got.relayAuth)
+		}
+		if want := "no matching relay.json (" + c.outcome + ")"; !strings.Contains(logs.String(), want) {
+			t.Fatalf("log lacks %q: %s", want, logs.String())
+		}
+	}
+	if got := logs.String(); strings.Contains(got, home) || strings.Contains(got, "5555") || strings.Contains(got, "5556") {
+		t.Fatalf("env mismatch log carries a path or port: %s", got)
+	}
 }
 
 func TestShinoqueDiscoveryLogging(t *testing.T) {

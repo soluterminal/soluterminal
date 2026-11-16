@@ -25,7 +25,6 @@ func TestPaneRecoveryRefusesFreshOrAmbiguousConversations(t *testing.T) {
 	for _, req := range []createPaneReq{
 		{Cmd: []string{"bash"}, Agent: agentCodex},
 		{Cmd: []string{"codex"}},
-		{Kind: "native", Agent: agentCodex},
 		{Cmd: []string{"claude"}},
 		{Cmd: []string{"bash"}, Agent: agentCodex, CodexThreadID: recoveryTestThread, IdentityBlocked: true},
 	} {

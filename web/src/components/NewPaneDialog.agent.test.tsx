@@ -6,11 +6,6 @@ import type { OrchestratorHostInfo } from '../types';
 import { NewPaneDialog } from './NewPaneDialog';
 import { useEntitlements } from '../entitlements';
 
-// Focus is retired by default (lib/focusAvailability). These suites cover the
-// Focus code paths that still exist behind SOLU_NATIVE_RENDERER=1, so they run
-// with it on unless a test flips focusFlag.on.
-const focusFlag = vi.hoisted(() => ({ on: true }));
-vi.mock('../lib/focusAvailability', () => ({ useFocusEnabled: () => focusFlag.on }));
 
 
 // Host availability as a current daemon reports it.
@@ -27,14 +22,12 @@ const originalLoadOrchestratorHosts = useStore.getState().loadOrchestratorHosts;
 
 function renderDialog(
   createPane: ReturnType<typeof vi.fn>,
-  defaultClaudeMode: '' | 'native' = '',
   workspaceContextPack = '',
   hosts: OrchestratorHostInfo[] | null = HOSTS,
 ) {
   useStore.setState({
     createPane: createPane as typeof originalCreatePane,
     focusedPaneId: null,
-    nativeSettings: { promptSuggestions: false, defaultClaudeMode },
     activeWorkspace: 'Default',
     workspaces: [{ name: 'Default', layout: null, paneIds: [], activeAt: new Date(0).toISOString(), contextPack: workspaceContextPack }],
     orchestratorHosts: hosts,
@@ -59,28 +52,21 @@ describe('NewPaneDialog agent choices', () => {
       splitFocused: originalSplitFocused,
       focusedPaneId: null,
       panes: originalPanes,
-      nativeSettings: null,
       orchestratorHosts: null,
       loadOrchestratorHosts: originalLoadOrchestratorHosts,
     });
   });
 
-  it('with Focus retired: no Focus chips, and a stored Focus default still creates a terminal pane', async () => {
-    focusFlag.on = false;
-    try {
-      useStore.setState({ nativeSettings: { defaultClaudeMode: 'native', promptSuggestions: false } as never });
-      const createPane = vi.fn().mockResolvedValue({});
-      renderDialog(createPane);
-      expect(screen.queryByRole('button', { name: 'claude · Focus' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'codex · Focus' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'muse · Focus' })).toBeNull();
-      fireEvent.click(screen.getByRole('button', { name: 'claude' }));
-      fireEvent.click(screen.getByRole('button', { name: 'Create' }));
-      await waitFor(() => expect(createPane).toHaveBeenCalled());
-      expect(createPane.mock.calls[0][0]).not.toHaveProperty('kind');
-    } finally {
-      focusFlag.on = true;
-    }
+  it('offers no Focus chips and creates a terminal pane', async () => {
+    const createPane = vi.fn().mockResolvedValue({});
+    renderDialog(createPane);
+    expect(screen.queryByRole('button', { name: 'claude · Focus' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'codex · Focus' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'muse · Focus' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'claude' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(createPane).toHaveBeenCalled());
+    expect(createPane.mock.calls[0][0]).not.toHaveProperty('kind');
   });
 
   it('creates Codex in Terminal mode with explicit agent identity', async () => {
@@ -102,7 +88,7 @@ describe('NewPaneDialog agent choices', () => {
 
   it('sends a workspace context-pack default for Claude', async () => {
     const createPane = vi.fn().mockResolvedValue({});
-    renderDialog(createPane, '', '/packs/strategy');
+    renderDialog(createPane, '/packs/strategy');
 
     fireEvent.click(screen.getByRole('button', { name: 'claude' }));
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
@@ -115,7 +101,7 @@ describe('NewPaneDialog agent choices', () => {
 
   it('sends the none sentinel when opting out of a workspace default', async () => {
     const createPane = vi.fn().mockResolvedValue({});
-    renderDialog(createPane, '', '/packs/strategy');
+    renderDialog(createPane, '/packs/strategy');
 
     fireEvent.click(screen.getByRole('button', { name: 'claude' }));
     fireEvent.click(screen.getByRole('button', { name: 'None' }));
@@ -129,32 +115,11 @@ describe('NewPaneDialog agent choices', () => {
 
   it('does not send contextPack for a shell command', async () => {
     const createPane = vi.fn().mockResolvedValue({});
-    renderDialog(createPane, '', '/packs/strategy');
+    renderDialog(createPane, '/packs/strategy');
 
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
     await waitFor(() => expect(createPane).toHaveBeenCalled());
     expect(createPane.mock.calls[0][0]).not.toHaveProperty('contextPack');
-  });
-
-  it('creates Codex directly in Focus without Claude provider flags', async () => {
-    const createPane = vi.fn().mockResolvedValue({});
-    renderDialog(createPane);
-
-    fireEvent.click(screen.getByRole('button', { name: 'claude' }));
-    fireEvent.click(screen.getByRole('button', { name: 'GLM' }));
-    fireEvent.click(screen.getByRole('button', { name: 'codex · Focus' }));
-    expect(screen.getByText(/Opens Codex in/)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'GLM' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Create Focus session' }));
-
-    await waitFor(() => expect(createPane).toHaveBeenCalledWith(expect.objectContaining({
-      cmd: ['codex'],
-      title: 'codex',
-      agent: 'codex',
-      kind: 'native',
-    })));
-    expect(createPane.mock.calls[0][0]).not.toHaveProperty('provider');
-    expect(createPane.mock.calls[0][0]).not.toHaveProperty('effort');
   });
 
   it('offers no Orchestrator or Muse presets to a public install', () => {

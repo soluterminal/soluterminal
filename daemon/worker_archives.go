@@ -98,6 +98,10 @@ type workerArchiveState struct {
 	readsSaveMu      sync.Mutex // orders worker-reads.json writes; taken before mu, never under it
 	retained         map[string]workerRetention
 	noticesLoaded    bool
+	excused          map[string]workerExcusedNote // archived worker → excused unsaved worktrees (ST-251); under noticeMu
+	excusedChecked   map[string]time.Time
+	excusedArchiving map[string]bool // records whose archive is under way; never posted mid-archive
+	excusedOp        sync.Mutex      // one excused-worktree recheck at a time, apart from operation
 	mu               sync.Mutex
 	operation        sync.Mutex
 	loaded           bool
@@ -379,6 +383,41 @@ func (a *apiServer) workerLiveCwd(p *Pane) string {
 		return s.liveCwd(p)
 	}
 	return liveCwdOfPane(p)
+}
+
+// workerGitPeers lists the start checkouts of live panes other than self,
+// for workerGitNotOwn (ST-251). Process cwds are left out: they are the
+// deepest child's (a lead's test run in this worker's worktree, a shell that
+// cd'd past it), which says nothing about who owns the worktree.
+func (a *apiServer) workerGitPeers(self *Pane) []workerGitPeer {
+	if a.mgr == nil {
+		return nil
+	}
+	var peers []workerGitPeer
+	for _, p := range a.mgr.List() {
+		if p == self || p.ID == self.ID || p.workerArchiving.Load() {
+			continue
+		}
+		snap := p.Snapshot()
+		if snap.Status == PaneExited {
+			continue
+		}
+		kind := paneTeamKind(snap.Origin)
+		switch {
+		case kind == paneTeamWorker:
+			var start *workerGitStart
+			if snap.Origin != nil {
+				start = snap.Origin.WorkerGit
+			}
+			peers = append(peers, workerGitPeer{Dir: snap.Cwd, Worker: true, Start: start})
+		case kind == paneTeamLead || (snap.Origin != nil && snap.Origin.Source == paneOriginUser):
+			// A lead or the person's own pane never closes by itself.
+			peers = append(peers, workerGitPeer{Dir: snap.Cwd})
+		}
+		// Any other pane (an agent's helper, an API pane) can be closed by
+		// whoever started it, so it answers for nothing.
+	}
+	return peers
 }
 
 // workerOwnWorktree is the linked worktree a merged worker was working in
@@ -726,7 +765,8 @@ func (a *apiServer) syncWorkerLeadAsksLocked(s *workerArchiveState, lead, create
 	leadPresent := a.workerLeadPresent(lead)
 	open := map[string]Ask{}
 	for _, x := range a.asks.list() {
-		if x.Kind != askKindWorker || x.State != askOpen {
+		// An excused-worktree notice outlives its worker (worker_excused.go).
+		if x.Kind != askKindWorker || x.State != askOpen || workerExcusedKey(x.Key) {
 			continue
 		}
 		owner, retained := s.retained[x.WorkerPane]
@@ -929,6 +969,22 @@ func (a *apiServer) archiveFinishedWorkers(now time.Time) {
 		ids = nil
 	}
 	s := a.workerArchives()
+	// The excused-worktree recheck runs git, so it stays off operation: a
+	// person's reopen never waits on it (worker_excused.go).
+	if s.excusedOp.TryLock() {
+		go func() {
+			defer s.excusedOp.Unlock()
+			s.mu.Lock()
+			ctx := s.context
+			s.mu.Unlock()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			if ctx.Err() == nil {
+				a.recheckWorkerExcused(ctx, now)
+			}
+		}()
+	}
 	if !s.operation.TryLock() {
 		return
 	}
@@ -1041,8 +1097,18 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	restored := receipt.Restored && afterRestart && inputRev == 0
 	read := (bound || restored) && receipt.Turn == key && !receipt.At.Before(reply.CompletedAt)
 	live := a.workerLiveCwd(p)
+	// A new worktree made after the final reply, or one another live pane
+	// works in, is not this worker's (ST-251). Only a final reply with no
+	// input since dates what this worker could have made.
+	own := workerGitOwnership{Peers: func() []workerGitPeer { return a.workerGitPeers(p) }}
+	// A final reply from before the daemon restarted is final only by the
+	// screen showing nothing after it; input between it and the restart is
+	// not on record, so it cannot date what the worker made (fail closed).
+	if final && !beforeRestart {
+		own.FinalAt = reply.CompletedAt
+	}
 	ctx, cancel := context.WithTimeout(baseContext, 4*time.Second)
-	proof, reason := workerGitForArchive(ctx, snap, live)
+	proof, reason := workerGitForArchiveOwned(ctx, snap, live, own)
 	cancel()
 	a.observeWorkerPublication(p.ID, reason, now)
 	if snap.Status == PaneExited {
@@ -1206,6 +1272,7 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		s.beforeGitRecheck()
 	}
 	decision = "archive stopped: the Git proof changed during the archive"
+	var excusedHosts []string
 	if merged {
 		ctx, cancel = context.WithTimeout(baseContext, 8*time.Second)
 		fresh := workerGitCheckouts(ctx, p.Snapshot(), calls, a.workerLiveCwd(p), transcriptCwd(reply.Path))
@@ -1215,10 +1282,20 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		}
 	} else {
 		ctx, cancel = context.WithTimeout(baseContext, 4*time.Second)
-		fresh, why := workerGitForArchive(ctx, p.Snapshot(), a.workerLiveCwd(p))
+		own.Excused = map[string]string{} // the proof the archive commits to
+		fresh, why := workerGitForArchiveOwned(ctx, p.Snapshot(), a.workerLiveCwd(p), own)
 		cancel()
 		if why != "" || fresh != proof {
 			return
+		}
+		// An excused, unsaved worktree must be reported to someone (ST-251):
+		// with no lead present to carry the notice, the worker stays open.
+		if len(own.Excused) > 0 {
+			excusedHosts = a.workerExcusedHosts(a.workerNoticeLead(snap.ID, snap.Origin))
+			if a.asks == nil || a.workerExcusedHost(excusedHosts) == "" {
+				decision = "archive stopped: no lead is present to be told about an excused worktree"
+				return
+			}
 		}
 	}
 	decision = "archive stopped: input, a new reply or a state change arrived during the archive"
@@ -1277,9 +1354,22 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		return
 	}
 	// RemovePane creates the server-owned tombstone before the process exits.
+	// Record excused, unsaved worktrees before the worker goes, so a failed
+	// teardown or a crash cannot lose them; the notice is posted at the end
+	// or by the next recheck (worker_excused.go).
+	excusedRecorded := len(own.Excused) > 0
+	if excusedRecorded {
+		a.workerRecordExcusedWorktrees(excusedHosts, p.ID, a.paneCallerLabel(p), snap.Origin.WorkerGit, own.Excused)
+		// However this archive ends, the record stops waiting on it: a
+		// failure that leaves the worker gone is posted by the next recheck.
+		defer a.workerExcusedArchiveEnded(p.ID)
+	}
 	if err = a.ws.RemovePane(p.ID); err != nil {
 		if a.discardWorkerArchive(archiveID) == nil {
 			keep = false
+		}
+		if excusedRecorded {
+			a.workerForgetExcused(p.ID) // the worker stays open
 		}
 		p.workerArchiving.Store(false)
 		decision = "archive failed: the layout could not be saved"
@@ -1296,6 +1386,9 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 		a.mgr.withCurrentPane(p, func() { restored = a.ws.restoreWorkerArchivePane(entry.Workspace, entry.Snap) == nil })
 		if restored && a.discardWorkerArchive(archiveID) == nil {
 			keep = false
+		}
+		if restored && excusedRecorded {
+			a.workerForgetExcused(p.ID)
 		}
 		decision = "archive failed: the worker process did not shut down"
 		a.flagWorkerLead(a.workerNoticeLead(snap.ID, snap.Origin), p.ID, "archive process shutdown failed")
@@ -1339,6 +1432,9 @@ func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	}
 
 	a.clearWorkerRetention(p.ID)
+	if excusedRecorded {
+		a.workerPostExcused(p.ID)
+	}
 	s.mu.Lock()
 	delete(s.merged, p.ID)
 	s.mu.Unlock()
@@ -1560,6 +1656,7 @@ func (a *apiServer) reopenWorkerArchive(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	_ = os.RemoveAll(filepath.Join(a.archiveRoot(), entry.ID))
+	a.workerForgetExcused(entry.Snap.ID)
 	writeJSON(w, 201, makePaneDTO(p, a.aria, a.attention))
 }
 func init() { registerAPIRoutes((*apiServer).registerWorkerArchiveRoutes) }

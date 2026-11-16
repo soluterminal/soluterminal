@@ -9,15 +9,17 @@ func (a *apiServer) updateBusy() *updateBusyError {
 	if a.mgr != nil {
 		panes = a.mgr.List()
 	}
-	// TEMPORARY FOCUS COMPATIBILITY: the Focus removal deletes this block.
-	// Focus still exists on main; its in-process turns must finish, even if
-	// the collaboration grace is exhausted. Give this priority over asks.
-	for _, p := range panes {
-		p.mu.Lock()
-		native := p.Kind == "native"
-		p.mu.Unlock()
-		if native && p.IsAgentWorking() {
-			return &updateBusyError{cause: updateBusyCauseFocus, reason: "a Focus pane is mid-turn (pane " + p.ID + ")", paneID: p.ID}
+	// Held messages live only in memory. While the person's pause keeps them
+	// (they never expire then), no unattended update may drop them: this
+	// cause is not subject to the collaboration grace.
+	if agentMessagingPaused() {
+		for _, p := range panes {
+			p.mu.Lock()
+			held := p.Status == PaneRunning && len(p.heldDeliveries) > 0
+			p.mu.Unlock()
+			if held {
+				return &updateBusyError{cause: updateBusyCauseMessagingPaused, reason: "agent messaging is paused and messages are held on pane " + p.ID + "; resume, or send or discard them, to update", paneID: p.ID}
+			}
 		}
 	}
 	if a.collabInflight.Load() > 0 {
@@ -30,7 +32,7 @@ func (a *apiServer) updateBusy() *updateBusyError {
 		held := false
 		if p.Status == PaneRunning && p.agentConn != nil && !p.respawning.Load() {
 			for _, h := range p.heldDeliveries {
-				if h.resolution == "" && h.connection == p.agentConn && now.Sub(time.UnixMilli(h.At)) < heldDeliveryLimit {
+				if h.resolution == "" && h.connection == p.agentConn && now.Sub(heldClockStart(h.At)) < heldDeliveryLimit {
 					held = true
 					break
 				}

@@ -169,10 +169,6 @@ func TestLifecycleSpawnRecipesHealIdentityBeforeChoosingProvider(t *testing.T) {
 		!slices.Equal(resumed.Cmd, []string{"codex", "resume", thread}) {
 		t.Fatalf("corroborated resume recipe chose the wrong provider: %+v", resumed)
 	}
-	focused := switchSpawnOpts(corroborated, "native", 0, 0)
-	if focused.Agent != agentCodex || focused.CodexThreadID != thread || focused.ClaudeSessionID != "claude-session" || len(focused.Cmd) != 0 {
-		t.Fatalf("corroborated switch recipe chose the wrong provider: %+v", focused)
-	}
 
 	uncorroborated := corroborated
 	uncorroborated.CodexThreadID = ""
@@ -243,45 +239,12 @@ func TestAgentKindPersistsAndLegacyClaudeStaysOmitted(t *testing.T) {
 	}
 }
 
-func TestCreatePaneAcceptsCodexFocus(t *testing.T) {
-	t.Setenv("SOLU_NATIVE_RENDERER", "1")
-	tests := []struct {
-		name string
-		body string
-	}{
-		{name: "explicit agent", body: `{"kind":"native","agent":"codex","cmd":["codex"]}`},
-		{name: "legacy shaped direct command", body: `{"kind":"native","cmd":["codex"]}`},
-		{name: "legacy shaped Windows command", body: `{"kind":"native","cmd":["C:\\\\Tools\\\\codex.exe"]}`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var got SpawnOpts
-			api := &apiServer{spawnPane: func(opts SpawnOpts) (*Pane, error) {
-				got = opts
-				p := transactionTestPane("codex-focus")
-				p.Kind, p.Agent = opts.Kind, opts.Agent
-				return p, nil
-			}}
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/api/panes", strings.NewReader(tt.body))
-			api.createPane(rec, req)
-			if rec.Code != http.StatusCreated {
-				t.Fatalf("status = %d, want 201; body=%q", rec.Code, rec.Body.String())
-			}
-			if got.Kind != "native" || got.Agent != agentCodex {
-				t.Fatalf("spawn opts = {Kind:%q Agent:%q Cmd:%v}, want native Codex", got.Kind, got.Agent, got.Cmd)
-			}
-		})
-	}
-}
-
 func TestCreatePaneRejectsContradictoryAgentRequestsBeforeSpawn(t *testing.T) {
-	t.Setenv("SOLU_NATIVE_RENDERER", "1")
 	tests := []struct {
 		name string
 		body string
 	}{
-		{name: "contradictory explicit Claude", body: `{"kind":"native","agent":"claude","cmd":["codex"]}`},
+		{name: "contradictory explicit Claude", body: `{"agent":"claude","cmd":["codex"]}`},
 		{name: "contradictory explicit Codex", body: `{"agent":"codex","cmd":["claude"]}`},
 		{name: "unknown agent", body: `{"agent":"gemini","cmd":["gemini"]}`},
 	}
@@ -305,16 +268,14 @@ func TestCreatePaneRejectsContradictoryAgentRequestsBeforeSpawn(t *testing.T) {
 	}
 }
 
-func TestCreatePaneInfersTerminalCodexAndDefaultsNativeClaude(t *testing.T) {
-	t.Setenv("SOLU_NATIVE_RENDERER", "1")
+func TestCreatePaneInfersTerminalCodexAndDefaultsClaude(t *testing.T) {
 	tests := []struct {
 		name      string
 		body      string
 		wantAgent string
 	}{
 		{name: "terminal Codex", body: `{"cmd":["codex"]}`, wantAgent: agentCodex},
-		{name: "legacy native Claude", body: `{"kind":"native","cmd":["claude"]}`, wantAgent: ""},
-		{name: "explicit native Claude", body: `{"kind":"native","agent":"claude","cmd":["claude"]}`, wantAgent: ""},
+		{name: "legacy Claude", body: `{"cmd":["claude"]}`, wantAgent: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -334,124 +295,6 @@ func TestCreatePaneInfersTerminalCodexAndDefaultsNativeClaude(t *testing.T) {
 			}
 			if got.Agent != tt.wantAgent {
 				t.Fatalf("spawn Agent = %q, want %q", got.Agent, tt.wantAgent)
-			}
-		})
-	}
-}
-
-func TestCodexFocusAndTerminalContinuityArgv(t *testing.T) {
-	if got, want := nativeCodexArgv(), []string{"codex", "app-server", "--stdio"}; !slices.Equal(got, want) {
-		t.Fatalf("native Codex argv = %v, want %v", got, want)
-	}
-
-	// Focus -> Terminal must reopen the exact Codex thread in the interactive
-	// TUI, rather than starting a fresh conversation or leaking app-server argv.
-	snap := PaneSnapshot{
-		ID: "codex-known", Kind: "native", Agent: agentCodex,
-		Cmd: nativeCodexArgv(), CodexThreadID: "thread-123", Cols: 80, Rows: 24,
-	}
-	terminal := switchSpawnOpts(snap, "", 120, 36)
-	if got, want := terminal.Cmd, []string{"codex", "resume", "thread-123"}; !slices.Equal(got, want) {
-		t.Fatalf("Focus -> Terminal argv = %v, want %v", got, want)
-	}
-	if terminal.Agent != agentCodex || terminal.CodexThreadID != "thread-123" {
-		t.Fatalf("Focus -> Terminal continuity = {Agent:%q Thread:%q}", terminal.Agent, terminal.CodexThreadID)
-	}
-
-	// Terminal -> Focus carries the same thread id; Manager.Spawn owns the argv
-	// rewrite to nativeCodexArgv once it sees Kind=native + Agent=codex.
-	snap.Kind, snap.Cmd = "", []string{"codex", "resume", "thread-123"}
-	focus := switchSpawnOpts(snap, "native", 0, 0)
-	if focus.Agent != agentCodex || focus.CodexThreadID != "thread-123" || len(focus.Cmd) != 0 {
-		t.Fatalf("Terminal -> Focus opts = {Agent:%q Thread:%q Cmd:%v}", focus.Agent, focus.CodexThreadID, focus.Cmd)
-	}
-}
-
-func TestSwitchModeAllowsFreshTerminalCodexWithoutThreadID(t *testing.T) {
-	t.Setenv("SOLU_NATIVE_RENDERER", "1")
-	mgr := NewManager(t.TempDir())
-	p := switchTestPane("legacy-codex", "", []string{"codex"}, "")
-	p.Agent = agentCodex
-	mgr.panes[p.ID] = p
-	var spawned SpawnOpts
-	api := &apiServer{
-		mgr: mgr,
-		spawnPane: func(opts SpawnOpts) (*Pane, error) {
-			spawned = opts
-			next := switchTestPane(opts.ID, opts.Kind, opts.Cmd, "")
-			next.Agent = opts.Agent
-			next.nativeGotInit.Store(true)
-			mgr.panes[next.ID] = next
-			return next, nil
-		},
-		killPane: func(id string) error {
-			delete(mgr.panes, id)
-			return nil
-		},
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/panes/legacy-codex/switch-mode", strings.NewReader(`{"kind":"native"}`))
-	req.SetPathValue("id", p.ID)
-	rec := httptest.NewRecorder()
-	api.handleSwitchMode(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
-	}
-	if spawned.Kind != "native" || spawned.Agent != agentCodex || spawned.CodexThreadID != "" {
-		t.Fatalf("fresh Codex spawn = {kind:%q agent:%q thread:%q}, want native Codex thread/start", spawned.Kind, spawned.Agent, spawned.CodexThreadID)
-	}
-}
-
-func TestSwitchModeRejectsTemporarilyBlockedCodexWithoutErasingThread(t *testing.T) {
-	t.Setenv("SOLU_NATIVE_RENDERER", "1")
-	mgr := NewManager(t.TempDir())
-	p := switchTestPane("blocked-codex", "", []string{"bash"}, "")
-	p.Agent = agentCodex
-	p.CodexThreadID = "thread-last-good"
-	p.codexIdentityBlocked.Store(true)
-	mgr.panes[p.ID] = p
-	spawned := false
-	api := &apiServer{mgr: mgr, spawnPane: func(SpawnOpts) (*Pane, error) {
-		spawned = true
-		return nil, nil
-	}}
-	req := httptest.NewRequest(http.MethodPost, "/api/panes/blocked-codex/switch-mode", strings.NewReader(`{"kind":"native"}`))
-	req.SetPathValue("id", p.ID)
-	rec := httptest.NewRecorder()
-	api.handleSwitchMode(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%q", rec.Code, rec.Body.String())
-	}
-	if spawned {
-		t.Fatal("blocked Codex mode switch reached respawn")
-	}
-	if got := p.Snapshot().CodexThreadID; got != "thread-last-good" {
-		t.Fatalf("blocked switch erased durable thread: %q", got)
-	}
-}
-
-func TestSwitchModeRejectsAmbiguousProviderForNowAndDeferred(t *testing.T) {
-	t.Setenv("SOLU_NATIVE_RENDERER", "1")
-	for _, body := range []string{`{"kind":"native"}`, `{"kind":"native","when":"deferred"}`} {
-		t.Run(body, func(t *testing.T) {
-			mgr := NewManager(t.TempDir())
-			p := switchTestPane("ambiguous-provider", "", []string{"bash"}, "claude-last-good")
-			p.ClaudeTranscriptPath = "/claude/last-good.jsonl"
-			p.codexIdentityBlocked.Store(true)
-			mgr.panes[p.ID] = p
-			spawned := false
-			api := &apiServer{mgr: mgr, spawnPane: func(SpawnOpts) (*Pane, error) {
-				spawned = true
-				return nil, nil
-			}}
-			req := httptest.NewRequest(http.MethodPost, "/api/panes/ambiguous-provider/switch-mode", strings.NewReader(body))
-			req.SetPathValue("id", p.ID)
-			rec := httptest.NewRecorder()
-			api.handleSwitchMode(rec, req)
-			if rec.Code != http.StatusConflict {
-				t.Fatalf("status = %d, want 409; body=%q", rec.Code, rec.Body.String())
-			}
-			if spawned || p.pendingSwitchSnapshot() != nil {
-				t.Fatalf("ambiguous switch mutated state: spawned=%v pending=%#v", spawned, p.pendingSwitchSnapshot())
 			}
 		})
 	}

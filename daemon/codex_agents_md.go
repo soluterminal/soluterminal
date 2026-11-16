@@ -3,99 +3,74 @@ package main
 import (
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync/atomic"
 )
 
+// Earlier versions kept a marker-delimited block in the user's GLOBAL
+// ~/.codex/AGENTS.md: the team brief on team installs, a context-pack note on
+// public ones. Every Codex session on the computer reads that file, including
+// ones in unrelated repositories, so SoluTerminal no longer writes it; the
+// Codex sessions it starts get their instructions per process instead
+// (codex_pane_policy.go). What is left here removes the old block.
 const (
 	codexAgentsBeginMarker = "<!-- soluterminal:managed:begin -->"
 	codexAgentsEndMarker   = "<!-- soluterminal:managed:end -->"
 )
 
-// codexAgentsPublicPolicy selects the public beta's block: installs without
-// the team entitlement get only the context-pack note, and a team block left
-// by an earlier version is replaced with it on the next sync.
-var codexAgentsPublicPolicy atomic.Bool
-
-const codexAgentsContextPackLine = "Context packs: if the environment variable SOLU_CONTEXT_PACK is set, it names a local directory holding a briefing for this session — before your first response, read its AGENTS.md (or CLAUDE.md if AGENTS.md is absent) and follow it, in addition to any AGENTS.md discovered from the working directory. If another instruction already pointed you at that same directory, it is the same pack — read it once.\n"
-
-// renderCodexAgentsPolicy renders the block in the user's GLOBAL
-// ~/.codex/AGENTS.md, which the daemon already manages. The orchestrator brief
-// must NEVER be written here or into a repository AGENTS.md; pane-role policy
-// reaches Codex only through the per-pane transport in pane_role_host.go.
-func renderCodexAgentsPolicy() string {
-	if codexAgentsPublicPolicy.Load() {
-		return "This block is maintained by soluterminal; edits inside the markers are overwritten. Content outside is never touched.\n\n" +
-			codexAgentsContextPackLine
-	}
-	return "This block is maintained by the soluterminal daemon; edits inside the markers are overwritten. Content outside is never touched.\n\n" + mcpDirectServerInstructions + "\n\n" + codexAgentsContextPackLine
-
-}
-
-func codexAgentsManagedBlock() string {
-	return codexAgentsBeginMarker + "\n" + renderCodexAgentsPolicy() + "\n" + codexAgentsEndMarker
-}
-
-// codexAgentsApply replaces only our marker-delimited block. Files with an
-// ambiguous marker shape are deliberately left untouched.
-func codexAgentsApply(existing string) (updated string, changed bool, ok bool) {
-	beginCount := strings.Count(existing, codexAgentsBeginMarker)
-	endCount := strings.Count(existing, codexAgentsEndMarker)
-	block := codexAgentsManagedBlock()
-
-	if beginCount == 0 && endCount == 0 {
-		if existing == "" {
-			updated = block + "\n"
-		} else {
-			updated = existing
-			if !strings.HasSuffix(updated, "\n") {
-				updated += "\n"
+// cleanupCodexAgentsMd removes the block an earlier version wrote, leaving
+// everything else in the file byte-for-byte (codexAgentsRemove also drops the
+// blank line that was put before the block). A file that held nothing but the
+// block was created by SoluTerminal and is deleted. A file without the block,
+// or with an ambiguous marker shape, is not touched.
+//
+// The file is copied into backupDir before it is edited or removed, as every
+// file SoluTerminal changes in the user's Claude/Codex setup is; with no
+// backupDir, or a failed copy, nothing is changed. A symlinked AGENTS.md (a
+// dotfiles setup, often a file shared across machines or tracked in the
+// user's own repository) is never edited, by @secure's rule: the user is told
+// to remove the block by hand.
+func cleanupCodexAgentsMd(path, backupDir string) {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if data, err := os.ReadFile(path); err == nil {
+			if _, changed, _ := codexAgentsRemove(string(data)); changed {
+				log.Printf("codex-agents: %s is a symlink, so SoluTerminal left it unchanged; remove the block between %s and %s from it by hand", path, codexAgentsBeginMarker, codexAgentsEndMarker)
 			}
-			updated += "\n" + block + "\n"
 		}
-		return updated, updated != existing, true
-	}
-	if beginCount != 1 || endCount != 1 {
-		return existing, false, false
-	}
-	begin := strings.Index(existing, codexAgentsBeginMarker)
-	end := strings.Index(existing, codexAgentsEndMarker)
-	if begin > end {
-		return existing, false, false
-	}
-	end += len(codexAgentsEndMarker)
-	updated = existing[:begin] + block + existing[end:]
-	return updated, updated != existing, true
-}
-
-func syncCodexAgentsMd(path string) {
-	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		log.Printf("codex-agents: could not read %s: %v", path, err)
 		return
 	}
-	next, changed, ok := codexAgentsApply(string(data))
-	if !ok {
+	if backupDir == "" {
+		// rewriteConfigFile skips the copy without a folder; this path never
+		// edits without one.
+		if data, err := os.ReadFile(path); err == nil {
+			if _, changed, _ := codexAgentsRemove(string(data)); changed {
+				log.Printf("codex-agents: no backup folder for %s, so the old soluterminal block was left in place", path)
+			}
+		}
+		return
+	}
+	// The same writer as the off/uninstall path: backup first, exclusive
+	// temp file, mode kept, fsync, and a re-read before the rename so an
+	// edit saved meanwhile is never lost.
+	result, err := rewriteConfigFile(path, backupDir, codexAgentsRemove)
+	switch {
+	case err != nil:
+		log.Printf("codex-agents: could not remove the old soluterminal block from %s: %v", path, err)
+		return
+	case result == "left as is (unrecognized shape)":
 		log.Printf("codex-agents: %s has an unrecognized soluterminal block shape (leaving as is)", path)
 		return
-	}
-	if !changed {
+	case result != "removed":
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		log.Printf("codex-agents: could not create directory for %s: %v", path, err)
+	// A file that held only our block was SoluTerminal's: deleted, not left
+	// empty (its copy is in the backup folder).
+	if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) == "" {
+		if err := os.Remove(path); err != nil {
+			log.Printf("codex-agents: could not remove %s: %v", path, err)
+			return
+		}
+		log.Printf("codex-agents: removed %s (it held only the old soluterminal block)", path)
 		return
 	}
-	tmp := path + ".solu-tmp"
-	if err := os.WriteFile(tmp, []byte(next), 0644); err != nil {
-		log.Printf("codex-agents: could not write %s: %v", tmp, err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		log.Printf("codex-agents: could not replace %s: %v", path, err)
-		return
-	}
-	log.Printf("codex-agents: synchronized soluterminal policy in %s", path)
+	log.Printf("codex-agents: removed the old soluterminal block from %s; your own text is unchanged", path)
 }

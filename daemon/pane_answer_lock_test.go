@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,28 +31,6 @@ func TestAnswerLockGridDetectorAndAriaPaths(t *testing.T) {
 			}
 			expectNoFrame(t, frames, "locked "+path)
 		})
-	}
-}
-
-func TestAnswerLockNativeApprovals(t *testing.T) {
-	p, agentEnd := nativePaneForApproval(t, "locked-native-approvals")
-	p.processNativeLine([]byte(nativeCanUseToolLine("locked-native", "locked-tool", "Read", `{"file_path":"/tmp/example"}`)), false, false)
-	p.setAutomaticAnswerSettings("", true)
-	if (&Aria{}).nativeAutoResolve(p, "locked-native", "locked-confirm", false) {
-		t.Fatal("approvals.go auto path answered")
-	}
-	a := &apiServer{mgr: testManagerWithPane(p)}
-	result, _ := a.mcpToolAnswerPrompt(map[string]any{"pane_id": p.ID, "option": "allow"})
-	text, isErr := mcpResultText(t, result)
-	if !isErr || !strings.Contains(text, "policy changed") {
-		t.Fatalf("native cross-pane answer: %q %v", text, isErr)
-	}
-	if p.peekNativePending("locked-native") == nil {
-		t.Fatal("locked pending approval was consumed")
-	}
-	_ = agentEnd.SetReadDeadline(time.Now().Add(30 * time.Millisecond))
-	if _, _, err := ReadFrame(agentEnd); err == nil {
-		t.Fatal("native automatic path wrote a frame")
 	}
 }
 
@@ -207,30 +183,5 @@ func TestAnswerLockMarkerTightensPersistedBootRecordDurably(t *testing.T) {
 	mode, locked := tightenPaneAnswerSettings(cwd, "always", false)
 	if mode != "always" || locked {
 		t.Fatal("unmarked pane was unexpectedly locked")
-	}
-}
-
-func TestAnswerLockDelegatedNativeHTTPUsesMachineAnswerGate(t *testing.T) {
-	p, agentEnd := nativePaneForApproval(t, "locked-native-http")
-	p.processNativeLine([]byte(nativeCanUseToolLine("locked-http", "locked-use", "Read", `{"file_path":"/tmp/example"}`)), false, false)
-	p.setAutomaticAnswerSettings("", true)
-	a := &apiServer{mgr: testManagerWithPane(p), agentAuthority: grantedAgentAuthority(t)}
-	original := identifyCallerHook
-	t.Cleanup(func() { identifyCallerHook = original })
-	identifyCallerHook = func(*http.Request) callerIdentity { return callerIdentity{Kind: callerPane, PaneID: "other-pane"} }
-	req := httptest.NewRequest("POST", "/api/panes/locked-native-http/approvals/locked-http/resolve", strings.NewReader(`{"allow":true}`))
-	req.SetPathValue("id", p.ID)
-	req.SetPathValue("reqId", "locked-http")
-	response := httptest.NewRecorder()
-	a.handlePaneApprovalResolve(response, req)
-	if response.Code != 409 {
-		t.Fatalf("delegated approval: %d %s", response.Code, response.Body.String())
-	}
-	if p.peekNativePending("locked-http") == nil {
-		t.Fatal("delegated caller consumed locked approval")
-	}
-	_ = agentEnd.SetReadDeadline(time.Now().Add(30 * time.Millisecond))
-	if _, _, err := ReadFrame(agentEnd); err == nil {
-		t.Fatal("delegated native HTTP wrote an approval")
 	}
 }

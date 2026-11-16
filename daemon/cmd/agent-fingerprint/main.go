@@ -99,11 +99,22 @@ func fingerprint(root string, detail bool) (string, error) {
 }
 
 func hashClosure(fset *token.FileSet, files []*ast.File, pkg *types.Package, info *types.Info, packages map[string]listedPackage, detail bool) (string, error) {
-	for _, name := range []string{"main", "runAgent", "runMuseDriver"} {
+	for _, name := range []string{"main", "runAgent"} {
 		if _, ok := pkg.Scope().Lookup(name).(*types.Func); !ok {
 			return "", fmt.Errorf("%s function root is missing; audit fingerprint roots", name)
 		}
 	}
+	// The Muse driver is a pane root, and the Codex terminal bridge a required
+	// pane dispatch, while anything in the package refers to them
+	// (runMuseDriver, runCodexTerminal): then main must dispatch each through an
+	// audited terminating branch, and a dispatch hidden in a closure or a helper
+	// is refused. The startup prefix runs through the last required dispatch,
+	// which is how the bridge is covered (it is reached from main's prefix, not
+	// listed as a root, so today's startup order is unchanged). Once nothing
+	// refers to the Muse driver (the Focus removal deletes main's muse-driver
+	// dispatch, then the driver), no pane process can start it and it is not a
+	// root.
+	museRequired, codexRequired := referencedFunc(pkg, info, "runMuseDriver"), referencedFunc(pkg, info, "runCodexTerminal")
 	decls := map[types.Object]ast.Node{}
 	var roots []ast.Node
 	var webMetadata ast.Node
@@ -112,25 +123,26 @@ func hashClosure(fset *token.FileSet, files []*ast.File, pkg *types.Package, inf
 			switch d := d.(type) {
 			case *ast.FuncDecl:
 				decls[info.Defs[d.Name]] = d
-				if d.Recv == nil && (d.Name.Name == "runAgent" || d.Name.Name == "runMuseDriver" || d.Name.Name == "initLogging" || d.Name.Name == "init") {
+				if d.Recv == nil && (d.Name.Name == "runAgent" || (museRequired && d.Name.Name == "runMuseDriver") || d.Name.Name == "initLogging" || d.Name.Name == "init") {
 					roots = append(roots, d)
 				}
 				if d.Recv == nil && d.Name.Name == "main" {
-					// Both long-lived pane modes pass through main. Include every
-					// statement through both dispatches, including intervening code,
-					// but omit the suffix only for audited terminating if branches.
-					// Refuse unfamiliar control flow instead of omitting live code.
-					foundAgent, foundMuse := false, false
+					// Every long-lived pane mode passes through main. Include every
+					// statement through the last pane dispatch, including intervening
+					// code, but omit the suffix only for audited terminating if
+					// branches. Refuse unfamiliar control flow instead of omitting
+					// live code.
+					foundAgent, foundMuse, foundCodex := false, false, false
 					for i, stmt := range d.Body.List {
 						if containsGoto(stmt) {
 							return "", fmt.Errorf("main pane startup contains goto; audit fingerprint roots")
 						}
-						callsAgent, callsMuse := paneDispatchCalls(stmt, pkg, info)
-						if (callsAgent || callsMuse) && !terminatingPaneDispatch(stmt, pkg, info) {
+						callsAgent, callsMuse, callsCodex := paneDispatchCalls(stmt, pkg, info)
+						if (callsAgent || callsMuse || callsCodex) && !terminatingPaneDispatch(stmt, pkg, info) {
 							return "", fmt.Errorf("main pane dispatch must be a terminating if body; audit fingerprint roots")
 						}
-						foundAgent, foundMuse = foundAgent || callsAgent, foundMuse || callsMuse
-						if foundAgent && foundMuse {
+						foundAgent, foundMuse, foundCodex = foundAgent || callsAgent, foundMuse || callsMuse, foundCodex || callsCodex
+						if foundAgent && (foundMuse || !museRequired) && (foundCodex || !codexRequired) {
 							copyFn, copyBody := *d, *d.Body
 							copyBody.List = d.Body.List[:i+1]
 							copyFn.Body = &copyBody
@@ -138,8 +150,14 @@ func hashClosure(fset *token.FileSet, files []*ast.File, pkg *types.Package, inf
 							break
 						}
 					}
-					if !foundAgent || !foundMuse {
-						return "", fmt.Errorf("main must dispatch runAgent and runMuseDriver; audit fingerprint roots")
+					if !foundAgent {
+						return "", fmt.Errorf("main must dispatch runAgent; audit fingerprint roots")
+					}
+					if museRequired && !foundMuse {
+						return "", fmt.Errorf("runMuseDriver is referenced, so main must dispatch it; audit fingerprint roots")
+					}
+					if codexRequired && !foundCodex {
+						return "", fmt.Errorf("runCodexTerminal is referenced, so main must dispatch it; audit fingerprint roots")
 					}
 				}
 			case *ast.GenDecl:
@@ -391,23 +409,56 @@ func hashClosure(fset *token.FileSet, files []*ast.File, pkg *types.Package, inf
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func paneDispatchCalls(node ast.Node, pkg *types.Package, info *types.Info) (agent, muse bool) {
+func paneDispatchCalls(node ast.Node, pkg *types.Package, info *types.Info) (agent, muse, codex bool) {
 	if node == nil {
-		return false, false
+		return false, false, false
 	}
+	agentFn, museFn, codexFn := pkg.Scope().Lookup("runAgent"), pkg.Scope().Lookup("runMuseDriver"), pkg.Scope().Lookup("runCodexTerminal")
 	ast.Inspect(node, func(n ast.Node) bool {
 		if _, ok := n.(*ast.FuncLit); ok {
 			return false
 		}
 		if call, ok := n.(*ast.CallExpr); ok {
 			if id, ok := call.Fun.(*ast.Ident); ok {
-				agent = agent || info.Uses[id] == pkg.Scope().Lookup("runAgent")
-				muse = muse || info.Uses[id] == pkg.Scope().Lookup("runMuseDriver")
+				// A name that is not declared looks up as nil; never match it.
+				agent = agent || (agentFn != nil && info.Uses[id] == agentFn)
+				muse = muse || (museFn != nil && info.Uses[id] == museFn)
+				codex = codex || (codexFn != nil && info.Uses[id] == codexFn)
 			}
 		}
 		return true
 	})
-	return agent, muse
+	return agent, muse, codex
+}
+
+// referencedFunc reports whether the package declares name as a function and
+// anything refers to it.
+func referencedFunc(pkg *types.Package, info *types.Info, name string) bool {
+	fn, ok := pkg.Scope().Lookup(name).(*types.Func)
+	if !ok {
+		return false
+	}
+	for _, used := range info.Uses {
+		if used == fn {
+			return true
+		}
+	}
+	return false
+}
+
+// osExitCall reports whether expr is a call of the standard library's os.Exit,
+// resolved by the type checker (not by spelling).
+func osExitCall(expr ast.Expr, info *types.Info) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	fn, ok := info.Uses[sel.Sel].(*types.Func)
+	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "os" && fn.Name() == "Exit"
 }
 
 func containsGoto(node ast.Node) bool {
@@ -426,14 +477,23 @@ func terminatingPaneDispatch(stmt ast.Stmt, pkg *types.Package, info *types.Info
 	if !ok || branch.Else != nil || len(branch.Body.List) == 0 {
 		return false
 	}
-	end, ok := branch.Body.List[len(branch.Body.List)-1].(*ast.ReturnStmt)
-	if !ok || len(end.Results) != 0 {
+	switch end := branch.Body.List[len(branch.Body.List)-1].(type) {
+	case *ast.ReturnStmt:
+		if len(end.Results) != 0 {
+			return false
+		}
+	case *ast.ExprStmt:
+		// os.Exit(...) ends the process: `os.Exit(runCodexTerminal())`.
+		if !osExitCall(end.X, info) {
+			return false
+		}
+	default:
 		return false
 	}
 	// A pane call in the condition or initializer may execute even when the
 	// branch is not taken, and therefore does not establish an early return.
 	for _, node := range []ast.Node{branch.Init, branch.Cond} {
-		if agent, muse := paneDispatchCalls(node, pkg, info); agent || muse {
+		if agent, muse, codex := paneDispatchCalls(node, pkg, info); agent || muse || codex {
 			return false
 		}
 	}

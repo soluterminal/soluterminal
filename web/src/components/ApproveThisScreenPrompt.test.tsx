@@ -18,9 +18,19 @@ vi.mock('../lib/localProof', async (orig) => ({
   }),
 }));
 
+vi.mock('../embed', async (orig) => ({
+  ...(await orig<typeof import('../embed')>()),
+  sendEmbedScreenApproval: vi.fn(),
+}));
+
 import { api } from '../api';
+import { sendEmbedScreenApproval } from '../embed';
+import { useStore } from '../store';
 import { askToApproveThisBrowser } from '../lib/localProof';
-import { APPROVE_SCREEN_ASK, APPROVE_SCREEN_TITLE, ApproveThisScreenPrompt, openApproveThisScreenPrompt } from './ApproveThisScreenPrompt';
+import {
+  APPROVE_SCREEN_ASK, APPROVE_SCREEN_TITLE, ApproveThisScreenPrompt, HOST_APPROVE_SCREEN_GAP_MS, __resetHostApproveScreenForTests,
+  openApproveThisScreenPrompt, screenApprovalState, whereToApprove,
+} from './ApproveThisScreenPrompt';
 
 const base: LocalProofStatus = {
   mode: 'report', effective: 'report', target: 'local/dmn_t', serverTime: Date.now(), envOff: false,
@@ -30,6 +40,7 @@ const base: LocalProofStatus = {
 beforeEach(() => {
   proof.status = { ...base };
   sessionStorage.clear();
+  __resetHostApproveScreenForTests();
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -168,5 +179,98 @@ describe('ApproveThisScreenPrompt', () => {
       proof.status = { ...base, device: 'approved' };
       expect(openApproveThisScreenPrompt()).toBe(false);
     });
+  });
+});
+
+// ST-248: what an embedding host hears, and what it may ask for.
+describe('embed approval events', () => {
+  it('maps the standing to none, pending or approved', () => {
+    expect(screenApprovalState({ device: 'approved' })).toBe('approved');
+    expect(screenApprovalState({ device: 'pending' })).toBe('pending');
+    expect(screenApprovalState({ device: 'committed' })).toBe('pending');
+    expect(screenApprovalState({ device: 'failed' })).toBe('none');
+    expect(screenApprovalState({ device: '' })).toBe('none');
+    expect(screenApprovalState({})).toBe('none');
+  });
+
+  it('reports the standing when known and when it changes, never a code', async () => {
+    const view = render(<ApproveThisScreenPrompt />);
+    expect(sendEmbedScreenApproval).toHaveBeenLastCalledWith('none');
+    fireEvent.click(screen.getByRole('button', { name: APPROVE_SCREEN_ASK }));
+    await waitFor(() => expect(askToApproveThisBrowser).toHaveBeenCalled());
+    view.rerender(<ApproveThisScreenPrompt />);
+    await waitFor(() => expect(sendEmbedScreenApproval).toHaveBeenLastCalledWith('pending'));
+    for (const [arg] of vi.mocked(sendEmbedScreenApproval).mock.calls) expect(['none', 'pending', 'approved']).toContain(arg);
+  });
+
+  it('sends nothing while the standing is unknown', () => {
+    proof.status = null;
+    render(<ApproveThisScreenPrompt />);
+    expect(sendEmbedScreenApproval).not.toHaveBeenCalled();
+  });
+
+  it("opens the prompt on the host's approve-screen, even at 0 approved devices", () => {
+    proof.status = { ...base, approvedDevices: 0, canBootstrap: true };
+    render(<ApproveThisScreenPrompt />);
+    expect(screen.queryByRole('region', { name: APPROVE_SCREEN_TITLE })).toBeNull();
+    act(() => { window.dispatchEvent(new Event('solu:embed-approve-screen')); });
+    const region = screen.getByRole('region', { name: APPROVE_SCREEN_TITLE });
+    // Nothing is approved yet, so it never sends the person to an approved device.
+    expect(region).toHaveTextContent('open SoluTerminal in a web browser on this computer');
+    expect(region).not.toHaveTextContent('already approved');
+    fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
+  });
+
+  it('says so, rather than nothing, when there is no prompt to open', () => {
+    const toast = vi.fn();
+    const prior = useStore.getState().toast;
+    useStore.setState({ toast });
+    try {
+      proof.status = { ...base, device: 'approved' };
+      render(<ApproveThisScreenPrompt />);
+      act(() => { window.dispatchEvent(new Event('solu:embed-approve-screen')); });
+      expect(toast).toHaveBeenLastCalledWith(expect.stringContaining('already approved'), { kind: 'info' });
+      proof.status = null;
+      __resetHostApproveScreenForTests();
+      act(() => { window.dispatchEvent(new Event('solu:embed-approve-screen')); });
+      expect(toast).toHaveBeenLastCalledWith(expect.stringContaining("can't ask for approval right now"), { kind: 'warn' });
+    } finally {
+      useStore.setState({ toast: prior });
+    }
+  });
+
+  // @secure: never while the prompt is open, and at most once per 10 s.
+  it('ignores approve-screen while the prompt is open, and more than once per 10 s', () => {
+    const toast = vi.fn();
+    const prior = useStore.getState().toast;
+    useStore.setState({ toast });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    try {
+      proof.status = { ...base, approvedDevices: 0, canBootstrap: true };
+      render(<ApproveThisScreenPrompt />);
+      const ask = () => act(() => { window.dispatchEvent(new Event('solu:embed-approve-screen')); });
+      ask();
+      expect(screen.getByRole('region', { name: APPROVE_SCREEN_TITLE })).toBeInTheDocument();
+      // Open: a second ask, even after the gap, does nothing.
+      now.mockReturnValue(1_000_000 + HOST_APPROVE_SCREEN_GAP_MS + 1);
+      ask();
+      fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
+      expect(screen.queryByRole('region', { name: APPROVE_SCREEN_TITLE })).toBeNull();
+      // Put away: the next ask opens it again, then one inside the gap doesn't.
+      ask();
+      expect(screen.getByRole('region', { name: APPROVE_SCREEN_TITLE })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
+      now.mockReturnValue(1_000_000 + 2 * HOST_APPROVE_SCREEN_GAP_MS);
+      ask();
+      expect(screen.queryByRole('region', { name: APPROVE_SCREEN_TITLE })).toBeNull();
+      expect(toast).not.toHaveBeenCalled();
+    } finally {
+      useStore.setState({ toast: prior });
+    }
+  });
+
+  it('keeps the require rule: only approved devices, whatever the count', () => {
+    expect(whereToApprove({ effective: 'require', approvedDevices: 0 })).toContain('already approved');
+    expect(whereToApprove({ effective: 'report', approvedDevices: 2 })).toContain('on the computer itself');
   });
 });

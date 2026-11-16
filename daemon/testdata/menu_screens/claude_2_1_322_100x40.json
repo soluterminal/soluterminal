@@ -1,0 +1,26 @@
+{
+ "cols": 100,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "idle",
+   "bytes": 3438
+  },
+  {
+   "name": "warm",
+   "bytes": 6641
+  },
+  {
+   "name": "two_shells",
+   "bytes": 16559
+  },
+  {
+   "name": "one_shell",
+   "bytes": 20193
+  },
+  {
+   "name": "no_shells",
+   "bytes": 23574
+  }
+ ]
+}

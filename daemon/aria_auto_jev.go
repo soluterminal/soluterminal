@@ -409,7 +409,7 @@ func jevAmbiguousCandidateText(tail string) bool {
 // tryJevAmbiguousTerminal runs Jev first for full-mode permission menus,
 // including known shapes. Cautious mode retains the exact-pane pilot.
 func (a *Aria) tryJevAmbiguousTerminal(ctx context.Context, p *Pane, paneID, paneTitle string, started time.Time) bool {
-	if p == nil || p.Snapshot().Kind == "native" {
+	if p == nil {
 		return false
 	}
 	mode := p.Snapshot().AutoMode

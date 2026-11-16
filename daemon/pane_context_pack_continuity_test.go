@@ -16,10 +16,6 @@ func TestContextPackCopySitesStayPairedWithRole(t *testing.T) {
 		typeName string
 	}{
 		{"pane_resume.go", "SpawnOpts"},
-		{"pane_refresh.go", "SpawnOpts"},
-		{"pane_effort.go", "SpawnOpts"},
-		{"pane_model.go", "SpawnOpts"},
-		{"native_switch.go", "SpawnOpts"},
 		{"api_migrate.go", "SpawnOpts"},
 		{"api_migrate.go", "PaneDef"},
 		{"mcp.go", "PaneDef"},
@@ -66,76 +62,15 @@ func TestContextPackCopySitesStayPairedWithRole(t *testing.T) {
 func TestContextPackPreservedAcrossRespawnPaths(t *testing.T) {
 	const pack = "/packs/strategy"
 
-	t.Run("pure resume and switch builders", func(t *testing.T) {
+	t.Run("pure resume builder", func(t *testing.T) {
 		snap := PaneSnapshot{
 			ID:              "pane-builders",
 			Cwd:             "/tmp",
-			Kind:            "native",
 			ClaudeSessionID: "session-builders",
 			ContextPack:     pack,
 		}
 		if got := resumeSpawnOpts(snap, 0, 0).ContextPack; got != pack {
 			t.Fatalf("resumeSpawnOpts ContextPack = %q, want %q", got, pack)
-		}
-		for _, target := range []string{"", "native"} {
-			if got := switchSpawnOpts(snap, target, 0, 0).ContextPack; got != pack {
-				t.Fatalf("switchSpawnOpts(%q) ContextPack = %q, want %q", target, got, pack)
-			}
-		}
-	})
-
-	t.Run("refresh", func(t *testing.T) {
-		p := switchTestPane("pane-refresh-pack", "native", nil, "session-refresh-pack")
-		p.ClaudeTranscriptPath = writeTempTranscript(t)
-		p.ContextPack = pack
-		api, spawned, _ := resumeTestServer(t, p)
-		rec := postRefresh(api, p.ID)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d; body=%q", rec.Code, rec.Body.String())
-		}
-		if len(*spawned) != 1 || (*spawned)[0].ContextPack != pack {
-			t.Fatalf("refresh spawn opts = %#v, want ContextPack %q", *spawned, pack)
-		}
-	})
-
-	for _, tc := range []struct {
-		name string
-		body string
-		call func(*apiServer, http.ResponseWriter, *http.Request)
-	}{
-		{"effort", `{"effort":"high"}`, (*apiServer).handleSetEffort},
-		{"model", `{"model":"claude-fable-5"}`, (*apiServer).handleSetModel},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := switchTestPane("pane-"+tc.name+"-pack", "native", nil, "session-"+tc.name+"-pack")
-			p.ClaudeTranscriptPath = writeTempTranscript(t)
-			p.ContextPack = pack
-			api, spawned, _ := resumeTestServer(t, p)
-			req := httptest.NewRequest(http.MethodPost, "/api/panes/"+p.ID+"/"+tc.name, strings.NewReader(tc.body))
-			req.SetPathValue("id", p.ID)
-			rec := httptest.NewRecorder()
-			tc.call(api, rec, req)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d; body=%q", rec.Code, rec.Body.String())
-			}
-			if len(*spawned) != 1 || (*spawned)[0].ContextPack != pack {
-				t.Fatalf("%s spawn opts = %#v, want ContextPack %q", tc.name, *spawned, pack)
-			}
-		})
-	}
-
-	t.Run("native switch rollback", func(t *testing.T) {
-		var got SpawnOpts
-		api := &apiServer{spawnPane: func(opts SpawnOpts) (*Pane, error) {
-			got = opts
-			return transactionTestPane("pane-rollback-pack"), nil
-		}}
-		snap := PaneSnapshot{ID: "pane-rollback-pack", Cwd: "/tmp", Cmd: []string{"claude"}, ContextPack: pack}
-		if p := api.rollbackSwitchMode(snap); p == nil {
-			t.Fatal("rollback returned nil pane")
-		}
-		if got.ContextPack != pack {
-			t.Fatalf("rollback ContextPack = %q, want %q", got.ContextPack, pack)
 		}
 	})
 

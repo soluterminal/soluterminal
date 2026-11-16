@@ -31,10 +31,9 @@ type PaneDef struct {
 	Flagged         bool     `json:"flagged,omitempty"`
 	FlagMemo        string   `json:"flagMemo,omitempty"`
 	ClaudeSessionID string   `json:"claudeSessionId,omitempty"`
-	// Kind selects the pane's rendering model ("native" for a Focus pane,
-	// "" for a terminal). Persisted so a workspace restore (and the
-	// cached-first switch's optimistic seed) recreates a native pane AS
-	// native instead of a terminal showing raw JSONL. Omitted for terminals.
+	// Kind is the retired renderer selector. A saved "native" (Focus) pane
+	// restores as a terminal pane on the same conversation (see
+	// retireNativeCreateRequest). Omitted for terminals.
 	Kind string `json:"kind,omitempty"`
 	// Agent is independent from the renderer Kind. Omitted means legacy Claude.
 	Agent         string `json:"agent,omitempty"`

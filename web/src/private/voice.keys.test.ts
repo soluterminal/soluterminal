@@ -2,18 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { blocksVoiceShortcut } from './voice.keys';
 
 describe('blocksVoiceShortcut', () => {
-  it('allows both pane-owned typing surfaces to invoke voice', () => {
+  it('allows the pane-owned terminal typing surface to invoke voice', () => {
     const xterm = document.createElement('textarea');
     xterm.className = 'xterm-helper-textarea';
 
-    const nativePane = document.createElement('div');
-    nativePane.className = 'native-pane';
-    const composer = document.createElement('textarea');
-    composer.className = 'composer-input';
-    nativePane.appendChild(composer);
-
     expect(blocksVoiceShortcut(xterm)).toBe(false);
-    expect(blocksVoiceShortcut(composer)).toBe(false);
   });
 
   it('still blocks dialog/rename inputs and unrelated composers', () => {

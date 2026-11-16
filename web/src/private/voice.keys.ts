@@ -37,15 +37,14 @@ function isVoiceCancelKey(e: KeyboardEvent): boolean {
   return e.key.toLowerCase() === 'c' || e.code === 'KeyC';
 }
 
-// Voice is deliberately allowed from the two pane-owned text capture surfaces:
-// xterm's hidden textarea and Focus's visible composer. Other app inputs (rename,
-// dialogs, pickers) keep Alt+S available for typing instead of starting the mic.
-// Kept module-level so the exception cannot silently drift without a regression
-// test when either pane renderer changes its DOM.
+// Voice is deliberately allowed from the pane-owned text capture surface:
+// xterm's hidden textarea. Other app inputs (rename, dialogs, pickers) keep
+// Alt+S available for typing instead of starting the mic. Kept module-level so
+// the exception cannot silently drift without a regression test when the pane
+// renderer changes its DOM.
 export function blocksVoiceShortcut(el: HTMLElement | null): boolean {
   if (!el) return false;
   if (el.classList.contains('xterm-helper-textarea')) return false;
-  if (el.classList.contains('composer-input') && el.closest('.native-pane')) return false;
   const tag = el.tagName.toLowerCase();
   return tag === 'input' || tag === 'textarea' || el.isContentEditable === true;
 }

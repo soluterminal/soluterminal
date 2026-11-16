@@ -62,8 +62,8 @@ const durableLogName = "solud.log"
 //
 // Deliberately NOT the --data dir (~/.solu): this has to resolve before flag
 // parsing, and a bad --data must not cost us the log that would explain it.
-// The one exception is a Windows daemon given a non-default --data dir; see
-// resolveDurableLogDir.
+// The one exception is a daemon given a non-default --data dir (a side
+// daemon); see resolveDurableLogDir.
 func soluShellDataDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		if d := os.Getenv("LOCALAPPDATA"); d != "" {
@@ -84,23 +84,34 @@ func soluShellDataDir() (string, error) {
 // resolveDurableLogDir picks the directory solud.log lives in.
 //
 //   - SOLU_DURABLE_LOG_DIR (envDir) wins everywhere. Callers handle "off".
-//   - On Windows, a daemon started with a --data dir other than the default
-//     (~/.solu) logs into <data>\logs. Without this, a test daemon or a second
-//     daemon on Windows wrote into the real install's
-//     %LOCALAPPDATA%\soluterminal\solud.log: unlike Linux, where the shell
-//     data dir sits under $HOME and so moves with a scratch HOME, LOCALAPPDATA
-//     does not follow the data dir or the home directory. <data>\logs is the
-//     same name launchd already uses and the fresh-install check tolerates.
-//   - Otherwise (every real install, which never passes --data, and every
-//     non-Windows daemon) the log stays co-located with the shell's
-//     daemon.log in soluShellDataDir, exactly as before.
+//   - A side daemon (daemon_role.go: not on 8787/38787, or a --data dir other
+//     than the default ~/.solu), on any OS, logs into <data>/logs; with no
+//     --data that is the default data dir's logs folder, never the real
+//     install's file. Side daemons are dev, test, capture or local Preview
+//     daemons. Without this a side daemon
+//     wrote into the real install's solud.log whenever it ran with the real
+//     HOME: on Windows LOCALAPPDATA never follows the data dir, and on Linux
+//     the shell data dir moves only with a scratch HOME (12 Nov, a capture
+//     daemon on :18899 wrote into the real ~/.local/share/soluterminal log).
+//     <data>/logs is the same name launchd already uses and the
+//     fresh-install check tolerates.
+//   - Otherwise (the primary daemon: every real install, which listens on a
+//     canonical port and never passes --data) the log stays co-located with
+//     the shell's daemon.log in soluShellDataDir.
 //
-// Pure apart from shellDir so the Windows decision is testable on any host.
-func resolveDurableLogDir(goos, envDir, dataDir, defaultData string, shellDir func() (string, error)) (string, error) {
+// addr is the -addr value ("" means the flag's default, 127.0.0.1:8787).
+// Pure apart from shellDir so the decision is testable on any host.
+func resolveDurableLogDir(goos, envDir, addr, dataDir, defaultData string, shellDir func() (string, error)) (string, error) {
 	if envDir = strings.TrimSpace(envDir); envDir != "" {
 		return envDir, nil
 	}
-	if goos == "windows" && strings.TrimSpace(dataDir) != "" && !sameDataDir(goos, dataDir, defaultData) {
+	if strings.TrimSpace(addr) == "" {
+		addr = defaultDaemonAddr
+	}
+	if strings.TrimSpace(dataDir) == "" {
+		dataDir = defaultData
+	}
+	if !decideDaemonRole(goos, addr, dataDir, defaultData).Primary {
 		return filepath.Join(dataDir, "logs"), nil
 	}
 	return shellDir()
@@ -123,15 +134,17 @@ func sameDataDir(goos, a, b string) bool {
 	return x == y
 }
 
-// durableLogDataFlag finds the --data value in the daemon's arguments. The
-// durable log is attached before flag parsing (see soluShellDataDir), so it
-// scans for it directly: -data/--data, with the value either attached (=) or
-// as the next argument, stopping at "--". It cannot know which other flags
-// take values, so it does not stop at non-flag arguments (the value of
-// --addr would otherwise end the scan); the last occurrence wins, as it does
-// in the flag package. A miss only means the log goes to the default
-// directory.
-func durableLogDataFlag(args []string) (string, bool) {
+// durableLogDataFlag finds the --data value in the daemon's arguments.
+func durableLogDataFlag(args []string) (string, bool) { return durableLogFlag(args, "data") }
+
+// durableLogFlag finds a flag's value in the daemon's arguments. The durable
+// log is attached before flag parsing (see soluShellDataDir), so it scans
+// for it directly: -name/--name, with the value either attached (=) or as
+// the next argument, stopping at "--". It cannot know which other flags take
+// values, so it does not stop at non-flag arguments (the value of --addr
+// would otherwise end the scan); the last occurrence wins, as it does in the
+// flag package. A miss means the flag's default.
+func durableLogFlag(args []string, flagName string) (string, bool) {
 	value, found := "", false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -144,11 +157,11 @@ func durableLogDataFlag(args []string) (string, bool) {
 				continue
 			}
 		}
-		if v, ok := strings.CutPrefix(name, "data="); ok {
+		if v, ok := strings.CutPrefix(name, flagName+"="); ok {
 			value, found = v, true
 			continue
 		}
-		if name == "data" && i+1 < len(args) {
+		if name == flagName && i+1 < len(args) {
 			i++
 			value, found = args[i], true
 		}
@@ -334,7 +347,8 @@ func attachDurableLog() {
 		return
 	}
 	dataDir, _ := durableLogDataFlag(os.Args[1:])
-	dir, err := resolveDurableLogDir(runtime.GOOS, envDir, dataDir, defaultDataDir(), soluShellDataDir)
+	addr, _ := durableLogFlag(os.Args[1:], "addr")
+	dir, err := resolveDurableLogDir(runtime.GOOS, envDir, addr, dataDir, defaultDataDir(), soluShellDataDir)
 	if err != nil {
 		slog.Warn("durable log: no data dir; logging to stderr only", "err", err)
 		return

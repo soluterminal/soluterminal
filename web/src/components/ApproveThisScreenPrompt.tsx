@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { currentRoutingScope } from '../api';
+import { sendEmbedScreenApproval, type EmbedScreenApproval } from '../embed';
+import { useStore } from '../store';
 import { askToApproveThisBrowser, localProofStatus, thisDeviceName, type LocalProofStatus } from '../lib/localProof';
 import { useLocalProof } from '../lib/useLocalProof';
 import { SITE_HELP_LOST_DEVICES_URL } from '../lib/siteLinks';
@@ -45,12 +47,59 @@ export function openApproveThisScreenPrompt(): boolean {
   return true;
 }
 
+/** This screen's approval for an embedding host: never a code, id or name. */
+export function screenApprovalState(s: Pick<LocalProofStatus, 'device'>): EmbedScreenApproval {
+  if (s.device === 'approved') return 'approved';
+  if (s.device === 'pending' || s.device === 'committed') return 'pending';
+  return 'none';
+}
+
+const APPROVE_ELSEWHERE =
+  'Approve it in Settings → Privacy & security → Remote devices on a browser or app you’ve already approved.';
+const APPROVE_FIRST_AT_COMPUTER =
+  'No browser or app is approved on this computer yet: open SoluTerminal in a web browser on this computer and ' +
+  'approve it there, in Settings → Privacy & security → Remote devices.';
+
+// A host's approve-screen is acted on at most once per this long, and never
+// while the prompt is open, so an embedder can't nag or stack prompts
+// (@secure, ST-248).
+export const HOST_APPROVE_SCREEN_GAP_MS = 10_000;
+let hostAskedAt = -Infinity;
+
+/** Test seam: forget the last host request. */
+export function __resetHostApproveScreenForTests(): void {
+  hostAskedAt = -Infinity;
+}
+
+/**
+ * Shinoque asked (approve-screen) to show this prompt. Opened when it has
+ * something to offer; otherwise the person is told why, never left with
+ * nothing.
+ */
+export function approveScreenFromHost(): void {
+  if (useOpenedOnPurpose.getState().open) return;
+  const now = Date.now();
+  if (now - hostAskedAt < HOST_APPROVE_SCREEN_GAP_MS) return;
+  hostAskedAt = now;
+  if (openApproveThisScreenPrompt()) return;
+  const scope = currentRoutingScope();
+  const status = scope.prefix === '' ? localProofStatus(scope.backendPrefix) : null;
+  const text = status?.device === 'approved'
+    ? 'This Shinoque Code window is already approved on this computer.'
+    : `This Shinoque Code window can't ask for approval right now. ${APPROVE_ELSEWHERE}`;
+  useStore.getState().toast(text, { kind: status?.device === 'approved' ? 'info' : 'warn' });
+}
+
 /** Where this screen's request can be approved, by the daemon's rule. */
-export function whereToApprove(s: Pick<LocalProofStatus, 'effective'>): string {
+export function whereToApprove(s: Pick<LocalProofStatus, 'effective'> & Partial<Pick<LocalProofStatus, 'approvedDevices'>>): string {
+  // With no device approved yet, nothing "already approved" exists: outside
+  // require the person approves it at the computer (the daemon's first
+  // device rule, handleApproveRemoteDevice).
+  if (s.approvedDevices === 0 && s.effective !== 'require') return APPROVE_FIRST_AT_COMPUTER;
   // Outside require, a browser traced at the computer approves too
   // (deviceManagementProven); under require only approved devices do.
   return s.effective === 'require'
-    ? 'Approve it in Settings → Privacy & security → Remote devices on a browser or app you’ve already approved.'
+    ? APPROVE_ELSEWHERE
     : 'Approve it in Settings → Privacy & security → Remote devices on a browser or app you’ve already approved, ' +
       'or on the computer itself in a browser SoluTerminal can tell apart from other programs.';
 }
@@ -71,6 +120,16 @@ export function ApproveThisScreenPrompt() {
   useEffect(() => {
     if (asked && !waitingHere) setAsked(null);
   }, [asked, waitingHere]);
+  // An embedding host hears this screen's approval when it changes, and
+  // can ask for this prompt (embed.ts: screen-approval, approve-screen).
+  const approval = status ? screenApprovalState(status) : null;
+  useEffect(() => {
+    if (approval) sendEmbedScreenApproval(approval);
+  }, [approval]);
+  useEffect(() => {
+    window.addEventListener('solu:embed-approve-screen', approveScreenFromHost);
+    return () => window.removeEventListener('solu:embed-approve-screen', approveScreenFromHost);
+  }, []);
 
   if (!status || status.device === 'approved') return null;
   if (status.approvedDevices === 0 && !openedOnPurpose) return null;

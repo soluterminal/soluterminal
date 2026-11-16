@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useStore } from '../../store';
+import { api } from '../../api';
 import type { Schedule } from '../../types';
 import { SchedulesSection } from './SchedulesSection';
 import { useEntitlements } from '../../entitlements';
@@ -154,6 +155,33 @@ describe('SchedulesSection housekeeping', () => {
     expect(tag.getAttribute('title')).toMatch(/Paused automatically/);
   });
 
+  it('a paused built-in agent shows a standing warning naming when and who', () => {
+    const agent: Schedule = {
+      ...prompt, id: 'pr', name: 'PR babysitter', kind: 'agent', agentId: 'pr-agent', paneId: undefined, prompt: undefined,
+      enabled: false,
+      changes: [{ at: '2026-11-14T10:20:00Z', action: 'disabled', by: '@cmo', paneId: 'p7', source: 'mcp' }],
+    };
+    renderWith([agent]);
+    const tag = within(rowFor(agent.name)).getByText(/paused since .+ by the agent in @cmo/);
+    expect(tag).toHaveClass('sched-warn');
+    expect(tag.getAttribute('title')).toMatch(/built-in agent is paused since .+ It does nothing until you turn it back on/);
+    expect(rowFor(agent.name).getAttribute('title')).toMatch(/Changes: Paused .+ by the agent in @cmo/);
+  });
+
+  it('a paused built-in agent with no record still warns', () => {
+    renderWith([{ ...prompt, id: 'fx', name: 'Fix agent', kind: 'agent', agentId: 'fix-agent', enabled: false }]);
+    const tag = rowFor('Fix agent').querySelector('.sched-paused-tag');
+    expect(tag).toHaveClass('sched-warn');
+    expect(tag?.textContent).toMatch(/paused$/);
+  });
+
+  it('an ordinary paused schedule names who paused it in its details only', () => {
+    renderWith([{ ...prompt, enabled: false, changes: [{ at: '2026-11-14T10:20:00Z', action: 'disabled', by: 'person', source: 'ui' }] }]);
+    const tag = within(rowFor(prompt.name)).getByText('· paused');
+    expect(tag).not.toHaveClass('sched-warn');
+    expect(tag.getAttribute('title')).toMatch(/Paused since .+ by you, in the app/);
+  });
+
   it('a user-paused schedule still just says paused', () => {
     renderWith([{ ...prompt, enabled: false }]);
     expect(within(rowFor(prompt.name)).getByText('· paused')).toBeInTheDocument();
@@ -276,3 +304,81 @@ describe('SchedulesSection housekeeping', () => {
 // one id, and the section only decides WHERE each one goes: the empty-state
 // line inside the "nothing scheduled yet" block, the honesty line under the one
 // row it is about.
+
+// An empty list used to read "No automations yet" while the first load was
+// still running and after it failed. Each of the three states now says what
+// it is, and a failed load can be retried from the list.
+describe('SchedulesSection loading and load errors', () => {
+  beforeEach(() => {
+    useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
+    useStore.setState({ schedules: [], schedulesLoaded: false, schedulesError: null, panes: {}, focusedPaneId: null });
+  });
+  afterEach(() => {
+    cleanup();
+    useStore.setState({ schedules: [], schedulesLoaded: false, schedulesError: null, panes: {} });
+    vi.restoreAllMocks();
+  });
+
+  it('says it is loading until the first load answers, then shows the empty state', async () => {
+    let answer: (rows: Schedule[]) => void = () => {};
+    vi.spyOn(api, 'listSchedules').mockReturnValue(new Promise<Schedule[]>((resolve) => { answer = resolve; }));
+    render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+    let load: Promise<void> = Promise.resolve();
+    act(() => { load = useStore.getState().refreshSchedules(); });
+
+    expect(screen.getByRole('status')).toHaveTextContent('Loading automations…');
+    expect(screen.queryByText(/No automations yet/)).not.toBeInTheDocument();
+
+    await act(async () => { answer([]); await load; });
+    expect(screen.getByText(/No automations yet/)).toBeInTheDocument();
+    expect(screen.queryByText('Loading automations…')).not.toBeInTheDocument();
+  });
+
+  it('says the load failed instead of "No automations yet", and Retry loads the list', async () => {
+    const list = vi.spyOn(api, 'listSchedules').mockRejectedValueOnce(new Error('daemon unreachable'));
+    render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+    await act(async () => { await useStore.getState().refreshSchedules(); });
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Couldn’t load automations.');
+    expect(screen.queryByText(/No automations yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Loading automations…')).not.toBeInTheDocument();
+
+    list.mockResolvedValueOnce([task]);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByText('Nightly task')).toBeInTheDocument());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the rows it has when a later refresh fails, and says they may be out of date', async () => {
+    vi.spyOn(api, 'listSchedules').mockResolvedValueOnce([task]).mockRejectedValueOnce(new Error('timeout'));
+    render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+    await act(async () => { await useStore.getState().refreshSchedules(); });
+    expect(screen.getByText('Nightly task')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    await act(async () => { await useStore.getState().refreshSchedules(); });
+    expect(screen.getByText('Nightly task')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Couldn’t refresh automations. This list may be out of date.');
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('calls a prompt automation whose pane is gone "(closed pane)"', () => {
+    useStore.setState({ schedules: [prompt], schedulesLoaded: true });
+    render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+    expect(rowFor('Morning prompt')).toHaveTextContent('(closed pane)');
+  });
+
+  it('says why a prompt automation is waiting for its pane', () => {
+    useStore.setState({
+      schedules: [
+        schedule({ ...prompt, waitingForPane: true, waitingReason: 'you are typing in the pane' }),
+        schedule({ ...prompt, id: 'sched-older', name: 'Older daemon', waitingForPane: true }),
+      ],
+      schedulesLoaded: true,
+    });
+    render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+    expect(rowFor('Morning prompt').querySelector('.sched-next')).toHaveTextContent('waiting: you are typing in the pane');
+    expect(rowFor('Older daemon').querySelector('.sched-next')).toHaveTextContent('waiting for pane');
+  });
+});

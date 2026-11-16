@@ -47,6 +47,18 @@ import (
 var errDeliveryLeftInComposer = errors.New("message left in the input box, not submitted")
 var errDeliveryChoicePrompt = errors.New("pane is showing a choice menu; message was not sent")
 
+// unattendedMenuCheck is the write precondition for text nobody is sending
+// live (a schedule firing, an ARIA mention): refused while a permission menu,
+// or a dialog still drawn after its first answer, would take the keys (ST-267).
+func unattendedMenuCheck(p *Pane) func() error {
+	return func() error {
+		if promptTakesKeys(p) {
+			return errDeliveryChoicePrompt
+		}
+		return nil
+	}
+}
+
 // errDeliveryWouldSteer: deliveryNoSteer stopped before Enter, which would
 // have steered a running Codex turn that offers no queue key it can press.
 var errDeliveryWouldSteer = errors.New("that Codex agent is mid-turn and its footer offers no queue key SoluTerminal can press, so the message was not sent (Enter would steer the running turn)")
@@ -261,6 +273,53 @@ func submitAgentMessage(p *Pane, body string, hasClaude bool, senders ...string)
 	return deliverAgentMessage(p, body, hasClaude, deliveryPlain, senders...)
 }
 
+// submitDaemonMessage is submitAgentMessage for the daemon's own deliveries
+// (a prompt schedule, an ARIA mention): like an agent's message it is never
+// typed while the person is typing in the pane or their input box has text
+// (pane_draft_guard.go), and like every unattended write it never answers a
+// menu (unattendedMenuCheck, ST-267): both are read under the writer lock
+// with the paste and with the Enter. It is not queued on the pane: it
+// returns an error wrapping errDraftGuardHeld, with the reason, and nothing
+// typed; the caller decides whether to try again (a schedule keeps the
+// prompt in its own wait, where a pause or edit still stops it).
+// (ST-119, tracker #35; from #1159.)
+func submitDaemonMessage(p *Pane, body string, hasClaude bool) (wrote int, outcome deliveryOutcome, err error) {
+	p.deliveryMu.Lock()
+	defer p.deliveryMu.Unlock()
+	wrote, outcome, err = typeAgentMessageLocked(p, strings.TrimRight(body, "\r\n"), hasClaude, deliveryPlain, draftUnattended)
+	if errors.Is(err, errDraftGuardHeld) {
+		// A put-back message waits for the person's Send or Clear, not for
+		// them to stop typing: say so, as the unchecked paths always did.
+		if perr := p.putBackInputCheck(); perr != nil {
+			return 0, "", perr
+		}
+		return 0, "", draftGuardHeldError(p.draftGuardReason(!hasClaude, true, time.Now(), p.humanComposerPendingSnapshot))
+	}
+	return wrote, outcome, err
+}
+
+// draftHeldError is errDraftGuardHeld with why nothing was typed.
+type draftHeldError struct{ reason string }
+
+func (e draftHeldError) Error() string        { return errDraftGuardHeld.Error() + " (" + e.reason + ")" }
+func (e draftHeldError) Is(target error) bool { return target == errDraftGuardHeld }
+
+func draftGuardHeldError(reason string) error {
+	if reason == "" {
+		reason = "the person is typing"
+	}
+	return draftHeldError{reason: reason}
+}
+
+// draftHeldReason is the reason an error from draftGuardHeldError carries.
+func draftHeldReason(err error) string {
+	var held draftHeldError
+	if errors.As(err, &held) {
+		return held.reason
+	}
+	return "the person is typing"
+}
+
 func deliverAgentMessage(p *Pane, body string, hasClaude bool, mode deliveryMode, senders ...string) (wrote int, outcome deliveryOutcome, err error) {
 	return deliverOrHoldAgentMessage(p, body, hasClaude, mode, nil, senders...)
 }
@@ -306,9 +365,10 @@ func deliverOrHoldAgentMessage(p *Pane, body string, hasClaude bool, mode delive
 }
 
 // draftCheck is what typeAgentMessageLocked rechecks under the writer lock
-// before the paste: nothing (the person's own message box, schedules), the
-// input box (the person pressed Send now on a held message), or the input
-// box and the person's keystroke recency (an agent's message).
+// before the paste: nothing (the person's own message box), the input box
+// (the person pressed Send now on a held message), or the input box and the
+// person's keystroke recency (an agent's message; a schedule or an ARIA
+// mention, which also never answers a menu).
 type draftCheck int
 
 const (
@@ -318,6 +378,10 @@ const (
 	// draftPersonBox: unchecked, as draftUnchecked, for the person's own
 	// message box only: a put-back message they kept does not refuse it.
 	draftPersonBox
+	// draftUnattended: draftBoxAndTyping for the daemon's own deliveries
+	// (submitDaemonMessage), whatever their mode: the paste and the Enter
+	// are also refused while a menu would take the keys.
+	draftUnattended
 )
 
 // typeAgentMessageLocked types body and submits it. Caller holds deliveryMu.
@@ -376,16 +440,19 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 	// ours: a keystroke after the paste would be submitted with the message.
 	var rev uint64
 	keyWrite := p.Write
-	if check == draftBoxOnly || check == draftBoxAndTyping {
+	if check == draftBoxOnly || check == draftBoxAndTyping || check == draftUnattended {
 		// An agent's message never goes into a menu, nor its Enter: keys
-		// there answer it. Read under the writer lock with each write, a
-		// dialog still drawn after its first answer included.
-		menuTakesKeys := func() bool { return mode == deliveryNoSteer && promptTakesKeys(p) }
+		// there answer it. Nor does an unattended one (a schedule, an ARIA
+		// mention). Read under the writer lock with each write, a dialog
+		// still drawn after its first answer included.
+		menuTakesKeys := func() bool {
+			return (mode == deliveryNoSteer || check == draftUnattended) && promptTakesKeys(p)
+		}
 		wrote, err = p.writeWithPrecondition(first, true, false, func() error {
 			if menuTakesKeys() {
 				return errDeliveryChoicePrompt
 			}
-			if p.draftGuardReason(codex, check == draftBoxAndTyping, time.Now(), p.promptRec.humanDraft) != "" {
+			if p.draftGuardReason(codex, check != draftBoxOnly, time.Now(), p.promptRec.humanDraft) != "" {
 				return errDraftGuardHeld
 			}
 			rev = p.inputRevision.Load()
@@ -411,14 +478,24 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 		}
 	} else {
 		// No path types onto a put-back message (the person's message box,
-		// schedules, ARIA mentions): it would be submitted with this one.
+		// unchecked callers): it would be submitted with this one.
 		// Only the person's own box may, once they kept it as their draft.
 		putBack := p.putBackInputCheck
 		if check == draftPersonBox {
 			putBack = p.putBackPersonCheck
 		}
-		wrote, err = p.writeWithPrecondition(first, true, false, putBack)
-		if errors.Is(err, errPutBackInBox) {
+		paste := putBack
+		if check == draftUnchecked {
+			// Unattended writes (schedules, ARIA mentions) never answer a
+			// menu: read under the writer lock with the paste and the Enter,
+			// so a menu that opened after the readiness check isn't answered.
+			paste = bothChecks(putBack, unattendedMenuCheck(p))
+			keyWrite = func(key []byte) (int, error) {
+				return p.writeWithPrecondition(key, true, false, unattendedMenuCheck(p))
+			}
+		}
+		wrote, err = p.writeWithPrecondition(first, true, false, paste)
+		if errors.Is(err, errPutBackInBox) || errors.Is(err, errDeliveryChoicePrompt) {
 			return 0, "", err
 		}
 	}
@@ -478,6 +555,11 @@ func typeAgentMessageLocked(p *Pane, body string, hasClaude bool, mode deliveryM
 	wrote += n
 	if errors.Is(err, errDraftGuardTypedAfterPaste) {
 		revision = rev
+		return wrote, deliveryLeftInComposer, nil
+	}
+	if errors.Is(err, errDeliveryChoicePrompt) {
+		// A menu opened before the second key: it waits in the box.
+		revision = p.inputRevision.Load()
 		return wrote, deliveryLeftInComposer, nil
 	}
 	if err != nil {
@@ -795,9 +877,6 @@ func (p *Pane) watchQueuedMessage(body, by string, codex bool) {
 // other panes (shells, REPLs) keep raw keystroke semantics.
 func paneAgentProvider(p *Pane) (agent bool, hasClaude bool) {
 	snap := p.Snapshot()
-	if snap.Kind == "native" {
-		return false, false
-	}
 	// The recorded agent wins: a Codex pane whose tool spawned a claude child
 	// still needs Codex delivery (bracketed paste).
 	switch strings.TrimSpace(snap.Agent) {

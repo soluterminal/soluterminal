@@ -7,23 +7,38 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createDecipheriv, createHash } from 'node:crypto';
-import { PINS } from './pins.mjs';
-import { canonicalDeepseekModel } from './deepseek-model.mjs';
+import { PINS, PI_LOCK_SHA256, DSH_LOCK_SHA256, DSH_SPAWN_HELPER } from './pins.mjs';
+import { canonicalDeepseekModel, dshModel, DEEPSEEK_FLASH_MODEL, DEEPSEEK_VISION_MODEL, DSH_PRIVACY_ROWS, dshPatchEntries } from './deepseek-model.mjs';
 
 // The root is overridable so tests can point at a fake runtime tree.
 export const runtimeRoot = process.env.SOLU_HARNESS_ROOT || path.join(os.homedir(), '.local/share/soluterminal/harnesses');
-// dsh's CLI only runs when `import.meta.main` exists (Node >= 24.2). On an
-// older Node it boots nothing and the ACP client waits for a handshake that
-// never comes, so fail with a precise message instead of a 30s stall.
-export const nodeSupportsDsh = () => typeof import.meta.main === 'boolean';
+// dsh 0.2.2 publishes engines node >=24.9.0, and its CLI only runs when
+// `import.meta.main` exists. On an older Node it boots nothing and the ACP
+// client waits for a handshake that never comes, so fail with a precise
+// message instead of a 30s stall.
+export const DSH_NODE_FLOOR = '24.9';
+export const nodeSupportsDsh = (version = process.versions.node, hasMain = typeof import.meta.main === 'boolean') => {
+  const [major, minor] = String(version).split('.').map(Number);
+  return hasMain && (major > 24 || (major === 24 && minor >= 9));
+};
 // Pi's published engines floor. Unlike dsh it does not need import.meta.main,
 // so the two gates are deliberately separate.
 export const nodeSupportsPi = () => {
   const [major, minor] = String(process.versions.node).split('.').map(Number);
   return major > 22 || (major === 22 && minor >= 19);
 };
+export const DEEPSEEK_MESSAGES_ROOT = 'https://api.deepseek.com/anthropic';
+// The old official roots no longer serve Messages: dsh would post to
+// /v1/messages beside them. An account that saved one moves to /anthropic;
+// any other custom address is kept, as dsh itself does.
+export function deepseekBaseURL(saved) {
+  const trimmed = String(saved || '').trim().replace(/\/+$/, '');
+  if (!trimmed || ['https://api.deepseek.com', 'https://api.deepseek.com/v1'].includes(trimmed.toLowerCase())) return DEEPSEEK_MESSAGES_ROOT;
+  return trimmed;
+}
 export function endpoint(provider, billing) {
-  if (provider === 'deepseek' && billing === 'api') return 'https://api.deepseek.com';
+  // DeepSeek Harness 0.2.2 speaks only Anthropic Messages, under /anthropic.
+  if (provider === 'deepseek' && billing === 'api') return DEEPSEEK_MESSAGES_ROOT;
   if (provider === 'pi' && billing === 'api') return 'https://api.deepseek.com';
   if (provider === 'pi-glm' && billing === 'coding-plan') return 'https://api.z.ai/api/coding/paas/v4';
   if (provider === 'glm' && billing === 'api') return 'https://api.z.ai/api/paas/v4';
@@ -210,11 +225,15 @@ export async function configureZcode(account, cwd, configFile = path.join(os.hom
 // Build the DeepSeek child's argv and environment. The key lives only in the
 // environment: argv is visible in `ps` and is echoed to the browser.
 export function deepseekPlan(account, dataDir, args = [], baseEnv = process.env) {
-  account = { ...account, model: canonicalDeepseekModel(account.model) };
+  account = { ...account, model: dshModel(account.model) };
   const env = cleanEnvironment(baseEnv);
   env.DEEPSEEK_API_KEY = account.apiKey;
-  env.DEEPSEEK_BASE_URL = account.baseURL || endpoint('deepseek', account.billing);
+  env.DEEPSEEK_BASE_URL = account.baseURL ? deepseekBaseURL(account.baseURL) : endpoint('deepseek', account.billing);
   env.DSH_HOME = path.join(dataDir, 'harness-state', 'deepseek');
+  // No session telemetry export to DeepSeek, not even on a feedback command:
+  // DSH_TELEMETRY_DISABLED unmounts the exporter row, the mode is a backstop.
+  env.DSH_TELEMETRY_DISABLED = '1';
+  env.DSH_TELEMETRY_MODE = 'DISABLED';
   // Attribution for the per-key spend meter: the terminal client writes a
   // session→account sidecar so the daemon can price each session's turns
   // against the account (and therefore the user) that launched it.
@@ -289,9 +308,14 @@ function piSessionOnDisk(sessionDir, sessionId) {
   return false;
 }
 
-// Pi on its first-party DeepSeek provider.
+// Pi on its first-party DeepSeek provider. Pi 1.5's DeepSeek catalog has no
+// vision-exp model; its deepseek-flash takes images itself, so a saved
+// vision-exp selection runs as deepseek-flash rather than as an unlisted,
+// text-only custom id.
 export function piPlan(account, dataDir, args = [], baseEnv = process.env) {
-  return piPlanFor('deepseek', 'DEEPSEEK_API_KEY', 'pi', { ...account, model: canonicalDeepseekModel(account.model) }, dataDir, args, baseEnv);
+  let model = canonicalDeepseekModel(account.model);
+  if (model === DEEPSEEK_VISION_MODEL) model = DEEPSEEK_FLASH_MODEL;
+  return piPlanFor('deepseek', 'DEEPSEEK_API_KEY', 'pi', { ...account, model }, dataDir, args, baseEnv);
 }
 
 // Pi on its first-party ZAI provider. Pi's zai provider uses the Z.ai Coding
@@ -345,6 +369,30 @@ function isManagedPiBrokerConfig(config) {
   return ['deepseek', 'zai'].includes(key) && entry && Object.keys(entry).sort().join(',') === 'apiKey,baseUrl' &&
     /^[0-9a-f]{64}$/.test(entry.apiKey) &&
     /^http:\/\/(?:127\.0\.0\.1|\[::1\]):\d+\/api\/team-broker\/(?:pi|pi-glm)\/[A-Za-z0-9_.%-]+\/v1$/.test(entry.baseUrl);
+}
+
+// Pi's prompt-cache warming (on by default since 0.86, "idle" mode) sends
+// extra paid refresh requests on its own between runs. A managed pane spends
+// only on what the person asks for, so the managed home pins it off. It is a
+// global-only setting, read from settings.json in PI_CODING_AGENT_DIR; other
+// settings in that file are kept.
+export async function ensurePiCacheWarmingOff(piHome) {
+  const file = path.join(piHome, 'settings.json');
+  let settings = {};
+  try {
+    settings = JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw new Error('Pi settings are unreadable. Fix or remove settings.json in the managed Pi home and retry.');
+  }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    throw new Error('Pi settings are unreadable. Fix or remove settings.json in the managed Pi home and retry.');
+  }
+  if (settings.cacheWarming === 'off') return;
+  settings.cacheWarming = 'off';
+  await fs.mkdir(piHome, { recursive: true, mode: 0o700 });
+  const temp = `${file}.${process.pid}.tmp`;
+  await fs.writeFile(temp, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await fs.rename(temp, file);
 }
 
 export async function clearPiBroker(piHome) {
@@ -409,6 +457,61 @@ export async function verifyDeepseekConfig(runtime, dshHome, execPath = process.
       resolve(out);
     });
   });
+}
+
+// dshPrivacyRowsOff reads a --dump-config of a patched profile and lists every
+// privacy row (DSH_PRIVACY_ROWS) that is missing or not switched off. A future
+// dsh that renames a row would otherwise leave our patch silently unapplied.
+export function dshPrivacyRowsOff(dump) {
+  const lines = String(dump).split('\n');
+  const problems = [];
+  for (const { id } of DSH_PRIVACY_ROWS) {
+    const at = lines.indexOf(`- id: ${id}`);
+    if (at < 0) { problems.push(`${id} is missing`); continue; }
+    let off = false;
+    // The row's block is its indented lines; the first unindented line ends it.
+    for (let i = at + 1; i < lines.length && /^\s/.test(lines[i]); i++) {
+      // The row's own config level only (four spaces), not a nested setting.
+      if (/^    enabled: false$/.test(lines[i]) || /^  disabled: true$/.test(lines[i])) off = true;
+    }
+    if (!off) problems.push(`${id} is not switched off`);
+  }
+  return problems;
+}
+
+// verifyDshPrivacy composes the pane (acp) and workflow (headless) profiles
+// with our privacy rows, offline, and refuses unless both rows are off in both.
+export async function verifyDshPrivacy(runtime, dshHome, execPath = process.execPath) {
+  await fs.mkdir(dshHome, { recursive: true, mode: 0o700 });
+  const dir = await fs.mkdtemp(path.join(dshHome, 'privacy-check-'));
+  try {
+    for (const [profile, entries] of [['acp', dshPatchEntries(DEEPSEEK_FLASH_MODEL)], ['headless', DSH_PRIVACY_ROWS]]) {
+      const patch = path.join(dir, `${profile}.json`);
+      await fs.writeFile(patch, JSON.stringify(entries), { mode: 0o600 });
+      const dump = await new Promise((resolve, reject) => {
+        const child = spawn(execPath, [runtime, '--profile', profile, '--patch', patch, '--dump-config'], {
+          env: { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_DISABLED: '1', DSH_TELEMETRY_MODE: 'DISABLED' }, stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let out = '', err = '';
+        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('DeepSeek Harness privacy check timed out')); }, 60000);
+        child.stdout.on('data', data => { out += data; });
+        child.stderr.on('data', data => { err += data; });
+        child.on('error', error => { clearTimeout(timer); reject(error); });
+        // 'close', not 'exit': stdout is fully read only once the streams close.
+        child.on('close', code => {
+          clearTimeout(timer);
+          if (code !== 0) return reject(new Error(`DeepSeek Harness privacy check exited ${code}: ${String(err).slice(-300)}`));
+          resolve(out);
+        });
+      });
+      const problems = dshPrivacyRowsOff(dump);
+      if (problems.length) {
+        const error = new Error(`DeepSeek Harness install refused: in its ${profile} profile, ${problems.join('; ')}, so it could send session data to DeepSeek.`);
+        error.privacyRows = true; // a finding about this dsh, not a transient failure
+        throw error;
+      }
+    }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 }
 
 // A version string alone does not prove the bundle loads. Boot Pi once offline
@@ -476,6 +579,128 @@ export const writePiProvenance = (dataDir, provenance) => writeHarnessProvenance
 // hardening: exact pins, the official registry, and no audit/fund noise.
 // min-release-age is deliberately NOT set — we pin exact versions and verify the
 // resolved tarball, so a same-day pin bump must still install.
+// Pi and DeepSeek Harness install from SoluTerminal's own lockfiles. Each has
+// a fixed root package.json (npm ci refuses a lockfile that does not match it),
+// a hash pinned in pins.mjs, and a verified marker the installer writes last.
+const HARNESS_LOCKS = {
+  pi: { label: 'Pi', pkg: '@earendil-works/pi-coding-agent', root: 'soluterminal-pi-runtime', pin: () => PINS.pi, sha256: () => PI_LOCK_SHA256 },
+  deepseek: { label: 'DeepSeek Harness', pkg: '@deepseek-ai/dsh', root: 'soluterminal-dsh-runtime', pin: () => PINS.deepseek, sha256: () => DSH_LOCK_SHA256 },
+};
+
+// The shipped DeepSeek Harness lockfile is written one package entry per line:
+// valid JSON for npm ci, a reviewable per-package diff on a bump, and about 740
+// lines instead of npm's 10,000 (the review bot skips diffs over 6,000 lines).
+// To regenerate: resolve package-lock.json as below, then
+//   node -e "import('./daemon/harness_assets/launch.mjs').then(m => process.stdout.write(m.formatHarnessLock(JSON.parse(require('fs').readFileSync(0, 'utf8')))))" < package-lock.json > daemon/harness_assets/dsh-lock.json
+export function formatHarnessLock(lock) {
+  const { packages = {}, ...top } = lock;
+  const head = Object.entries(top).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},`);
+  const rows = Object.entries(packages).map(([key, value]) => `    ${JSON.stringify(key)}: ${JSON.stringify(value)}`);
+  return ['{', ...head, '  "packages": {', rows.join(',\n'), '  }', '}', ''].join('\n');
+}
+
+export function harnessRootPackageJSON(kind, pin = HARNESS_LOCKS[kind].pin()) {
+  const spec = HARNESS_LOCKS[kind];
+  return JSON.stringify({ name: spec.root, private: true, dependencies: { [spec.pkg]: pin } }, null, 2) + '\n';
+}
+
+// prepareHarnessLock checks SoluTerminal's own lockfile against its pinned
+// hash and the pin, then writes it with the matching package.json into the
+// install prefix, so `npm ci` installs exactly that tree. Any other bytes are
+// refused before npm runs: a tampered integrity line cannot reach an install.
+export async function prepareHarnessLock(kind, prefix, lockBytes, { pin = HARNESS_LOCKS[kind].pin(), sha256 = HARNESS_LOCKS[kind].sha256() } = {}) {
+  const spec = HARNESS_LOCKS[kind];
+  const got = createHash('sha256').update(lockBytes).digest('hex');
+  if (got !== sha256) throw new Error(`${spec.label} install refused: its lockfile does not match the pinned hash (got ${got.slice(0, 12)}…). Reinstall SoluTerminal's harness files.`);
+  let lock;
+  try { lock = JSON.parse(String(lockBytes)); } catch { throw new Error(`${spec.label} install refused: its lockfile is not valid JSON.`); }
+  const entry = lock?.packages?.['node_modules/' + spec.pkg];
+  if (!entry || entry.version !== pin) throw new Error(`${spec.label} install refused: its lockfile does not resolve ${spec.label} ${pin}.`);
+  await fs.mkdir(prefix, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(prefix, 'package.json'), harnessRootPackageJSON(kind, pin), { mode: 0o600 });
+  await fs.writeFile(path.join(prefix, 'package-lock.json'), lockBytes, { mode: 0o600 });
+  return lock;
+}
+
+// harnessTreeMatchesLock reports whether the installed tree (npm's hidden
+// lockfile, node_modules/.package-lock.json) holds exactly the lockfile's
+// packages, with the same versions and integrity hashes. An optional package
+// the lockfile lists for another platform may be absent.
+export async function harnessTreeMatchesLock(prefix, lock) {
+  let hidden;
+  try { hidden = JSON.parse(await fs.readFile(path.join(prefix, 'node_modules', '.package-lock.json'), 'utf8')); }
+  catch { return false; }
+  const want = lock?.packages || {};
+  const have = hidden?.packages || {};
+  for (const [key, entry] of Object.entries(have)) {
+    const w = want[key];
+    if (!key || !w || w.version !== entry.version || (w.integrity || '') !== (entry.integrity || '')) return false;
+  }
+  for (const [key, entry] of Object.entries(want)) {
+    if (key && !have[key] && !entry.optional) return false;
+  }
+  return true;
+}
+
+// The installer writes this marker into the prefix only after the lockfile,
+// installed tree, registry signatures and offline boot all passed, and removes
+// it before reinstalling; a launch refuses the harness without it.
+const VERIFIED_MARKER = '.soluterminal-verified.json';
+
+export async function writeHarnessVerified(kind, prefix, { pin = HARNESS_LOCKS[kind].pin(), sha256 = HARNESS_LOCKS[kind].sha256() } = {}) {
+  const file = path.join(prefix, VERIFIED_MARKER);
+  const temp = `${file}.${process.pid}.tmp`;
+  await fs.writeFile(temp, JSON.stringify({ version: pin, lockSha256: sha256 }) + '\n', { mode: 0o600 });
+  await fs.rename(temp, file);
+}
+
+export async function clearHarnessVerified(prefix) {
+  await fs.rm(path.join(prefix, VERIFIED_MARKER), { force: true });
+}
+
+export async function harnessInstallVerified(kind, prefix, { pin = HARNESS_LOCKS[kind].pin(), sha256 = HARNESS_LOCKS[kind].sha256() } = {}) {
+  try {
+    const marker = JSON.parse(await fs.readFile(path.join(prefix, VERIFIED_MARKER), 'utf8'));
+    return marker?.version === pin && marker?.lockSha256 === sha256;
+  } catch { return false; }
+}
+
+export const piRootPackageJSON = (pin = PINS.pi) => harnessRootPackageJSON('pi', pin);
+export const preparePiLock = (prefix, lockBytes, options) => prepareHarnessLock('pi', prefix, lockBytes, options);
+export const piTreeMatchesLock = harnessTreeMatchesLock;
+export const writePiVerified = (prefix, options) => writeHarnessVerified('pi', prefix, options);
+export const clearPiVerified = clearHarnessVerified;
+export const piInstallVerified = (prefix, options) => harnessInstallVerified('pi', prefix, options);
+export const dshRootPackageJSON = (pin = PINS.deepseek) => harnessRootPackageJSON('deepseek', pin);
+export const prepareDshLock = (prefix, lockBytes, options) => prepareHarnessLock('deepseek', prefix, lockBytes, options);
+export const writeDshVerified = (prefix, options) => writeHarnessVerified('deepseek', prefix, options);
+export const clearDshVerified = clearHarnessVerified;
+export const dshInstallVerified = (prefix, options) => harnessInstallVerified('deepseek', prefix, options);
+
+// With install scripts off, the installer itself applies the one effect dsh
+// needs: dsh-subprocess-local's postinstall sets mode 0755 on node-pty's
+// prebuilt spawn-helper. Only the pinned node-pty version is accepted, and only
+// a helper whose SHA-256 is pinned for this platform. A platform with no pinned
+// helper (Linux, Windows) must not carry one either.
+export async function ensureDshSpawnHelper(prefix, lock, { platform = process.platform, arch = process.arch, spec = DSH_SPAWN_HELPER } = {}) {
+  const entry = lock?.packages?.['node_modules/node-pty'];
+  if (!entry || entry.version !== spec.nodePty) throw new Error(`DeepSeek Harness install refused: its lockfile does not pin node-pty ${spec.nodePty}.`);
+  const helper = path.join(prefix, 'node_modules', 'node-pty', 'prebuilds', `${platform}-${arch}`, 'spawn-helper');
+  const want = spec.sha256[`${platform}-${arch}`];
+  let bytes = null;
+  try { bytes = await fs.readFile(helper); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (!want) {
+    if (bytes) throw new Error('DeepSeek Harness install refused: node-pty ships an unexpected spawn-helper for this platform.');
+    return null;
+  }
+  if (!bytes) throw new Error('DeepSeek Harness install refused: node-pty\'s spawn-helper is missing.');
+  const got = createHash('sha256').update(bytes).digest('hex');
+  if (got !== want) throw new Error('DeepSeek Harness install refused: node-pty\'s spawn-helper does not match its pinned hash.');
+  await fs.chmod(helper, spec.mode);
+  if (((await fs.stat(helper)).mode & 0o7777) !== spec.mode) throw new Error('DeepSeek Harness install refused: could not set the spawn-helper\'s mode.');
+  return helper;
+}
+
 export function managedNpmrc() {
   return [
     '# SoluTerminal managed harness install (generated)',
@@ -555,11 +780,12 @@ async function launchAccount(provider, argv, dataDir, file, broker, account) {
     env.ZCODE_STORAGE_DIR = path.join(dataDir, 'harness-state/zcode');
     command = [runtime, '--mode', 'build', ...argv];
   } else if (provider === 'deepseek') {
-    if (!nodeSupportsDsh()) throw new Error('DeepSeek Harness needs Node 24.2 or newer (its CLI relies on import.meta.main). Update Node, then install or launch again.');
+    if (!nodeSupportsDsh()) throw new Error(`DeepSeek Harness needs Node ${DSH_NODE_FLOOR} or newer. Update Node, then install or launch again.`);
     env.SOLU_CLIENT_BUILD = await clientBuildVersion();
     const plan = deepseekPlan(account, dataDir, argv, env);
     await fs.access(plan.runtime).catch(() => { throw new Error('DeepSeek Harness is not installed. Run deepseek --install, or use Install in Credentials.'); });
     await verifyPinnedRuntime(plan.packageJson, PINS.deepseek, 'DeepSeek Harness');
+    if (!(await dshInstallVerified(path.join(runtimeRoot, 'deepseek')))) throw new Error('DeepSeek Harness is not verified on this computer (its install did not finish every check). Run deepseek --install, or use Install in Credentials.');
     await fs.mkdir(plan.env.DSH_HOME, { recursive: true, mode: 0o700 });
     env = plan.env; command = plan.argv;
   } else if (provider === 'pi') {
@@ -567,8 +793,10 @@ async function launchAccount(provider, argv, dataDir, file, broker, account) {
     const plan = piPlan(account, dataDir, argv, env);
     await fs.access(plan.runtime).catch(() => { throw new Error('Pi is not installed. Run pi --install, or use Install in Credentials.'); });
     await verifyPinnedRuntime(plan.packageJson, PINS.pi, 'Pi');
+    if (!(await piInstallVerified(path.join(runtimeRoot, 'pi')))) throw new Error('Pi is not verified on this computer (its install did not finish every check). Run pi --install, or use Install in Credentials.');
     await fs.mkdir(plan.env.PI_CODING_AGENT_DIR, { recursive: true, mode: 0o700 });
     await fs.mkdir(plan.env.PI_CODING_AGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
+    await ensurePiCacheWarmingOff(plan.env.PI_CODING_AGENT_DIR);
     if (broker) await configurePiBroker(account, plan.env.PI_CODING_AGENT_DIR, provider);
     else await clearPiBroker(plan.env.PI_CODING_AGENT_DIR);
     env = plan.env; command = plan.argv;
@@ -577,8 +805,10 @@ async function launchAccount(provider, argv, dataDir, file, broker, account) {
     const plan = piGlmPlan(account, dataDir, argv, env);
     await fs.access(plan.runtime).catch(() => { throw new Error('Pi is not installed. Run pi-glm --install, or use Install in Credentials.'); });
     await verifyPinnedRuntime(plan.packageJson, PINS.pi, 'Pi');
+    if (!(await piInstallVerified(path.join(runtimeRoot, 'pi')))) throw new Error('Pi is not verified on this computer (its install did not finish every check). Run pi --install, or use Install in Credentials.');
     await fs.mkdir(plan.env.PI_CODING_AGENT_DIR, { recursive: true, mode: 0o700 });
     await fs.mkdir(plan.env.PI_CODING_AGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
+    await ensurePiCacheWarmingOff(plan.env.PI_CODING_AGENT_DIR);
     if (broker) await configurePiBroker(account, plan.env.PI_CODING_AGENT_DIR, provider);
     else await clearPiBroker(plan.env.PI_CODING_AGENT_DIR);
     env = plan.env; command = plan.argv;

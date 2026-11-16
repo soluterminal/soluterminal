@@ -662,8 +662,10 @@ func (a *apiServer) tickWorkers(now time.Time) {
 		}
 	}
 	var starts []*workerRequest
+	// The person's stop on agent messaging keeps queued workers queued.
+	paused := agentMessagingPaused()
 	for _, r := range q.requests {
-		if r.Info.State == "queued" && !now.Before(r.QuotaRetryAt) && a.workerRunningLocked(q, r.Lead) < q.settings.MaxRunning+boolInt(r.Info.Priority == "urgent") {
+		if !paused && r.Info.State == "queued" && !now.Before(r.QuotaRetryAt) && a.workerRunningLocked(q, r.Lead) < q.settings.MaxRunning+boolInt(r.Info.Priority == "urgent") {
 			r.Info.State = "running"
 			starts = append(starts, r)
 		}
@@ -900,11 +902,4 @@ func visibleWorkerOrigin(o *PaneOrigin) *PaneOrigin {
 		o.WorkerGit = nil
 	}
 	return o
-}
-func quotaNativeCodexArgv(opts SpawnOpts) []string {
-	cmd := nativeCodexArgv()
-	if opts.workerAccount != "" && opts.workerTeamID == "" {
-		return routeChildCommand(cmd, []string{"-c", `model_provider="openai"`, "-c", `cli_auth_credentials_store="file"`})
-	}
-	return cmd
 }

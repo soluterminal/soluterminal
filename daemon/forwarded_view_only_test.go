@@ -282,14 +282,14 @@ func TestViewOnlyCallersGetNoMCP(t *testing.T) {
 	}
 	// The handler on its own refuses any tool too.
 	rec := httptest.NewRecorder()
-	a.mcp(rec, request("POST", call("search_files", map[string]any{"query": "token"})))
+	a.mcp(rec, request("POST", call("list_panes", map[string]any{})))
 	if !strings.Contains(rec.Body.String(), viewOnlyText) {
 		t.Fatalf("the MCP handler gave a view-only caller a tool: %s", rec.Body)
 	}
 	// A signed forwarded caller still reaches the tools.
 	callAsIdentity(t, viewOnlyCallers[1].id)
 	rec = httptest.NewRecorder()
-	mcp.ServeHTTP(rec, request("POST", call("get_pane_state", map[string]any{"pane_id": "none"})))
+	mcp.ServeHTTP(rec, request("POST", call("list_panes", map[string]any{})))
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), viewOnlyText) {
 		t.Fatalf("a signed device was refused /mcp: %d %s", rec.Code, rec.Body)
 	}

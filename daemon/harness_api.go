@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-//go:embed harness_assets/*.mjs harness_assets/*.sh
+//go:embed harness_assets/*.mjs harness_assets/*.sh harness_assets/pi-lock.json harness_assets/dsh-lock.json
 var harnessAssets embed.FS
 
 func (a *apiServer) harnessStore(provider string) *harnessCredStore {
@@ -274,7 +274,7 @@ func (a *apiServer) harnessLauncher() (string, error) {
 			return "", err
 		}
 	}
-	for _, name := range []string{"pins.mjs", "deepseek-model.mjs", "launch.mjs", "pi-approval.mjs", "deepseek-terminal.mjs", "install.mjs", "harness-shortcut.sh"} {
+	for _, name := range []string{"pins.mjs", "deepseek-model.mjs", "launch.mjs", "pi-approval.mjs", "deepseek-terminal.mjs", "install.mjs", "harness-shortcut.sh", "pi-lock.json", "dsh-lock.json"} {
 		b, err := harnessAssets.ReadFile("harness_assets/" + name)
 		if err != nil {
 			return "", err

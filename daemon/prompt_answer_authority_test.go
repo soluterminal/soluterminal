@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -188,9 +187,11 @@ func TestST10CodexClaimsAreRefused(t *testing.T) {
 // child with SOLU_PANE_ID set is a worker.
 func TestST10SolupaneIDClaimsAreRefused(t *testing.T) {
 	a := st10Server(t, true)
-	codex := a.mgr.panes["C"]
-	codex.Kind = "native"
-	codex.nativePendingApprovals = map[string]*NativeApproval{"r1": {RequestID: "r1"}}
+	// C, a Codex pane, shows its own permission prompt.
+	codex := choicePromptPane(t, "C")
+	codex.Agent = agentCodex
+	drainConn(t, codex)
+	a.mgr.panes["C"] = codex
 	for name, id := range map[string]callerIdentity{
 		"detached job of a Claude pane": {Kind: callerPane, PaneID: "C", PID: 4242, FromEnv: true},
 		"worker":                        {Kind: callerWorker, PID: 8},
@@ -282,33 +283,10 @@ func TestST10RESTRefusalKeepsDeviceGuidance(t *testing.T) {
 	}
 }
 
-// Interrupting a native pane denies its pending approvals: gated like the
-// REST deny, and nothing is denied when refused.
-func TestST10NativeInterruptDenyIsGated(t *testing.T) {
-	a := st10Server(t, true)
-	p := a.mgr.panes["A"]
-	p.Kind = "native"
-	p.nativePendingApprovals = map[string]*NativeApproval{"r1": {RequestID: "r1"}}
-	for name, id := range map[string]callerIdentity{
-		"SOLU_PANE_ID claim": {Kind: callerPane, PaneID: "C", FromEnv: true},
-		"worker":             {Kind: callerWorker},
-		"own pane":           {Kind: callerPane, PaneID: "A"},
-	} {
-		callAsIdentity(t, id)
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/panes/A/native/interrupt", nil)
-		req.SetPathValue("id", "A")
-		a.handlePaneNativeInterrupt(rec, req)
-		if rec.Code != http.StatusForbidden || p.peekNativePending("r1") == nil {
-			t.Errorf("%s: code %d, pending %v", name, rec.Code, p.peekNativePending("r1") != nil)
-		}
-	}
-}
-
-// A4: turning on auto-mode, adding to the native allowlist and approving an
-// Aria confirmation follow the same rules: for its own pane a pane is
-// refused, for another pane under the grant it is allowed, and a SOLU_PANE_ID
-// claim is refused on all three. The person is unchanged.
+// A4: turning on auto-mode and approving an Aria confirmation follow the
+// same rules: for its own pane a pane is refused, for another pane under the
+// grant it is allowed, and a SOLU_PANE_ID claim is refused on both. The
+// person is unchanged.
 func TestST10GrantRoutesFollowThePromptRules(t *testing.T) {
 	routes := map[string]func(a *apiServer) *httptest.ResponseRecorder{
 		"turn on auto-mode": func(a *apiServer) *httptest.ResponseRecorder {
@@ -316,13 +294,6 @@ func TestST10GrantRoutesFollowThePromptRules(t *testing.T) {
 			req.SetPathValue("id", "A")
 			rec := httptest.NewRecorder()
 			a.setPaneAutoMode(rec, req)
-			return rec
-		},
-		"add to the native allowlist": func(a *apiServer) *httptest.ResponseRecorder {
-			req := httptest.NewRequest("POST", "/api/panes/A/native/allowlist", strings.NewReader(`{"tool":"Read","action":"add"}`))
-			req.SetPathValue("id", "A")
-			rec := httptest.NewRecorder()
-			a.paneNativeAllowlistPost(rec, req)
 			return rec
 		},
 		"approve an Aria confirmation": func(a *apiServer) *httptest.ResponseRecorder {
@@ -336,7 +307,6 @@ func TestST10GrantRoutesFollowThePromptRules(t *testing.T) {
 	}
 	audit := map[string]string{
 		"turn on auto-mode":            `prompt="" action="turn on auto-approve"`,
-		"add to the native allowlist":  `prompt="" action="add an auto-allow rule"`,
 		"approve an Aria confirmation": `prompt="aria-confirm:c1" action="approve an Aria confirmation"`,
 	}
 	for route, call := range routes {
@@ -502,106 +472,6 @@ func TestST10TracedPaneAnswersADrawnDialogAndIsAudited(t *testing.T) {
 }
 
 const promptAnswerLogPrefix = "authority: prompt answer by agent"
-
-// st10NativePane adds native pane N to a, with a parallel approval open for
-// each request id.
-func st10NativePane(t *testing.T, a *apiServer, reqIDs ...string) *Pane {
-	t.Helper()
-	p, agentEnd := nativePaneForApproval(t, "N")
-	go func() { _, _ = io.Copy(io.Discard, agentEnd) }()
-	for _, id := range reqIDs {
-		p.processNativeLine([]byte(nativeCanUseToolLine(id, id+"-use", "Read", `{"file_path":"/tmp/example"}`)), false, false)
-		if p.peekNativePending(id) == nil {
-			t.Fatalf("approval %s not pending", id)
-		}
-	}
-	a.mgr.panes["N"] = p
-	return p
-}
-
-// Rule 7, MCP: with two parallel approvals open, the audit line names the one
-// answer_prompt actually resolved. Its pick among them varies, so repeat.
-func TestST10AuditNamesTheApprovalAnswerPromptResolved(t *testing.T) {
-	traced := callerIdentity{Kind: callerPane, PaneID: "B"}
-	for i := 0; i < 8; i++ {
-		a := st10Server(t, true)
-		p := st10NativePane(t, a, "r1", "r2")
-		logged := captureAuthorityLog(t)
-		text := toolViaHTTP(t, a, traced, "", "answer_prompt", map[string]any{"pane_id": "N", "option": "allow"})
-		if !strings.Contains(text, "Allowed") {
-			t.Fatalf("answer: %q", text)
-		}
-		answered, open := "r1", "r2"
-		if p.peekNativePending("r1") != nil {
-			answered, open = "r2", "r1"
-		}
-		if p.peekNativePending(open) == nil || p.peekNativePending(answered) != nil {
-			t.Fatalf("exactly one approval should be resolved: %s open, %s answered", open, answered)
-		}
-		want := `transport=tcp pane=B (traced) target=N prompt="approval:` + answered + `" action="answer_prompt"`
-		if !strings.Contains(logged.String(), want) {
-			t.Fatalf("resolved %s, log %q", answered, logged.String())
-		}
-	}
-}
-
-// Rule 7, REST: resolving either of two parallel approvals logs that one, and
-// a resolve that finds nothing to answer logs no answer.
-func TestST10AuditNamesTheApprovalRESTResolved(t *testing.T) {
-	resolve := func(a *apiServer, reqID string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("POST", "/api/panes/N/approvals/x/resolve", strings.NewReader(`{"allow":true}`))
-		req.SetPathValue("id", "N")
-		req.SetPathValue("reqId", reqID)
-		rec := httptest.NewRecorder()
-		a.handlePaneApprovalResolve(rec, req)
-		return rec
-	}
-	for _, tc := range []struct{ answered, open string }{{"r1", "r2"}, {"r2", "r1"}} {
-		a := st10Server(t, true)
-		p := st10NativePane(t, a, "r1", "r2")
-		callAsIdentity(t, callerIdentity{Kind: callerPane, PaneID: "B"})
-		logged := captureAuthorityLog(t)
-		if rec := resolve(a, tc.answered); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"resolved":true`) {
-			t.Fatalf("resolve %s: %d %s", tc.answered, rec.Code, rec.Body.String())
-		}
-		if p.peekNativePending(tc.answered) != nil || p.peekNativePending(tc.open) == nil {
-			t.Fatalf("resolving %s should leave only %s open", tc.answered, tc.open)
-		}
-		want := `transport=rest pane=B (traced) target=N prompt="approval:` + tc.answered + `" action="allow a pane's permission request"`
-		if !strings.Contains(logged.String(), want) || strings.Contains(logged.String(), "approval:"+tc.open) {
-			t.Fatalf("resolved %s, log %q", tc.answered, logged.String())
-		}
-	}
-
-	a := st10Server(t, true)
-	st10NativePane(t, a, "r1")
-	callAsIdentity(t, callerIdentity{Kind: callerPane, PaneID: "B"})
-	logged := captureAuthorityLog(t)
-	if rec := resolve(a, "gone"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"resolved":false`) {
-		t.Fatalf("unknown id: %d %s", rec.Code, rec.Body.String())
-	}
-	if strings.Contains(logged.String(), promptAnswerLogPrefix) {
-		t.Fatalf("no answer happened, log %q", logged.String())
-	}
-}
-
-// Rule 7: interrupting denies every open approval, and the line names each.
-func TestST10AuditNamesEveryApprovalAnInterruptDenied(t *testing.T) {
-	a := st10Server(t, true)
-	p := st10NativePane(t, a, "r2", "r1")
-	callAsIdentity(t, callerIdentity{Kind: callerPane, PaneID: "B"})
-	logged := captureAuthorityLog(t)
-	req := httptest.NewRequest("POST", "/api/panes/N/native/interrupt", nil)
-	req.SetPathValue("id", "N")
-	a.handlePaneNativeInterrupt(httptest.NewRecorder(), req)
-	if p.hasNativePending() {
-		t.Fatal("approvals still open")
-	}
-	want := `pane=B (traced) target=N prompt="approval:r1,r2" action="deny a pane's permission request"`
-	if !strings.Contains(logged.String(), want) {
-		t.Fatalf("log %q", logged.String())
-	}
-}
 
 // Rule 7, terminal panes: the line names the menu's revision from before the
 // answer, and only an answer that was written is logged.

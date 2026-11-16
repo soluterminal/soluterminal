@@ -240,4 +240,16 @@ describe('a Backend setting change that cut the pane off', () => {
  it('stays silent for a terminal that is fine', () => {
   expect(paneAccountStatus({ ...thread, terminalAddressLost: false }, name)).toBeNull();
  });
+ it('any agent session offers a restart that keeps the conversation (ST-230)', async () => {
+  const restart = vi.spyOn(paneRestart, 'restartPaneFlow').mockResolvedValue(undefined as never);
+  render(<PaneCredentialBadge pane={{ ...thread, addressLost: true }} />);
+  fireEvent.click(screen.getByText('needs restart'));
+  expect(screen.getByText('After the Backend setting was changed, this session can no longer reach SoluTerminal, so its pane tools and status updates stop working. Restart it to continue; the conversation is kept.')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Restart session' }));
+  await waitFor(() => expect(restart).toHaveBeenCalledWith('pane_test'));
+ });
+ it('an agent session cut off outranks an account mismatch', () => {
+  const status = paneAccountStatus({ ...thread, addressLost: true, credential: { provider: 'codex', account: 'old', activeAccount: 'work', source: 'launch', restartRequired: true } }, name)!;
+  expect(status.detail?.heading).toBe('This session needs a restart');
+ });
 });

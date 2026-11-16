@@ -12,7 +12,8 @@
 //   GET  /api/cloud/status      → CloudStatus
 //   POST /api/cloud/pair/start  → { code, expiresAt } (idempotent)
 //   POST /api/cloud/pair/cancel → 200, empty body
-//   POST /api/cloud/disconnect  → 200, empty body (403 over the relay)
+//   POST /api/cloud/disconnect  → 200, { cloudRemoval, machinesUrl } when the
+//                                 computer was paired (403 over the relay)
 
 import { useEffect, useRef, useState } from 'react';
 import { isTauri } from './voice';
@@ -34,7 +35,20 @@ export interface CloudStatus {
   relayState: RelayState;
   ownerEmail?: string;
   pairing?: CloudPairing;
+  // After a Disconnect, the cloud refused to remove this computer from the
+  // account (shown while it isn't paired again). machinesUrl is the account
+  // page of the cloud that refused.
+  revokeRefused?: { refused: boolean; at: string; machinesUrl: string };
 }
+
+// What POST /api/cloud/disconnect says about removing the computer from the
+// account. Absent on older daemons and when the computer wasn't paired.
+export type CloudRemoval = 'removed' | 'unlisted' | 'refused' | 'pending';
+export interface DisconnectResult {
+  cloudRemoval?: CloudRemoval;
+  machinesUrl?: string;
+}
+
 
 export interface PairStartResponse {
   code: string;
@@ -77,8 +91,8 @@ export const cloudPairApi = {
   // record was deleted server-side (token permanently rejected → "sign-in
   // needed" forever) or the user no longer wants cloud. LOCAL-ONLY (403 over the
   // relay — you can't disconnect a machine through its own tunnel).
-  disconnect: (): Promise<void> =>
-    fetch('/api/cloud/disconnect', { method: 'POST' }).then(jsonOrThrow<void>),
+  disconnect: (): Promise<DisconnectResult | undefined> =>
+    fetch('/api/cloud/disconnect', { method: 'POST' }).then(jsonOrThrow<DisconnectResult | undefined>),
 };
 
 // Derived, human-facing summary of the header chip's single truth.

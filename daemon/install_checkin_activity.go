@@ -64,16 +64,8 @@ func (c *installCheckin) activityFlags() (agentPane, together bool) {
 }
 
 // checkinAgentPane reports whether a freshly spawned pane runs Claude Code or
-// Codex. A plain shell has no agent: its zero-value Agent only means "Claude"
-// for native panes, so terminal panes are judged by their command.
+// Codex. A plain shell has no agent, so a pane is judged by its command.
 func checkinAgentPane(snap PaneSnapshot) bool {
-	if snap.Kind == "native" {
-		switch effectiveAgentKind(snap.Agent) {
-		case agentClaude, agentCodex:
-			return true
-		}
-		return false
-	}
 	if strings.TrimSpace(snap.Agent) == agentCodex {
 		return true
 	}

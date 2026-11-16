@@ -45,14 +45,16 @@ func TestValidateTaskKind(t *testing.T) {
 	}{
 		{"valid plan", func(*ScheduleInput) {}, ""},
 		{"valid edit", func(in *ScheduleInput) { in.Permission = "edit" }, ""},
+		{"github preset is gone (ST-277)", func(in *ScheduleInput) { in.Permission = "github" }, `"plan", "check" or "edit"`},
+		{"valid check", func(in *ScheduleInput) { in.Permission = "check" }, ""},
 		{"valid timeout", func(in *ScheduleInput) { in.TimeoutMin = 60 }, ""},
 		{"no prompt", func(in *ScheduleInput) { in.Prompt = "" }, "prompt is required"},
 		{"no cwd", func(in *ScheduleInput) { in.Cwd = "" }, "cwd is required"},
 		{"relative cwd", func(in *ScheduleInput) { in.Cwd = "relative/path" }, "absolute"},
 		{"missing cwd", func(in *ScheduleInput) { in.Cwd = filepath.Join(dir, "nope") }, "existing directory"},
 		{"cwd is a file", func(in *ScheduleInput) { in.Cwd = file }, "existing directory"},
-		{"bad permission", func(in *ScheduleInput) { in.Permission = "bypassPermissions" }, `"plan" or "edit"`},
-		{"empty permission", func(in *ScheduleInput) { in.Permission = "" }, `"plan" or "edit"`},
+		{"bad permission", func(in *ScheduleInput) { in.Permission = "bypassPermissions" }, `"plan", "check" or "edit"`},
+		{"empty permission", func(in *ScheduleInput) { in.Permission = "" }, `"plan", "check" or "edit"`},
 		{"paneId rejected", func(in *ScheduleInput) { in.PaneID = "p1" }, "no paneId"},
 		{"negative timeout", func(in *ScheduleInput) { in.TimeoutMin = -1 }, "timeoutMin"},
 		{"timeout over ceiling", func(in *ScheduleInput) { in.TimeoutMin = 60*4 + 1 }, "timeoutMin"},
@@ -89,6 +91,93 @@ func TestTaskPermissionPresetsAreClosed(t *testing.T) {
 		}
 		if taskPermissionModes[preset] != mode {
 			t.Errorf("preset %q maps to %q, want %q", preset, taskPermissionModes[preset], mode)
+		}
+	}
+}
+
+// Task schedules add one preset, check, between plan and edit. It stays closed the
+// same way, and the presets other headless runners share don't widen.
+func TestScheduleTaskPresetsAreClosed(t *testing.T) {
+	for _, bad := range []string{"bypassPermissions", "default", "dontAsk", "acceptEdits", "auto", "", "CHECK", "lookup", "test", "github"} {
+		if validScheduleTaskPermission(bad) {
+			t.Errorf("validScheduleTaskPermission(%q) = true, want false", bad)
+		}
+	}
+	for _, shared := range []string{"check"} {
+		if validTaskPermission(shared) {
+			t.Errorf("validTaskPermission(%q) = true; the shared plan/edit presets must not widen", shared)
+		}
+	}
+	for preset, mode := range map[string]string{"plan": "plan", "check": "dontAsk", "edit": "acceptEdits"} {
+		if got := scheduleTaskPresets[preset].mode; got != mode {
+			t.Errorf("preset %q mode = %q, want %q", preset, got, mode)
+		}
+	}
+}
+
+// The argv each preset adds: plan and edit are unchanged; check
+// pre-approves only its commands and denies Claude's file-writing tools.
+func TestScheduleTaskPermissionArgs(t *testing.T) {
+	if got := strings.Join(scheduleTaskPermissionArgs("plan"), " "); got != "--permission-mode plan" {
+		t.Errorf("plan args = %q", got)
+	}
+	if got := strings.Join(scheduleTaskPermissionArgs("edit"), " "); got != "--permission-mode acceptEdits" {
+		t.Errorf("edit args = %q", got)
+	}
+	allowOf := func(preset string) []string {
+		args := scheduleTaskPermissionArgs(preset)
+		// --setting-sources "": no settings file's allow rules can widen the list.
+		if len(args) != 8 || args[0] != "--permission-mode" || args[1] != "dontAsk" ||
+			args[2] != "--allowedTools" || args[4] != "--disallowedTools" || args[5] != "Edit,Write,NotebookEdit,mcp__*" ||
+			args[6] != "--setting-sources" || args[7] != "" {
+			t.Fatalf("%s args = %q", preset, args)
+		}
+		return strings.Split(args[3], ",")
+	}
+	check := allowOf("check")
+	has := func(list []string, rule string) bool {
+		for _, r := range list {
+			if r == rule {
+				return true
+			}
+		}
+		return false
+	}
+	// No preset allows a raw gh rule: a prefix rule such as
+	// Bash(gh pr view:*) also allows -R other-host/… and would let injected
+	// PR text send data out (@secure, #1213). A read-only GitHub preset comes
+	// back only through a daemon-owned wrapper (ST-277).
+	for name, preset := range scheduleTaskPresets {
+		for _, rule := range preset.allow {
+			if strings.Contains(rule, "Bash(gh ") || strings.Contains(rule, "Bash(gh)") {
+				t.Errorf("preset %s allows raw gh rule %q", name, rule)
+			}
+		}
+	}
+	for _, rule := range []string{"Bash(npm audit)", "Bash(yarn outdated)", "Bash(go list -m -u all)", "Bash(npm test)", "Bash(go test ./...)", "Bash(pytest)"} {
+		if !has(check, rule) {
+			t.Errorf("check preset missing %s", rule)
+		}
+	}
+	for _, rule := range check {
+		// Nothing that writes, pushes, merges or calls arbitrary APIs.
+		for _, banned := range []string{"Bash(gh api", "Bash(gh pr merge", "Bash(gh pr create", "Bash(gh pr checkout", "Bash(git ", "fix", "Bash(npm install", "Bash(*"} {
+			if strings.Contains(rule, banned) {
+				t.Errorf("allow rule %q contains %q", rule, banned)
+			}
+		}
+		if strings.Contains(rule, ",") {
+			t.Errorf("allow rule %q contains a comma; the list is comma-joined", rule)
+		}
+		// check runs the project's code, so it takes no text from outside
+		// authors (no gh) and every rule is exact: a test runner's or
+		// dependency tool's extra flags can name a program to run (go test
+		// -exec, make SHELL=…, cargo test --config …, pytest -p).
+		if strings.HasPrefix(rule, "Bash(gh ") {
+			t.Errorf("check preset allows %q; gh reads outside authors' text", rule)
+		}
+		if strings.Contains(rule, ":*") || strings.Contains(rule, "*") && rule != "mcp__*" {
+			t.Errorf("allow rule %q is not exact", rule)
 		}
 	}
 }
@@ -241,7 +330,7 @@ func TestTaskRunCapturesLog(t *testing.T) {
 		t.Errorf("log missing child output: %q", got)
 	}
 	// The permission preset must reach claude as its mapped flag...
-	if !strings.Contains(got, "--permission-mode plan") {
+	if !strings.Contains(got, "--permission-mode plan --output-format text") {
 		t.Errorf("permission flag missing from argv: %q", got)
 	}
 	// ...and the prompt must arrive on STDIN, never as an argv element.
@@ -537,6 +626,22 @@ func TestMcpCreateScheduleDefaultsToPromptKind(t *testing.T) {
 	}
 }
 
+// With no kind, cwd and no pane_id means the task kind the tool recommends,
+// instead of "pane_id is required for kind=prompt".
+func TestMcpCreateScheduleInfersTaskKindFromCwd(t *testing.T) {
+	work := t.TempDir()
+	s := newTestScheduleStore(t)
+	a := &apiServer{scheds: s}
+	if res := a.mcpToolCreateSchedule(map[string]any{
+		"cwd": work, "prompt": "audit deps", "cron": "0 9 * * 1",
+	}, ""); isToolErr(res) {
+		t.Fatalf("cwd without kind failed: %v", res)
+	}
+	if list := s.List(); len(list) != 1 || list[0].Kind != "task" || list[0].Cwd != work || list[0].Permission != "plan" {
+		t.Fatalf("expected a plan task in cwd, got %+v", list)
+	}
+}
+
 func TestMcpCreateScheduleTaskKind(t *testing.T) {
 	work := t.TempDir()
 	s := newTestScheduleStore(t)
@@ -568,6 +673,45 @@ func TestMcpCreateScheduleTaskKind(t *testing.T) {
 		"permission": "bypassPermissions",
 	}, ""); !isToolErr(res) {
 		t.Error("permission=bypassPermissions should be rejected via MCP")
+	}
+	// The command-running presets are the person's choice in the app, not an
+	// agent's: MCP keeps to the plan/edit pair its schema documents.
+	for _, preset := range []string{"check"} {
+		if res := a.mcpToolCreateSchedule(map[string]any{
+			"kind": "task", "prompt": "x", "cron": "0 9 * * *", "cwd": work, "permission": preset,
+		}, ""); !isToolErr(res) {
+			t.Errorf("permission=%s should be rejected via MCP", preset)
+		}
+	}
+}
+
+// ST-153 (interim, until Automations stage 2's approval flow): an agent can't
+// create a task that changes files unattended. Nothing is saved, and the
+// refusal points at the person's Automations list. A plan task still works.
+func TestMcpCreateScheduleRefusesAgentEditTasks(t *testing.T) {
+	work := t.TempDir()
+	s := newTestScheduleStore(t)
+	a := &apiServer{scheds: s}
+	res := a.mcpToolCreateSchedule(map[string]any{
+		"kind": "task", "prompt": "fix the lint", "cron": "0 3 * * *", "cwd": work, "permission": "edit",
+	}, "")
+	text, isErr := mcpResultText(t, res)
+	if !isErr || !strings.Contains(text, "agents can't create one") || !strings.Contains(text, "Automations") || !strings.Contains(text, work) {
+		t.Fatalf("edit task = %q (err=%v), want the refusal", text, isErr)
+	}
+	if n := len(s.List()); n != 0 {
+		t.Fatalf("schedules = %d, want none saved", n)
+	}
+	if res := a.mcpToolCreateSchedule(map[string]any{
+		"kind": "task", "prompt": "audit deps", "cron": "0 9 * * 1", "cwd": work, "permission": "plan",
+	}, ""); isToolErr(res) {
+		t.Fatalf("plan task refused: %v", res)
+	}
+	// The rule covers tasks only: a prompt schedule is not refused. (It is
+	// called from create_schedule alone; the person's HTTP create never
+	// reaches it.)
+	if refusal := agentScheduleCreateRefusal(ScheduleInput{Kind: "prompt", PaneID: "p1"}); refusal != "" {
+		t.Fatalf("a prompt schedule was refused: %q", refusal)
 	}
 }
 
@@ -685,24 +829,26 @@ func TestMcpCreateScheduleStampsCreatedBy(t *testing.T) {
 func TestMcpSetScheduleEnabled(t *testing.T) {
 	s := newTestScheduleStore(t)
 	a := &apiServer{scheds: s}
-	sched, err := s.Create(ScheduleInput{Cron: "0 9 * * *", PaneID: "p1", Prompt: "x"})
+	// The creating pane is the one that may pause and resume it.
+	sched, err := s.CreateWithOrigin(ScheduleInput{Cron: "0 9 * * *", PaneID: "p1", Prompt: "x"}, &ScheduleOrigin{Source: "mcp", PaneID: "maker"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res := a.mcpToolSetScheduleEnabled(map[string]any{"id": sched.ID, "enabled": false}); isToolErr(res) {
+	maker, meta := paneCaller{ID: "maker"}, mcpMetaFromCallerPane("maker")
+	if res := a.mcpToolSetScheduleEnabled(map[string]any{"id": sched.ID, "enabled": false}, maker, meta); isToolErr(res) {
 		t.Fatalf("pause failed: %v", res)
 	}
 	if got, _ := s.Get(sched.ID); got.Enabled {
 		t.Error("schedule still enabled after pause")
 	}
-	if res := a.mcpToolSetScheduleEnabled(map[string]any{"id": sched.ID, "enabled": true}); isToolErr(res) {
+	if res := a.mcpToolSetScheduleEnabled(map[string]any{"id": sched.ID, "enabled": true}, maker, meta); isToolErr(res) {
 		t.Fatalf("resume failed: %v", res)
 	}
 	if got, _ := s.Get(sched.ID); !got.Enabled {
 		t.Error("schedule still disabled after resume")
 	}
 	// Missing/!bool enabled is an error, not a silent false.
-	if res := a.mcpToolSetScheduleEnabled(map[string]any{"id": sched.ID}); !isToolErr(res) {
+	if res := a.mcpToolSetScheduleEnabled(map[string]any{"id": sched.ID}, maker, meta); !isToolErr(res) {
 		t.Error("missing enabled should error")
 	}
 }
@@ -985,7 +1131,7 @@ func TestRecordRunPushBodyPrefersSummary(t *testing.T) {
 	})
 	s.recordRun(failed.ID, ScheduleRun{
 		At: time.Now(), Status: "error",
-		Detail:  "plan · exit 1 in 3s",
+		Detail:  "stopped with exit code 1 after 3s",
 		Summary: "failed: error: build compilation failed",
 	})
 
@@ -1015,7 +1161,7 @@ func TestRecordRunPushBodyPrefersSummary(t *testing.T) {
 	if got["sched:"+noSummary.ID] != "plan · finished in 9s" {
 		t.Errorf("no-summary push body = %q, want the detail fallback", got["sched:"+noSummary.ID])
 	}
-	if want := "failed: error: build compilation failed (plan · exit 1 in 3s)"; got["sched:"+failed.ID] != want {
+	if want := "failed: error: build compilation failed (stopped with exit code 1 after 3s)"; got["sched:"+failed.ID] != want {
 		t.Errorf("failed-run push body = %q, want %q", got["sched:"+failed.ID], want)
 	}
 }
@@ -1163,5 +1309,44 @@ func TestTaskReportSeenIgnoresAReadMarkerMovedByALaterFailure(t *testing.T) {
 	unread := Schedule{Runs: []ScheduleRun{report}}
 	if taskReportSeen(unread, lastReportRun(unread.Runs)) {
 		t.Error("never opened: not seen")
+	}
+}
+
+// A "check" task reaches claude in dontAsk mode with its allow and deny lists.
+func TestTaskRunCheckPresetArgv(t *testing.T) {
+	bin := t.TempDir()
+	fake := filepath.Join(bin, "claude")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho \"args: $*\"\ncat >/dev/null\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	work := t.TempDir()
+	s := newTestScheduleStore(t)
+	enabled := false
+	sched, err := s.Create(ScheduleInput{
+		Kind: "task", Cron: "0 0 * * *", Prompt: "run the tests",
+		Cwd: work, Permission: "check", Enabled: &enabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.fireTask(sched.ID, work, "run the tests", "check", "", 0)
+	run := waitForRun(t, s, sched.ID)
+	if run.Status != "fired" {
+		t.Fatalf("status = %q (%s), want fired", run.Status, run.Detail)
+	}
+	data, err := os.ReadFile(filepath.Join(s.taskRunDir(sched.ID), run.LogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"-p --permission-mode dontAsk --allowedTools Bash(npm outdated),",
+		"Bash(npm test),",
+		"--disallowedTools Edit,Write,NotebookEdit,mcp__* --setting-sources  --output-format text",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("argv missing %q:\n%s", want, got)
+		}
 	}
 }

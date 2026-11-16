@@ -493,11 +493,8 @@ func TestNewEnrolmentIsAnnouncedOnce(t *testing.T) {
 	}
 	defer func() {
 		// A second new device inside the gap is not announced (it still waits
-		// in Settings), and under "any" nothing is announced at all.
+		// in Settings).
 		enrolKey("Other phone", newTestDevice(t).spki)
-		a.trustedDevices.record.Policy = remoteAccessAny
-		a.trustedDevices.announcedAt = time.Time{}
-		enrolKey("Third phone", newTestDevice(t).spki)
 		if len(events) != 0 {
 			t.Fatalf("unexpected announcement: %+v", <-events)
 		}
@@ -518,6 +515,69 @@ func TestNewEnrolmentIsAnnouncedOnce(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Type != "remote-device.pending" || got[0].Text != "Pixel 8a" {
 		t.Fatalf("events = %+v, want one remote-device.pending for Pixel 8a", got)
+	}
+}
+
+// ST-249: under "any" a new request is announced too, with the same gap and
+// only for a new key.
+func TestNewEnrolmentIsAnnouncedUnderAny(t *testing.T) {
+	a := trustedDevicesTestServer(t)
+	a.trustedDevices.record.Policy = remoteAccessAny
+	a.uiBus = newUIBus()
+	events := a.uiBus.subscribe()
+	enrol := func(name, spki string) {
+		body := `{"name":"` + name + `","publicKey":"` + spki + `","codeVersion":2}`
+		w := httptest.NewRecorder()
+		a.handleEnrollRemoteDevice(w, httptest.NewRequest("POST", remoteDevicesEnrollPath, strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("enrol: %d %s", w.Code, w.Body)
+		}
+	}
+	drain := func() (got []uiEvent) {
+		for len(events) > 0 {
+			got = append(got, <-events)
+		}
+		return got
+	}
+	phone := newTestDevice(t)
+	enrol("Pixel 8a", phone.spki)
+	enrol("Pixel 8a", phone.spki)               // asking again: not announced
+	enrol("Other phone", newTestDevice(t).spki) // inside the gap: not announced
+	if got := drain(); len(got) != 1 || got[0].Type != "remote-device.pending" || got[0].Text != "Pixel 8a" || got[0].Reason != remoteAccessAny || got[0].DeviceID != deviceID(phone.spki) {
+		t.Fatalf("events = %+v, want one remote-device.pending for Pixel 8a under any", got)
+	}
+	// After the gap, the next new key is announced.
+	a.trustedDevices.mu.Lock()
+	a.trustedDevices.announcedAt = time.Now().Add(-newRequestAnnounceGap - time.Second)
+	a.trustedDevices.mu.Unlock()
+	enrol("Third phone", newTestDevice(t).spki)
+	if got := drain(); len(got) != 1 || got[0].Text != "Third phone" {
+		t.Fatalf("events after the gap = %+v, want one for Third phone", got)
+	}
+}
+
+// @secure (ST-249): at most newRequestAnnouncePerHour announcements an hour,
+// on top of the gap; past the cap requests still wait, unannounced.
+func TestNewRequestAnnounceHourlyCap(t *testing.T) {
+	s := &trustedDevices{record: trustedDevicesRecord{Policy: remoteAccessAny}}
+	start := time.Now()
+	at := start
+	for i := 0; i < newRequestAnnouncePerHour; i++ {
+		if ok, policy := s.announceNewRequest(at); !ok || policy != remoteAccessAny {
+			t.Fatalf("announcement %d at +%s: ok=%v policy=%q", i+1, at.Sub(start), ok, policy)
+		}
+		at = at.Add(newRequestAnnounceGap)
+	}
+	if ok, _ := s.announceNewRequest(at); ok {
+		t.Fatalf("announcement %d within the hour was shown", newRequestAnnouncePerHour+1)
+	}
+	// Inside the gap is refused too, whatever the hour holds.
+	if ok, _ := s.announceNewRequest(at.Add(-newRequestAnnounceGap + time.Second)); ok {
+		t.Fatal("announcement inside the gap was shown")
+	}
+	// An hour after the first, its slot frees up.
+	if ok, _ := s.announceNewRequest(start.Add(time.Hour + time.Second)); !ok {
+		t.Fatal("announcement after the oldest one aged out was refused")
 	}
 }
 

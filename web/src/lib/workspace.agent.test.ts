@@ -3,7 +3,7 @@ import type { Layout, PaneInfo } from '../types';
 import { collectPaneDefs, optimisticPaneFromDef } from './workspace';
 
 describe('workspace agent identity round-trip', () => {
-  it('preserves Codex Focus thread and model metadata', () => {
+  it('preserves Codex thread and model metadata, and never saves a Focus kind', () => {
     const pane: PaneInfo = {
       id: 'codex-1', cwd: '/work', cmd: ['codex'], title: 'Codex', status: 'running',
       createdAt: new Date(0).toISOString(), cols: 100, rows: 30, pid: 1,
@@ -13,11 +13,13 @@ describe('workspace agent identity round-trip', () => {
     const layout: Layout = { type: 'pane', paneId: pane.id };
     const [def] = collectPaneDefs(layout, { [pane.id]: pane });
     expect(def).toMatchObject({
-      kind: 'native', agent: 'codex', codexThreadId: 'thread-1', model: 'gpt-5.3-codex',
+      agent: 'codex', codexThreadId: 'thread-1', model: 'gpt-5.3-codex',
     });
-    expect(optimisticPaneFromDef(def)).toMatchObject({
-      kind: 'native', agent: 'codex', codexThreadId: 'thread-1', model: 'gpt-5.3-codex',
+    expect(def).not.toHaveProperty('kind');
+    expect(optimisticPaneFromDef({ ...def, kind: 'native' })).toMatchObject({
+      agent: 'codex', codexThreadId: 'thread-1', model: 'gpt-5.3-codex',
     });
+    expect(optimisticPaneFromDef({ ...def, kind: 'native' }).kind).toBeUndefined();
   });
 
   it('preserves the orchestrator role through def and optimistic seed', () => {

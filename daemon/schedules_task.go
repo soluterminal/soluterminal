@@ -22,7 +22,9 @@ package main
 //   • a global concurrency cap so N schedules firing at once can't fork-bomb;
 //   • a hard timeout (default 30m, ceiling 4h) with a killed child tree;
 //   • dry-run-first defaults: "plan" (read + plan, no writes) unless the user
-//     explicitly opts up to "edit". bypassPermissions is NOT offered at all.
+//     explicitly opts up: "check" (also the project's tests and dependency
+//     reports) or "edit". bypassPermissions
+//     is NOT offered at all.
 
 import (
 	"fmt"
@@ -55,6 +57,109 @@ var taskPermissionModes = map[string]string{
 func validTaskPermission(p string) bool {
 	_, ok := taskPermissionModes[p]
 	return ok
+}
+
+// scheduleTaskPreset is one task-schedule permission preset: Claude's
+// --permission-mode plus daemon-owned --allowedTools / --disallowedTools
+// lists. Like the mode, the lists never cross the API boundary; a client
+// names the preset.
+type scheduleTaskPreset struct {
+	mode  string
+	allow []string
+	deny  []string
+	// noSettings: load no user/project/local settings files, so their allow
+	// rules can't widen the allow list (see the comment above the lists).
+	noSettings bool
+}
+
+// Headless plan mode runs file reads and Claude Code's built-in read-only
+// shell commands (ls, cat, grep, read-only git…) and denies everything else,
+// because nobody is there to approve it. So a "plan" task can't run `gh` or
+// a test suite. The check preset runs in dontAsk mode — never prompts,
+// denies whatever isn't pre-approved — and pre-approves exactly the commands
+// its job needs, while Claude's own file-writing tools stay denied.
+//
+// The lists are a ceiling only if nothing else can approve a call, so these
+// runs load no Claude settings files (--setting-sources ""): an allow rule
+// such as Bash(*) in the user's or the repository's settings would otherwise
+// count in dontAsk mode too. Managed settings and the run's own --settings
+// (the usage-limit markers) still apply.
+var (
+	// taskNoWriteTools are denied outright in the middle presets: Claude's
+	// file-writing tools, and every MCP tool.
+	taskNoWriteTools = []string{"Edit", "Write", "NotebookEdit", "mcp__*"}
+
+	// taskDependencyCommands report outdated and vulnerable dependencies.
+	// They write nothing, but a package manager obeys the repository's own
+	// config, which can name a program to launch (.yarnrc yarn-path, a
+	// .pnpmfile, a cargo credential-provider, npm's git setting). So they
+	// belong with the tests, in the preset that already trusts the project's
+	// code. Matched exactly: their other forms write (npm audit fix, pnpm
+	// audit --fix, pip-audit --fix) or run a program (go list -toolexec).
+	taskDependencyCommands = []string{
+		"Bash(npm outdated)", "Bash(npm outdated --json)", "Bash(npm audit)", "Bash(npm audit --json)",
+		"Bash(pnpm outdated)", "Bash(pnpm outdated --json)", "Bash(pnpm audit)", "Bash(pnpm audit --json)",
+		"Bash(yarn outdated)", "Bash(yarn outdated --json)", "Bash(yarn audit)", "Bash(yarn audit --json)",
+		"Bash(pip list --outdated)", "Bash(pip3 list --outdated)", "Bash(pip-audit)",
+		"Bash(go list -m -u all)", "Bash(go list -m -u -json all)", "Bash(govulncheck ./...)",
+		"Bash(cargo outdated)", "Bash(cargo audit)",
+	}
+
+	// taskTestCommands run the project's own test suite, which executes the
+	// project's code. Matched exactly, with no arguments: a runner's flags
+	// can name a program to run (go test -exec, make SHELL=…, cargo test
+	// --config target.*.runner=…, pytest -p, npm test -- …), and a prefix
+	// rule would turn the preset into an unattended shell.
+	taskTestCommands = []string{
+		"Bash(npm test)", "Bash(npm run test)", "Bash(pnpm test)", "Bash(pnpm run test)",
+		"Bash(yarn test)", "Bash(yarn run test)", "Bash(bun test)", "Bash(deno test)",
+		"Bash(go test ./...)", "Bash(cargo test)",
+		"Bash(pytest)", "Bash(python -m pytest)", "Bash(python3 -m pytest)",
+		"Bash(make test)", "Bash(make check)",
+		"Bash(dotnet test)", "Bash(mvn test)", "Bash(gradle test)", "Bash(./gradlew test)",
+		"Bash(mix test)", "Bash(bundle exec rspec)", "Bash(rspec)",
+	}
+
+	scheduleTaskPresets = map[string]scheduleTaskPreset{
+		"plan": {mode: "plan"},
+		// check has no gh: gh issue/pr view and pr diff read text from
+		// outside authors, which must not steer a run that executes the
+		// project's code.
+		"check": {mode: "dontAsk", allow: concatStrings(taskDependencyCommands, taskTestCommands),
+			deny: taskNoWriteTools, noSettings: true},
+		"edit": {mode: "acceptEdits"},
+	}
+)
+
+func concatStrings(lists ...[]string) []string {
+	var out []string
+	for _, l := range lists {
+		out = append(out, l...)
+	}
+	return out
+}
+
+// validScheduleTaskPermission is the task-schedule preset check. It is wider
+// than validTaskPermission (plan/edit), which other headless runners share.
+func validScheduleTaskPermission(p string) bool {
+	_, ok := scheduleTaskPresets[p]
+	return ok
+}
+
+// scheduleTaskPermissionArgs is the argv a preset adds to `claude -p`.
+func scheduleTaskPermissionArgs(permission string) []string {
+	p := scheduleTaskPresets[permission]
+	args := []string{"--permission-mode", p.mode}
+	if len(p.allow) > 0 {
+		args = append(args, "--allowedTools", strings.Join(p.allow, ","))
+	}
+	if len(p.deny) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(p.deny, ","))
+	}
+	if p.noSettings {
+		args = append(args, "--setting-sources", "")
+	}
+	return args
 }
 
 // taskRunDir is where a task schedule's per-run logs live:
@@ -174,7 +279,7 @@ func (s *ScheduleStore) fireTaskGated(schedID, cwd, prompt, permission, model st
 			}
 		}
 	}
-	if !validTaskPermission(permission) {
+	if !validScheduleTaskPermission(permission) {
 		run.Status = "error"
 		run.Detail = "unknown permission preset: " + permission
 		s.recordRun(schedID, run)
@@ -322,11 +427,8 @@ func (s *ScheduleStore) runTaskAttempt(schedID, bin, cwd, prompt, permission, mo
 	// dash: a task whose prompt starts with "--" (or "-n", …) dies with
 	// "error: unknown option". Verified against the installed claude CLI.
 	// Stdin sidesteps argv parsing entirely and is the canonical headless form.
-	args := []string{
-		"-p",
-		"--permission-mode", taskPermissionModes[permission],
-		"--output-format", "text",
-	}
+	args := append([]string{"-p"}, scheduleTaskPermissionArgs(permission)...)
+	args = append(args, "--output-format", "text")
 	if model != "" {
 		args = append(args, "--model", model)
 	}
@@ -399,7 +501,7 @@ func (s *ScheduleStore) runTaskAttempt(schedID, bin, cwd, prompt, permission, mo
 		if ee, ok := werr.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		}
-		run.Detail = fmt.Sprintf("%s · exit %d in %s", permission, code, dur)
+		run.Detail = fmt.Sprintf("stopped with exit code %d after %s", code, dur)
 		if line := lastErrorLine(out.buf); line != "" {
 			run.Summary = "failed: " + line
 		} else {

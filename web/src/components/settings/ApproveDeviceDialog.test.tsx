@@ -28,6 +28,13 @@ function open(device: RemoteDevice, opts: { recovery?: boolean; reload?: () => P
 }
 
 describe('ApproveDeviceDialog', () => {
+  // @secure (ST-249): Approve is never the default; Cancel has focus.
+  it('opens with Cancel focused, never Approve', () => {
+    open(v3);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
+    expect(document.activeElement).not.toBe(screen.getByRole('button', { name: CODES_MATCH_APPROVE }));
+  });
+
   it('says what the approval grants next to the V3 code', () => {
     const { view } = open(v3);
     expect(screen.getByTestId('approve-device-scope')).toHaveTextContent('Full access');
@@ -62,7 +69,8 @@ describe('ApproveDeviceDialog', () => {
     open(v3);
     const button = screen.getByRole('button', { name: CODES_MATCH_APPROVE });
     expect(document.activeElement).not.toBe(button);
-    expect(document.activeElement).toBe(screen.getByRole('dialog'));
+    // @secure (ST-249): the default is Cancel.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Enter' });
     act(() => button.focus());
     // A browser turns Enter on a focused button into a click unless the

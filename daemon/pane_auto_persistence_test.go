@@ -21,7 +21,6 @@ func autoSettingsServer(t *testing.T, a *apiServer) *httptest.Server {
 	mux.HandleFunc("POST /api/panes/{id}/never-auto-answer", a.setPaneNeverAutoAnswer)
 	mux.HandleFunc("POST /api/panes/{id}/restart", a.handleRestartPane)
 	mux.HandleFunc("POST /api/panes/{id}/resume", a.handleResumePane)
-	mux.HandleFunc("POST /api/panes/{id}/refresh", a.handleRefresh)
 	mux.HandleFunc("POST /api/panes/closed/{id}/reopen", a.reopenClosedPane)
 	mux.HandleFunc("POST /api/panes/{id}/migrate-clean", a.migratePaneClean)
 	mux.HandleFunc("POST /api/panes", a.createPane)
@@ -63,11 +62,10 @@ func assertAutoSettings(t *testing.T, p *Pane, locked bool) {
 // Process hooks isolate provider/network requirements while exercising each
 // real recipe, replacement handler, settings API and durable store.
 func TestAutoOffAcrossLifecyclePaths(t *testing.T) {
-	for _, path := range []string{"restart", "restart-fresh", "resume", "refresh", "migrate-inplace", "migrate-sibling", "workspace-restore", "reopen-agent", "reopen-shell"} {
+	for _, path := range []string{"restart", "restart-fresh", "resume", "migrate-inplace", "migrate-sibling", "workspace-restore", "reopen-agent", "reopen-shell"} {
 		for _, locked := range []bool{false, true} {
 			t.Run(path+map[bool]string{false: "/off", true: "/locked"}[locked], func(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
-				t.Setenv("SOLU_NATIVE_RENDERER", "1")
 				p := switchTestPane("policy-pane", "", []string{"claude"}, "session-policy")
 				p.ClaudeTranscriptPath = writeTempTranscript(t)
 				if path == "reopen-shell" {
@@ -76,9 +74,6 @@ func TestAutoOffAcrossLifecyclePaths(t *testing.T) {
 				}
 				if path == "migrate-inplace" {
 					close(p.done)
-				}
-				if path == "refresh" {
-					p.Kind = "native"
 				}
 				if path == "resume" {
 					p.Status = PaneExited
@@ -297,21 +292,6 @@ func TestNeverAutoAnswerRequiresHumanEvenWithDelegation(t *testing.T) {
 	}
 }
 
-func TestNeverAutoAnswerBlocksNativeAllowlistAndAria(t *testing.T) {
-	p := newTestNativePane()
-	p.setNativeAllowlist([]string{"Bash"})
-	p.setAutomaticAnswerSettings("", true)
-	if how, _ := p.allowlistAutoAllows("Bash", json.RawMessage(`{"command":"git status"}`)); how != "" {
-		t.Fatal("locked allowlist opted in")
-	}
-	if _, err := p.resolveAutomaticApproval("request"); !errors.Is(err, errAutoModePolicyChanged) {
-		t.Fatalf("native auto resolve: %v", err)
-	}
-	if p.maybeAutoAllowFromList("request", "Bash", "tool") {
-		t.Fatal("allowlist resolved")
-	}
-}
-
 func TestAutoSettingsPersistenceFailureRollsBack(t *testing.T) {
 	p := switchTestPane("failed-lock", "", []string{"bash"}, "")
 	p.SetAutoMode("always")
@@ -368,43 +348,6 @@ func TestAutoOffCannotSucceedOnPaneBeingRestarted(t *testing.T) {
 	assertAutoSettings(t, np, false)
 }
 
-func TestNeverAutoAnswerRevokesQueuedNativeWriteButAllowsHuman(t *testing.T) {
-	p, agentEnd := nativePaneForApproval(t, "locked-native-write")
-	p.processNativeLine([]byte(`{"type":"control_request","request_id":"req-lock","request":{"subtype":"can_use_tool","tool_name":"Read","tool_use_id":"tool-lock","input":{"file_path":"/tmp/example"}}}`), false, false)
-	p.agentWriteMu.Lock()
-	done := make(chan error, 1)
-	go func() { _, err := p.resolveAutomaticApproval("req-lock"); done <- err }()
-	deadline := time.Now().Add(time.Second)
-	for p.peekNativePending("req-lock") != nil && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	// The resolver has taken the request and is queued at the transport lock.
-	queued := p.peekNativePending("req-lock") == nil
-	p.setAutomaticAnswerSettings("", true)
-	p.agentWriteMu.Unlock()
-	if !queued {
-		t.Fatal("automatic resolver did not queue")
-	}
-	if err := <-done; !errors.Is(err, errAutoModePolicyChanged) {
-		t.Fatalf("automatic write was not revoked: %v", err)
-	}
-	if p.peekNativePending("req-lock") == nil {
-		t.Fatal("revoked approval was lost")
-	}
-	frames := make(chan error, 1)
-	go func() {
-		_ = agentEnd.SetReadDeadline(time.Now().Add(time.Second))
-		_, _, err := ReadFrame(agentEnd)
-		frames <- err
-	}()
-	if _, err := p.resolveApproval("req-lock", true, ""); err != nil {
-		t.Fatalf("human approval refused: %v", err)
-	}
-	if err := <-frames; err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestNeverAutoAnswerReopenNeverEnablesAutoMode(t *testing.T) {
 	for _, session := range []string{"", "closed-session"} {
 		opts := reopenSpawnOpts(closedPaneEntry{Snap: PaneSnapshot{Cmd: []string{"bash"}, ClaudeSessionID: session, AutoMode: "always", NeverAutoAnswer: true}}, 0, 0)
@@ -422,26 +365,5 @@ func TestNeverAutoAnswerAlreadyUnlockedIsNoOp(t *testing.T) {
 	autoSettingsPost(t, s, "/api/panes/"+p.ID+"/never-auto-answer", `{"neverAutoAnswer":false}`, 200)
 	if p.Snapshot().AutoMode != "always" {
 		t.Fatal("already-clear lock changed the mode")
-	}
-}
-
-func TestAutoOffRevokesNativeDecisionContext(t *testing.T) {
-	p, agentEnd := nativePaneForApproval(t, "native-old-decision")
-	p.SetAutoMode("always")
-	p.processNativeLine([]byte(nativeCanUseToolLine("old-decision", "old-tool", "Read", `{"file_path":"/tmp/example"}`)), false, false)
-	a := testNativeAutoAria(t, p)
-	ctx, _ := withAriaAutoModePolicy(context.Background(), p)
-	p.SetAutoMode("")
-	a.directAutoFireNative(ctx, p.ID, p.Title)
-	got := a.toolResolvePermission(ctx, "old", p.ID, "old-decision", false, func(map[string]any) {})
-	if !strings.Contains(got, "policy changed") {
-		t.Fatalf("old native decision: %s", got)
-	}
-	if p.peekNativePending("old-decision") == nil {
-		t.Fatal("old decision resolved the pending request")
-	}
-	_ = agentEnd.SetReadDeadline(time.Now().Add(30 * time.Millisecond))
-	if _, _, err := ReadFrame(agentEnd); err == nil {
-		t.Fatal("revoked native decision wrote a frame")
 	}
 }

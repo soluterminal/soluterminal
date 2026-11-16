@@ -86,8 +86,8 @@ const COOLDOWN_MS = 10_000;
 const SPOKEN_FALLBACK: Record<VoiceEvent, string> = {
   approval: 'approval needed',
   'reply-ready': 'reply ready',
-  'schedule-soon': 'schedule soon',
-  'schedule-fired': 'schedule fired',
+  'schedule-soon': 'automation runs soon',
+  'schedule-fired': 'automation ran',
   'update-available': 'update available',
 };
 

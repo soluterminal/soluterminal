@@ -3,13 +3,27 @@ import {
   authEmailRedirect,
   DESKTOP_AUTH_REDIRECT,
   isRelayedSession,
+  machineIdFromLocation,
   machineIdFromPath,
   useCloud,
+  webSignInProviders,
   type CloudMachine,
 } from './cloud';
 
 const initialCloudState = useCloud.getInitialState();
 const selectedMachineStorageKey = 'solu.selectedMachineId';
+
+describe('webSignInProviders', () => {
+  it('uses the website list on the cloud, not the phone list', () => {
+    expect(webSignInProviders({ authProviders: ['google', 'apple'], webAuthProviders: [] })).toEqual([]);
+    expect(webSignInProviders({ authProviders: ['google', 'apple'], webAuthProviders: ['google'] })).toEqual(['google']);
+  });
+
+  it('falls back to authProviders on a local daemon, which sends no website list', () => {
+    expect(webSignInProviders({ authProviders: ['google'] })).toEqual(['google']);
+    expect(webSignInProviders({})).toEqual([]);
+  });
+});
 
 describe('machineIdFromPath', () => {
   it('parses machine deep-link paths', () => {
@@ -21,6 +35,16 @@ describe('machineIdFromPath', () => {
     expect(machineIdFromPath('/')).toBeNull();
     expect(machineIdFromPath('/machines/machine-123')).toBeNull();
     expect(machineIdFromPath('/m/%E0%A4%A')).toBeNull();
+  });
+});
+
+describe('machineIdFromLocation', () => {
+  it('prefers ?machine= (a push tap, ST-117) and falls back to the path', () => {
+    expect(machineIdFromLocation('/', '?machine=m%201&pane=p1')).toBe('m 1');
+    expect(machineIdFromLocation('/m/path-id/', '?machine=query-id')).toBe('query-id');
+    expect(machineIdFromLocation('/m/path-id/', '?pane=p1')).toBe('path-id');
+    expect(machineIdFromLocation('/', '?machine=')).toBeNull();
+    expect(machineIdFromLocation('/', '')).toBeNull();
   });
 });
 
@@ -64,6 +88,50 @@ describe('cloud machine deep links', () => {
     expect(useCloud.getState().selectedMachineId).toBe('target');
     expect(window.location.pathname).toBe('/m/target/');
     expect(window.location.search).toBe('?pane=pane-1');
+  });
+
+  it('selects the machine a push tap names in ?machine=, then drops it from the URL', async () => {
+    const machines: CloudMachine[] = [
+      { id: 'remembered', name: 'Remembered', online: true, backends: ['host'] },
+      { id: 'target', name: 'Target', online: true, backends: ['host'] },
+    ];
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, json: async () => machines } as Response);
+    localStorage.setItem(selectedMachineStorageKey, 'remembered');
+    window.history.replaceState({}, '', '/?machine=target&pane=pane-1');
+    useCloud.setState({ session: { access_token: 'token' } as any, selectedMachineId: null, machines: [] });
+
+    await useCloud.getState().refreshMachines();
+
+    expect(useCloud.getState().selectedMachineId).toBe('target');
+    expect(window.location.pathname).toBe('/');
+    expect(window.location.search).toBe('?pane=pane-1');
+
+    // Picking another computer afterwards is not pulled back by a refresh.
+    useCloud.getState().selectMachine('remembered');
+    await useCloud.getState().refreshMachines();
+    expect(useCloud.getState().selectedMachineId).toBe('remembered');
+  });
+
+  it('drops a ?machine= it cannot select, so it does not take over later', async () => {
+    let online = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
+      ok: true,
+      json: async () => [
+        { id: 'remembered', name: 'Remembered', online: true, backends: ['host'] },
+        { id: 'target', name: 'Target', online, backends: online ? ['host'] : [] },
+      ],
+    }) as Response);
+    localStorage.setItem(selectedMachineStorageKey, 'remembered');
+    window.history.replaceState({}, '', '/?machine=target');
+    useCloud.setState({ session: { access_token: 'token' } as any, selectedMachineId: null, machines: [] });
+
+    await useCloud.getState().refreshMachines();
+    expect(useCloud.getState().selectedMachineId).toBe('remembered');
+    expect(window.location.search).toBe('');
+
+    online = true;
+    await useCloud.getState().refreshMachines();
+    expect(useCloud.getState().selectedMachineId).toBe('remembered');
   });
 
   it('restores the last selected online machine during a normal PWA launch', async () => {

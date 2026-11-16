@@ -1,0 +1,67 @@
+.ad-shell {
+  min-height: 100%;
+  display: flex;
+  justify-content: center;
+  padding: 48px 16px;
+  box-sizing: border-box;
+  background: var(--bg, #0a0b0a);
+  color: var(--fg, #e8e8e6);
+  font: 15px/1.55 system-ui, sans-serif;
+  overflow-y: auto;
+}
+.ad-card {
+  width: 100%;
+  max-width: 560px;
+}
+.ad-card h1 {
+  font-size: 22px;
+  margin: 0 0 16px;
+}
+.ad-card a {
+  color: inherit;
+}
+.ad-muted {
+  opacity: 0.7;
+}
+.ad-note {
+  border-left: 3px solid currentColor;
+  padding-left: 12px;
+}
+.ad-foot {
+  margin-top: 32px;
+  font-size: 13px;
+}
+.ad-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+.ad-input {
+  font: inherit;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #555;
+  background: transparent;
+  color: inherit;
+  max-width: 240px;
+}
+.ad-button {
+  font: inherit;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #555;
+  background: #222;
+  color: inherit;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.ad-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ad-danger {
+  background: #8b1d1d;
+  border-color: #b33;
+  color: #fff;
+}

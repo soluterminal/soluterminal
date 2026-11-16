@@ -235,29 +235,6 @@ func TestHarnessInstallerSuppressesCoreDumps(t *testing.T) {
 	requireLimitUnchanged(t, before)
 }
 
-// TestMuseTurnSuppressesCoreDumps proves the native pane's per-turn `muse exec`
-// child is guarded; the fake muse reports its limits on stderr, which lands in
-// the bounded turn_exit tail.
-func TestMuseTurnSuppressesCoreDumps(t *testing.T) {
-	before := coreDumpGuardPreconditions(t)
-	binDir := t.TempDir()
-	fake := filepath.Join(binDir, "muse")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\n("+coreTreeReportScript+") >&2\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	code, interrupted, tail := runMuseTurn(fake, "sid", "", "", "", "prompt", make(chan struct{}))
-	if code != 0 || interrupted {
-		t.Fatalf("runMuseTurn code=%d interrupted=%v tail=%q", code, interrupted, tail)
-	}
-	requireGuardedTree(t, tail, before)
-	soft, hard := coreLimitLine(t, tail)
-	if soft != "1" || hard != procLimitValue(before.Max) {
-		t.Fatalf("muse turn limits soft=%q hard=%q, want soft=1 hard=%q", soft, hard, procLimitValue(before.Max))
-	}
-	requireLimitUnchanged(t, before)
-}
-
 // TestScheduleTaskSpawnSuppressesCoreDumps mirrors the guarded agent-schedule
 // seam for the task spawner: a fake claude reports its limits and the recorded
 // run log must show soft=1.

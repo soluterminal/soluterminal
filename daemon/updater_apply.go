@@ -82,10 +82,14 @@ func valueOrUnknown(s string) string {
 // to a typed 409 so clients can defer and retry without guessing from prose;
 // every other Apply error stays a plain 500.
 const (
-	updateBusyCauseFocus         = "focus"
 	updateBusyCauseCollaboration = "collaboration"
 	updateBusyCauseWorkflow      = "workflow"
 	updateBusyCauseRestart       = "restart"
+	// updateBusyCauseMessagingPaused: the person paused agent messaging and
+	// messages wait on panes in memory. A swap would drop them, so an
+	// unattended update waits, without the collaboration grace, until the
+	// person resumes or discards them (agent_messaging_pause.go).
+	updateBusyCauseMessagingPaused = "agent-messaging-paused"
 )
 
 type updateBusyError struct {

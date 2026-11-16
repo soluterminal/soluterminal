@@ -8,7 +8,7 @@ import type { SettingsCategory } from '../../settingsRegistry';
  */
 const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
   appearance: [
-    'App theme', 'Color theme', 'Font size', 'Line height', 'Focus text offset', 'Sidebar text size',
+    'App theme', 'Color theme', 'Font size', 'Line height', 'Sidebar text size',
   ],
   workspace: [
     'Pane layout', 'Arrange', 'Cols', 'Rows', 'Grid', 'Left+stack', 'Copy on select',
@@ -16,9 +16,7 @@ const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
     'Detached sessions', 'Credentials', 'Automations', 'Agents', 'MCP servers', 'Reset to default',
   ],
   sessions: [
-    'New Claude sessions', 'After a restart', 'Suggest next prompt (Focus)',
-    'Show prompt history strip', 'Focus vitals', 'Model', 'Context %', 'Tokens', 'Cost',
-    'Cache', 'Resets', 'Working dir',
+    'After a restart', 'Show prompt history strip',
   ],
   workflows: [
     'Local OpenAI-compatible',

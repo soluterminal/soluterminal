@@ -228,11 +228,14 @@ type bootEnv struct {
 	backendID string
 	version   string
 	bootTeam  bool
-	api       *apiServer
-	mgr       *Manager
-	scheds    *ScheduleStore
-	bus       *uiBus
-	updater   *Updater
+	// role says whether this is the primary daemon (daemon_role.go). Steps
+	// that act on the shared credential stores run only when role.Primary.
+	role    daemonRole
+	api     *apiServer
+	mgr     *Manager
+	scheds  *ScheduleStore
+	bus     *uiBus
+	updater *Updater
 	// server is the daemon's HTTP server (nil before bootLoops). A step may
 	// serve its handler on a listener of its own; it must not change it.
 	server *http.Server
@@ -333,7 +336,8 @@ func registerHealthHook(fn func(a *apiServer, body map[string]any)) {
 }
 
 // gitStatusNoteHooks append a feature's note to the git_status MCP tool's
-// answer for a repository path ("" adds nothing).
+// answer for a repository path ("" adds nothing), and give a pane agent the
+// same note as list_panes' release_note on its own row.
 var gitStatusNoteHooks []func(a *apiServer, path string) string
 
 func registerGitStatusNote(fn func(a *apiServer, path string) string) {

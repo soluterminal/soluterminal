@@ -65,6 +65,24 @@ type relaySupervisor struct {
 	// (used by rotation's signalTokenChanged). Buffered + coalesced.
 	signal chan struct{}
 
+	// policyCh asks for a redial after a person changed this computer's
+	// remote-access policy, so the new handshake carries it: the cloud trusts
+	// a policy only from the tunnel's own handshake (device_policy_report.go).
+	// Buffered + coalesced; lastPolicyRedial spaces redials at least
+	// relayPolicyRedialMin apart so a flapping setting can't hammer the relay.
+	policyCh         chan struct{}
+	lastPolicyRedial time.Time
+	policyRedialMin  time.Duration // relayPolicyRedialMin; tests shorten it
+	// policyRedialDelay is the short wait before any policy redial, so the
+	// request that changed the policy gets its answer first and a quick
+	// series of changes needs one redial (relayPolicyRedialDelay).
+	policyRedialDelay time.Duration
+	// policyChangedAt and lastDialAt let a scheduled redial be skipped when
+	// the tunnel was already dialed after the change (its handshake carries
+	// the new policy). Only the run loop touches them.
+	policyChangedAt time.Time
+	lastDialAt      time.Time
+
 	// onCreds fires (on the supervisor goroutine) whenever a NEW usable token
 	// is first observed — at boot if claim.json already exists, or the instant
 	// a post-boot pairing writes it. main.go uses it to wire the HTTPS-side
@@ -139,16 +157,19 @@ const (
 func newRelaySupervisor(ctx context.Context, dataDir, relayURL, backendID string, handler http.Handler) *relaySupervisor {
 	requireNormalBootEngine("relay_supervisor.newRelaySupervisor")
 	s := &relaySupervisor{
-		ctx:          ctx,
-		dataDir:      dataDir,
-		relayURL:     relayURL,
-		backendID:    backendID,
-		handler:      handler,
-		dial:         serveRelayClassified,
-		pollInterval: 5 * time.Second,
-		redialDelay:  relayRedialDelay,
-		signal:       make(chan struct{}, 1),
-		rehomeCh:     make(chan string, 1),
+		ctx:               ctx,
+		dataDir:           dataDir,
+		relayURL:          relayURL,
+		backendID:         backendID,
+		handler:           handler,
+		dial:              serveRelayClassified,
+		pollInterval:      5 * time.Second,
+		redialDelay:       relayRedialDelay,
+		signal:            make(chan struct{}, 1),
+		policyCh:          make(chan struct{}, 1),
+		policyRedialMin:   relayPolicyRedialMin,
+		policyRedialDelay: relayPolicyRedialDelay,
+		rehomeCh:          make(chan string, 1),
 	}
 	if base := httpsBaseFromRelayURL(relayURL); base != "" {
 		s.healthURL = base + "/api/health"
@@ -204,6 +225,26 @@ func (s *relaySupervisor) signalTokenChanged() {
 	select {
 	case s.signal <- struct{}{}:
 	default: // already pending — coalesce
+	}
+}
+
+// relayPolicyRedialMin is the least time between two policy-change redials;
+// relayPolicyRedialDelay is the wait before one.
+const (
+	relayPolicyRedialMin   = 10 * time.Second
+	relayPolicyRedialDelay = time.Second
+)
+
+// policyChanged asks for a redial so the cloud sees a new remote-access
+// policy. Called only on a real change (trustedDevices.setPolicy runs its hook
+// only when the value differs). Coalesced; never blocks.
+func (s *relaySupervisor) policyChanged() {
+	if s == nil {
+		return
+	}
+	select {
+	case s.policyCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -324,12 +365,30 @@ func (s *relaySupervisor) run() {
 		done := make(chan error, 1)
 		tunnelDone = done
 		tok := current
+		s.lastDialAt = time.Now()
 		go func() {
 			done <- s.dial(dctx, s.relayURL, tok, s.backendID, s.handler, s.markOnline)
 		}()
 	}
 
 	reconcile()
+
+	// policyRedial reconnects so the new handshake carries a changed
+	// remote-access policy; policyDue is a pending, spaced redial.
+	var policyDue <-chan time.Time
+	policyRedial := func() {
+		s.lastPolicyRedial = time.Now()
+		log.Printf("relay: remote-access policy changed; reconnecting so the cloud sees it")
+		s.teardown(&dialCancel, &tunnelDone)
+		s.setState(func(st *cloudStatus) {
+			if st.RelayState == relayStateOnline || st.RelayState == relayStateConnecting {
+				st.RelayState = relayStateOffline
+			}
+			s.onlineSince = time.Time{}
+		})
+		current = "" // a fresh dial, whose handshake reads the policy now
+		reconcile()
+	}
 
 	go s.watchCloudInstance()
 
@@ -389,6 +448,29 @@ func (s *relaySupervisor) run() {
 			// full poll interval.
 			current = "" // ensure reconcile treats this as a fresh dial
 			reconcile()
+
+		case <-s.policyCh:
+			s.policyChangedAt = time.Now()
+			if tunnelDone == nil || policyDue != nil {
+				// Not connected: the next dial carries the new policy. Or a
+				// redial is already scheduled: it reads the policy when it
+				// dials, so this change folds into it.
+				continue
+			}
+			// Never at once: the request that changed the policy gets its
+			// answer first, and further changes fold in. On a timer this loop
+			// selects on, so drops, re-homes and Disconnect are still handled
+			// meanwhile; spaced at least policyRedialMin apart.
+			wait := max(s.policyRedialDelay, s.policyRedialMin-time.Since(s.lastPolicyRedial))
+			policyDue = time.After(wait)
+
+		case <-policyDue:
+			policyDue = nil
+			// Skip when there is no tunnel, or it was dialed after the change:
+			// that handshake already carried the new policy.
+			if tunnelDone != nil && s.lastDialAt.Before(s.policyChangedAt) {
+				policyRedial()
+			}
 
 		case from := <-s.rehomeCh:
 			// New cloud traffic now lands on a different instance than the

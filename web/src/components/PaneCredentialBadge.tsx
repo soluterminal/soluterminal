@@ -17,7 +17,7 @@ import { sectionOffered } from './sidebar/sidebarSections';
 // Launch metadata cannot prove a CLI's current billing identity: "still on X"
 // means the session was started on X and nothing has confirmed a switch since.
 
-type PaneAccountPane = Pick<PaneInfo, 'credential' | 'codexAuth'> & Partial<Pick<PaneInfo, 'id' | 'terminalAddressLost'>>;
+type PaneAccountPane = Pick<PaneInfo, 'credential' | 'codexAuth'> & Partial<Pick<PaneInfo, 'id' | 'terminalAddressLost' | 'addressLost'>>;
 
 export type PaneAccountAction = 'reconnect' | 'cancel' | 'restart' | 'restart-terminal' | 'credentials';
 
@@ -61,6 +61,13 @@ export function paneAccountStatus(pane: PaneAccountPane, name: (account?: string
     return { tone: 'warn', label: 'connection lost', title: 'This session lost its team connection after the Backend setting was changed. Restart it to continue.', detail: {
       heading: 'Team connection lost',
       body: 'This session lost its team connection after the Backend setting was changed. Restart it to continue; the conversation is kept.',
+      action: restart,
+    } };
+  }
+  if (pane.addressLost) {
+    return { tone: 'warn', label: 'needs restart', title: 'This session lost its connection to SoluTerminal after the Backend setting was changed. Restart it to continue.', detail: {
+      heading: 'This session needs a restart',
+      body: 'After the Backend setting was changed, this session can no longer reach SoluTerminal, so its pane tools and status updates stop working. Restart it to continue; the conversation is kept.',
       action: restart,
     } };
   }

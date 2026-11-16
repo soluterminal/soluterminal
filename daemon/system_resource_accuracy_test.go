@@ -13,22 +13,17 @@ func TestSystemMemoryAccountingAndEffectiveCapacity(t *testing.T) {
 	s := systemSample{SampledAt: now, DaemonRssMB: floatPtr(2100), GoHeapMB: floatPtr(1500), GoRuntimeMB: floatPtr(4600), GuardUsedMB: floatPtr(4600), MemGuardMB: 6144, EngineWarn: true, EngineRollback: true, EngineRollbackCap: 1, EngineEffectiveCap: 4, EngineFloorCap: 4, EngineRollbackReason: "persistent pressure"}
 	_, state := systemLevels(s, now, levelState{})
 	levels, _ := systemLevels(s, now, state)
-	var memory, engine string
+	var memory string
 	for _, r := range levels.Reasons {
 		if r.Key == "daemonMemory" {
 			memory = r.Text
 		}
 		if r.Key == "engine" {
-			engine = r.Text
+			t.Fatalf("the retired engine is in the verdict's reasons: %+v", levels.Reasons)
 		}
 	}
 	if !strings.Contains(memory, "guard accounting") || strings.Contains(memory, "RSS") {
 		t.Fatalf("mislabelled accounting: %s", memory)
-	}
-	for _, want := range []string{"advisory cap rollback to 1", "effective cap 4", "configured minimum 4"} {
-		if !strings.Contains(engine, want) {
-			t.Fatalf("missing %q in %s", want, engine)
-		}
 	}
 	a := &apiServer{system: seededSystemSampler(s), startT: now, dataDir: t.TempDir()}
 	rec := httptest.NewRecorder()

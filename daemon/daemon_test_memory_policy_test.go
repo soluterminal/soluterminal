@@ -155,14 +155,3 @@ func requireParallelTests(t *testing.T, file string, names ...string) {
 		}
 	}
 }
-
-func TestNativeTranscriptParallelizesHermeticTests(t *testing.T) {
-	t.Parallel()
-	requireParallelTests(t, "native_transcript_test.go",
-		"TestSeedFromTranscriptSlugMunging",
-		"TestMapTranscriptLineRobustToGarbage",
-		"TestMergeSeedWithRingDedupsUserEcho",
-		"TestMergeSeedRingOverlapServedOnce",
-		"TestMergeSeedRingNoOverlapKeepsFullSeed",
-	)
-}

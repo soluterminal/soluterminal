@@ -343,6 +343,13 @@ func workerGitIsLinkedWorktree(dir, common string, live map[string]bool) bool {
 // Check every new entry conservatively instead of attributing another pane's
 // work to this one. A live process cwd provides an additional concrete target.
 func workerGitForArchive(ctx context.Context, snap PaneSnapshot, live string) (string, string) {
+	return workerGitForArchiveOwned(ctx, snap, live, workerGitOwnership{})
+}
+
+// workerGitForArchiveOwned is workerGitForArchive with what is known about
+// who else may own a new worktree: an unsaved new worktree that provably is
+// not this worker's (workerGitNotOwn) does not hold it (ST-251).
+func workerGitForArchiveOwned(ctx context.Context, snap PaneSnapshot, live string, own workerGitOwnership) (string, string) {
 	var baseline *workerGitStart
 	if snap.Origin != nil {
 		baseline = snap.Origin.WorkerGit
@@ -393,6 +400,9 @@ func workerGitForArchive(ctx context.Context, snap PaneSnapshot, live string) (s
 			}
 			p, reason := workerGitCleanPushedWith(ctx, path, workerGitArchiveOptions(ctx, path, baseline))
 			if reason != "" {
+				if workerGitNotOwn(ctx, snap, baseline, path, paths, p, reason, &own) {
+					continue
+				}
 				return "", reason + " (new worktree: " + path + ")"
 			}
 			proofs[path] = p
@@ -980,14 +990,26 @@ func workerGitLinkedWorktree(ctx context.Context, path, common string) (string, 
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", "", fmt.Errorf("%s is outside %s/.claude/worktrees", path, root)
 	}
+	admin, err := workerGitAdminEntry(ctx, path, common)
+	if err != nil {
+		return "", "", err
+	}
+	return admin, root, nil
+}
+
+// workerGitAdminEntry is the admin entry (common/worktrees/<name>) of the
+// linked worktree whose root is path, proven its own: <admin>/gitdir points
+// back at <path>/.git, as git worktree remove checks, so a crafted .git file
+// cannot borrow a sibling's entry. common is the repository's cleaned common dir.
+func workerGitAdminEntry(ctx context.Context, path, common string) (string, error) {
 	admin, err := workerGitRun(ctx, path, "rev-parse", "--path-format=absolute", "--git-dir")
 	if err != nil || filepath.Dir(filepath.Clean(admin)) != filepath.Join(common, "worktrees") {
-		return "", "", fmt.Errorf("%s is not a linked worktree", path)
+		return "", fmt.Errorf("%s is not a linked worktree", path)
 	}
 	admin = filepath.Clean(admin)
 	f, _, err := openUserFile(filepath.Join(admin, "gitdir"), 4096)
 	if err != nil {
-		return "", "", fmt.Errorf("%s has no worktree entry: %v", path, err)
+		return "", fmt.Errorf("%s has no worktree entry: %v", path, err)
 	}
 	raw, err := io.ReadAll(f)
 	f.Close()
@@ -996,9 +1018,9 @@ func workerGitLinkedWorktree(ctx context.Context, path, common string) (string, 
 		back = filepath.Join(admin, back)
 	}
 	if err != nil || back == "" || filepath.Clean(back) != filepath.Join(path, ".git") {
-		return "", "", fmt.Errorf("worktree entry %s does not belong to %s", admin, path)
+		return "", fmt.Errorf("worktree entry %s does not belong to %s", admin, path)
 	}
-	return admin, root, nil
+	return admin, nil
 }
 
 // workerGitCreatedWorktree is the commit a linked worktree started at, when

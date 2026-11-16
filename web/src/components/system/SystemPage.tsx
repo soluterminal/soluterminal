@@ -15,7 +15,7 @@ import { ErrorBoundary } from '../ErrorBoundary';
 import { RunStatusGlyph } from '../shared/runStatus';
 
 import { IconGauge, IconX } from '../ui/icons';
-import { ageLabel, automationLine, blockingLayerLine, cleanupScopeLabel, deltaLabel, publicKpiTiles, publicSystemLevel, fmtBytes, fmtMB, growthStateLabel, guestOnlyExplanation, hostOffenderLine, kpiTiles, levelVisual, releaseLine, storageProducerRows, topProcesses, untilLabel } from './systemModel';
+import { ageLabel, automationLine, blockingLayerLine, builtinsLine, cleanupScopeLabel, deltaLabel, publicKpiTiles, publicSystemLevel, fmtBytes, fmtMB, growthStateLabel, guestOnlyExplanation, hostOffenderLine, kpiTiles, levelVisual, operatorSystemLevel, releaseLine, runtimeName, runtimeNeedsAttention, runtimeSince, runtimeStatusLine, runtimeVisual, storageProducerRows, topProcesses, untilLabel } from './systemModel';
 import { cloudPairingFix, pairingFixPlace, plainBlockingLine, plainKpiTiles, plainProcessKind, plainRelayState, plainStateText, plainSystemLevel } from './systemPlain';
 import { UPDATE_CHECK_FAILED } from '../../lib/updateErrors';
 import './system.css';
@@ -76,6 +76,56 @@ function BackgroundServiceCard({ status }: { status: SystemStatus }) {
   );
 }
 
+// The runtimes a headless run can use, by name: how each is, why, and since
+// when, with a check the person can run. "Test connection" spends nothing: it
+// re-reads sign-in and usage for Claude and Codex and asks a local model
+// server for its model list. A pass does not clear a cooldown; a failed test
+// of a local model leaves it out of use until a check passes. Operator-only,
+// like the rest of the team cards.
+function RuntimesCard({ status, now }: { status: SystemStatus; now: number }) {
+  const [testing, setTesting] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const runtimes = status.runtimes ?? [];
+  const test = async (id: string) => {
+    setTesting(id);
+    setFailed(null);
+    try {
+      await api.workflowRuntimesProbe({ runtime: id, observe: true });
+    } catch {
+      setFailed(id);
+    } finally {
+      await refreshSystemStatus();
+      setTesting(null);
+    }
+  };
+  return (
+    <article className="system-card">
+      <h3>Crew &amp; runtimes</h3>
+      <div className="system-rows system-runtimes">
+        {runtimes.map((runtime) => {
+          const since = runtimeSince(runtime, now);
+          return (
+            <div key={runtime.id}>
+              <span><RunStatusGlyph visual={runtimeVisual(runtime)} title={runtimeNeedsAttention(runtime) ? 'Needs attention' : undefined} /> {runtimeName(runtime.id)}</span>
+              <span>
+                {runtimeStatusLine(runtime)}
+                {since ? ` · ${since}` : ''}
+                {runtime.cooldownUntilEpoch ? ` · cooldown ${untilLabel(runtime.cooldownUntilEpoch * 1000, now)}` : ''}
+                {failed === runtime.id ? ' · the test could not run' : ''}
+                {' '}
+                <button type="button" className="system-link" disabled={testing !== null} aria-label={`Test connection to ${runtimeName(runtime.id)}`} onClick={() => void test(runtime.id)}>
+                  {testing === runtime.id ? 'Testing…' : 'Test connection'}
+                </button>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {!runtimes.length && <p>Runtime health unavailable.</p>}
+    </article>
+  );
+}
+
 function SystemPageBody({ onClose }: Props) {
   const { status, error, polling } = useSystemStatus();
   const { health } = useDaemonHealth();
@@ -118,7 +168,9 @@ function SystemPageBody({ onClose }: Props) {
   if (error === 'unavailable') return <SystemPageState title="System sampler disabled" detail="Remove the SOLU_SYSTEM_SAMPLER kill-switch and restart solud." onClose={onClose} />;
   if (!status) return <SystemPageState title={health ? 'Loading system status…' : 'Daemon offline'} detail={error === 'network' ? 'The last update could not reach solud.' : 'Collecting the first bounded resource sample.'} onClose={onClose} />;
 
-  const level = team ? status.level : detail ? publicSystemLevel(status.level) : plainSystemLevel(publicSystemLevel(status.level));
+  // The verdict leaves out the retired engine and the runtime table on every
+  // install (the daemon does the same; this covers an older one).
+  const level = team ? operatorSystemLevel(status.level) : detail ? publicSystemLevel(status.level) : plainSystemLevel(publicSystemLevel(status.level));
   const tiles = team ? kpiTiles(status) : detail ? publicKpiTiles(kpiTiles(status)) : plainKpiTiles(status);
   const ageMs = Math.max(0, now - Date.parse(status.sampledAt));
   const stale = !Number.isFinite(ageMs) || ageMs > 3 * SYSTEM_POLL_MS;
@@ -129,8 +181,6 @@ function SystemPageBody({ onClose }: Props) {
   const cleanup = status.disk.cleanup;
   const guestOnly = guestOnlyExplanation(status);
   const usageTop = usage?.by_model?.[0]?.model ?? '—';
-  const builtinsPresent = status.automation.builtins.filter((row) => row.present).length;
-  const builtinsRunning = status.automation.builtins.filter((row) => row.running).length;
   const blocking = detail ? blockingLayerLine(status) : plainBlockingLine(status);
   // Free installs don't upload usage, so an empty Usage strip has nothing to
   // promise them; it shows only once there is something to show.
@@ -232,8 +282,8 @@ function SystemPageBody({ onClose }: Props) {
 
       <section className="system-grid" aria-label="Moving parts">
 
-        {team && <article className="system-card"><h3>Crew & runtimes</h3><div className="system-rows">{(status.runtimes ?? []).map((runtime) => <div key={runtime.id}><span><RunStatusGlyph visual={runtime.status === 'healthy' ? 'ok' : runtime.status === 'unknown' ? 'neutral' : 'attention'} /> {runtime.id}</span><span>{runtime.status}{runtime.cooldownUntilEpoch ? ` · cooldown ${untilLabel(runtime.cooldownUntilEpoch * 1000, now)}` : ''}</span></div>)}</div>{!status.runtimes?.length && <p>Runtime health unavailable.</p>}</article>}
-        {team && <article className="system-card"><h3>Automation</h3>{status.automation.autonomy.globalPaused && <div className="system-neutral-banner">Autonomy paused</div>}<p>{automationLine(status)}</p><div className="system-stat-line"><span>Errors 24h <b>{status.automation.schedules.errors24h}</b></span><span>Built-ins <b>{builtinsPresent}/{status.automation.builtins.length} present · {builtinsRunning} running</b></span></div><div className="system-rows"><div><span>Next automation</span><span>{untilLabel(status.automation.schedules.nextFireAt, now)}</span></div></div><div className="system-card-actions"><button type="button" className="system-deep-link" onClick={() => { useStore.getState().setAgentsPanelOpen(true); onClose(); }}>Agents status</button><button type="button" className="system-deep-link" onClick={() => { revealSidebar('schedules'); onClose(); }}>Schedules</button></div></article>}
+        {team && <RuntimesCard status={status} now={now} />}
+        {team && <article className="system-card"><h3>Automation</h3>{status.automation.autonomy.globalPaused && <div className="system-neutral-banner">Autonomy paused</div>}<p>{automationLine(status)}</p><div className="system-stat-line"><span>Errors 24h <b>{status.automation.schedules.errors24h}</b></span><span>Built-ins <b>{builtinsLine(status)}</b></span></div><div className="system-rows"><div><span>Next automation</span><span>{untilLabel(status.automation.schedules.nextFireAt, now)}</span></div></div><div className="system-card-actions"><button type="button" className="system-deep-link" onClick={() => { useStore.getState().setAgentsPanelOpen(true); onClose(); }}>Agents status</button><button type="button" className="system-deep-link" onClick={() => { revealSidebar('schedules'); onClose(); }}>Schedules</button></div></article>}
         {detail ? <article className="system-card"><h3>Surface</h3><div className="system-rows"><div><span>Listener</span><span>{status.surface.addr || '—'}</span></div><div><span>Ports</span><span>{status.surface.ports.paneOwned} pane-owned / {status.surface.ports.total} total</span></div><div><span>Previews</span><span>{status.surface.previews.active} active</span></div><div><span>Cloud relay</span><span><RunStatusGlyph visual={status.surface.cloud.relayState === 'online' ? 'ok' : status.surface.cloud.configured ? 'attention' : 'neutral'} /> {status.surface.cloud.relayState}</span></div></div>{ports.slice(0, 4).map((port) => <p className="system-muted" key={`${port.proto}:${port.port}`}>:{port.port} · {port.process}{port.paneId ? ' · pane-owned' : ''}</p>)}{status.surface.cloud.credsInvalid && <p className="system-error-text">{pairingFix}</p>}<button type="button" className="system-deep-link" onClick={() => { useSettings.getState().openSettings('devices'); onClose(); }}>Devices & cloud</button></article> : <article className="system-card"><h3>Connections</h3><div className="system-rows"><div><span>Local servers</span><span>{status.surface.ports.total}{status.surface.ports.paneOwned ? ` · ${status.surface.ports.paneOwned} from your sessions` : ''}</span></div><div><span>Phone &amp; browser access</span><span><RunStatusGlyph visual={status.surface.cloud.relayState === 'online' ? 'ok' : status.surface.cloud.configured ? 'attention' : 'neutral'} /> {plainRelayState(status.surface.cloud.relayState)}</span></div></div>{ports.slice(0, 4).map((port) => <p className="system-muted" key={`${port.proto}:${port.port}`}>:{port.port} · {port.process}</p>)}{status.surface.cloud.credsInvalid && <p className="system-error-text">{pairingFix}</p>}<button type="button" className="system-deep-link" onClick={() => { useSettings.getState().openSettings('devices'); onClose(); }}>Devices &amp; cloud</button></article>}
         {team ? <article className="system-card"><h3>Release & update</h3><p>{releaseLine(status)}</p><div className="system-rows"><div><span>Daemon</span><span>{status.release.running} → {status.release.latest || status.release.running}</span></div><div><span>Shell</span><span>{status.release.shellCurrent || '—'} → {status.release.shellLatest || status.release.shellCurrent || '—'}</span></div>{status.release.workflowDeferState && <div><span>Workflow update</span><span>{status.release.workflowDeferState === 'backoff' ? `deferred · retry ${untilLabel(status.release.workflowNextRetryMs, now)}` : `draining · ${status.release.workflowInflight ?? 0} in flight`}{status.release.workflowDeferAttempts ? ` · attempt ${status.release.workflowDeferAttempts}` : ''}</span></div>}<div><span>Last successful check</span><span>{status.release.lastSuccessMs ? ageLabel(status.release.lastSuccessMs, now) : '—'}</span></div><div><span>Release train</span><span>{status.release.train ? `${status.release.train.enabled ? 'on' : 'off'} · ${status.release.train.phase}` : '—'}</span></div></div>{status.release.lastError && <p className="system-error-text">{status.release.lastError}</p>}<button type="button" className="system-deep-link" onClick={() => { useStore.getState().setVersionPopoverOpen(true); onClose(); }}>Open update status</button></article> : <article className="system-card"><h3>Updates</h3><div className="system-rows"><div><span>SoluTerminal</span><span>{status.release.running} → {status.release.latest || status.release.running}</span></div><div><span>Last successful check</span><span>{status.release.lastSuccessMs ? ageLabel(status.release.lastSuccessMs, now) : '—'}</span></div></div>{status.release.lastError && <p className="system-error-text">{UPDATE_CHECK_FAILED}</p>}<button type="button" className="system-deep-link" onClick={() => { useStore.getState().setVersionPopoverOpen(true); onClose(); }}>Open update status</button></article>}
         {team && <BackgroundServiceCard status={status} />}

@@ -78,6 +78,9 @@ type shinoqueRelayKeyState struct {
 	repeats         int
 	summarized      time.Time
 	refusals        map[string]time.Time
+	// untracedAt is the last push refused because its sender isn't the
+	// installed Shinoque app (untraced_caller), for shinoqueRelayReason.
+	untracedAt time.Time
 
 	now func() time.Time // nil uses time.Now
 }
@@ -143,6 +146,18 @@ func (s *shinoqueRelayKeyState) store(home, port, key string, pid int, exe strin
 	s.lastFP, s.lastPID, s.lastExe, s.summarized = fp, pid, exe, now
 }
 
+// pusher is the process whose relay-key push was last accepted (the Shinoque
+// core that serves relayed Shinoque users, or Shinoque.exe on Windows): its
+// pid and executable, or 0 and "".
+func (s *shinoqueRelayKeyState) pusher() (int, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.pushed {
+		return 0, ""
+	}
+	return s.lastPID, s.lastExe
+}
+
 func (s *shinoqueRelayKeyState) flushRepeats() {
 	if s.repeats > 0 {
 		log.Printf("shinoque relay key: %d unchanged re-pushes pid=%d exe=%q fp=%s", s.repeats, s.lastPID, s.lastExe, s.lastFP)
@@ -155,6 +170,9 @@ func (s *shinoqueRelayKeyState) refused(reason string, pid int, exe string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock()
+	if reason == "untraced_caller" {
+		s.untracedAt = now
+	}
 	if last, ok := s.refusals[reason]; ok && now.Sub(last) < shinoqueRelayKeyQuiet {
 		return
 	}
@@ -163,6 +181,19 @@ func (s *shinoqueRelayKeyState) refused(reason string, pid int, exe string) {
 	}
 	s.refusals[reason] = now
 	log.Printf("shinoque relay key: refused reason=%s pid=%d exe=%q", reason, pid, exe)
+}
+
+// missingKeyReason says why no key signs a forward: a sender that isn't the
+// installed Shinoque app was refused within a key's lifetime, or no key came.
+// Only a loopback, non-browser request reaches the sender check, so a web page
+// or a phone can't set pusher_refused.
+func (s *shinoqueRelayKeyState) missingKeyReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.untracedAt.IsZero() && s.clock().Sub(s.untracedAt) <= shinoqueRelayBridgeKeyTTL {
+		return shinoqueRelayReasonPusherRefused
+	}
+	return shinoqueRelayReasonNoKey
 }
 
 // shinoqueRelayKeyMarked reports whether the core marked home memory-key.
@@ -193,24 +224,66 @@ func (c *shinoqueTokenCache) signingKey(config shinoqueRelayConfig) string {
 	return c.readHome(config.home)
 }
 
+// Why /api/health reports shinoqueRelay false (shinoqueRelayReason). A fixed
+// set: the phone words its message from it, so it never carries free text,
+// paths, pids, versions, key ids or skew amounts. Shinoque reads an unknown
+// value as "not available"; add values, never rename them.
+const (
+	// No fresh key from Shinoque's core: none pushed, pushes stopped, or (on
+	// Linux and WSL) the core wasn't found.
+	shinoqueRelayReasonNoKey = "no_key"
+	// A Windows-native solud that isn't backend "host" (Dual's "win" side)
+	// never takes a push.
+	shinoqueRelayReasonNotHost = "not_host_backend"
+	// A key is held, but the core's clock is too far from Windows'.
+	shinoqueRelayReasonClockSkew = "clock_skew"
+	// A key is held, but the core hasn't declared strict relay auth
+	// (relayAuth 2), or the desktop route can't be reached or hasn't proved
+	// it reaches the core. On Linux and WSL, a core named by SHINOQUE_HOME or
+	// SHINOQUE_RELAY_PORT declares it only through a matching relay.json.
+	shinoqueRelayReasonRouteUnverified = "route_unverified"
+	// No key is held, and a push was refused in the last 35 s because the
+	// sender isn't the installed Shinoque app running as this user.
+	shinoqueRelayReasonPusherRefused = "pusher_refused"
+)
+
 // relayCapability resolves discovery once for health: whether a forward can
-// be signed now, and whether a pushed key would sign it.
-func (c *shinoqueTokenCache) relayCapability() (usable, pushed bool) {
+// be signed now, whether a pushed key would sign it, and, when it can't, why
+// (one of the shinoqueRelayReason values).
+func (c *shinoqueTokenCache) relayCapability(backendID string) (usable, pushed bool, reason string) {
+	bridge := c.discovery.bridge
+	if bridge != nil && backendID != shinoqueRelayBridgeHost {
+		return false, false, shinoqueRelayReasonNotHost
+	}
 	config, ok := c.discovery.resolve()
 	if !ok {
-		return false, false
+		return false, false, c.pushedKey.missingKeyReason()
 	}
 	if key, _ := c.pushedKey.held(config.home, config.port); key != "" {
-		if c.discovery.bridge != nil && (!config.supportsRelayAuth() || !c.discovery.bridge.usable()) {
-			// Through the desktop, health is true only while a forward could go.
-			return false, true
+		// The relay proxies only to a core that declared strict relay auth
+		// (shinoqueUpdateRequired), so health never says more (ST-256).
+		if !config.supportsRelayAuth() {
+			return false, true, shinoqueRelayReasonRouteUnverified
 		}
-		return true, true
+		if bridge != nil && !bridge.usable() {
+			// Through the desktop, health is true only while a forward could go.
+			if bridge.skewed() {
+				return false, true, shinoqueRelayReasonClockSkew
+			}
+			return false, true, shinoqueRelayReasonRouteUnverified
+		}
+		return true, true, ""
 	}
-	if c.discovery.bridge != nil {
-		return false, false
+	if bridge != nil {
+		return false, false, c.pushedKey.missingKeyReason()
 	}
-	return c.signingKey(config) != "", false
+	if c.signingKey(config) != "" {
+		if !config.supportsRelayAuth() {
+			return false, false, shinoqueRelayReasonRouteUnverified
+		}
+		return true, false, ""
+	}
+	return false, false, c.pushedKey.missingKeyReason()
 }
 
 // acceptPushedKey holds key for home and port, and drops any token read from
@@ -260,11 +333,6 @@ func (a *apiServer) shinoqueRelayKeyPush(w http.ResponseWriter, r *http.Request)
 		state.refused(reason, pid, exe)
 		writeJSON(w, status, map[string]any{"error": code})
 	}
-	if ok, wait := state.admit(); !ok {
-		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
-		refuse(http.StatusTooManyRequests, "rate_limited", "rate_limited")
-		return
-	}
 	bridge := tokens.discovery.bridge
 	local := shinoqueRelayKeyPushLocal
 	if bridge != nil {
@@ -278,6 +346,14 @@ func (a *apiServer) shinoqueRelayKeyPush(w http.ResponseWriter, r *http.Request)
 	if pid, exe, traced = shinoqueRelayKeyPeer(r); !traced {
 		pid, exe = 0, ""
 		refuse(http.StatusForbidden, "local_only", "untraced_caller")
+		return
+	}
+	// Spend a rate token only once the caller is local and traced, so a
+	// caller refused above can't drain the bucket and make the real push
+	// wait while the held key lapses.
+	if ok, wait := state.admit(); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+		refuse(http.StatusTooManyRequests, "rate_limited", "rate_limited")
 		return
 	}
 	if bridge != nil {
@@ -308,11 +384,13 @@ func (a *apiServer) shinoqueRelayKeyPush(w http.ResponseWriter, r *http.Request)
 	}
 	config, ok := tokens.discovery.resolve()
 	port := strconv.Itoa(push.Port)
-	if !ok || config.home == "" || config.home != push.Home || config.port != port {
+	// Discovery's home is clean (shinoque_discovery*.go); so is the push's.
+	home := filepath.Clean(push.Home)
+	if !ok || config.home == "" || push.Home == "" || config.home != home || config.port != port {
 		refuse(http.StatusConflict, "discovery_mismatch", "discovery_mismatch")
 		return
 	}
-	tokens.acceptPushedKey(push.Home, port, push.Key, pid, exe)
+	tokens.acceptPushedKey(home, port, push.Key, pid, exe)
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": true})
 }
 

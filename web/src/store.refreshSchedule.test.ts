@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError } from './api';
+import { api, ApiError, setBackend } from './api';
 import { useStore } from './store';
 import type { Schedule } from './types';
 
@@ -11,7 +11,8 @@ function sched(id: string, over: Partial<Schedule> = {}): Schedule {
 }
 
 afterEach(() => {
-  useStore.setState({ schedules: [] });
+  setBackend(null);
+  useStore.setState({ schedules: [], schedulesLoaded: false, schedulesError: null });
   vi.restoreAllMocks();
 });
 
@@ -85,5 +86,42 @@ describe('refreshSchedule (one row per run event)', () => {
     await useStore.getState().refreshSchedule('a');
     expect(list).toHaveBeenCalledTimes(1);
     expect(useStore.getState().schedules[0].fireCount).toBe(3);
+  });
+});
+
+describe('refreshSchedules (loaded and error state)', () => {
+  it('records a good load, then a failed one without dropping the rows', async () => {
+    vi.spyOn(api, 'listSchedules').mockResolvedValueOnce([sched('a')]).mockRejectedValueOnce(new Error('daemon unreachable'));
+    expect(useStore.getState().schedulesLoaded).toBe(false);
+
+    await useStore.getState().refreshSchedules();
+    expect(useStore.getState()).toMatchObject({ schedulesLoaded: true, schedulesError: null });
+
+    await useStore.getState().refreshSchedules();
+    expect(useStore.getState()).toMatchObject({ schedulesLoaded: true, schedulesError: 'daemon unreachable' });
+    expect(useStore.getState().schedules.map((s) => s.id)).toEqual(['a']);
+  });
+
+  it('a failed first load is an error, not an empty loaded list', async () => {
+    vi.spyOn(api, 'listSchedules').mockRejectedValue(new Error('HTTP 502'));
+    await useStore.getState().refreshSchedules();
+    expect(useStore.getState()).toMatchObject({ schedulesLoaded: false, schedulesError: 'HTTP 502', schedules: [] });
+  });
+
+  // The request left for one backend; the person switched before it answered.
+  it("drops an answer from the backend selected before a switch and asks the new one", async () => {
+    let release!: (v: Schedule[]) => void;
+    const list = vi.spyOn(api, 'listSchedules')
+      .mockReturnValueOnce(new Promise((r) => { release = r; }))
+      .mockResolvedValueOnce([sched('from-new-backend')]);
+    const first = useStore.getState().refreshSchedules();
+
+    setBackend('win');
+    release([sched('from-old-backend')]);
+    await first;
+
+    await vi.waitFor(() => expect(useStore.getState().schedulesLoaded).toBe(true));
+    expect(useStore.getState().schedules.map((s) => s.id)).toEqual(['from-new-backend']);
+    expect(list).toHaveBeenCalledTimes(2);
   });
 });

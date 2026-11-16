@@ -94,10 +94,8 @@ func TestResolveContextPackStatus(t *testing.T) {
 		want                   string
 	}{
 		{"terminal claude", "/tmp", "", "", []string{"claude"}, contextPackInjected},
-		{"native claude", "/tmp", "native", "", []string{"label"}, contextPackInjected},
 		{"terminal codex", "/tmp", "", agentCodex, []string{"codex"}, contextPackInjected},
-		{"native codex", "/tmp", "native", agentCodex, nil, contextPackInjected},
-		{"muse", "/tmp", "native", agentMuse, nil, contextPackUnsupported},
+		{"muse", "/tmp", "", agentMuse, []string{"muse"}, contextPackUnsupported},
 		{"bash", "/tmp", "", "", []string{"bash"}, contextPackUnsupported},
 		{"cwd equal", dir, "", "", []string{"claude"}, contextPackCwd},
 		{"cwd inside", filepath.Join(dir, "nested"), "", "", []string{"claude"}, contextPackCwd},
@@ -120,8 +118,8 @@ func TestResolveContextPackStatus(t *testing.T) {
 
 func TestWithContextPackClaudeArgv(t *testing.T) {
 	agentsDir := makeContextPack(t, "AGENTS.md")
-	agentsInj := resolveContextPack(agentsDir, "/tmp", "native", "", nil)
-	base := []string{"claude", "-p", "--append-system-prompt", nativeNarrationPrompt + "\n\n" + orchestratorBrief}
+	agentsInj := resolveContextPack(agentsDir, "/tmp", "", "", []string{"claude"})
+	base := []string{"claude", "--append-system-prompt", orchestratorBrief}
 	once := withContextPack(base, agentsInj)
 	if countFlag(once, "--add-dir") != 1 || !slices.Contains(once, agentsDir) {
 		t.Fatalf("pack dir was not appended once: %v", once)
@@ -224,7 +222,6 @@ func TestContextPackNoContentLeak(t *testing.T) {
 		cmd         []string
 	}{
 		{"", "", []string{"claude"}},
-		{"native", "", nil},
 		{"", agentCodex, []string{"codex"}},
 	} {
 		inj := resolveContextPack(dir, "/tmp", tc.kind, tc.agent, tc.cmd)

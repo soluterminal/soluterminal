@@ -156,8 +156,18 @@ func (p *Pane) computeState() PaneRuntimeState {
 // menu again at a newer raw position, so the pane read as choice-prompt for
 // as long as a command ran (2026-10-25: 9 of ~104 auto-approvals on live
 // panes were Enters into such a screen, each 5-35s after the real answer;
-// every genuine approval sampled had the menu on the rendered grid). Only a
-// live grid can veto, and only for Claude: other TUIs keep the raw scan.
+// every genuine approval sampled had the menu on the rendered grid). Only
+// Claude panes are vetoed: other TUIs keep the raw scan.
+//
+// A pane without auto-approval has no live grid, only the replay screen that
+// every terminal pane keeps. Its raw tail misreads more than answered dialogs:
+// Claude repaints single changed cells, so a count that becomes 1 ("2 shells"
+// to "1 shell") written after a repaint of the input box's ❯ reads as a
+// focused "❯ 1" row. With no input after it, that match held the pane at
+// choice-prompt, and ask_pane refused it, until someone typed (2026-11-14,
+// ST-263). The replay screen vetoes only when it positively shows Claude's
+// input box (claudeInputBoxOnScreen): a blank or unreadable screen, or a
+// dialog that replaced the box, keeps the raw match.
 func (p *Pane) claudeMenuOffScreen(hasCodex bool) bool {
 	if hasCodex {
 		return false
@@ -168,14 +178,33 @@ func (p *Pane) claudeMenuOffScreen(hasCodex bool) bool {
 	if !claude {
 		return false
 	}
-	text, ok := p.gridMenuText(false)
-	if !ok || isGridChoicePromptText(text, false) {
+	text, gridOK := p.gridMenuText(false)
+	if gridOK && isGridChoicePromptText(text, false) {
 		return false
 	}
-	if screen, ok := p.screenMenuText(false); ok && isGridChoicePromptText(screen, false) {
+	screen, screenOK := p.screenMenuText(false)
+	if screenOK && isGridChoicePromptText(screen, false) {
 		return false
 	}
-	return true
+	if gridOK {
+		return true
+	}
+	return screenOK && claudeInputBoxOnScreen(screen)
+}
+
+// claudeInputBoxOnScreen reports that a rendered screen shows Claude Code's
+// input box as its last prompt glyph, with no dialog structure below it: no
+// option row, no other prompt or focus glyph, no rule and no dialog key hint.
+// Claude draws a permission or question dialog in place of the box, and its
+// "Teach auto mode about your environment?" dialog below the box, so neither
+// passes. Panes narrower than inputBoxMinRule columns never pass.
+func claudeInputBoxOnScreen(screen string) bool {
+	_, end, ok := lastClaudeInputBox(screen)
+	if !ok {
+		return false
+	}
+	below := screen[end:]
+	return !menuDialogFooterRE.MatchString(below) && !idleTrailerDenyRE.MatchString(below)
 }
 
 func (p *Pane) computeStateWithHasCodex(hasCodex bool) PaneRuntimeState {
@@ -184,18 +213,6 @@ func (p *Pane) computeStateWithHasCodex(hasCodex bool) PaneRuntimeState {
 	p.mu.Unlock()
 	if status == PaneExited {
 		return StateExited
-	}
-
-	// Native-renderer short-circuit (RECON C). A parked permission request is
-	// the authoritative "this pane is asking for approval" signal for native
-	// panes — read lock-free (one atomic int load) BEFORE the 64KB tail
-	// scan. For terminal panes (Kind==""), the parser never runs and this
-	// counter is always 0, so this is a single cache-hot int read and
-	// then the identical existing code path — the byte-identical fallback
-	// guarantee holds. Placed AFTER the PaneExited check so a dead native pane
-	// still reports StateExited.
-	if p.hasNativePending() {
-		return StateChoicePrompt
 	}
 
 	now := time.Now().UnixMilli()

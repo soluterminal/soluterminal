@@ -188,15 +188,14 @@ func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "codex-terminal" {
 		os.Exit(runCodexTerminal())
 	}
-	// `solud muse-driver ...` is the long-lived child of a native Muse pane
-	// (see muse_driver.go) — it bridges Muse Code's one-shot `muse exec` to
-	// the persistent stdio contract native panes expect.
-	if len(os.Args) >= 2 && os.Args[1] == "muse-driver" {
-		runMuseDriver()
-		return
-	}
 	if len(os.Args) >= 2 && os.Args[1] == "gc" {
 		fmt.Fprintln(os.Stderr, "solud gc was retired with the task engine; workflow data is preserved")
+		os.Exit(2)
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "muse-driver" {
+		// Only Focus (native) Muse panes ran this; they reopen as terminal
+		// panes now. Never fall through to a full daemon boot.
+		fmt.Fprintln(os.Stderr, "solud muse-driver was retired with the Focus view; Muse panes run as terminal panes")
 		os.Exit(2)
 	}
 	if len(os.Args) >= 2 && os.Args[1] == "host-storage" {
@@ -282,7 +281,7 @@ func main() {
 	// crash table; recover()-site reports cover only crashes we survived.
 	watchdogEvidence := captureWatchdogRespawnEvidence()
 
-	addr := flag.String("addr", "127.0.0.1:8787", "bind address")
+	addr := flag.String("addr", defaultDaemonAddr, "bind address")
 	wslAddr := flag.String("wsl-addr", "", "additional WSL IPv4 address on the loopback --addr port (requires --backend-id wsl)")
 	dataDir := flag.String("data", defaultDataDir(), "data directory for workspace persistence")
 	devWeb := flag.String("dev-web", "", "if set, serve static files from this path instead of embedded assets (for dev)")
@@ -311,8 +310,16 @@ func main() {
 	// passes this based on its own cfg, not the daemon's runtime.GOOS.
 	// Empty falls back to runtime.GOOS+ARCH for backward compat.
 	shellPlatform := flag.String("shell-platform", "", "manifest platform key for the Tauri shell (e.g. windows-amd64). Empty = fall back to daemon's runtime platform.")
+	seedPanes := flag.Bool("seed-panes", false, "side daemons only: open the panes listed in <data>/seed-panes.json at boot, on a fresh -data (seed_panes.go); the primary daemon ignores it")
 	doClaim := flag.Bool("claim", false, "pair this machine with the cloud: prints a 6-char code, waits for you to accept it in the web UI, then writes ~/.solu/claim.json and exits")
 	flag.Parse()
+	// As given on the command line: the shell-info.json fallback below fills
+	// *shellVersion for any daemon on a machine with the desktop app.
+	shellVersionFlag := *shellVersion
+	// Primary or side daemon (daemon_role.go): only the primary manages the
+	// shared credential stores. Decided once, logged once.
+	role := bootDaemonRole(*addr, *dataDir)
+	log.Print(role.logLine())
 	setGitViewDir(*dataDir)
 	listenerAddresses, err := wslListenerAddresses(*addr, *wslAddr, *backendID)
 	if err != nil {
@@ -375,6 +382,11 @@ func main() {
 		}
 		return
 	}
+
+	// A daemon started inside a claude session moves to a session of its own
+	// here, after the one-shot paths above and before it claims anything, so
+	// it outlives that claude session (reexec_unix.go, ST-118).
+	maybeDetachFromClaudeSession(*addr, *dataDir, *backendID, shellVersionFlag)
 
 	// Own the data directory before anything below loads, reattaches or
 	// respawns panes. A second daemon on the same data directory exits here.
@@ -458,20 +470,11 @@ func main() {
 		log.Printf("recovery settings unavailable: %v (using defaults)", err)
 		recoverySettings = defaultRecoverySettingsStore(*dataDir)
 	}
-	nativeSettings, err := newNativeSettingsStore(*dataDir)
-	if err != nil {
-		log.Printf("native settings unavailable: %v (using defaults)", err)
-		nativeSettings = defaultNativeSettingsStore(*dataDir)
-	}
 	rollbackStore, err := newUpdateRollbackStore(*dataDir)
 	if err != nil {
 		log.Printf("rollback state unavailable: %v (using defaults)", err)
 		rollbackStore = defaultUpdateRollbackStore(*dataDir)
 	}
-	// promptSuggestionsEnabled is read fresh at every native (re)spawn to decide
-	// whether --prompt-suggestions is appended to the headless claude argv.
-	mgr.promptSuggestionsEnabled = func() bool { return nativeSettings.PromptSuggestionsEnabled() }
-
 	// Keep the persisted pane list in sync whenever the manager spawns or
 	// loses a pane.
 	mgr.onPaneExit = func(p *Pane) {
@@ -581,47 +584,19 @@ func main() {
 
 	// attention computes the per-pane "who needs to act" signal every channel
 	// (web client, attention inbox, phone push) keys its alerts on. Created
-	// before panes attach so the turn-edge hook below can refresh it eagerly;
-	// Aria (standing orders + pause/cap gates) is late-bound after
+	// before panes attach; Aria (standing orders + pause/cap gates) is late-bound after
 	// construction via SetAria.
 	attention := newAttentionEngine(mgr)
 
-	// onTurnStateEdge publishes a pane-state (AgentMidTurn) event the instant a
-	// native pane's nativeInTurn flag flips true↔false — so the client spinner
-	// reflects turn start/finish in real time instead of waiting on the 2s activity
-	// ticker (which skips sub-5s turns) or the 3s panes poll. Reads mgr.bus at fire
-	// time (constructed later, like onPromptsCommit). Publishes ONLY pane-state (not
-	// pane.reply_complete), so it doesn't double-count title re-warms; the value is
-	// computed exactly as the DTO does (agentMidTurnForState) so an SSE edge and the
-	// next poll agree (samePaneInfo). A double-fire with the activity watcher is a
-	// harmless no-op — the client's applyPaneStateFromSSE is value-guarded.
-	mgr.onTurnStateEdge = func(p *Pane) {
-		// Approval park/resolve flips the pane's runtime state through this
-		// edge — reclassify attention immediately so a native prompt is
-		// tagged auto-pending vs needs-user before any client can alert on
-		// the raw state (the pre-attention race fired "Approval needed"
-		// toasts that auto-approval then cleared seconds later).
-		attention.Refresh(p)
-		if mgr.bus == nil {
-			return
-		}
-		snap := p.Snapshot()
-		// This closure is native-only (every publishTurnEdge call site is a native
-		// in-turn flip), and a native pane never has a codex descendant — so pass
-		// hasCodex=false to skip the /proc descendant scan computeState() would run.
-		// The result equals the poll DTO's state for native panes (api.go passes the
-		// same false there), so the SSE edge and the next poll never disagree.
-		state := p.computeStateWithHasCodex(false)
-		amt := p.agentMidTurnForState(state)
-		mgr.bus.publish(uiEvent{
-			Type:         "pane-state",
-			PaneID:       snap.ID,
-			PaneTitle:    snap.Title,
-			Ts:           time.Now().UnixMilli(),
-			ToState:      string(state),
-			AgentMidTurn: &amt,
-		})
-	}
+	// The operator verdict, read from files only. Decided here, before any
+	// pane is reattached, restored or resumed below: those spawns read
+	// codexPanePolicyTeam, and a team Codex pane resumed before it is set
+	// would start without the team instructions (codex_pane_policy.go).
+	bootTeam, bootTeamSource := bootOperatorVerdict(*dataDir)
+	// Team installs brief the Codex sessions SoluTerminal starts with the
+	// team instructions; public ones only get the context-pack note when a
+	// pack is attached.
+	codexPanePolicyTeam.Store(bootTeam)
 
 	// Reattach to any agents still alive from a previous daemon run.
 	// Two phases so HTTP becomes reachable fast even with many panes:
@@ -710,33 +685,12 @@ func main() {
 		for _, note := range identityNotes {
 			log.Printf("reattach pane %s: identity heal: %s", info.ID, note)
 		}
-		// --- Native Focus-pane recovery (repairs the "Focus pane → bash shell
-		// after an app update" regression an older daemon's resume path caused) ---
-		// 1) Restore a lost native Kind: persisted Kind=="" but the Cmd is the
-		//    headless `claude -p … stream-json` argv (see healLostNativeKind).
-		info, kindHealed := healLostNativeKind(info)
-		// 2) Tear down a broken pre-fix native agent: a Kind=="native" pane still
-		//    bound to an agent spawned WITHOUT --no-pty ran claude -p under a PTY,
-		//    crashed with "Input must be provided … --print", and fell back to a
-		//    zombie `bash -i`. Reattaching would just rebind that dead shell — kill
-		//    it and resume the conversation fresh under a proper --no-pty agent.
-		//    The identity check (cmdline names THIS pane's socket) keeps
-		//    terminatePid safe against a recycled pid.
-		if info.Kind == "native" && isStaleNonPtyNativeAgent(info.AgentPid, info.SocketPath) {
-			log.Printf("reattach pane %s: live agent lacks --no-pty (broken native) → clean resume", info.ID)
-			_ = terminatePid(info.AgentPid)
-			info.AgentPid = 0
-			info.SocketPath = ""
+		// A saved Focus pane (the removed native renderer) comes back as a
+		// terminal pane that reopens the same conversation (focus_migration.go).
+		info, kindHealed := retireNativePersistedPane(info)
+		if kindHealed {
+			log.Printf("reattach pane %s: Focus view was removed; reopening as a terminal pane", info.ID)
 		}
-		// 3) Recover the session id from the `--resume <id>` baked into the Cmd
-		//    when the ClaudeSessionID field itself was cleared by the corruption,
-		//    so the conversation still resumes instead of the pane being dropped.
-		if effectiveAgentKind(info.Agent) == agentClaude && info.Kind == "native" && strings.TrimSpace(info.ClaudeSessionID) == "" {
-			if sid := resumeSessionIDFromCmd(info.Cmd); sid != "" {
-				info.ClaudeSessionID = sid
-			}
-		}
-		// --- end native recovery ---
 
 		p, err := mgr.AttachExisting(&info)
 		if err != nil {
@@ -918,13 +872,10 @@ func main() {
 	// installs. Public beta installs run the terminal app without them.
 	// The operator flag decides; it equals the team flag until a cloud
 	// grants team without operator (a customer team plan).
-	bootTeam, bootTeamSource := bootOperatorVerdict(*dataDir)
+	// (bootTeam was decided before the panes were restored, above.)
 	if !bootTeam {
 		log.Printf("team engines off for this boot (verdict source %s); workflow tasks, managed agents and the release train are operator-only", bootTeamSource)
 	}
-	// Public installs get a minimal Codex AGENTS.md block (context packs
-	// only), never the workflow delegation brief.
-	codexAgentsPublicPolicy.Store(!bootTeam)
 	// Opt-in for the machine-wide Claude Code / Codex registration
 	// (agent_integration.go). Decide before the registrations below run: an
 	// install that already carries them is recorded as "on" with a notice.
@@ -954,7 +905,7 @@ func main() {
 	// boot.api and boot.updater are filled in once they exist.
 	boot := &bootEnv{
 		dataDir: *dataDir, addr: *addr, backendID: *backendID, version: version, bootTeam: bootTeam,
-		mgr: mgr, scheds: scheds, bus: bus,
+		role: role, mgr: mgr, scheds: scheds, bus: bus,
 	}
 	defer boot.exit()
 	// One invocation boundary is shared by workflows, managed agents and
@@ -1013,7 +964,6 @@ func main() {
 		preview:            newPreviewChannel(*dataDir),
 		metrics:            metrics,
 		recoverySettings:   recoverySettings,
-		nativeSettings:     nativeSettings,
 		updateSettings:     updateSettings,
 		rollback:           rollbackStore,
 		mcpScopes:          newMcpScopeStore(),
@@ -1024,6 +974,7 @@ func main() {
 		shellVersion:       *shellVersion,
 		shellPlatform:      *shellPlatform,
 		dataDir:            *dataDir,
+		sideDaemon:         !role.Primary,
 	}
 	// Terminal turns survive a daemon swap. Protect volatile collaboration
 	// state and, until removal lands, in-process Focus turns.
@@ -1077,17 +1028,6 @@ func main() {
 	coordLog.setDir(*dataDir)
 	api.originAliases = newPaneOriginAliases(*dataDir)
 
-	// Re-arm deferred-switch watchers for panes whose armed "switch when Claude
-	// finishes" survived the restart in panes.json (AttachExisting restored the
-	// entry onto the live pane; the watcher goroutine could only be created once
-	// the API server existed). SuspendExisting never restores one, so every hit
-	// here is a live reattached pane.
-	for _, p := range mgr.List() {
-		if p.pendingSwitchSnapshot() != nil {
-			log.Printf("switch-mode: re-armed deferred switch after restart (pane=%s)", p.ID)
-			api.ensureSwitchWatcher(p)
-		}
-	}
 	// In-app vs out-app session ledger for Claude Code usage capture. Fed by
 	// the hook handler (every Claude session fires our global hooks) and read
 	// by the transcript scanner, which is started later only when the cloud
@@ -1170,14 +1110,23 @@ func main() {
 	// Windows-native) with no CLI args — and the UI shell is served by the
 	// Windows one, so a developer needs to point both at a live web/dist
 	// without rebuilding either binary.
-	if devDir := resolveDevWebDir(*devWeb, *dataDir); devDir != "" {
-		log.Printf("web assets: serving %s (dev override; embedded dist bypassed)", devDir)
-		mux.Handle("/", spaFileServer(http.Dir(devDir)))
+	//
+	// In a release build the marker files and SOLU_WEB_DEV_DIR count only while
+	// the person has Developer overrides on (developer_overrides.go), decided
+	// per request so turning it off takes effect at once. The flag is the
+	// launcher's own argv and always counts.
+	var embedded http.Handler = http.NotFoundHandler()
+	if sub, err := fs.Sub(webFS, "webdist"); err == nil {
+		embedded = spaFileServer(http.FS(sub))
+	}
+	if flagDir := strings.TrimSpace(*devWeb); flagDir != "" {
+		log.Printf("web assets: serving %s (-dev-web flag; embedded dist bypassed)", flagDir)
+		mux.Handle("/", spaFileServer(http.Dir(flagDir)))
+	} else if devDir := resolveDevWebDir("", *dataDir); devDir != "" {
+		log.Printf("web assets: dev-web override %s (served while developer overrides allow it; otherwise the embedded dist)", devDir)
+		mux.Handle("/", api.devWebGate(spaFileServer(http.Dir(devDir)), embedded))
 	} else {
-		sub, err := fs.Sub(webFS, "webdist")
-		if err == nil {
-			mux.Handle("/", spaFileServer(http.FS(sub)))
-		}
+		mux.Handle("/", embedded)
 	}
 
 	token, err := loadOrCreateToken(*dataDir)
@@ -1203,6 +1152,7 @@ func main() {
 	updater.SetCloudTeamUpdates(api.entitlements.cloudTeamUpdatesPath)
 	api.entitlements.credsChanged = api.cloudCredsChangedCh
 	api.agentAuthority = newAgentAuthority(*dataDir)
+	api.devOverrides = newDeveloperOverrides(*dataDir)
 	// An agent's open request about a pane, and a queued ask_pane to it, end
 	// when that pane or the asking agent's pane closes (pane_confirm.go,
 	// mcp_collab_ask.go).
@@ -1220,7 +1170,10 @@ func main() {
 	api.humanProof = newHumanProof(*dataDir)
 	// Reminder names already mirrored to the cloud are replaced as soon as
 	// approved-only is turned on (schedules_reminders.go reminderPayload).
-	api.trustedDevices.onPolicyChange = scheds.scheduleReminderSync
+	// A person's policy change also redials the relay, so the cloud (which
+	// trusts a policy only from the tunnel's own handshake) sees it.
+	api.trustedDevices.onPolicyChange = api.policyChangeHook(scheds.scheduleReminderSync)
+	liveDevicePolicy = api.trustedDevices.policy
 	api.trustedDevices.daemonKey = func() *daemonIdentity {
 		id, err := loadDaemonIdentity(*dataDir)
 		if err != nil {
@@ -1236,6 +1189,16 @@ func main() {
 		}
 		return machineID, *backendID
 	}
+	// ST-193: approvals shown on a phone are signed with this computer's
+	// identity key over its machine id. Nothing signs since the Focus panes
+	// were removed (approval_signature.go); the terminal-pane one-tap will.
+	setApprovalSigner(&approvalSigner{
+		key: api.trustedDevices.daemonKey,
+		machineID: func() string {
+			id, _ := api.trustedDevices.identity()
+			return id
+		},
+	})
 	api.privacy = newPrivacySettings(*dataDir, func() bool {
 		team, _ := api.entitlements.verdict()
 		return team
@@ -1740,12 +1703,6 @@ func main() {
 	// only user still gets the feed.
 	go startActivityWatcher(ctx, mgr, bus, api.refreshPaneAITitleCache)
 
-	// Focus retirement: move native panes back to the terminal renderer once
-	// each one's current turn settles (focus_retire.go).
-	if !nativeRendererEnabled() {
-		go api.runFocusRetirement(ctx)
-	}
-
 	// Turn tracker: per-turn git snapshots for terminal agent panes (turns.go)
 	// behind the pane header's "what changed this turn" chip and timers.
 	// SOLU_DISABLE_TURN_SNAPSHOTS=1 turns it off.
@@ -1846,6 +1803,8 @@ func main() {
 	startMemGuard(ctx, memCfg)
 
 	runBootSteps(bootOwned, boot)
+	// Seeded panes (seed_panes.go): side daemons only, fresh -data only.
+	api.seedPanesAtBoot(*seedPanes, role)
 
 	// Workflow drivers start only once this process owns the local port.
 	// A twin that loses the bind race exits before reaching here, so it can

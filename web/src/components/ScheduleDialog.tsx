@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api, currentRoutingScope } from '../api';
 import { useStore } from '../store';
@@ -19,9 +19,12 @@ import {
 } from '../lib/cron';
 import { parseNaturalSchedule } from '../lib/scheduleNL';
 import { useUnsentInput } from '../lib/unsentInput';
+import { confirmDialog } from '../lib/dialog';
+import { useFocusTrap } from './useFocusTrap';
+import { SCHEDULE_PERMISSION_CHOICES, schedulePermissionChoice } from '../lib/schedulePermission';
 
-// Add / edit modal for Schedules. A schedule is a trigger plus one of
-// two job kinds:
+// Add / edit modal for Automations ("schedules" in the code and the daemon's
+// API). An automation is a trigger plus one of these job kinds:
 //   • Prompt — inject text into a target pane's PTY on fire.
 //   • Agent — run a built-in local agent (fix agent, PR babysitter) as
 //     a child process on fire. Only offered when the daemon reports an
@@ -69,6 +72,10 @@ interface Preset {
   label: string;
   cron: string;
 }
+
+// A new automation starts daily, never hourly: the first thing a person makes
+// from scratch must not run 24 times a day for ever on their own usage.
+const DEFAULT_PRESET_CRON = '0 9 * * *';
 
 // Ordered from fine-grained to coarse. "Custom" and "Once" are handled
 // separately — see the cronMode state machine.
@@ -166,7 +173,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
 
   const [name, setName] = useState('');
   const [cronMode, setCronMode] = useState<CronMode>('preset');
-  const [presetCron, setPresetCron] = useState(PRESETS[3].cron); // every hour default
+  const [presetCron, setPresetCron] = useState(DEFAULT_PRESET_CRON);
   const [customCron, setCustomCron] = useState('0 9 * * *');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [nlText, setNlText] = useState('');
@@ -220,6 +227,9 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
   const [agents, setAgents] = useState<ScheduleAgent[]>([]);
   // kind=task
   const [cwd, setCwd] = useState('');
+  // The form has no model picker, but a save replaces every field, so the
+  // model a task was created with has to ride along or the edit erases it.
+  const [model, setModel] = useState('');
   const [permission, setPermission] = useState<SchedulePermission>('plan');
   const [timeoutMin, setTimeoutMin] = useState(30);
   const [catchUp, setCatchUp] = useState(false);
@@ -255,9 +265,28 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
   // agent-schedule editable even if the fetch failed.
   const showKindToggle = presentAgents.length > 0 || editing?.kind === 'agent';
 
-  // Reset when opening.
+  // Changed by the person since the form was filled in. Closing a changed
+  // form asks first; an untouched one just closes.
+  const [dirty, setDirty] = useState(false);
+  const markDirty = () => setDirty(true);
+
+  // Fill the form ONCE per open (and when a different automation is put up
+  // for editing). The seed pane and the entry point are read through refs on
+  // purpose: hosts pass the focused pane, which changes on background events,
+  // and re-running this on each change wiped what the person was typing.
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
+  const initialPaneIdRef = useRef(initialPaneId);
+  initialPaneIdRef.current = initialPaneId;
+  const fromPaneMenuRef = useRef(fromPaneMenu);
+  fromPaneMenuRef.current = fromPaneMenu;
+  const editingId = editing?.id ?? null;
   useEffect(() => {
     if (!open) return;
+    const editing = editingRef.current;
+    const initialPaneId = initialPaneIdRef.current;
+    const fromPaneMenu = fromPaneMenuRef.current;
+    setDirty(false);
     if (editing) {
       setName(editing.name);
       if (editing.runAt) {
@@ -295,7 +324,8 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
       setAgentId(editing.agentId || '');
       setApplyMode(!!editing.apply);
       setCwd(editing.cwd || '');
-      setPermission(editing.permission === 'edit' ? 'edit' : 'plan');
+      setModel(editing.kind === 'task' ? (editing.model || '') : '');
+      setPermission(schedulePermissionChoice(editing.permission).value);
       setTimeoutMin(editing.timeoutMin || 30);
       setCatchUp(!!editing.catchUp);
       setDeliverChat(editing.deliverChat ?? null);
@@ -303,14 +333,18 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
     } else {
       setName('');
       setCronMode('preset');
-      setPresetCron(PRESETS[3].cron);
+      setPresetCron(DEFAULT_PRESET_CRON);
       setCustomCron('0 9 * * *');
       setAdvancedOpen(false);
       setRunAt(defaultRunAt());
       setEndMode('forever');
       setMaxFires(10);
       setUntil(defaultUntil());
-      setPaneId(initialPaneId || '');
+      // Read imperatively: `panes` re-identifies on every daemon poll, and
+      // depending on it here would re-run this whole reset.
+      const seedPane = (initialPaneId && useStore.getState().panes[initialPaneId]) || undefined;
+      // Only a running pane can be typed into; anything else stays unpicked.
+      setPaneId(seedPane?.status === 'running' ? seedPane.id : '');
       setPrompt('');
       setNotifyOnRun(false);
       notifyTouched.current = false;
@@ -323,11 +357,9 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
       setAgentId('');
       setApplyMode(false);
       // Seed the working directory from the pane the user came from — the
-      // overwhelmingly likely answer, and it saves a paste. Read imperatively:
-      // `panes` re-identifies on every daemon poll, and depending on it here
-      // would re-run this whole reset and wipe what the user is typing.
-      const seedPane = (initialPaneId && useStore.getState().panes[initialPaneId]) || undefined;
+      // overwhelmingly likely answer, and it saves a paste.
       setCwd(seedPane ? (seedPane.liveCwd || seedPane.cwd || '') : '');
+      setModel('');
       setPermission('plan');
       setTimeoutMin(30);
       setCatchUp(false);
@@ -335,12 +367,14 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
       setShowTemplates(!fromPaneMenu); // pane context menu opens the seeded prompt form directly
     }
     setNlText('');
-  }, [open, editing, initialPaneId, fromPaneMenu]);
+  }, [open, editingId]);
 
   // Recipe → dialog state. Leaves cwd/paneId alone (already seeded) so a
   // template never yanks the user out of the directory they came from.
   function applyTemplate(t: ScheduleTemplate) {
     const p = t.preset;
+    // A recipe's own text is not the person's work: one click brings it back.
+    setDirty(false);
     setShowTemplates(false);
     setJobKind(p.kind);
     setName(p.name);
@@ -439,6 +473,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
     }
     if (next.weekdays.length === 0) next = { ...next, weekdays: cur.weekdays.length ? cur.weekdays : [1] };
     setCustomCron(compileSpec(next));
+    markDirty();
   }
 
   function toggleWeekday(day: number) {
@@ -538,10 +573,16 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
     return [...seen].sort();
   }, [panes]);
 
+  // The pane this automation types into is gone (closed, or no longer
+  // running). Shown as "(closed pane)", and Save waits for another pick:
+  // saving would keep an automation that can never run.
+  const paneClosed = jobKind === 'prompt' && paneId !== '' && !runningPanes.some((p) => p.id === paneId);
+
   function setRunAtOffset(ms: number) {
     const d = new Date(Date.now() + ms);
     d.setSeconds(0, 0);
     setRunAt(dateToLocalInput(d));
+    markDirty();
   }
 
   function setRunAtTomorrow9am() {
@@ -549,6 +590,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
     d.setDate(d.getDate() + 1);
     d.setHours(9, 0, 0, 0);
     setRunAt(dateToLocalInput(d));
+    markDirty();
   }
 
   async function save() {
@@ -560,6 +602,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
       if (deliverChat && !deliverChat.chatId) { toast(chatDelivery?.missingChoice ?? 'Pick the chat for the report', { kind: 'warn', icon: '⚠' }); return; }
     } else {
       if (!paneId) { toast('Pick a target pane', { kind: 'warn', icon: '⚠' }); return; }
+      if (paneClosed) { toast('That pane is closed. Pick another pane', { kind: 'warn', icon: '⚠' }); return; }
       if (!prompt.trim()) { toast('Prompt is empty', { kind: 'warn', icon: '⚠' }); return; }
     }
     if (cronMode !== 'once' && !cronValid) { toast('The timing looks wrong — check the repeat settings', { kind: 'warn', icon: '⚠' }); return; }
@@ -582,6 +625,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
               cwd: cwd.trim(),
               prompt,
               permission,
+              model: model || undefined,
               timeoutMin: timeoutMin === 30 ? undefined : timeoutMin,
               notifyOnRun,
               deliverChat: deliverChat ?? undefined,
@@ -632,6 +676,68 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
     }
   }
 
+  // Every way out (Escape, a click outside, ×, Cancel) comes through here, so
+  // a changed form is never thrown away without a question.
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const confirmingRef = useRef(false);
+  async function requestClose() {
+    // While a save is on its way the form stays: if the save fails, what was
+    // typed is still here to try again, and a good save closes it anyway.
+    if (confirmingRef.current || saving) return;
+    if (!dirty) { onClose(); return; }
+    confirmingRef.current = true;
+    setConfirmingDiscard(true);
+    try {
+      const discard = await confirmDialog({
+        title: editing ? 'Discard your changes?' : 'Discard this automation?',
+        message: editing
+          ? `Your changes to "${editing.name}" have not been saved.`
+          : 'What you entered has not been saved.',
+        confirmLabel: 'Discard',
+        cancelLabel: 'Keep editing',
+        danger: true,
+        focusCancel: true,
+      });
+      if (discard) onClose();
+    } finally {
+      confirmingRef.current = false;
+      setConfirmingDiscard(false);
+    }
+  }
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
+
+  // Escape closes, as the × button's "Close (Esc)" says. Bubble phase, and
+  // only an Escape nothing else handled: the discard question in front of
+  // this form consumes its own when it has focus.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      // isComposing: Escape there cancels an input-method composition.
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+      e.preventDefault();
+      if (confirmingRef.current) {
+        // The question is up but focus is not in it yet (it takes focus a
+        // frame after it appears), so its own handler never saw this key.
+        // Escape still answers the question: keep editing.
+        useStore.getState().closeDialog(false);
+        return;
+      }
+      void requestCloseRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  // Keyboard-modal: Tab stays inside, focus starts inside, and it returns to
+  // whatever opened the form on close. Paused while the discard question is up.
+  const cardRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useFocusTrap(cardRef, open, confirmingDiscard);
+  useEffect(() => {
+    if (open) cardRef.current?.focus({ preventScroll: true });
+  }, [open]);
+
   if (!open) return null;
 
   const runsValue =
@@ -651,16 +757,25 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
   // block for position:fixed, so without the portal the dialog rendered
   // squeezed inside the drawer box on phones.
   return createPortal(
-    <div className="dialog-backdrop" onMouseDown={onClose}>
+    <div className="dialog-backdrop" role="presentation" onMouseDown={() => void requestClose()}>
       <div
+        ref={cardRef}
         className="dialog schedule-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         onMouseDown={(e) => e.stopPropagation()}
-        style={{ width: 560, maxWidth: '92vw' }}
+        // Any field the person changes bubbles its change event here.
+        onChange={markDirty}
+        // Focused on open only so keys and screen readers start inside; it is
+        // not a tab stop, so it needs no focus ring.
+        style={{ width: 560, maxWidth: '92vw', outline: 'none' }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h2>{editing ? 'Edit automation' : 'New automation'}</h2>
+          <h2 id={titleId}>{editing ? 'Edit automation' : 'New automation'}</h2>
           <button
-            onClick={onClose}
+            onClick={() => void requestClose()}
             title="Close (Esc)"
             aria-label="Close"
             style={{ padding: '1px 8px' }}
@@ -704,7 +819,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
               </div>
             </div>
             <div className="row" style={{ marginTop: 10 }}>
-              <button onClick={onClose}>Cancel</button>
+              <button onClick={() => void requestClose()}>Cancel</button>
               <button className="primary" onClick={() => setShowTemplates(false)}>
                 Start from scratch →
               </button>
@@ -742,8 +857,8 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
                     : 'A fresh Claude session each run — no pane needed, works while you\'re away.')
                 : jobKind === 'prompt'
                   ? (claudeMissing
-                      ? 'Types into a pane you already have open, such as a Codex pane. Skipped if that pane is busy.'
-                      : 'Types into a pane you already have open. Skipped if that pane is busy.')
+                      ? 'Types into a pane you already have open, such as a Codex pane. If that pane is busy, or you are typing in it, it waits up to an hour.'
+                      : 'Types into a pane you already have open. If that pane is busy, or you are typing in it, it waits up to an hour.')
                   : 'Runs a built-in local agent as a background process.'}
             </div>
           </div>
@@ -1033,7 +1148,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
                   <button
                     key={d}
                     type="button"
-                    onClick={() => setCwd(d)}
+                    onClick={() => { setCwd(d); markDirty(); }}
                     title={d}
                     style={{ fontSize: 10, padding: '2px 6px', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                   >{d.replace(/^\/home\/[^/]+/, '~')}</button>
@@ -1043,15 +1158,18 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
 
             <label style={{ marginTop: 8 }}>Permission</label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                <input type="radio" name="perm" checked={permission === 'plan'} onChange={() => setPermission('plan')} />
-                <span>Read &amp; plan only <span style={{ color: 'var(--fg-dim)' }}>— changes nothing</span></span>
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                <input type="radio" name="perm" checked={permission === 'edit'} onChange={() => setPermission('edit')} />
-                <span>Allow edits <span style={{ color: 'var(--fg-dim)' }}>— Claude may change files in this directory</span></span>
-              </label>
+              {SCHEDULE_PERMISSION_CHOICES.map((c) => (
+                <label key={c.value} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                  <input type="radio" name="perm" checked={permission === c.value} onChange={() => setPermission(c.value)} />
+                  <span>{c.label} <span style={{ color: 'var(--fg-dim)' }}>{c.detail}</span></span>
+                </label>
+              ))}
             </div>
+            {permission === 'check' && (
+              <div style={{ fontSize: 10, color: 'var(--warn)', marginTop: 3 }}>
+                This runs your project&apos;s tests and dependency checks, which execute code from the repository, unattended. Pick it only for a project you trust. It doesn&apos;t load your Claude settings files, so a Bedrock, Vertex or API-key-helper login set up there isn&apos;t used and the run fails.
+              </div>
+            )}
             {permission === 'edit' && (
               <div style={{ fontSize: 10, color: 'var(--danger)', marginTop: 3 }}>
                 This runs unattended and can modify your working tree. Commit or stash first.
@@ -1104,7 +1222,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
             />
             <div style={{ fontSize: 10, color: 'var(--fg-dim)', marginTop: 3 }}>
               Each run starts a fresh session with no memory of the last one — say
-              everything it needs to know. Output lands in this schedule&apos;s run history.
+              everything it needs to know. Output lands in this automation&apos;s run history.
             </div>
           </div>
         )}
@@ -1160,6 +1278,7 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
             style={{ width: '100%' }}
           >
             <option value="">— pick a running pane —</option>
+            {paneClosed && <option value={paneId} disabled>(closed pane)</option>}
             {runningPanes.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.title || p.cmd.join(' ')} · {(p.liveCwd || p.cwd).replace(/^\/home\/[^/]+/, '~')}
@@ -1167,9 +1286,14 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
               </option>
             ))}
           </select>
+          {paneClosed && (
+            <div role="alert" style={{ fontSize: 10, color: 'var(--danger)', marginTop: 3 }}>
+              The pane this automation types into is closed. Pick another pane to save it.
+            </div>
+          )}
           {runningPanes.length === 0 && (
             <div style={{ fontSize: 10, color: 'var(--fg-dim)', marginTop: 3 }}>
-              No running panes — create one first, then schedule.
+              No running panes. Open one first, then come back.
             </div>
           )}
         </div>
@@ -1241,11 +1365,12 @@ export function ScheduleDialog({ open, onClose, editing, initialPaneId, fromPane
         </label>
 
         <div className="row" style={{ marginTop: 10 }}>
-          <button onClick={onClose} disabled={saving}>Cancel</button>
+          <button onClick={() => void requestClose()} disabled={saving}>Cancel</button>
           <button
             className="primary"
             onClick={save}
-            disabled={saving || (cronMode === 'once' ? !runAtValid : !cronValid)}
+            disabled={saving || paneClosed || (cronMode === 'once' ? !runAtValid : !cronValid)}
+            title={paneClosed ? 'Pick a pane that is still open first' : undefined}
           >
             {saving ? 'Saving…' : editing ? 'Save' : 'Create'}
           </button>

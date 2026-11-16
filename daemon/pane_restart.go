@@ -111,17 +111,11 @@ func restartSpawnOpts(snap PaneSnapshot, fresh bool) SpawnOpts {
 	opts.HarnessProvider = ""
 	opts.CodexTurnInFlight = false
 	opts.Env = nil
-	if snap.Kind != "native" {
-		cmd := append([]string(nil), snap.Cmd...)
-		if len(cmd) == 0 {
-			cmd = []string{defaultShell()}
-		}
-		opts.Cmd = cmd
-	} else {
-		// Native Spawn rebuilds a fresh headless argv from Agent when Cmd is nil
-		// and no session id is set.
-		opts.Cmd = nil
+	cmd := append([]string(nil), snap.Cmd...)
+	if len(cmd) == 0 {
+		cmd = []string{defaultShell()}
 	}
+	opts.Cmd = cmd
 	return opts
 }
 

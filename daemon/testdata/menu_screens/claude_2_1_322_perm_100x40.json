@@ -1,0 +1,42 @@
+{
+ "cols": 100,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "trust",
+   "bytes": 1288
+  },
+  {
+   "name": "idle",
+   "bytes": 3305
+  },
+  {
+   "name": "bash_permission",
+   "bytes": 7471
+  },
+  {
+   "name": "bash_cancelled",
+   "bytes": 8826
+  },
+  {
+   "name": "write_permission",
+   "bytes": 13720
+  },
+  {
+   "name": "edit_permission",
+   "bytes": 25277
+  },
+  {
+   "name": "webfetch_permission",
+   "bytes": 34920
+  },
+  {
+   "name": "sudo_permission",
+   "bytes": 40715
+  },
+  {
+   "name": "settings_write_permission",
+   "bytes": 51755
+  }
+ ]
+}

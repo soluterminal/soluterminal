@@ -10,8 +10,8 @@
 # silently no-ops on every release (daemon/updater.go:189) — exactly
 # the failure mode that kept v0.0.421 from reaching one running install.
 #
-# Output paths follow feedback_windows_build_command.md: write to the
-# Windows-side repo root (not WSL ext4) to avoid the UNC exe cache.
+# Output goes to a Windows-side folder (WIN_OUT_DIR, not WSL ext4) to avoid
+# the UNC exe cache.
 #
 #   build-sidecar-binaries.sh          release sidecars (needs scripts/release-ldflags.sh)
 #   build-sidecar-binaries.sh --dev    unsigned development sidecars
@@ -156,10 +156,19 @@ else
   echo "warning: auth gate defaults omitted from sidecars (SOLU_ALLOW_NO_AUTH_SIDECAR=1)" >&2
 fi
 
-# Default Windows-side output paths from feedback_windows_build_command.md.
-# Override by exporting WIN_OUT_DIR before invoking, e.g.
+# Windows-side output folder: WIN_OUT_DIR when set, e.g.
 #   WIN_OUT_DIR=/mnt/c/Code/soluterminal ./build-sidecar-binaries.sh
-WIN_OUT_DIR="${WIN_OUT_DIR:-/mnt/c/Users/benja/soluterminal}"
+# otherwise <Windows user profile>/soluterminal, asked from Windows itself.
+if [[ -z "${WIN_OUT_DIR:-}" ]]; then
+  win_cmd="$(command -v cmd.exe || echo /mnt/c/Windows/System32/cmd.exe)"
+  win_profile="$(timeout 20 "$win_cmd" /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r' || true)"
+  if [[ "$win_profile" =~ ^[A-Za-z]:\\ ]] && command -v wslpath >/dev/null; then
+    WIN_OUT_DIR="$(wslpath -u "$win_profile")/soluterminal"
+  else
+    echo "error: set WIN_OUT_DIR (could not read the Windows user profile from WSL)" >&2
+    exit 1
+  fi
+fi
 mkdir -p "$WIN_OUT_DIR"
 
 echo "==> building solud.exe (windows-amd64) → $WIN_OUT_DIR/solud.exe"

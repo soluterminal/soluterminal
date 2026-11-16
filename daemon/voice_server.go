@@ -25,6 +25,7 @@ func init() {
 	registerBootStep(bootServer, func(b *bootEnv) {
 		api := b.api
 		api.voice().localCleaner = newLocalCleaner()
+		api.voice().localCleaner.useAPIKey = func() bool { return api.localCleanupMode() == voiceCleanupAPIKey }
 		api.voice().voiceLocal = newVoiceLocalSettings(b.dataDir)
 		api.voice().voiceWords = newVoiceWords(b.dataDir)
 	})

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { sendEmbedClaimRefused } from '../embed';
 
 // What became of the last "Type here" click (SessionClaimOverlay). A claim the
 // daemon refuses used to look exactly like no click at all: the ack is the
@@ -37,6 +38,25 @@ export function parseClaimDenied(v: unknown): ClaimRefusal | null {
 
 export const useClaimFeedback = create<ClaimFeedback>(() => ({ state: 'idle' }));
 
+// An embedding host (Shinoque) hears of each refused click once, as
+// claim-refused with the reason the chip settles on: panes answering a moment
+// apart can raise it (PRIORITY), so it is sent a beat after the first one.
+export const CLAIM_REFUSED_SETTLE_MS = 300;
+let hostTimer: ReturnType<typeof setTimeout> | null = null;
+let hostToldFor = -1;
+
+function tellHost(): void {
+  if (hostToldFor === attempt) return;
+  hostToldFor = attempt;
+  if (hostTimer !== null) clearTimeout(hostTimer);
+  const forAttempt = attempt;
+  hostTimer = setTimeout(() => {
+    hostTimer = null;
+    const cur = useClaimFeedback.getState();
+    if (forAttempt === attempt && cur.state === 'refused') sendEmbedClaimRefused(cur.reason);
+  }, CLAIM_REFUSED_SETTLE_MS);
+}
+
 let timer: ReturnType<typeof setTimeout> | null = null;
 // Each click is one attempt. A pane reports against the attempt it claimed
 // for, so a late answer from an earlier click, or from a workspace no longer
@@ -62,6 +82,7 @@ export function beginTypeHere(): void {
     timer = null;
     if (useClaimFeedback.getState().state === 'pending') {
       useClaimFeedback.setState({ state: 'refused', reason: 'unreachable' }, true);
+      tellHost();
     }
   }, CLAIM_FEEDBACK_TIMEOUT_MS);
 }
@@ -76,6 +97,7 @@ export function reportClaimRefused(reason: ClaimRefusal, from?: number): void {
   if (cur.state === 'refused' && PRIORITY.indexOf(cur.reason) <= PRIORITY.indexOf(reason)) return;
   clearTimer();
   useClaimFeedback.setState({ state: 'refused', reason }, true);
+  tellHost();
 }
 
 /** The chip went away (every pane is typeable here: a re-grab may still

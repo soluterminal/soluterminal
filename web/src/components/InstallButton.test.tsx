@@ -29,6 +29,7 @@ function installPrompt(prompt: () => Promise<void>) {
 afterEach(() => {
   vi.restoreAllMocks();
   delete (window as unknown as Stash).__SOLU_INSTALL_PROMPT__;
+  localStorage.removeItem('solu.pwaInstalled');
 });
 
 describe('InstallButton on iOS', () => {
@@ -130,5 +131,60 @@ describe('InstallButton on Android and desktop', () => {
     expect(screen.getByRole('button', { name: INSTALL_LABEL })).toBeInTheDocument();
     act(() => { window.dispatchEvent(new Event('appinstalled')); });
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+// F-015: the steps popover takes focus so a screen reader reads its title.
+// F-016: a normal tab hides Install once the installed app has run here.
+describe('InstallButton install state and screen readers', () => {
+  it('moves focus into the steps so their title is read out, and back on close', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ANDROID_CHROME);
+    render(<InstallButton />);
+    const pill = screen.getByRole('button', { name: INSTALL_LABEL });
+    pill.focus();
+    fireEvent.click(pill);
+    expect(screen.getByRole('dialog', { name: INSTALL_HELP_TITLE })).toHaveFocus();
+    fireEvent.click(pill);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(pill).toHaveFocus();
+  });
+
+  it('Firefox keeps Install despite the note, since it never offers a prompt to clear it', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ANDROID_FIREFOX);
+    localStorage.setItem('solu.pwaInstalled', '1');
+    render(<InstallButton />);
+    expect(screen.getByRole('button', { name: INSTALL_LABEL })).toBeInTheDocument();
+  });
+
+  it('a tab hides Install once the installed app has run on this device', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ANDROID_CHROME);
+    // The installed window runs standalone (isStandalone also reads this flag).
+    (navigator as unknown as { standalone?: boolean }).standalone = true;
+    try {
+      const app = render(<InstallButton />);
+      expect(app.container).toBeEmptyDOMElement();
+      app.unmount();
+    } finally {
+      delete (navigator as unknown as { standalone?: boolean }).standalone;
+    }
+    const tab = render(<InstallButton />);
+    expect(tab.container).toBeEmptyDOMElement();
+  });
+
+  it('a fresh install prompt (uninstalled since) brings Install back', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ANDROID_CHROME);
+    localStorage.setItem('solu.pwaInstalled', '1');
+    const { container } = render(<InstallButton />);
+    expect(container).toBeEmptyDOMElement();
+    act(() => { window.dispatchEvent(installPrompt(() => Promise.resolve())); });
+    expect(screen.getByRole('button', { name: INSTALL_LABEL })).toBeInTheDocument();
+    expect(localStorage.getItem('solu.pwaInstalled')).toBeNull();
+  });
+
+  it('remembers an install finished in this tab', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ANDROID_CHROME);
+    render(<InstallButton />);
+    act(() => { window.dispatchEvent(new Event('appinstalled')); });
+    expect(localStorage.getItem('solu.pwaInstalled')).toBe('1');
   });
 });

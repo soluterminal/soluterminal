@@ -27,7 +27,7 @@ package main
 //
 // Manifest signing: newer builds can enforce an Ed25519 detached
 // signature over the raw update.json bytes. The public key is baked by
-// publish.sh via -ldflags or supplied by SOLU_UPDATE_MANIFEST_PUBKEY;
+// publish.sh via -ldflags (a dev build may take SOLU_UPDATE_MANIFEST_PUBKEY);
 // the private key stays outside the repo in SOLU_UPDATE_SIGNING_PRIVATE_KEY.
 // If no public key is configured, the updater keeps the legacy HTTPS +
 // SHA-256 behavior for dev/private installs.
@@ -222,6 +222,12 @@ type UpdateStatus struct {
 	RollbackState  string `json:"rollbackState,omitempty"`
 	RollbackTarget string `json:"rollbackTarget,omitempty"`
 	RollbackError  string `json:"rollbackError,omitempty"`
+
+	// IdleWaitCause/IdleWaitReason: why the last automatic apply waited
+	// (an updateBusyError), so a long wait — e.g. the person's pause on
+	// agent messaging holding messages — is named, not silent.
+	IdleWaitCause  string `json:"idleWaitCause,omitempty"`
+	IdleWaitReason string `json:"idleWaitReason,omitempty"`
 
 	WorkflowDeferred        bool   `json:"workflowDeferred,omitempty"`
 	WorkflowDeferReason     string `json:"workflowDeferReason,omitempty"`
@@ -666,7 +672,7 @@ func (u *Updater) StartBackgroundPoll(ctx context.Context) {
 			slog.Error("auto-update refusing to poll", "reason", "signed manifest required but no manifest public key configured")
 			return
 		}
-		slog.Warn("auto-update running unsigned", "reason", "no manifest public key compiled in or set via SOLU_UPDATE_MANIFEST_PUBKEY", "fallback", "HTTPS+SHA256 only")
+		slog.Warn("auto-update running unsigned", "reason", "no manifest public key compiled in (or, in a dev build, set via SOLU_UPDATE_MANIFEST_PUBKEY)", "fallback", "HTTPS+SHA256 only")
 	default:
 		slog.Info("auto-update verification enabled", "alg", "ed25519", "fingerprint", fmt.Sprintf("%x", pub[:4]))
 	}
@@ -680,11 +686,11 @@ func (u *Updater) StartBackgroundPoll(ctx context.Context) {
 			err = runAutoApplyIfEligible(ctx, enabled, st, func(applyCtx context.Context) error {
 				return u.Apply(applyCtx, os.Exit, false)
 			})
+			busy, waiting := u.noteAutoApplyWait(err)
 			if err == nil {
 				return
 			}
-			var busy *updateBusyError
-			if errors.As(err, &busy) {
+			if waiting {
 				slog.Info("auto-update waiting for idle", "reason", busy.reason)
 				return
 			}
@@ -1334,4 +1340,19 @@ func (u *Updater) WorkflowDrainPending() bool {
 	return u.leaseHeld ||
 		(!u.drainStart.IsZero() && time.Since(u.drainStart) < u.drainWindow &&
 			(u.status.Available || u.rollbackDrain || u.localDrainCandidateID != ""))
+}
+
+// noteAutoApplyWait records in the status why an automatic apply waited (an
+// updateBusyError), or clears it, so the UI can name a long wait such as the
+// person's pause on agent messaging holding messages.
+func (u *Updater) noteAutoApplyWait(err error) (*updateBusyError, bool) {
+	var busy *updateBusyError
+	waiting := errors.As(err, &busy)
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.status.IdleWaitCause, u.status.IdleWaitReason = "", ""
+	if waiting {
+		u.status.IdleWaitCause, u.status.IdleWaitReason = busy.cause, busy.reason
+	}
+	return busy, waiting
 }

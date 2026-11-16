@@ -47,17 +47,6 @@ func TestAnswerLockEveryAutoAnswerPathWritesZeroFrames(t *testing.T) {
 		lockWithAnswerProbe(p, probe)
 		return a, p, &apiServer{mgr: a.mgr, uiBus: newUIBus(), agentAuthority: grantedAgentAuthority(t)}
 	}
-	native := func(t *testing.T, probe *answerLockFrameProbe) (*Aria, *Pane, *apiServer) {
-		p, _ := nativePaneForApproval(t, "zero-native")
-		p.mu.Lock()
-		p.AutoMode = "always"
-		p.mu.Unlock()
-		lockWithAnswerProbe(p, probe)
-		p.setNativeAllowlist([]string{"Read"})
-		p.processNativeLine([]byte(nativeCanUseToolLine("zero-req", "zero-tool", "Read", `{"file_path":"/tmp/example"}`)), false, false)
-		a := testNativeAutoAria(t, p)
-		return a, p, &apiServer{mgr: a.mgr, uiBus: a.uiBus, agentAuthority: grantedAgentAuthority(t)}
-	}
 	noop := func(map[string]any) {}
 	cases := []struct {
 		name string
@@ -90,36 +79,6 @@ func TestAnswerLockEveryAutoAnswerPathWritesZeroFrames(t *testing.T) {
 			if att, _ := p.AttentionNow(); att != AttentionNeedsUser {
 				t.Fatalf("locked prompt attention: %s", att)
 			}
-		}},
-		{"native-allowlist", func(t *testing.T, c *answerLockFrameProbe) {
-			_, p, _ := native(t, c)
-			p.maybeAutoAllowFromList("zero-req", "Read", "tool")
-		}},
-		{"native-auto-resolve", func(t *testing.T, c *answerLockFrameProbe) {
-			a, p, _ := native(t, c)
-			a.nativeAutoResolve(p, "zero-req", "zero-confirm", false)
-		}},
-		{"native-aria-direct", func(t *testing.T, c *answerLockFrameProbe) {
-			a, p, _ := native(t, c)
-			a.directAutoFireNative(context.Background(), p.ID, p.Title)
-		}},
-		{"native-aria-tool", func(t *testing.T, c *answerLockFrameProbe) {
-			a, p, _ := native(t, c)
-			a.toolResolvePermission(context.Background(), "zero", p.ID, "zero-req", false, noop)
-		}},
-		{"native-answer-prompt", func(t *testing.T, c *answerLockFrameProbe) {
-			_, p, a := native(t, c)
-			a.mcpToolAnswerPrompt(map[string]any{"pane_id": p.ID, "option": "allow"})
-		}},
-		{"native-delegated-http", func(t *testing.T, c *answerLockFrameProbe) {
-			_, p, a := native(t, c)
-			old := identifyCallerHook
-			t.Cleanup(func() { identifyCallerHook = old })
-			identifyCallerHook = func(*http.Request) callerIdentity { return callerIdentity{Kind: callerPane, PaneID: "other-pane"} }
-			req := httptest.NewRequest("POST", "/resolve", strings.NewReader(`{"allow":true}`))
-			req.SetPathValue("id", p.ID)
-			req.SetPathValue("reqId", "zero-req")
-			a.handlePaneApprovalResolve(httptest.NewRecorder(), req)
 		}},
 		{"cross-pane-answer-prompt", func(t *testing.T, c *answerLockFrameProbe) {
 			_, p, a := terminal(t, c)

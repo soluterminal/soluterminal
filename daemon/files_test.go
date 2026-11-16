@@ -51,7 +51,7 @@ func TestLooksLikeEnvFile(t *testing.T) {
 	}
 }
 
-func TestMCPWriteFileLineRefusalDetectsSecretishPaths(t *testing.T) {
+func TestSecretPathRefusalDetectsSecretishPaths(t *testing.T) {
 	tests := []struct {
 		path string
 		want bool
@@ -70,9 +70,9 @@ func TestMCPWriteFileLineRefusalDetectsSecretishPaths(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := mcpWriteFileLineRefusal(tt.path) != ""
+		got := secretPathRefusal(tt.path) != ""
 		if got != tt.want {
-			t.Fatalf("mcpWriteFileLineRefusal(%q) refused=%v, want %v", tt.path, got, tt.want)
+			t.Fatalf("secretPathRefusal(%q) refused=%v, want %v", tt.path, got, tt.want)
 		}
 	}
 }

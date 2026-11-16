@@ -175,7 +175,6 @@ func TestReconcileKeepsDraftWithoutProof(t *testing.T) {
 		"unrecognised box":   {screen: "$ "},
 		"keystroke too new":  {screen: claude2110Screen(t, "esc_sent"), setup: func(p *Pane) { p.promptRec.lastRecordedInputMs = time.Now().UnixMilli() }},
 		"not an agent pane":  {screen: claude2110Screen(t, "esc_sent"), setup: func(p *Pane) { p.Agent = "" }},
-		"native agent pane":  {screen: claude2110Screen(t, "esc_sent"), setup: func(p *Pane) { p.Kind = "native" }},
 		"inside a menu step": {screen: claude2110Screen(t, "esc_sent"), setup: func(p *Pane) { p.promptRec.enterMenu() }},
 		// The last glyph row is a continuation of a multi-line draft: no rule
 		// directly above it, so the box is not provably one empty row.

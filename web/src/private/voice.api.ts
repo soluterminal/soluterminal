@@ -4,14 +4,25 @@ import type { VoiceDiagnostics } from 'soluvoice';
 import { apiFetch, currentApiPrefix, currentPrefix, j, rootFetch } from '../api';
 import { readVoiceJSON, validateVoiceUpload, voiceErrorFromResponse, voiceQuotaFromHeaders } from '../lib/voiceRequest';
 
-// "Clean up dictation with my Claude plan" (daemon/voice_local_api.go). reason is
+// "Clean up dictation with my Claude plan" (daemon/voice_local_api.go), off by default. reason is
 // why it isn't available right now: 'off' | 'not_installed' |
 // 'not_signed_in' | 'paused' | 'unavailable'.
 export interface VoiceLocalSettings {
+  /** The person opted in to clean-up on their Claude plan (never the default). */
   enabled: boolean;
   available: boolean;
   reason?: string;
   model: string;
+  /** Where clean-up runs now; older daemons leave it out. */
+  using?: 'plan' | 'api_key' | 'cloud';
+  /** An ANTHROPIC_API_KEY is exported to SoluTerminal (presence only). */
+  apiKey?: boolean;
+  /** The person picked "Use my Anthropic API key" (never automatic). */
+  apiKeyChosen?: boolean;
+  /** The person chose either way on the plan setting (unset used to mean on). */
+  planChoiceSet?: boolean;
+  /** The one-time "now runs in the cloud by default" notice was shown. */
+  noticeSeen?: boolean;
 }
 
 // "Words to recognise" (daemon/voice_vocabulary.go): the user's own names,
@@ -22,8 +33,16 @@ export interface VoiceWordsSettings {
   maxWords: number;
 }
 
-/** Who cleaned a dictation: the user's own Claude login, or our cloud. */
-export type VoiceCleanedBy = 'local' | 'cloud';
+/** Who cleaned a dictation: the user's Claude plan ('local'), their own API
+ * key, or our cloud. The daemon says "local" for both local logins and names
+ * the API key in cleanupProvider ("local/api-key"). */
+export type VoiceCleanedBy = 'local' | 'api_key' | 'cloud';
+
+export function cleanedByFrom(res: { by?: string; cleanupProvider?: string }): VoiceCleanedBy | undefined {
+  if (res.by === 'local') return res.cleanupProvider === 'local/api-key' ? 'api_key' : 'local';
+  if (res.by === 'cloud') return 'cloud';
+  return undefined;
+}
 
 // Whether a dictation may send the terminal snapshot (`context`). In cloud
 // mode the browser posts straight to the cloud, so the computer's "Only
@@ -113,7 +132,7 @@ const voiceApi = {
         ? { text, context: opts.context ?? '', language: opts.language ?? '' }
         : { text, language: opts.language ?? '' }),
       signal: opts.signal,
-    }).then(async r => { if (!r.ok) throw await voiceErrorFromResponse(r); return readVoiceJSON<VoiceDiagnostics & { text: string; cleanup?: 'ok' | 'disabled' | 'failed' | 'skipped'; by?: VoiceCleanedBy }>(r); }),
+    }).then(async r => { if (!r.ok) throw await voiceErrorFromResponse(r); return readVoiceJSON<VoiceDiagnostics & { text: string; cleanup?: 'ok' | 'disabled' | 'failed' | 'skipped'; by?: 'local' | 'cloud'; cleanupProvider?: string }>(r); }),
 
   startVoiceContextCheck,
 
@@ -153,6 +172,20 @@ const voiceApi = {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ enabled }),
+    }).then(j<VoiceLocalSettings>),
+  // "Use my Anthropic API key": an explicit choice; choosing it turns the
+  // Claude-plan setting off (the daemon keeps them exclusive).
+  setVoiceApiKey: (apiKey: boolean): Promise<VoiceLocalSettings> =>
+    apiFetch('/api/voice/local', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey }),
+    }).then(j<VoiceLocalSettings>),
+  markVoiceCleanupNoticeSeen: (): Promise<VoiceLocalSettings> =>
+    apiFetch('/api/voice/local', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ noticeSeen: true }),
     }).then(j<VoiceLocalSettings>),
 };
 

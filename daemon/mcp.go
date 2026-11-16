@@ -20,17 +20,17 @@ import (
 
 const mcpProtocolVersion = "2024-11-05"
 
-// Served verbatim in the MCP initialize response and embedded by reference in
-// the daemon-managed ~/.codex/AGENTS.md block (codex_agents_md.go). Edit this
-// constant and both surfaces update on the next daemon start. Sessions work
+// Served verbatim in the MCP initialize response, and to the Codex sessions
+// SoluTerminal starts as their developer instructions (codex_pane_policy.go).
+// Edit this constant and both surfaces update on the next daemon start. Sessions work
 // directly and coordinate through panes; the delegate-first workflow contract
 // lives only in the opt-in orchestrator role (orchestrator_policy.go).
 const mcpServerInstructions = mcpDirectServerInstructions
 
-// The engine-free brief is also used by the generated global Codex policy.
-// Keep schedules and pane coordination available without
-// advertising task lifecycle or repair capabilities that cannot run.
-const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. The workflow task engine is unavailable. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards. Workers close and archive automatically once finished, their result is read, and their work is committed and pushed, or once their work has merged into the default branch and their worktree is clean. Never close a lead. Close plain finished panes you started with kill_pane unless the user wants them kept. Message agents with ask_pane, never send_input. send_input and ask_pane messages are held while the person types, then delivered once their input box is empty and they stop typing; do not resend. Messages back in an input box unsent wait for the person to Send or Clear; held deliveries wait behind them, and list_panes held_messages marks them stuck. For a decision or action from the user, agents in verified panes use post_user_ask (one item per ask, your own only); resolve_user_ask when done or no longer needed. Unverified or scoped callers ask in their reply instead. Do not repeat open asks in replies. list_panes open_asks counts person asks; worker_notices holds lead housekeeping, with needsUser marking escalations; flagOwner records bookmark ownership. Flags are the person’s bookmarks; agents in panes no longer set or clear them. Pick each worker's agent for its task (cmd claude or codex, optionally with model and effort): work that writes code goes to a visible worker pane, and in-session subagents are for read-only research. Keep your own pane's working_on line current with set_pane_info as your work moves on. Message a pane only when it must act or decide: no acks, FYIs or relays. Wait on long work with one blocking command; never poll. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Preserve user authorization and required approval gates. Answering another pane's permission prompt (answer_prompt, or send_input keys at a prompt) needs the person's Agent permissions and a pane traced to your own process; a pane id, header or SOLU_PANE_ID you name is never enough, and no pane answers its own prompt. Codex panes can't answer other panes' prompts where their connection can't be traced, including WSL's default networking, until the Codex bridge ships. Use list_workspaces to discover names; move_pane_to_workspace targets existing layouts only. Moving someone else's pane and all rename_workspace/delete_workspace operations require user_requested and the person's Allow in the app, regardless of Agent permissions; deletion is empty-only. Never use _current for these tools. If your pane identity is unverified, name the target explicitly; pane changes need the user's request and Allow in the app, even for your own workers. Message labels mark such claims as unverified. Unverified callers have no automatic self-pane default or list_panes you marker. New panes have no starter or inherited worker/lead relationship and do not auto-archive; cmd auto and caller-owned queue cancellation are unavailable. Use explicit commands and workspace names; otherwise spawn placement falls back to the most recently active visible workspace. Do not update working_on without the user's request and Allow when unverified. Use MCP tools for pane and workspace changes; the matching REST mutation routes are for the human UI and do not accept agent callers."
+// The brief for team installs. It is served as the MCP server's instructions
+// and given to the Codex sessions SoluTerminal starts for that session only
+// (codex_pane_policy.go); it is never written into a global instructions file.
+const mcpDirectServerInstructions = "soluterminal is the user's multi-pane terminal workspace. Work directly in your own session: investigate, implement and test your changes. Keep any git worktree or clone you create inside its repository (for example .claude/worktrees/<name>, after making sure .gitignore excludes that folder), never in a temporary folder such as /tmp that can be cleared on restart, and commit work in progress early. Coordinate with other panes through list_panes, ask_pane, wait_for_pane and read_pane_tail. When you start a pane with spawn_pane, give it a title, purpose and handle so the user knows what it is, address it by its @handle afterwards. Workers close and archive automatically once finished, their result is read, and their work is committed and pushed, or once their work has merged into the default branch and their worktree is clean. Never close a lead. Close plain finished panes you started with kill_pane unless the user wants them kept. Message agents with ask_pane, never send_input. send_input and ask_pane messages are held while the person types, then delivered once their input box is empty and they stop typing; do not resend. Messages back in an input box unsent wait for the person to Send or Clear; held deliveries wait behind them, and list_panes held_messages marks them stuck. For a decision or action from the user, agents in verified panes use post_user_ask (one item per ask, your own only); resolve_user_ask when done or no longer needed. Unverified or scoped callers ask in their reply instead. Do not repeat open asks in replies. list_panes open_asks counts person asks; worker_notices holds lead housekeeping, with needsUser marking escalations; flagOwner records bookmark ownership. Flags are the person’s bookmarks; agents in panes no longer set or clear them. Pick each worker's agent for its task (cmd claude or codex, optionally with model and effort): work that writes code goes to a visible worker pane, and in-session subagents are for read-only research. Keep your own pane's working_on line current with set_pane_info as your work moves on. Message a pane only when it must act or decide: no acks, FYIs or relays. Wait on long work with one blocking command; never poll. Before handing a change back for merge, follow the repository AGENTS.md independent-review procedure (in soluterminal run scripts/solu-review, at most two rounds), then report the change, evidence, review and open issues to the user, who merges. Preserve user authorization and required approval gates. Answering another pane's permission prompt (answer_prompt, or send_input keys at a prompt) needs the person's Agent permissions and a pane traced to your own process; a pane id, header or SOLU_PANE_ID you name is never enough, and no pane answers its own prompt. Codex panes can't answer other panes' prompts where their connection can't be traced, including WSL's default networking, until the Codex bridge ships. Use list_workspaces to discover names; move_pane_to_workspace targets existing layouts only. Moving someone else's pane and all rename_workspace/delete_workspace operations require user_requested and the person's Allow in the app, regardless of Agent permissions; deletion is empty-only. Never use _current for these tools. If your pane identity is unverified, name the target explicitly; pane changes need the user's request and Allow in the app, even for your own workers. Message labels mark such claims as unverified. Unverified callers have no automatic self-pane default or list_panes you marker. New panes have no starter or inherited worker/lead relationship and do not auto-archive; cmd auto and caller-owned queue cancellation are unavailable. Use explicit commands and workspace names; otherwise spawn placement falls back to the most recently active visible workspace. Do not update working_on without the user's request and Allow when unverified. Use MCP tools for pane and workspace changes; the matching REST mutation routes are for the human UI and do not accept agent callers."
 
 // SOLU_MCP_MUTATION_POLICY controls MCP tools that directly mutate local
 // state without the ARIA confirmation channel. Default "allow" preserves
@@ -342,7 +342,7 @@ func mcpToolsForScope(scope *mcpScope) []mcpTool {
 		return all
 	}
 	out := make([]mcpTool, 0, len(scope.Tools))
-	for _, t := range all {
+	for _, t := range append(all, mcpScopedOnlyTools()...) {
 		if scope.allows(t.Name) {
 			out = append(out, t)
 		}
@@ -355,6 +355,81 @@ func mcpToolsForScope(scope *mcpScope) []mcpTool {
 // *when* to reach for each one, not just what it does.
 func mcpTools() []mcpTool {
 	return withExtensionTools(mcpCoreTools())
+}
+
+// mcpScopedOnlyTools are served only to callers holding a daemon-minted
+// scope, never to interactive panes, which have their own Read, Grep and git.
+// A managed agent runs headless with no shell (agents_run.go
+// agentDisallowedToolsFlag), so git_status is how it reads git state; all
+// three are in its minted read set (agentReadTools), where
+// agentScopedReadArgs keeps their paths inside the agent's repository.
+func mcpScopedOnlyTools() []mcpTool {
+	return []mcpTool{
+		{
+			Name: "read_file",
+			Description: "Read a bounded slice of a text file and return its lines, with the " +
+				"file's mtime as `mtime`. ANSI-safe; refuses likely secret/.env files, binary " +
+				"files, and oversized files.",
+			InputSchema: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"path": {
+						"type": "string",
+						"description": "Absolute path, or path starting with ~, to the file to read."
+					},
+					"start_line": {
+						"type": "number",
+						"description": "1-indexed line to start at. Defaults to 1."
+					},
+					"max_lines": {
+						"type": "number",
+						"description": "Number of lines to return. Defaults to 120, capped at 200."
+					}
+				},
+				"required": ["path"],
+				"additionalProperties": false
+			}`),
+		},
+		{
+			Name: "search_files",
+			Description: "Read-only fuzzy file search under a directory. Returns matching paths " +
+				"only, not contents; skips common generated/vendor directories. Use this to " +
+				"locate a source, config, or document file before reading it.",
+			InputSchema: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"query": {
+						"type": "string",
+						"description": "Fuzzy query to match against file names/paths."
+					},
+					"path": {
+						"type": "string",
+						"description": "Directory to search under. Optional — defaults to the user's home. Prefer a project directory."
+					}
+				},
+				"required": ["query"],
+				"additionalProperties": false
+			}`),
+		},
+		{
+			Name: "git_status",
+			Description: "Read-only Git summary for a directory: repo root, branch/upstream line, " +
+				"porcelain status, recent commits, and diff stats. Use this when the user asks " +
+				"what changed, whether a repo is clean, or what branch they're on. Only " +
+				"read-only git commands are run. Pass a directory inside the repo — a pane's " +
+				"live_cwd from list_panes targets the pane the user is working in.",
+			InputSchema: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"path": {
+						"type": "string",
+						"description": "A directory inside a git repo. Optional — defaults to the user's home (rarely useful; prefer passing a real project dir)."
+					}
+				},
+				"additionalProperties": false
+			}`),
+		},
+	}
 }
 
 func mcpCoreTools() []mcpTool {
@@ -385,21 +460,28 @@ func mcpCoreTools() []mcpTool {
 				"as the user sees them in the app, a label like \"#2 Codex\", the live state " +
 				"(busy, recent, idle, awaiting-input, choice-prompt, exited), agent identity (claude | " +
 				"codex | muse, empty for a plain shell), title, cwd and flagged state. Optional JSON fields: " +
-				"open_asks (person asks only; omitted when zero), held_messages (messages waiting on the pane, untyped: count, senders, and stuck when they wait behind text in its input box that only the person can clear; do not resend), worker_notices (lead notes with id, text, workerPane, createdAt and needsUser; only marked person escalations count or push), flagOwner (bookmark owner; omitted when unset; flags are the person’s bookmarks), " +
+				"open_asks (person asks only; omitted when zero), held_messages (messages waiting on the pane, untyped: count, senders, and stuck when they wait behind text in its input box that only the person can clear; do not resend), worker_notices (lead notes with id, text, workerPane, createdAt and needsUser; only marked person escalations count or push), flagOwner (bookmark owner; omitted when unset; flags are the person’s bookmarks), agent_messaging_paused (on every row while the person has paused agent messaging: messages to agent panes are held, spawning and other pane input refused), " +
 				"teamKind (lead or worker), leadRole (a lead’s role), handle (stable @name), " +
 				"workingOn (current one-line status), startedBy (who opened it and why; absent for user-opened panes). " +
 				"Also includes worker requests without a pane yet: status queued, running (starting), or closed " +
 				"(cancelled/failed), with worker, queuePosition and optional workerError; use cancel_queued_worker " +
 				"with the request id to cancel a queued request. Archived workers have status archived and worker.state archived; " +
 				"these request/archive entries have no live state or #number. read_pane_tail can read an archived result. `you: true` " +
-				"marks your own pane. When the user says \"pane 2\" they mean number 2 in their " +
+				"marks your own pane; release_note on that row says when the repository you work in has merged changes that are not active until published. When the user says \"pane 2\" they mean number 2 in their " +
 				"workspace. Open pane ids, #numbers or @handles are the inputs to ask_pane, wait_for_pane, " +
-				"read_pane_tail, get_pane_state, send_input and kill_pane. Message agents with ask_pane, never send_input. " +
+				"read_pane_tail, send_input and kill_pane. Pass pane_id to get just that pane, which also " +
+				"reports live_cwd: the directory its shell is in now, which may differ from the cwd it started in. " +
+				"Message agents with ask_pane, never send_input. " +
 				"send_input and ask_pane messages are held while the person types, then delivered when their input box is empty and they stop typing; do not resend. " +
 				"Messages back in an input box unsent wait for the person to Send or Clear; held deliveries wait behind them, and list_panes held_messages marks them stuck.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
-				"properties": {},
+				"properties": {
+					"pane_id": {
+						"type": "string",
+						"description": "Optional. Pane id, #number or @handle: return only that pane, with its live_cwd."
+					}
+				},
 				"additionalProperties": false
 			}`),
 		},
@@ -433,25 +515,6 @@ func mcpCoreTools() []mcpTool {
 			}`),
 		},
 		{
-			Name: "get_pane_state",
-			Description: "Return the runtime state of a pane — one of busy, idle, recent, " +
-				"awaiting-input, choice-prompt, or exited. Use this for a quick check of " +
-				"whether a pane is working, finished, or waiting for a human, without " +
-				"pulling its full scrollback. A note follows the state when messages are stuck behind text in " +
-				"its input box, which only the person can clear; do not resend.",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"pane_id": {
-						"type": "string",
-						"description": "Pane id, #number or @handle as returned by list_panes."
-					}
-				},
-				"required": ["pane_id"],
-				"additionalProperties": false
-			}`),
-		},
-		{
 			Name: "ask_pane",
 			Description: "Ask the agent in another pane something and get its answer: sends `text` " +
 				"as a message, waits until that agent has finished its turn, and returns only its " +
@@ -462,7 +525,8 @@ func mcpCoreTools() []mcpTool {
 				"busy or on a menu, or is your own pane. While the person is typing in that pane, " +
 				"nothing is typed: the message waits on the pane (delivery \"held\") and goes in " +
 				"once their input box is empty and they stop typing; keep waiting, do not resend. " +
-				"Sender labels say unverified when the caller cannot be traced to a pane. All unverified senders share five held messages per target; the total queue limit is twenty. held_messages (count, senders, stuck; never text) reports what waits on that pane.",
+				"Sender labels say unverified when the caller cannot be traced to a pane. All unverified senders share five held messages per target; the total queue limit is twenty. held_messages (count, senders, stuck; never text) reports what waits on that pane. " +
+				"While the person has paused agent messaging (list_panes agent_messaging_paused), the message is held on that pane with that reason until they resume; do not resend.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -520,7 +584,8 @@ func mcpCoreTools() []mcpTool {
 				"Invisible format characters (Unicode tag characters, bidi controls, " +
 				"zero-width spaces) are removed before anything is typed. " +
 				"Refused if the pane has already exited. The pane_id must come from list_panes. " +
-				"Sender labels say unverified when the caller cannot be traced to a pane. All unverified senders share five held messages per target; the total queue limit is twenty.",
+				"Sender labels say unverified when the caller cannot be traced to a pane. All unverified senders share five held messages per target; the total queue limit is twenty. " +
+				"While the person has paused agent messaging (list_panes agent_messaging_paused), a message to an agent pane is held until they resume, and keys or text to any other pane are refused.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -543,10 +608,11 @@ func mcpCoreTools() []mcpTool {
 				"safe way to unblock another session. Prefer this over send_input for prompts: " +
 				"it can ONLY pick an option the pane is already showing, never free-type. For a " +
 				"terminal pane in choice-prompt state, `option` is the menu number (\"1\", \"2\", …); " +
-				"the number must be one currently on the menu. For a native (Focus) pane, `option` " +
-				"is \"allow\" or \"deny\". Refused if the pane is not actually on a prompt (it will " +
+				"the number must be one currently on the menu. Refused if the pane is not actually on a prompt (it will " +
 				"not act on a running/idle pane or a prose \"should I continue?\" question). Get " +
-				"the state first with get_pane_state, and the menu text with read_pane_tail. " +
+				"the state first with list_panes (pass pane_id), and the menu text with " +
+				"read_pane_tail mode \"screen\" (its default for an agent pane is the last reply, " +
+				"not the menu). " +
 				"Answering acts for the person: it needs their Agent permissions and a pane traced to " +
 				"your own process (Claude Code via the MCP bridge); a claimed pane id, header or " +
 				"SOLU_PANE_ID, workers and managed agents are refused, and no pane answers a prompt in " +
@@ -560,7 +626,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"option": {
 						"type": "string",
-						"description": "Terminal pane: the menu number to select (\"1\", \"2\", …). Native pane: \"allow\" or \"deny\"."
+						"description": "The menu number to select (\"1\", \"2\", …)."
 					}
 				},
 				"required": ["pane_id", "option"],
@@ -582,7 +648,8 @@ func mcpCoreTools() []mcpTool {
 				"Set role to orchestrator to start Claude or Codex with " +
 				"the chief-of-staff brief. Always pass title (a short name, e.g. \"Engine deletion\"), " +
 				"purpose (one sentence) and handle (e.g. \"engine-delete\"): the user sees them on the pane and in " +
-				"the notice that you started it, and the handle addresses the pane in later calls.",
+				"the notice that you started it, and the handle addresses the pane in later calls. " +
+				"Refused while the person has paused agent messaging (list_panes agent_messaging_paused); queued workers wait until they resume.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -803,92 +870,6 @@ func mcpCoreTools() []mcpTool {
 			}`),
 		},
 		{
-			Name: "read_file",
-			Description: "Read a bounded slice of a text file and return its lines. ANSI-safe; " +
-				"refuses likely secret/.env files, binary files, and oversized files. Returns " +
-				"the file mtime as `mtime`; MCP write_file_line requires that nonzero value " +
-				"as its optimistic-concurrency guard. Prefer " +
-				"this over shell `cat`/`head` for inspecting source or config when you don't " +
-				"need the user to see it in a UI tile (use preview_file for that).",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"path": {
-						"type": "string",
-						"description": "Absolute path, or path starting with ~, to the file to read."
-					},
-					"start_line": {
-						"type": "number",
-						"description": "1-indexed line to start at. Defaults to 1."
-					},
-					"max_lines": {
-						"type": "number",
-						"description": "Number of lines to return. Defaults to 120, capped at 200."
-					}
-				},
-				"required": ["path"],
-				"additionalProperties": false
-			}`),
-		},
-		{
-			Name: "get_pane_livecwd",
-			Description: "Return the current working directory of the shell running inside a pane — " +
-				"the directory the user has actually cd'd into, which may differ from the " +
-				"pane's spawn cwd. Use this when you need to know where a shell pane \"is\" " +
-				"right now, e.g. before running git_status or search_files for it. The " +
-				"pane_id must come from list_panes.",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"pane_id": {
-						"type": "string",
-						"description": "Pane id, #number or @handle as returned by list_panes."
-					}
-				},
-				"required": ["pane_id"],
-				"additionalProperties": false
-			}`),
-		},
-		{
-			Name: "git_status",
-			Description: "Read-only Git summary for a directory: repo root, branch/upstream line, " +
-				"porcelain status, recent commits, and diff stats. Use this when the user asks " +
-				"what changed, whether a repo is clean, or what branch they're on. Only " +
-				"read-only git commands are run. Pass a directory inside the repo — pair it " +
-				"with get_pane_livecwd to target the pane the user is working in.",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"path": {
-						"type": "string",
-						"description": "A directory inside a git repo. Optional — defaults to the user's home (rarely useful; prefer passing a real project dir)."
-					}
-				},
-				"additionalProperties": false
-			}`),
-		},
-		{
-			Name: "search_files",
-			Description: "Read-only fuzzy file search under a directory. Returns matching paths " +
-				"only, not contents; skips common generated/vendor directories. Use this to " +
-				"locate a source, config, or document file before reading it.",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"query": {
-						"type": "string",
-						"description": "Fuzzy query to match against file names/paths."
-					},
-					"path": {
-						"type": "string",
-						"description": "Directory to search under. Optional — defaults to the user's home. Prefer a project directory or a pane's live cwd."
-					}
-				},
-				"required": ["query"],
-				"additionalProperties": false
-			}`),
-		},
-		{
 			Name: "rename_pane",
 			Description: "Change a pane's display title. Use when the user wants to relabel a pane " +
 				"for clarity (e.g. \"rename this pane to backend\"). Does not affect the " +
@@ -989,11 +970,12 @@ func mcpCoreTools() []mcpTool {
 		},
 		{
 			Name: "list_schedules",
-			Description: "List scheduled prompt-injections — recurring (cron) and one-time " +
-				"(run-at) jobs that fire a prompt into a pane on a timer. Each entry has its " +
-				"id, name, target pane, prompt, trigger, enabled state, next-fire time, fire/" +
-				"skip/error counts and last-fired time; pass includeRuns:true for recent run history. Use this to review what's " +
-				"scheduled, or to find a schedule's id before calling cancel_schedule. The result " +
+			Description: "List scheduled jobs, recurring (cron) or one-time (run-at): Claude " +
+				"tasks (kind \"task\", a fresh headless session in a folder) and prompts typed " +
+				"into a pane (kind \"prompt\"). Each entry has its " +
+				"id, name, target, prompt, trigger, enabled state, next-fire time, fire/" +
+				"skip/error counts and last-fired time; pass includeRuns:true for recent run history and the full record of who turned it on or off (changes; the newest entry is always included). Use this to review what's " +
+				"scheduled, or to find a schedule's id before calling set_schedule_enabled or cancel_schedule. The result " +
 				"is {schedules, page}: schedules is this page and page.total counts every visible " +
 				"schedule after filters. When page.truncated is true, pass page.nextCursor as cursor.",
 			InputSchema: json.RawMessage(`{
@@ -1015,7 +997,9 @@ func mcpCoreTools() []mcpTool {
 				"fresh headless Claude session on `prompt` inside `cwd` — no pane needed, works " +
 				"while the user is away, output saved to the run history; kind=\"prompt\" types " +
 				"`prompt` into an existing pane's terminal and presses Enter (needs pane_id from " +
-				"list_panes, and is skipped if that pane is busy). Prefer \"task\" unless the " +
+				"list_panes; if that pane is busy, or the person is typing there or has text in its " +
+				"input box, the prompt waits up to an hour, then is skipped and the person is told; " +
+				"prompts waiting for one pane go in one at a time). Prefer \"task\" unless the " +
 				"user explicitly wants the text to land in a pane they are watching. Pass exactly " +
 				"one trigger: `cron` for a recurring job (standard 5-field cron, local timezone) " +
 				"or `run_at` for a one-time fire (RFC3339 timestamp, must be in the future). " +
@@ -1026,7 +1010,7 @@ func mcpCoreTools() []mcpTool {
 					"kind": {
 						"type": "string",
 						"enum": ["task", "prompt"],
-						"description": "\"task\" = fresh headless Claude session in cwd (requires cwd). \"prompt\" = type into an existing pane (requires pane_id). Defaults to \"prompt\" for backward compatibility."
+						"description": "\"task\" = fresh headless Claude session in cwd (requires cwd). \"prompt\" = type into an existing pane (requires pane_id). If omitted: \"task\" when you pass cwd without pane_id, otherwise \"prompt\"."
 					},
 					"name": {
 						"type": "string",
@@ -1039,7 +1023,7 @@ func mcpCoreTools() []mcpTool {
 					"permission": {
 						"type": "string",
 						"enum": ["plan", "edit"],
-						"description": "kind=task only. \"plan\" (default) reads and plans but changes nothing; \"edit\" lets Claude modify files in cwd. Only pass \"edit\" when the user clearly asked for changes to be made unattended."
+						"description": "kind=task only. \"plan\" (default) reads and plans but changes nothing. \"edit\" (Claude modifies files in cwd unattended) is refused for agents: if the user wants one, ask them to set it up in the app's Automations list."
 					},
 					"timeout_min": {
 						"type": "number",
@@ -1080,9 +1064,13 @@ func mcpCoreTools() []mcpTool {
 		},
 		{
 			Name: "set_schedule_enabled",
-			Description: "Pause or resume a schedule without deleting it — its config, counters, " +
-				"and run history all survive. Use this for \"pause my nightly build check\" or " +
-				"\"turn the morning digest back on\". The id must come from list_schedules.",
+			Description: "Pause or resume a schedule your own pane created, without deleting it — its " +
+				"config, counters, and run history all survive. It works only on schedules whose " +
+				"createdBy.paneId in list_schedules is your pane, and only from a verified pane. " +
+				"A schedule the person made, one another pane made, or a built-in agent's is the " +
+				"person's to change: ask them with post_user_ask and they do it in the app's " +
+				"Automations list. Each change is recorded on the schedule with your pane's name. " +
+				"The id must come from list_schedules.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -1101,9 +1089,13 @@ func mcpCoreTools() []mcpTool {
 		},
 		{
 			Name: "cancel_schedule",
-			Description: "Permanently delete a scheduled prompt-injection so it stops firing. This " +
-				"is destructive — the schedule and its run history are removed (to merely " +
-				"pause one, that's a separate UI action). The id must come from list_schedules.",
+			Description: "Permanently delete a schedule your own pane created, so it stops firing. " +
+				"This is destructive — the schedule and its run history are removed (to merely " +
+				"pause one, use set_schedule_enabled). It works only on schedules whose " +
+				"createdBy.paneId in list_schedules is your pane, and only from a verified pane. " +
+				"A schedule the person made, one another pane made, or a built-in agent's is the " +
+				"person's to delete: ask them with post_user_ask. The deletion is recorded with " +
+				"your pane's name. The id must come from list_schedules.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -1116,41 +1108,7 @@ func mcpCoreTools() []mcpTool {
 				"additionalProperties": false
 			}`),
 		},
-		{
-			Name: "write_file_line",
-			Description: "Replace exactly one line of a text file ON DISK, in place. This is a " +
-				"mutating tool — it edits the real file (atomically) and there is no undo. It " +
-				"replaces only the single line at `line_number`; other lines are untouched. " +
-				"`expected_mtime` is an optimistic-concurrency guard: pass the file's mtime " +
-				"from a prior read_file/preview, and the write is rejected if the file changed " +
-				"since (re-read and retry); zero is refused for MCP writes. Intended for small, deliberate config-style edits, " +
-				"not multi-line refactors — use a Claude Code pane for real code changes. " +
-				"Refuses binary files, files over 512 KB, and likely secret/env/key files; new_text must not contain a newline.",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"path": {
-						"type": "string",
-						"description": "Absolute path, or path starting with ~, to the text file to edit."
-					},
-					"line_number": {
-						"type": "number",
-						"description": "1-indexed line number to replace. Must exist in the file."
-					},
-					"new_text": {
-						"type": "string",
-						"description": "Replacement text for that line. Must not contain a newline."
-					},
-					"expected_mtime": {
-						"type": "number",
-						"description": "The file's last-modified time in unix milliseconds, as seen on a prior read. Must be nonzero; the write is rejected with a mismatch error if the file changed since."
-					}
-				},
-				"required": ["path", "line_number", "new_text", "expected_mtime"],
-				"additionalProperties": false
-			}`),
-		},
-	}, append(askMCPTools(), removedTodoMCPTools()...)...)
+	}, askMCPTools()...)
 }
 
 type toolCallParams struct {
@@ -1181,11 +1139,6 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 	// daemon-side wall, checked before any policy or handler logic runs.
 	if scope != nil && !scope.allows(p.Name) {
 		return toolErr("tool " + p.Name + " is not in this session's scope")
-	}
-	// Todos was removed: its old tool names answer one fixed notice and do
-	// nothing else, so no guard, activity row or handler runs for them.
-	if removedTodoToolNames[p.Name] {
-		return a.mcpToolTodosRemoved()
 	}
 	// "#3" and "@api-fix" become the pane's id before any guard reads it.
 	a.resolvePaneIDArgument(p.Arguments, callerPane)
@@ -1243,14 +1196,12 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 		return a.noteCrossPaneTool(crossPane, a.mcpToolAskPaneAs(p.Arguments, caller))
 	case "wait_for_pane":
 		return a.noteCrossPaneTool(crossPane, a.mcpToolWaitForPaneAs(p.Arguments, caller))
-	case "get_pane_state":
-		return a.mcpToolGetPaneState(p.Arguments)
 	case "send_input":
 		// Keys sent to a pane at a permission prompt answer it: only a
 		// caller allowed to answer prompts there (decidePromptAnswer) gets
 		// them through, checked again at write time.
 		target, _ := a.mgr.Get(mcpArgString(p.Arguments, "pane_id"))
-		atPrompt := target != nil && target.Snapshot().Kind != "native" && promptTakesKeys(target)
+		atPrompt := target != nil && promptTakesKeys(target)
 		v := a.decidePromptAnswer(meta, scope != nil, target)
 		prompt := ""
 		if !v.allowed {
@@ -1270,17 +1221,23 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 		// Answering a prompt is acting for the person: only under the
 		// person's grant, from a traced pane, and never in the caller's own
 		// pane (decidePromptAnswer).
+		if agentMessagingPaused() {
+			return toolErr(agentMessagingRefusal("another pane's prompt cannot be answered"))
+		}
 		target, _ := a.mgr.Get(mcpArgString(p.Arguments, "pane_id"))
 		v := a.decidePromptAnswer(meta, scope != nil, target)
 		if !v.allowed {
 			return toolErr(v.refusal)
 		}
-		res, prompt := a.mcpToolAnswerPrompt(p.Arguments)
+		res, prompt := a.mcpToolAnswerPromptChecked(p.Arguments, a.promptAnswerRecheck(meta, scope != nil, target))
 		if toolSucceeded(res) {
 			logPromptAnswer(v, meta, target, prompt, "answer_prompt")
 		}
 		return a.noteCrossPaneTool(crossPane, res)
 	case "spawn_pane":
+		if agentMessagingPaused() {
+			return toolErr(agentMessagingRefusal("no pane can be started"))
+		}
 		if strings.TrimSpace(mcpArgString(p.Arguments, "cmd")) == "auto" {
 			return a.noteCrossPaneTool(crossPane, a.mcpToolAutoWorker(p.Arguments, callerPane, scope))
 		}
@@ -1307,14 +1264,19 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 		return a.mcpToolCloseBrowser(p.Arguments)
 	case "read_activity":
 		return a.mcpToolReadActivity(p.Arguments)
-	case "read_file":
-		return a.mcpToolReadFile(p.Arguments)
-	case "get_pane_livecwd":
-		return a.mcpToolGetPaneLiveCwd(p.Arguments)
-	case "git_status":
+	case "git_status", "read_file", "search_files":
+		// Scoped callers only (mcpScopedOnlyTools): a pane agent has its own
+		// git, Read and Grep.
+		if scope == nil {
+			return toolErr("unknown tool: " + p.Name)
+		}
+		switch p.Name {
+		case "read_file":
+			return a.mcpToolReadFile(p.Arguments)
+		case "search_files":
+			return a.mcpToolSearchFiles(p.Arguments)
+		}
 		return a.mcpToolGitStatus(p.Arguments)
-	case "search_files":
-		return a.mcpToolSearchFiles(p.Arguments)
 	case "rename_pane":
 		return a.mcpToolRenamePaneAs(p.Arguments, caller)
 	case "set_pane_info":
@@ -1338,11 +1300,11 @@ func (a *apiServer) mcpCallToolTransport(params json.RawMessage, scope *mcpScope
 		// is the CREATOR, stamped as provenance, never the prompt target.
 		return a.mcpToolCreateSchedule(p.Arguments, callerPane)
 	case "set_schedule_enabled":
-		return a.mcpToolSetScheduleEnabled(p.Arguments)
+		// An agent changes only the schedules its own verified pane created
+		// (scheduleAgentActor); the rest are the person's to change.
+		return a.mcpToolSetScheduleEnabled(p.Arguments, caller, meta)
 	case "cancel_schedule":
-		return a.mcpToolCancelSchedule(p.Arguments)
-	case "write_file_line":
-		return a.mcpToolWriteFileLine(p.Arguments)
+		return a.mcpToolCancelSchedule(p.Arguments, caller, meta)
 	default:
 		if call, ok := extensionMCPTool(p.Name); ok {
 			return call(a, mcpToolCall{Args: p.Arguments, Scope: scope, CallerPane: callerPane, Ident: callerIdent})
@@ -1368,7 +1330,7 @@ func mcpCheckMutatorAllowed(tool string) error {
 func mcpToolRequiresMutationPolicy(tool string) bool {
 	switch tool {
 
-	case "send_input", "ask_pane", "spawn_pane", "create_schedule", "set_schedule_enabled", "cancel_schedule", "write_file_line", "open_browser", "close_browser",
+	case "send_input", "ask_pane", "spawn_pane", "create_schedule", "set_schedule_enabled", "cancel_schedule", "open_browser", "close_browser",
 		// Every mutator joins the mutation-policy gate; the hardening
 		// pass — before it, `deny` still left kill_pane (!) and the
 		// flag/workspace/preview mutators callable, which made the policy a
@@ -1418,8 +1380,8 @@ func redactToolHint(tool string, args map[string]any) string {
 	switch tool {
 	case "preview_file":
 		hint = basename(pick("path"))
-	case "send_input", "read_pane_tail", "get_pane_state", "kill_pane",
-		"rename_pane", "set_pane_info", "set_pane_flag", "get_pane_livecwd", "ask_pane", "wait_for_pane":
+	case "send_input", "read_pane_tail", "list_panes", "kill_pane",
+		"rename_pane", "set_pane_info", "set_pane_flag", "ask_pane", "wait_for_pane":
 		// Pane-targeting tools: the target id (the publish site upgrades
 		// it to the pane's title when it can). Never the input text —
 		// send_input bodies are prompts and may carry anything.
@@ -1504,8 +1466,8 @@ type mcpPaneSummary struct {
 	ExitCode       *int   `json:"exitCode,omitempty"`
 	LastActivityMs int64  `json:"lastActivityMs"`
 	// Agent is the live agent identity — "claude" | "codex" | "muse", or
-	// "" for a plain shell/REPL. Kind is the renderer: "terminal" | "native"
-	// (native = Focus). Orchestrators need both to pick a pane to drive.
+	// "" for a plain shell/REPL. Kind is always "terminal" (kept for older
+	// callers). Orchestrators use Agent to pick a pane to drive.
 	Agent string `json:"agent,omitempty"`
 	Kind  string `json:"kind"`
 	// Flagged/FlagMemo mirror the sidebar's "come back to this" marker.
@@ -1527,6 +1489,14 @@ type mcpPaneSummary struct {
 	Label     string `json:"label,omitempty"`
 	State     string `json:"state,omitempty"`
 	You       bool   `json:"you,omitempty"`
+	// ReleaseNote is set on the caller's own row only: a note for the
+	// repository its pane works in (gitStatusNoteHooks), such as the release
+	// train's "merged changes are NOT active until published". It used to
+	// reach agents only through git_status, which panes no longer get.
+	ReleaseNote string `json:"release_note,omitempty"`
+	// MessagingPaused: the person has paused agent-to-agent messaging; set
+	// on every row while it lasts (agent_messaging_pause.go).
+	MessagingPaused bool `json:"agent_messaging_paused,omitempty"`
 	// StartedBy says who opened the pane and why, e.g. "#5 Claude — Engine deletion"
 	// (pane_origin.go); empty for panes the user opened or that predate it.
 	StartedBy string `json:"startedBy,omitempty"`
@@ -1542,6 +1512,10 @@ type mcpPaneSummary struct {
 	// current one-line status (pane_identity.go).
 	Handle    string `json:"handle,omitempty"`
 	WorkingOn string `json:"workingOn,omitempty"`
+	// LiveCwd is the directory the pane's shell is in now (it falls back to
+	// the spawn cwd). Only filled when list_panes asks for one pane: it walks
+	// the pane's process tree, too costly to do for every pane on each call.
+	LiveCwd string `json:"live_cwd,omitempty"`
 }
 
 // paneSummaryAgent resolves a pane's live agent identity for list_panes:
@@ -1550,10 +1524,6 @@ type mcpPaneSummary struct {
 func paneSummaryAgent(p *Pane, snap PaneSnapshot) string {
 	if strings.TrimSpace(snap.Agent) != "" {
 		return effectiveAgentKind(snap.Agent)
-	}
-	if snap.Kind == "native" {
-		// Native panes with no explicit agent are the legacy Claude default.
-		return agentClaude
 	}
 	if cmdStartsCodex(snap.Cmd) {
 		return agentCodex
@@ -1585,9 +1555,19 @@ func paneSummaryAgent(p *Pane, snap PaneSnapshot) string {
 	return ""
 }
 
-func (a *apiServer) mcpToolListPanes(_ map[string]any, callerPane string) any {
+func (a *apiServer) mcpToolListPanes(args map[string]any, callerPane string) any {
 	verifiedCaller := splitMCPCaller(callerPane).ID != ""
 	panes := a.mgr.List()
+	// pane_id (already resolved from #n / @handle) narrows the list to one
+	// pane and adds its live cwd.
+	only := strings.TrimSpace(mcpArgString(args, "pane_id"))
+	if only != "" {
+		p, ok := a.mgr.Get(only)
+		if !ok {
+			return toolErr("no pane with id " + only + " (call list_panes for ids)")
+		}
+		panes = []*Pane{p}
+	}
 	slots := paneSlotsByID(a.ws)
 	var asks map[string]int
 	var notices map[string][]Ask
@@ -1599,9 +1579,6 @@ func (a *apiServer) mcpToolListPanes(_ map[string]any, callerPane string) any {
 	for _, p := range panes {
 		snap := p.Snapshot()
 		kind := "terminal"
-		if snap.Kind == "native" {
-			kind = "native"
-		}
 		agent := paneSummaryAgent(p, snap)
 		slot := slots[snap.ID]
 		var workerNotices []paneAskDTO
@@ -1638,9 +1615,27 @@ func (a *apiServer) mcpToolListPanes(_ map[string]any, callerPane string) any {
 			WorkingOn:      identityWorkingOn(snap.Identity),
 			You:            callerPane != "" && snap.ID == callerPane,
 		})
+		if out[len(out)-1].You {
+			out[len(out)-1].ReleaseNote = repoNotes(a, snap.Cwd)
+		}
+		if only != "" {
+			live := liveCwdOfPane(p)
+			if live == "" {
+				live = snap.Cwd // no shell child to read: the spawn cwd
+			}
+			out[len(out)-1].LiveCwd = live
+		}
 	}
-	out = append(out, a.queuedWorkerSummaries()...)
-	out = append(out, a.archivedWorkerSummaries()...)
+	if only == "" {
+		// With pane_id, just that pane: no worker requests or archive entries.
+		out = append(out, a.queuedWorkerSummaries()...)
+		out = append(out, a.archivedWorkerSummaries()...)
+	}
+	if agentMessagingPaused() {
+		for i := range out {
+			out[i].MessagingPaused = true
+		}
+	}
 	// The UI's order: by workspace, then #n; panes outside any workspace last.
 	sort.SliceStable(out, func(i, j int) bool {
 		wi, wj := out[i].Workspace, out[j].Workspace
@@ -1707,28 +1702,6 @@ func (a *apiServer) mcpToolReadPaneTail(args map[string]any, callerPane string) 
 	return toolOK(redactTerminalTail(tailOfPane(p, lines)))
 }
 
-func (a *apiServer) mcpToolGetPaneState(args map[string]any) any {
-	paneID, _ := args["pane_id"].(string)
-	if paneID == "" {
-		return toolErr("pane_id is required")
-	}
-	p, ok := a.mgr.Get(paneID)
-	if !ok {
-		return toolErr("no pane with id " + paneID + " (call list_panes for ids)")
-	}
-	// Cached read, NOT the direct computeState(): the direct path advances
-	// the fire-once ack positions (awaiting-input falls through to idle on
-	// the next compute), so an MCP poll could consume a state edge before
-	// the attention engine's own 2s sample saw it — suppressing a "waiting
-	// for you" signal. The cache shares one compute with the watchers
-	// (≤1s staleness), so polling here can no longer eat their edges.
-	state := string(p.computeStateCached())
-	if held := heldSummaryFor(p.Snapshot(), false); held != nil && held.Stuck {
-		return toolOK(state + "; " + heldStuckHint(held.Count))
-	}
-	return toolOK(state)
-}
-
 // mcpToolSendInput is an agent's send_input: a message to a running Codex
 // turn is queued or refused, never pressed in as a steer (deliveryNoSteer).
 func (a *apiServer) mcpToolSendInput(args map[string]any, callers ...string) any {
@@ -1779,6 +1752,20 @@ func (a *apiServer) mcpToolSendInputOutcomeAs(args map[string]any, mode delivery
 		}
 		text = stripped
 	}
+	// The person's stop on agent messaging: a message to an agent pane is
+	// held below (deliverOrHoldAgentMessage); keys, and text to a pane with
+	// no agent, cannot be held, so they are refused. Keys to an agent's own
+	// pane are not agent-to-agent and still go in; a message to it is held
+	// like any other.
+	if mode == deliveryNoSteer && agentMessagingPaused() && c.ID != paneID {
+		if _, msg := agentMessageBody(text); !agent || !msg {
+			what := "keys sent to another pane cannot be held"
+			if !agent {
+				what = "text sent to a pane with no agent cannot be held"
+			}
+			return toolErr(agentMessagingRefusal(what)), ""
+		}
+	}
 	if reason := sendInputMenuCollision(p, text); reason != "" {
 		return toolErr(reason), ""
 	}
@@ -1816,7 +1803,7 @@ func (a *apiServer) mcpToolSendInputOutcomeAs(args map[string]any, mode delivery
 	// command, another agent mid-reply) is not typed into: the line would
 	// land in the running program or mix with its output. Keys without a
 	// line (Ctrl+C, Esc, a one-letter reply) still go through.
-	if line, ok := agentMessageBody(text); ok && mode == deliveryNoSteer && p.Snapshot().Kind != "native" && sendInputPaneBusy(p) {
+	if line, ok := agentMessageBody(text); ok && mode == deliveryNoSteer && sendInputPaneBusy(p) {
 		return a.refuseBusyPaneAs(p, line, c), ""
 	}
 	// Split body + trailing-Enter so a submitted line is written as a
@@ -2342,32 +2329,6 @@ func (a *apiServer) mcpToolCloseBrowser(_ map[string]any) any {
 	return toolOK(res)
 }
 
-func (a *apiServer) mcpToolReadActivity(args map[string]any) any {
-	limit := 50
-	if v, ok := args["limit"].(float64); ok && v > 0 {
-		limit = int(v)
-	}
-	if limit > 200 {
-		limit = 200
-	}
-	since := int64(0)
-	if v, ok := args["since"].(float64); ok && v > 0 {
-		since = int64(v)
-	}
-	events, cursor := a.uiBus.RecentSince(since)
-	if len(events) > limit {
-		events = events[len(events)-limit:]
-	}
-	b, err := json.Marshal(map[string]any{
-		"events": events,
-		"cursor": cursor,
-	})
-	if err != nil {
-		return toolErr("marshal: " + err.Error())
-	}
-	return toolOK(string(b))
-}
-
 func (a *apiServer) mcpToolReadFile(args map[string]any) any {
 	if a.aria == nil {
 		return toolErr("read_file unavailable (aria not enabled)")
@@ -2410,33 +2371,54 @@ func (a *apiServer) mcpToolReadFile(args map[string]any) any {
 	return toolOK(string(b))
 }
 
-func (a *apiServer) mcpToolGetPaneLiveCwd(args map[string]any) any {
-	paneID, _ := args["pane_id"].(string)
-	if strings.TrimSpace(paneID) == "" {
-		return toolErr("pane_id is required")
+func (a *apiServer) mcpToolSearchFiles(args map[string]any) any {
+	if a.aria == nil {
+		return toolErr("search_files unavailable (aria not enabled)")
 	}
-	p, ok := a.mgr.Get(paneID)
-	if !ok {
-		return toolErr("no pane with id " + paneID + " (call list_panes for ids)")
+	query, _ := args["query"].(string)
+	if strings.TrimSpace(query) == "" {
+		return toolErr("query is required")
 	}
-	cwd := liveCwdOfPane(p)
-	fellBack := false
-	if cwd == "" {
-		cwd = p.Cwd // fall back to spawn-time cwd — mirrors paneLiveCwd
-		fellBack = true
+	path, _ := args["path"].(string)
+	if strings.TrimSpace(path) == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = home
+		}
+	}
+	// Reuse the ARIA implementation: skips vendor/generated dirs,
+	// returns paths only, default kind=files and default hit cap.
+	res := a.aria.toolSearchFiles(path, query, "files", 0)
+	if strings.HasPrefix(res, "error:") {
+		return toolErr(strings.TrimSpace(strings.TrimPrefix(res, "error:")))
+	}
+	return toolOK(res)
+}
+
+func (a *apiServer) mcpToolReadActivity(args map[string]any) any {
+	limit := 50
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	since := int64(0)
+	if v, ok := args["since"].(float64); ok && v > 0 {
+		since = int64(v)
+	}
+	events, cursor := a.uiBus.RecentSince(since)
+	if len(events) > limit {
+		events = events[len(events)-limit:]
 	}
 	b, err := json.Marshal(map[string]any{
-		"pane_id":      paneID,
-		"cwd":          cwd,
-		"spawn_cwd":    p.Cwd,
-		"is_spawn_cwd": fellBack,
+		"events": events,
+		"cursor": cursor,
 	})
 	if err != nil {
 		return toolErr("marshal: " + err.Error())
 	}
 	return toolOK(string(b))
 }
-
 func (a *apiServer) mcpToolGitStatus(args map[string]any) any {
 	if a.aria == nil {
 		return toolErr("git_status unavailable (aria not enabled)")
@@ -2462,27 +2444,19 @@ func (a *apiServer) mcpToolGitStatus(args map[string]any) any {
 	return toolOK(res)
 }
 
-func (a *apiServer) mcpToolSearchFiles(args map[string]any) any {
-	if a.aria == nil {
-		return toolErr("search_files unavailable (aria not enabled)")
-	}
-	query, _ := args["query"].(string)
-	if strings.TrimSpace(query) == "" {
-		return toolErr("query is required")
-	}
-	path, _ := args["path"].(string)
+// repoNotes joins every gitStatusNoteHooks note for the repository at path
+// into one line for list_panes' release_note ("" when none applies).
+func repoNotes(a *apiServer, path string) string {
 	if strings.TrimSpace(path) == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			path = home
+		return ""
+	}
+	var notes []string
+	for _, note := range gitStatusNoteHooks {
+		if n := strings.TrimSpace(note(a, path)); n != "" {
+			notes = append(notes, n)
 		}
 	}
-	// Reuse the ARIA implementation: skips vendor/generated dirs,
-	// returns paths only, default kind=files and default hit cap.
-	res := a.aria.toolSearchFiles(path, query, "files", 0)
-	if strings.HasPrefix(res, "error:") {
-		return toolErr(strings.TrimSpace(strings.TrimPrefix(res, "error:")))
-	}
-	return toolOK(res)
+	return strings.Join(notes, " ")
 }
 
 // mcpToolRenamePane changes a pane's title. Like kill_pane and set_pane_info,
@@ -2651,6 +2625,11 @@ func (a *apiServer) mcpToolListSchedules(args map[string]any) any {
 		dto := a.makeScheduleDTO(s)
 		if !includeRuns {
 			dto.Runs = nil
+			// Likewise the change record: the newest entry says who last
+			// turned it on or off; the rest come with the run history.
+			if len(dto.Changes) > 1 {
+				dto.Changes = dto.Changes[:1]
+			}
 		}
 		out = append(out, dto)
 	}
@@ -2683,12 +2662,16 @@ func (a *apiServer) mcpToolCreateSchedule(args map[string]any, callerPane string
 	paneID, _ := args["pane_id"].(string)
 	prompt, _ := args["prompt"].(string)
 	cronExpr, _ := args["cron"].(string)
-	// kind defaults to "prompt": pre-task callers passed pane_id + prompt with
-	// no kind at all, and must keep working unchanged.
+	// An omitted kind follows the target: cwd without pane_id is a task (the
+	// kind the description recommends); anything else stays "prompt", so
+	// pre-task callers that passed pane_id + prompt keep working unchanged.
 	kindArg, _ := args["kind"].(string)
 	kindArg = strings.TrimSpace(kindArg)
 	if kindArg == "" {
 		kindArg = "prompt"
+		if cwdArg, _ := args["cwd"].(string); strings.TrimSpace(cwdArg) != "" && strings.TrimSpace(paneID) == "" {
+			kindArg = "task"
+		}
 	}
 	if strings.TrimSpace(prompt) == "" {
 		return toolErr("prompt is required")
@@ -2710,6 +2693,11 @@ func (a *apiServer) mcpToolCreateSchedule(args map[string]any, callerPane string
 		in.Permission = strings.TrimSpace(permArg)
 		if in.Permission == "" {
 			in.Permission = "plan" // read-only unless the caller opts up
+		}
+		// Agents get the two presets the tool documents. The command-running
+		// preset ("check") is picked by the person in the app.
+		if in.Permission != "plan" && in.Permission != "edit" {
+			return toolErr(`permission must be "plan" or "edit"`)
 		}
 		if v, ok := args["timeout_min"].(float64); ok {
 			in.TimeoutMin = int(v)
@@ -2744,6 +2732,9 @@ func (a *apiServer) mcpToolCreateSchedule(args map[string]any, callerPane string
 		}
 		in.Until = &t
 	}
+	if refusal := agentScheduleCreateRefusal(in); refusal != "" {
+		return toolErr(refusal)
+	}
 	createdBy := &ScheduleOrigin{Source: "mcp", PaneID: strings.TrimSpace(callerPane)}
 	if createdBy.PaneID != "" {
 		createdBy.PaneTitle = a.mgr.DisplayTitle(createdBy.PaneID)
@@ -2766,7 +2757,7 @@ func (a *apiServer) mcpToolCreateSchedule(args map[string]any, callerPane string
 	return toolOK("Created schedule " + sched.ID + " '" + sched.Name + "' — " + trigger + " — " + target + ".")
 }
 
-func (a *apiServer) mcpToolSetScheduleEnabled(args map[string]any) any {
+func (a *apiServer) mcpToolSetScheduleEnabled(args map[string]any, caller paneCaller, meta mcpCallMeta) any {
 	if a.scheds == nil {
 		return toolErr("schedule store not initialized")
 	}
@@ -2779,10 +2770,15 @@ func (a *apiServer) mcpToolSetScheduleEnabled(args map[string]any) any {
 	if !ok {
 		return toolErr("enabled must be true or false")
 	}
-	if err := mcpRefuseAgentRunSchedule(a.scheds, id); err != nil {
-		return toolErr(err.Error())
+	doing := "pause it"
+	if enabled {
+		doing = "turn it back on"
 	}
-	sched, err := a.scheds.SetEnabled(id, enabled)
+	actor, refused := a.mcpScheduleChangeActor(id, caller, meta, doing)
+	if refused != nil {
+		return refused
+	}
+	sched, err := a.scheds.SetEnabledBy(id, enabled, actor)
 	if err != nil {
 		return toolErr(err.Error())
 	}
@@ -2792,21 +2788,48 @@ func (a *apiServer) mcpToolSetScheduleEnabled(args map[string]any) any {
 	return toolOK("Paused schedule " + sched.ID + " '" + sched.Name + "' — it will not fire until resumed.")
 }
 
-func (a *apiServer) mcpToolCancelSchedule(args map[string]any) any {
+func (a *apiServer) mcpToolCancelSchedule(args map[string]any, caller paneCaller, meta mcpCallMeta) any {
 	if a.scheds == nil {
 		return toolErr("schedule store not initialized")
 	}
-	id, _ := args["id"].(string)
-	if strings.TrimSpace(id) == "" {
+	idArg, _ := args["id"].(string)
+	id := strings.TrimSpace(idArg)
+	if id == "" {
 		return toolErr("id is required")
 	}
-	if err := mcpRefuseAgentRunSchedule(a.scheds, strings.TrimSpace(id)); err != nil {
-		return toolErr(err.Error())
+	actor, refused := a.mcpScheduleChangeActor(id, caller, meta, "delete it")
+	if refused != nil {
+		return refused
 	}
-	if err := a.scheds.Delete(id); err != nil {
+	if err := a.scheds.DeleteBy(id, actor); err != nil {
 		return toolErr(err.Error())
 	}
 	return toolOK("Deleted schedule " + id + " — it will no longer fire.")
+}
+
+// mcpScheduleChangeActor runs the checks set_schedule_enabled and
+// cancel_schedule share, in order: the caller is a verified pane, the schedule
+// is not an agent's hidden trigger, and the caller's pane created it. It
+// returns the actor to record, or the refusal to answer with.
+//
+// The caller check comes first so that a caller with no standing learns
+// nothing about a schedule id it guessed.
+func (a *apiServer) mcpScheduleChangeActor(id string, caller paneCaller, meta mcpCallMeta, doing string) (ScheduleActor, any) {
+	if strings.TrimSpace(caller.ID) == "" || meta.id.Forwarded {
+		return ScheduleActor{}, toolErr(scheduleUnverifiedCallerNotice)
+	}
+	if err := mcpRefuseAgentRunSchedule(a.scheds, id); err != nil {
+		return ScheduleActor{}, toolErr(err.Error())
+	}
+	sched, ok := a.scheds.Get(id)
+	if !ok {
+		return ScheduleActor{}, toolErr("schedule not found")
+	}
+	actor, err := a.scheduleAgentActor(sched, caller, meta, doing)
+	if err != nil {
+		return ScheduleActor{}, toolErr(err.Error())
+	}
+	return actor, nil
 }
 
 // mcpRefuseAgentRunSchedule keeps the hidden triggers backing managed agents
@@ -2835,55 +2858,6 @@ func mcpRefuseAgentRunSchedule(store *ScheduleStore, id string) error {
 	}
 	return errors.New("that schedule belongs to an agent and is managed through the agents API, not this tool")
 }
-
-func (a *apiServer) mcpToolWriteFileLine(args map[string]any) any {
-	path, _ := args["path"].(string)
-	if strings.TrimSpace(path) == "" {
-		return toolErr("path is required")
-	}
-	newText, _ := args["new_text"].(string)
-	lineFloat, ok := args["line_number"].(float64)
-	if !ok {
-		return toolErr("line_number is required (number)")
-	}
-	lineNumber := int(lineFloat)
-	if lineNumber < 1 {
-		return toolErr("line_number must be 1 or greater")
-	}
-	mtimeFloat, ok := args["expected_mtime"].(float64)
-	if !ok {
-		return toolErr("expected_mtime is required (number, unix millis from a prior read)")
-	}
-	expectedMtime := int64(mtimeFloat)
-	if expectedMtime == 0 {
-		return toolErr("expected_mtime must be nonzero for MCP file writes; call read_file first and pass its mtime")
-	}
-	abs, err := canonicalizeFilePath(path)
-	if err != nil {
-		return toolErr(err.Error())
-	}
-	if reason := mcpWriteFileLineRefusal(abs); reason != "" {
-		return toolErr(reason)
-	}
-	// writeFileLineAt is 0-indexed; the tool's line_number is 1-indexed
-	// to match read_file / preview_file output, so convert here. It is
-	// the shared core behind the /api/files/write-line handler, so the
-	// mtime guard, atomic write, and caps are identical to the UI path.
-	abs, newMtime, _, err := writeFileLineAt(abs, lineNumber-1, newText, expectedMtime)
-	if err != nil {
-		return toolErr(err.Error())
-	}
-	b, mErr := json.Marshal(map[string]any{
-		"path":        abs,
-		"line_number": lineNumber,
-		"mtime":       newMtime,
-	})
-	if mErr != nil {
-		return toolErr("marshal: " + mErr.Error())
-	}
-	return toolOK("Replaced line " + fmt.Sprintf("%d", lineNumber) + " of " + abs + " on disk. " + string(b))
-}
-
 func toolOK(msg string) map[string]any {
 	return map[string]any{
 		"content": []any{

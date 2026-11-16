@@ -17,13 +17,13 @@ describe('voice history cleanup label', () => {
       ],
     });
     render(<VoiceHistoryInline />);
-    expect(screen.getByText('cleaned on your Claude plan')).toBeInTheDocument();
+    expect(screen.getByText('cleaned with your Claude plan')).toBeInTheDocument();
     expect(screen.getByText('cleaned by SoluTerminal')).toBeInTheDocument();
-    expect(screen.getAllByText(/cleaned (on|by)/)).toHaveLength(2);
+    expect(screen.getAllByText(/cleaned (with|by)/)).toHaveLength(2);
   });
 
   it('labels both paths in plain words', () => {
-    expect(cleanedByLabel('local')).toBe('cleaned on your Claude plan');
+    expect(cleanedByLabel('local')).toBe('cleaned with your Claude plan');
     expect(cleanedByLabel('cloud')).toBe('cleaned by SoluTerminal');
   });
 });
@@ -32,8 +32,11 @@ describe('voice history explains each dictation', () => {
   const base = { id: 1, text: 'Run the tests.', paneTitle: 'claude', delivered: true };
 
   it('names the cleanup outcome', () => {
-    expect(historyStatusLabel({ ...base, polish: 'cleaned', cleanedBy: 'local' })).toBe('cleaned on your Claude plan');
-    expect(historyStatusLabel({ ...base, polish: 'unchanged', cleanedBy: 'local' })).toBe('checked on your Claude plan, nothing to fix');
+    expect(historyStatusLabel({ ...base, polish: 'cleaned', cleanedBy: 'local' })).toBe('cleaned with your Claude plan');
+    expect(historyStatusLabel({ ...base, polish: 'unchanged', cleanedBy: 'local' })).toBe('checked with your Claude plan, nothing to fix');
+    expect(historyStatusLabel({ ...base, polish: 'cleaned', cleanedBy: 'api_key' })).toBe('cleaned with your API key');
+    expect(historyStatusLabel({ ...base, polish: 'unchanged', cleanedBy: 'api_key' })).toBe('checked with your API key, nothing to fix');
+    expect(historyStatusLabel({ ...base, polish: 'unchanged', cleanedBy: 'cloud' })).toBe('checked by SoluTerminal, nothing to fix');
     expect(historyStatusLabel({ ...base, polish: 'short' })).toBe('too short to clean');
     expect(historyStatusLabel({ ...base, polish: 'kept-raw' })).toBe('you typed first, kept as heard');
     expect(historyStatusLabel({ ...base, polish: 'failed' })).toBe('cleanup failed, kept as heard');

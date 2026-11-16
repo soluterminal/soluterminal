@@ -13,12 +13,11 @@ async function openTree(page: Page, keys: string[]) {
     if (localStorage.getItem('solu.sidebarTreeCollapsed.v1') === null) localStorage.setItem('solu.sidebarTreeCollapsed.v1', JSON.stringify(Object.fromEntries(keys.map(key => [key, false]))));
   }, keys);
 }
-async function setup(page: Page, nativeWorker = false, options: { secondWorkspace?: boolean; agentOnly?: boolean; orphan?: boolean; auto?: boolean; folded?: boolean } = {}) {
+async function setup(page: Page, options: { secondWorkspace?: boolean; agentOnly?: boolean; orphan?: boolean; auto?: boolean; folded?: boolean } = {}) {
   if (!options.folded) await openTree(page, ['Tree project:pane:tree-lead']);
   const panes = ids.map((id, i) => ({
     id, title: labels[i], cwd: '/project', cmd: ['sh'], status: 'running', state: 'idle', pid: i + 10, cols: 80, rows: 24,
     createdAt: '2026-10-30T00:00:00Z', lastActivityMs: 0,
-    ...(nativeWorker && i === 3 ? { kind: 'native', agent: 'claude', hasClaude: true } : {}),
     ...(i > 0 && i < 5 ? { origin: { source: 'agent', byPaneId: i === 4 ? ids[1] : ids[0], leadPaneId: ids[0], workspace: 'Tree project', at: i } } : {}),
     ...(i === 4 ? { state: 'choice-prompt', attention: 'needs-user' } : {}),
     ...(i === 2 ? { turn: { active: false, count: 1, last: { n: 1, startedMs: 1, endedMs: Date.now(), outcome: 'completed', files: 0, added: 0, removed: 0 } } } : {}),
@@ -158,7 +157,7 @@ test('workspace, lead, nested lead, worker and return preserve the saved layout'
 
 test('chevrons take near misses, × takes no width, and branches open and close together', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 960 });
-  await setup(page, false, { secondWorkspace: true });
+  await setup(page, { secondWorkspace: true });
   const topLevel = ['tree-lead', 'tree-human'];
   await visible(page, topLevel);
   // The chevron is a full-height column: a click 2px above the row's bottom
@@ -218,7 +217,7 @@ test('chevrons take near misses, × takes no width, and branches open and close 
 
 test('workers start folded under their lead, still raise its flag, and an opened lead stays open', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 960 });
-  await setup(page, false, { folded: true });
+  await setup(page, { folded: true });
   const lead = row(page, 'Release lead');
   await expect(lead).toHaveAttribute('aria-expanded', 'false');
   await expect(row(page, 'Build worker')).toHaveCount(0);
@@ -250,22 +249,6 @@ test('mobile keeps the hierarchy and capped indentation', async ({ page }, testI
 });
 
 
-test('a recovered Focus worker receives live events outside the saved layout', async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 960 });
-  let connected = false;
-  await page.route('**/api/panes/tree-w3/native/history*', route => route.fulfill({ json: { since: 0, events: [], truncated: false } }));
-  await page.route('**/api/panes/tree-w3/native/allowlist', route => route.fulfill({ json: { tools: [] } }));
-  await page.routeWebSocket(/\/api\/panes\/tree-w3\/native\/ws/, ws => {
-    connected = true;
-    ws.send(JSON.stringify({ seq: 1, type: 'text', text: 'Native worker live updates', messageId: 'message-1' }));
-  });
-  await setup(page, true);
-  await row(page, 'Missing layout worker').locator(':scope > .workspace-pane-row').click();
-  await expect.poll(() => connected).toBe(true);
-  await expect(page.locator('[data-pane-id="tree-w3"]').getByText('Native worker live updates', { exact: true })).toBeVisible();
-});
-
-
 test('pane refresh order preserves team grid order and mounted terminals', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 960 });
   const { panes } = await setup(page);
@@ -292,7 +275,7 @@ test('pane refresh order preserves team grid order and mounted terminals', async
 
 test('workspace overview, persistent All panes, nested teams and selection stay distinct', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 960 });
-  await setup(page, false, { secondWorkspace: true, orphan: true });
+  await setup(page, { secondWorkspace: true, orphan: true });
   const workspace = row(page, 'Tree project');
   const lead = row(page, 'Release lead');
   const toggle = page.getByRole('button', { name: 'All panes in Tree project' });
@@ -340,7 +323,7 @@ test('workspace overview, persistent All panes, nested teams and selection stay 
 
 test('an agent-only workspace falls back to every pane', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 960 });
-  await setup(page, false, { agentOnly: true });
+  await setup(page, { agentOnly: true });
   await row(page, 'Tree project').locator(':scope > .ws-row .ws-name').click();
   await visible(page, ids);
   await expect(page.getByRole('group', { name: 'Unattached', exact: true })).toBeVisible();
@@ -454,7 +437,7 @@ test('an attention jump to a hidden worker opens its team and focuses it', async
 
 test('switching workspaces never paints hidden workers or an in-between view', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 960 });
-  await setup(page, false, { secondWorkspace: true });
+  await setup(page, { secondWorkspace: true });
   await visible(page, ['tree-lead', 'tree-human']);
   await row(page, 'Other project').locator(':scope > .ws-row .ws-name').click();
   await expect(page.locator('[data-pane-id="other-human"] .xterm')).toBeVisible();
@@ -474,7 +457,7 @@ test('switching workspaces never paints hidden workers or an in-between view', a
 
 test('an auto layout overview stays resizable and saving it keeps hidden workers', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 960 });
-  const { saves } = await setup(page, false, { auto: true });
+  const { saves } = await setup(page, { auto: true });
   await visible(page, ['tree-lead', 'tree-human']);
   const lead = page.locator('[data-pane-id="tree-lead"]');
   const before = (await lead.boundingBox())!;

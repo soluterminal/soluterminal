@@ -111,7 +111,8 @@ func scanDeepSeekMeter(sessionsDir, accountsDir string) (map[string]deepseekusag
 
 // sessionLogPath returns the newest session-log file for a session directory.
 func sessionLogPath(dir string) string {
-	for _, name := range []string{"session.v3.jsonl.zstd", "session.jsonl.zstd"} {
+	// DeepSeek Harness 0.2.2 writes v4; its usage fields are unchanged.
+	for _, name := range []string{"session.v4.jsonl.zstd", "session.v3.jsonl.zstd", "session.jsonl.zstd"} {
 		candidate := filepath.Join(dir, name)
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate

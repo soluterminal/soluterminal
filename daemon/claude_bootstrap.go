@@ -52,7 +52,10 @@ type claudeStatus struct {
 	checked   bool   // false until the first DEFINITIVE probe completes (UI shows "checking…")
 	installed bool   // a runnable `claude` resolved in the login-shell env
 	version   string // first line of `claude --version`, "" if unknown
-	authed    bool   // a valid live credential file exists (Linux/WSL/Windows)
+	authed    bool   // signed in: a valid live credential file, or an API key (resolveClaudeAuthed)
+	// planLogin: signed in with the Claude login itself, not an API key. Only
+	// this lets a background run (dictation cleanup) bill the user's plan.
+	planLogin bool
 }
 
 // claudeProbeOutcome separates a probe's ANSWER from its FAILURE. A probe that
@@ -181,6 +184,7 @@ func (a *apiServer) refreshClaudeStatus() {
 	}
 	credPresent := a.claudeLogin != nil && a.claudeLogin.LiveCredentialPresent()
 	next.authed = resolveClaudeAuthed(next.installed, credPresent, hasAPIKey, runtime.GOOS)
+	next.planLogin = resolveClaudeAuthed(next.installed, credPresent, false, runtime.GOOS)
 	a.claudeStatMu.Lock()
 	a.claudeStat = next
 	a.claudeStatMu.Unlock()
@@ -309,12 +313,23 @@ func (a *apiServer) currentClaudeStatus() claudeStatus {
 
 // detectClaudeCLI reports whether a runnable `claude` exists (as a three-way
 // outcome — see claudeProbeOutcome), its version string, and whether
-// ANTHROPIC_API_KEY is present in the environment panes run in (API-key auth
-// never writes a credential file — see resolveClaudeAuthed).
+// Claude runs on an API key: ANTHROPIC_API_KEY in the environment panes run in,
+// or a key Claude stored itself (see claudeStoredAPIKeyConfigured). API-key auth
+// never writes a credential file — see resolveClaudeAuthed.
 // Unix: a login shell with the shared init (matches pane spawn). Windows: the
 // live registry PATH (matches pane spawn — findOnWindowsPath) plus the native
 // installer's %USERPROFILE%\.local\bin.
 func detectClaudeCLI() (outcome claudeProbeOutcome, version string, hasAPIKey bool) {
+	outcome, version, hasAPIKey = probeClaudeCLI()
+	if !hasAPIKey && outcome == claudeProbeFound {
+		hasAPIKey = claudeStoredAPIKeyConfigured()
+	}
+	return outcome, version, hasAPIKey
+}
+
+// probeClaudeCLI is detectClaudeCLI's CLI and environment probe, before the
+// stored-key check.
+func probeClaudeCLI() (outcome claudeProbeOutcome, version string, hasAPIKey bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 

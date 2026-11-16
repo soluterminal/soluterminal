@@ -134,6 +134,7 @@ pub fn run() {
             autostart::desktop_get_autostart,
             autostart::desktop_set_autostart,
             desktop_set_backend_mode,
+            desktop_wsl_readiness,
             desktop_set_up_wsl,
             desktop_set_launch_mode,
             exit_for_update,
@@ -448,12 +449,20 @@ fn start_backends(
                             startup_screen::step("Starting the Windows background service");
                             // The Windows backend takes its own port: WSL's localhost
                             // forwarding already owns Windows' 127.0.0.1:8787 (see
-                            // daemon::DUAL_WIN_ADDR).
-                            let host = daemon::ensure_daemon_running_on(
-                                daemon::BACKEND_ID_WIN,
-                                daemon::DUAL_WIN_ADDR,
-                                true,
-                            );
+                            // daemon::DUAL_WIN_ADDR). With WSL failed it would run as the
+                            // single host daemon on 8787, but daemon::DUAL_HOST_FALLBACK is
+                            // off in this release, so it stays on DUAL_WIN_ADDR
+                            // (daemon::start_windows_after_dual_wsl_failure).
+                            let (host, fallback_side) = if wsl.is_ok() {
+                                let host = daemon::ensure_daemon_running_on(
+                                    daemon::BACKEND_ID_WIN,
+                                    daemon::DUAL_WIN_ADDR,
+                                    true,
+                                );
+                                (host, daemon::DualWindowsFallback::DualSide)
+                            } else {
+                                daemon::start_windows_after_dual_wsl_failure()
+                            };
                             match (wsl, host) {
                                 (Ok(w), Ok(h)) => {
                                     // Both daemons are up but each has its
@@ -518,11 +527,18 @@ fn start_backends(
                                 }
                                 (Err(e), Ok(h)) => {
                                     daemon::launch_log(&format!(
-                                        "Dual: WSL failed ({e}), falling to Windows-only"
+                                        "Dual: WSL failed ({e}), falling to Windows-only ({fallback_side:?})"
                                     ));
+                                    let shinoque_hint = fallback_side == daemon::DualWindowsFallback::DualSide
+                                        && daemon::shinoque_installed();
+                                    SHINOQUE_NEEDS_WINDOWS_MODE
+                                        .store(shinoque_hint, std::sync::atomic::Ordering::Relaxed);
                                     if interactive_startup {
                                         use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-                                        let (title, body) = classify_wsl_fallback(&e);
+                                        let (title, mut body) = classify_wsl_fallback(&e);
+                                        if shinoque_hint {
+                                            body.push_str(SHINOQUE_WINDOWS_MODE_NOTE);
+                                        }
                                         app_handle.dialog().message(body).title(title)
                                             .kind(MessageDialogKind::Warning).show(|_| {});
                                     }
@@ -552,6 +568,19 @@ fn start_backends(
         }
     }
 }
+
+/// Set when a Dual launch fell back to Dual's own Windows side (backend `win`
+/// on 38787) on a PC with Shinoque installed: Shinoque's phone access relays
+/// only through Windows-only mode's `host` daemon, so it is down this session.
+/// The page shows the same note (window.__SOLU_BACKEND__.shinoqueNeedsWindowsMode).
+#[cfg_attr(not(windows), allow(dead_code))]
+static SHINOQUE_NEEDS_WINDOWS_MODE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg_attr(not(windows), allow(dead_code))]
+const SHINOQUE_WINDOWS_MODE_NOTE: &str = "\n\nShinoque's phone access isn't available in this session: it needs \
+     SoluTerminal's Windows mode. Choose Windows in the Backend switch, or restart \
+     SoluTerminal once WSL is back.";
 
 /// Run `start` unless an earlier call in this launch already failed; then
 /// return that first error without calling it again.
@@ -761,12 +790,17 @@ fn finish_startup(
     };
     #[cfg(not(windows))]
     let wsl_distro = "null";
+    // shinoqueNeedsWindowsMode: this session runs Dual's Windows side alone,
+    // where Shinoque's phone access can't relay (ST-245). Older shells omit it.
+    let shinoque_needs_windows_mode = fallback
+        && SHINOQUE_NEEDS_WINDOWS_MODE.load(std::sync::atomic::Ordering::Relaxed);
     let backend_script = format!(
         "window.__SOLU_BACKEND__ = {{ requested: \"{requested_backend}\", \
          actual: \"{actual_backend}\", fallback: {fallback}, \
          hostPlatform: \"{host_platform}\", launchMode: \"{launch_mode_value}\", \
          version: \"{shell_version}\", updateThisComputer: {update_this_computer}, \
-         shellFlavor: \"{shell_flavor}\", wslDistro: {wsl_distro} }};"
+         shellFlavor: \"{shell_flavor}\", wslDistro: {wsl_distro}, \
+         shinoqueNeedsWindowsMode: {shinoque_needs_windows_mode} }};"
     );
 
     // Restore the main window's saved geometry (position, size,
@@ -1180,6 +1214,27 @@ async fn desktop_set_backend_mode(app: tauri::AppHandle, mode: String) -> Result
         let _ = app;
         let _ = mode;
         Err("backend mode switching is only available on Windows".to_string())
+    }
+}
+
+/// Whether Linux (WSL) can run SoluTerminal right now, for the Backend
+/// switch's warning before it restarts into Dual or Linux mode (ST-245): one
+/// of "ready", "not-installed", "no-distro", "needs-update", "not-ready" or
+/// "unavailable" (backend::WslReadiness). One bounded wsl.exe call, run only
+/// when the person picks a mode. Older shells reject the invoke; the page
+/// then restarts without the warning, as before.
+#[tauri::command]
+async fn desktop_wsl_readiness() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        let readiness = tauri::async_runtime::spawn_blocking(backend::wsl_readiness)
+            .await
+            .map_err(|e| format!("WSL check failed: {e}"))?;
+        Ok(readiness.code().to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Linux (WSL) is only available on Windows".to_string())
     }
 }
 

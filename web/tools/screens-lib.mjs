@@ -162,7 +162,7 @@ export function systemStatusFixture(opts = {}) {
     host: { cores: 12, cpuPct: 18, loadAvg1: 1.4, memTotalMB: 32768, memAvailableMB: 18432, memFloorMB: 2048 },
     footprint: { totalRssMB: 1736, daemonRssMB: 420, panesRssMB: 1100, workersRssMB: 216, paneCount: 2, workerCount: 1, procs: 9, cpuPct: 12, complete: true },
     panes: [
-      { id: 'pane_ops', title: 'Operations', agent: 'codex', kind: 'native', role: 'execute', status: 'running', state: 'busy', pid: 101, procs: 4, rssMB: 740, cpuPct: 6.5, agentRssMB: 620 },
+      { id: 'pane_ops', title: 'Operations', agent: 'codex', role: 'execute', status: 'running', state: 'busy', pid: 101, procs: 4, rssMB: 740, cpuPct: 6.5, agentRssMB: 620 },
       { id: 'pane_shell', title: 'Release shell', agent: '', kind: '', role: '', status: 'running', state: 'idle', pid: 102, procs: 2, rssMB: 360, cpuPct: .8, agentRssMB: null },
     ],
     workers: [{ taskId: 'wft_run00003', taskTitle: 'Repair Codex MCP permission prompt detection', stage: 'verify', role: 'verify', runtime: 'codex', pid: 103, procs: 2, rssMB: 216, cpuPct: 1.9, startedAt: new Date(now - 600_000).toISOString() }],
@@ -295,6 +295,9 @@ export function buildAmbientAppObjectResponses(healthVersion, now = Date.parse('
     '/api/entitlements': TEAM_ENTITLEMENTS,
     // Settings → Devices reads the anonymous check-in preference.
     '/api/settings/checkin': { enabled: true },
+    // Developer overrides (daemon/developer_overrides.go): off, so the
+    // status bar shows no indicator.
+    '/api/settings/developer-overrides': { on: false, required: true },
     // Approved devices at this computer (lib/localProof.ts): nothing approved
     // yet, so Privacy & security offers "Approve this browser" and no banner.
     '/api/human-proof': {
@@ -327,7 +330,6 @@ export function buildAmbientAppObjectResponses(healthVersion, now = Date.parse('
     // offered here. Fixtures model a machine where it is not.
     '/api/service/restart': { supported: false, pid: 0 },
     '/api/recovery/settings': { resumeAfterRestart: 'manual' },
-    '/api/native/settings': { promptSuggestions: false, defaultClaudeMode: '' },
     '/api/update/settings': { autoApply: 'off', shellAutoApply: 'off' },
     // Preview channel: fixtures model a machine without a source checkout.
     '/api/update/preview': { available: false, main: {}, newChanges: 0, ahead: 0 },

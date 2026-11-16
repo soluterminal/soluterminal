@@ -13,7 +13,6 @@ func TestCreatePaneGoldenResponses(t *testing.T) {
 	tests := []struct {
 		name           string
 		body           string
-		nativeRenderer string
 		mgr            *Manager
 		emptyWorkspace bool
 		wantStatus     int
@@ -22,6 +21,7 @@ func TestCreatePaneGoldenResponses(t *testing.T) {
 		wantSpawn      bool
 		wantPack       string
 		oversized      bool
+		wantCmd        []string
 	}{
 		{name: "malformed JSON", body: `{oops`, wantStatus: http.StatusBadRequest, wantBody: "invalid json\n"},
 		{name: "empty body", body: ``, wantStatus: http.StatusBadRequest, wantBody: "invalid json\n"},
@@ -30,7 +30,9 @@ func TestCreatePaneGoldenResponses(t *testing.T) {
 		{name: "workspace store unavailable", body: `{"workspace":"x"}`, wantStatus: http.StatusInternalServerError, wantBody: "workspace store not initialized\n"},
 		{name: "workspace not found", body: `{"workspace":"x"}`, emptyWorkspace: true, wantStatus: http.StatusNotFound, wantBody: "workspace not found: x\n"},
 		{name: "unknown kind", body: `{"kind":"weird"}`, wantStatus: http.StatusBadRequest, wantBody: "unknown pane kind: weird\n"},
-		{name: "native renderer disabled", body: `{"kind":"native"}`, nativeRenderer: "0", wantStatus: http.StatusBadRequest, wantBody: "native renderer is disabled: Focus mode has been retired — open a terminal pane instead\n"},
+		{name: "new Focus pane refused", body: `{"kind":"native"}`, wantStatus: http.StatusBadRequest, wantBody: "Focus view was removed: open a terminal pane instead\n"},
+		{name: "saved Focus pane restores as a terminal", body: `{"kind":"native","restore":true,"cmd":["claude"],"claudeSessionId":"sess-1"}`, wantStatus: http.StatusCreated, wantSpawn: true, wantCmd: []string{"claude", "--resume", "sess-1"}},
+		{name: "saved Focus pane without a conversation asks for it", body: `{"kind":"native","restore":true,"cmd":["claude"]}`, wantStatus: http.StatusBadRequest, wantBody: "saved conversation ID is missing; choose the original conversation\n"},
 		{name: "unknown agent", body: `{"agent":"gemini"}`, wantStatus: http.StatusBadRequest, wantBody: "unknown agent: gemini\n"},
 		{name: "Claude agent with Codex command", body: `{"agent":"claude","cmd":["codex"]}`, wantStatus: http.StatusBadRequest, wantBody: "agent is claude but command starts Codex\n"},
 		{name: "Claude agent with Muse command", body: `{"agent":"claude","cmd":["muse"]}`, wantStatus: http.StatusBadRequest, wantBody: "agent is claude but command starts Muse\n"},
@@ -52,7 +54,6 @@ func TestCreatePaneGoldenResponses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("SOLU_NATIVE_RENDERER", tt.nativeRenderer)
 			body := tt.body
 			if tt.oversized {
 				body = `{"title":"` + strings.Repeat("x", 1<<20) + `"}`
@@ -88,6 +89,11 @@ func TestCreatePaneGoldenResponses(t *testing.T) {
 				t.Fatalf("spawned = %v, want %v", spawned, tt.wantSpawn)
 			}
 			if tt.wantStatus == http.StatusCreated {
+				if tt.wantCmd != nil {
+					if spawnOpts.Kind != "" || strings.Join(spawnOpts.Cmd, " ") != strings.Join(tt.wantCmd, " ") {
+						t.Fatalf("spawn kind=%q cmd=%q, want terminal %q", spawnOpts.Kind, spawnOpts.Cmd, tt.wantCmd)
+					}
+				}
 				if spawnOpts.ContextPack != tt.wantPack {
 					t.Fatalf("spawn context pack = %q, want %q", spawnOpts.ContextPack, tt.wantPack)
 				}

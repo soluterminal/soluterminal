@@ -17,11 +17,10 @@ func TestSystemLevelsSeparatesWindowsHostDisk(t *testing.T) {
 	levels, _ := systemLevels(s, time.Now(), state)
 	// 41 GB free on a 2 TB drive is under the heavy-work floor but not
 	// "almost full": the person-facing alarm is a warning, not critical.
-	var engine string
 	var host systemLevelReason
 	for _, r := range levels.Reasons {
 		if r.Key == "engine" {
-			engine = r.Text
+			t.Fatalf("the retired engine is in the verdict's reasons: %+v", levels.Reasons)
 		}
 		if r.Key == "hostDisk" {
 			host = r
@@ -38,8 +37,8 @@ func TestSystemLevelsSeparatesWindowsHostDisk(t *testing.T) {
 	if strings.Contains(host.Text, "VHDX") || strings.Contains(host.Text, "%TEMP%") {
 		t.Fatalf("chip text carries detail: %q", host.Text)
 	}
-	if !strings.Contains(engine, "host disk floor active") {
-		t.Fatalf("engine reason=%q all=%+v", engine, levels)
+	if levels.Areas["engine"] != "warn" {
+		t.Fatalf("engine area=%q, want it still reported under Areas (all=%+v)", levels.Areas["engine"], levels)
 	}
 }
 

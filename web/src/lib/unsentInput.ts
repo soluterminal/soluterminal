@@ -4,9 +4,7 @@ import { useEffect, useId } from 'react';
 //
 // The unattended updates must not run over it: the daemon swap reloads the
 // page and the installer update restarts the app, and either one throws away
-// a box's text. Native pane drafts have their own per-pane store
-// (useNativePane's hasAnyUnsentDraft, which also covers panes that are not
-// mounted); every other compose box reports here while it is mounted.
+// a box's text. Every compose box reports here while it is mounted.
 const holders = new Set<string>();
 
 export function reportUnsentInput(key: string, text: string): void {

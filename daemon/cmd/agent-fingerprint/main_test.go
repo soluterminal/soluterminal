@@ -214,17 +214,212 @@ func daemon() {}
 		}
 	}
 	for name, changed := range map[string]string{
-		"missing Muse root":      strings.ReplaceAll(source, "runMuseDriver", "differentDriver"),
-		"missing Muse dispatch":  strings.Replace(source, "runMuseDriver(); return", "return", 1),
 		"missing agent dispatch": strings.Replace(source, "runAgent(); return", "return", 1),
-		"shadowed Muse dispatch": strings.Replace(source, "func main() {", "func main() { runMuseDriver := func() {};", 1),
 		"unexecuted callback":    strings.Replace(source, "runMuseDriver(); return", "_ = func() { runMuseDriver() }; return", 1),
+		"dispatch via closure": strings.Replace(strings.Replace(source, "runMuseDriver(); return", "start(); return", 1),
+			"func main() {", "func main() { start := func() { runMuseDriver() };", 1),
+		"dispatch via helper": strings.Replace(strings.Replace(source, "runMuseDriver(); return", "startMuse(); return", 1),
+			"func daemon() {}", "func daemon() {}\nfunc startMuse() { runMuseDriver() }", 1),
+		"referenced elsewhere only": strings.Replace(strings.Replace(source, "runMuseDriver(); return", "return", 1),
+			"func daemon() {}", "func daemon() { runMuseDriver() }", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := fixtureDigestResult(t, changed); err == nil {
 				t.Fatal("unrecognized pane dispatch accepted")
 			}
 		})
+	}
+}
+
+// The Focus removal first deletes main's muse-driver dispatch (the Muse driver
+// itself stays one more step), then the driver. Once nothing refers to
+// runMuseDriver, no pane process can start it: it is not a root, and the
+// startup prefix ends at the runAgent dispatch.
+func TestFingerprintMuseRootOnlyWhileReferenced(t *testing.T) {
+	const withMuse = `package main
+var mode string
+func runAgent() int { return 1 }
+func runMuseDriver() int { return 10 }
+func initLogging() {}
+func main() {
+ initLogging()
+ if mode == "agent" { runAgent(); return }
+ if mode == "router" { return }
+ if mode == "muse-driver" { runMuseDriver(); return }
+ daemon()
+}
+func daemon() int { return 20 }
+`
+	// Today's dispatch shape: the driver is a root and the prefix runs through
+	// its dispatch.
+	base := fixtureDigest(t, withMuse)
+	if fixtureDigest(t, strings.Replace(withMuse, "return 10", "return 11", 1)) == base {
+		t.Fatal("Muse driver change missed while main dispatches it")
+	}
+	if fixtureDigest(t, strings.Replace(withMuse, `"router"`, `"router2"`, 1)) == base {
+		t.Fatal("startup prefix before the Muse dispatch missed")
+	}
+	if fixtureDigest(t, strings.Replace(withMuse, "return 20", "return 21", 1)) != base {
+		t.Fatal("daemon-only code entered the fingerprint")
+	}
+
+	// The step that drops main's dispatch but keeps the driver: no longer a root.
+	undispatched := strings.Replace(withMuse, ` if mode == "muse-driver" { runMuseDriver(); return }
+`, "", 1)
+	dropped := fixtureDigest(t, undispatched)
+	if fixtureDigest(t, strings.Replace(undispatched, "return 10", "return 11", 1)) != dropped {
+		t.Fatal("unreferenced Muse driver still a root")
+	}
+	if fixtureDigest(t, strings.Replace(undispatched, "return 1 }", "return 2 }", 1)) == dropped {
+		t.Fatal("agent change missed without a Muse dispatch")
+	}
+	if fixtureDigest(t, strings.Replace(undispatched, `"router"`, `"router2"`, 1)) != dropped {
+		t.Fatal("prefix after the agent dispatch entered the fingerprint without a Muse dispatch")
+	}
+
+	// The driver deleted too.
+	gone := strings.Replace(undispatched, "func runMuseDriver() int { return 10 }\n", "", 1)
+	if fixtureDigest(t, gone) != dropped {
+		t.Fatal("deleting an unreferenced Muse driver changed the fingerprint")
+	}
+	if fixtureDigest(t, strings.Replace(gone, "return 1 }", "return 2 }", 1)) == dropped {
+		t.Fatal("agent change missed after the Muse driver is gone")
+	}
+
+	// runAgent stays mandatory with or without the driver.
+	for name, src := range map[string]string{
+		"no agent dispatch, driver gone":   strings.Replace(gone, `if mode == "agent" { runAgent(); return }`, "", 1),
+		"no agent root, driver gone":       strings.ReplaceAll(gone, "runAgent", "otherAgent"),
+		"agent falls through, driver gone": strings.Replace(gone, "runAgent(); return", "runAgent()", 1),
+		"Muse dispatch falls through":      strings.Replace(withMuse, "runMuseDriver(); return", "runMuseDriver()", 1),
+		"Muse dispatch unconditional":      strings.Replace(withMuse, `if mode == "muse-driver" { runMuseDriver(); return }`, "runMuseDriver()", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := fixtureDigestResult(t, src); err == nil {
+				t.Fatal("pane dispatch accepted without a recognized terminating branch")
+			}
+		})
+	}
+}
+
+// The Codex terminal bridge is dispatched between the agent and Muse
+// dispatches. Removing the Muse dispatch must not end the startup prefix
+// before it: while runCodexTerminal is referenced, main must dispatch it
+// through an audited terminating branch (os.Exit counts), and the startup
+// prefix runs through that dispatch. It is covered through the prefix, not
+// listed as a root.
+func TestFingerprintKeepsCodexTerminalBridgeWithoutMuse(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module fixture\n\ngo 1.22\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result := func(source string) (string, error) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return fingerprint(dir, false)
+	}
+	digest := func(source string) string {
+		t.Helper()
+		value, err := result(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	const withMuse = `package main
+import "os"
+var mode string
+func runAgent() int { return 1 }
+func runCodexTerminal() int { return 5 }
+func runMuseDriver() int { return 10 }
+func main() {
+	if mode == "agent" { runAgent(); return }
+	if mode == "router" { return }
+	if mode == "codex-terminal" { os.Exit(runCodexTerminal()) }
+	if mode == "muse-driver" { runMuseDriver(); return }
+	daemon()
+}
+func daemon() int { return 20 }
+`
+	noMuseDispatch := strings.Replace(withMuse, "\tif mode == \"muse-driver\" { runMuseDriver(); return }\n", "", 1)
+	noMuse := strings.Replace(noMuseDispatch, "func runMuseDriver() int { return 10 }\n", "", 1)
+	for name, source := range map[string]string{"today": withMuse, "Muse dispatch removed": noMuseDispatch, "Muse driver removed": noMuse} {
+		t.Run(name, func(t *testing.T) {
+			base := digest(source)
+			if digest(strings.Replace(source, "return 5", "return 6", 1)) == base {
+				t.Fatal("Codex terminal bridge change missed")
+			}
+			if digest(strings.Replace(source, `"router"`, `"router2"`, 1)) == base {
+				t.Fatal("startup prefix before the Codex dispatch missed")
+			}
+			if digest(strings.Replace(source, "return 20", "return 21", 1)) != base {
+				t.Fatal("daemon-only code entered the fingerprint")
+			}
+		})
+	}
+	// With no Codex bridge at all, the agent alone is the root.
+	if _, err := result(strings.Replace(strings.Replace(noMuse, "func runCodexTerminal() int { return 5 }\n", "", 1),
+		"\tif mode == \"codex-terminal\" { os.Exit(runCodexTerminal()) }\n", "\t_ = os.Args\n", 1)); err != nil {
+		t.Fatalf("tree without a Codex bridge refused: %v", err)
+	}
+	for name, source := range map[string]string{
+		"Codex dispatch falls through": strings.Replace(noMuse, "os.Exit(runCodexTerminal())", "runCodexTerminal()", 1),
+		"Codex dispatch via helper": strings.Replace(strings.Replace(noMuse, "os.Exit(runCodexTerminal())", "os.Exit(startCodex())", 1),
+			"func daemon() int { return 20 }", "func daemon() int { return 20 }\nfunc startCodex() int { return runCodexTerminal() }", 1),
+		"Codex referenced but not dispatched": strings.Replace(strings.Replace(noMuse, "\tif mode == \"codex-terminal\" { os.Exit(runCodexTerminal()) }\n", "", 1),
+			"func daemon() int { return 20 }", "func daemon() int { return runCodexTerminal() }", 1),
+		"exit in the condition": strings.Replace(noMuse, `if mode == "codex-terminal" { os.Exit(runCodexTerminal()) }`, `if runCodexTerminal() == 0 { os.Exit(0) }`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := result(source); err == nil {
+				t.Fatal("Codex bridge dispatch accepted without a recognized terminating branch")
+			}
+		})
+	}
+}
+
+// todayDispatchShape mirrors the order of daemon/main.go's dispatches before
+// the Focus removal: a pre-logging exit, initLogging, agent, router, the Codex
+// terminal bridge, the Muse driver, then a retired command and the daemon. It
+// imports nothing, so its digest depends on this tool alone, not on the Go
+// toolchain's standard-library source. (The real tree, where the Codex bridge
+// ends in os.Exit, is checked with the real tool in the pull request.)
+const todayDispatchShape = `package main
+var mode string
+func initLogging() {}
+func runAgent() int { return 1 }
+func runRouter() {}
+func runCodexTerminal() int { return 5 }
+func runMuseDriver() {}
+func main() {
+	if mode == "version" { return }
+	initLogging()
+	if mode == "agent" {
+		if code := runAgent(); code != 0 {
+			mode = "exit"
+		}
+		return
+	}
+	if mode == "router" { runRouter(); return }
+	if mode == "codex-terminal" { runCodexTerminal(); return }
+	// the long-lived child of a native Muse pane
+	if mode == "muse-driver" { runMuseDriver(); return }
+	if mode == "gc" { return }
+	daemon()
+}
+func daemon() int { return 20 }
+`
+
+// The digest of todayDispatchShape computed by the tool before the Muse root
+// and the Codex dispatch became required-while-referenced. Equal means the
+// roots and the startup order for today's shape are unchanged.
+const todayDispatchShapeDigest = "4f1c12bee234f0457387e6fd528a294d31f803da2d2f4ce307462187e17f3514"
+
+func TestFingerprintTodayDispatchShapeUnchanged(t *testing.T) {
+	if got := fixtureDigest(t, todayDispatchShape); got != todayDispatchShapeDigest {
+		t.Fatalf("today's dispatch shape digest = %s, want %s", got, todayDispatchShapeDigest)
 	}
 }
 

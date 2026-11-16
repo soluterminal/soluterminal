@@ -1,4 +1,21 @@
 {
+  "0.0.1244": [
+    "The Focus view has been removed. Panes saved from it come back as normal terminal panes and can resume the same conversation.",
+    "Settings › Privacy & security has a new Developer overrides switch, off by default. It lets local builds be installed on this computer and is only for people who develop SoluTerminal.",
+    "Automations: reminders now fire on time, and recurring ones no longer run late. A prompt for a pane that's busy, or that you're typing in, now waits for up to an hour instead of being skipped, and that wait survives a restart. Run now tells you at once whether it started, was skipped or failed.",
+    "Automations: the form no longer loses what you typed when you click another pane, and asks before discarding changes. A failed task says its exit code and how long it ran.",
+    "Agents can pause, resume or delete only the automations their own pane created; yours need you. Agents can no longer create a background task that edits files; that needs you. The built-in recipes now ask for less permission, with a new Read & run checks level.",
+    "In the desktop app, clicking a link in a terminal now opens it in your browser, and only plain web and email links open.",
+    "Fixed: a Claude pane could look like it was waiting on a prompt when it wasn't.",
+    "Dictation clean-up now runs in SoluTerminal's cloud by default. Using your Claude plan or your own Anthropic API key is a choice in Settings › Voice.",
+    "SoluTerminal's instructions for Codex now reach only the Codex sessions it starts, not your global AGENTS.md.",
+    "On Windows, if changing the Backend setting cuts off a Claude or Codex pane, the pane shows \"needs restart\" and offers Restart session; the conversation is kept.",
+    "Disconnect now tells you whether your account removed this computer.",
+    "The Your machines page on the web now shows each computer's platform and its remote-access setting.",
+    "A new Agent messages chip in the footer pauses agents messaging each other with one click; held messages are delivered when you resume.",
+    "On Windows, the check before an app update no longer wakes a stopped Linux (WSL) distribution.",
+    "Security: built with Go 1.26.11, which fixes a flaw in Go's web server code (GO-2026-6859)."
+  ],
   "0.0.1243": [
     "On Windows, the first start no longer asks how SoluTerminal should run: it finds where Claude Code and Codex are installed and starts there. The tray's Switch mode menu now lists Linux (WSL), Windows and Dual (WSL + Windows), with your saved mode ticked.",
     "On Windows, the startup window now appears straight away and says what it's checking, even while Linux (WSL) is waking up.",

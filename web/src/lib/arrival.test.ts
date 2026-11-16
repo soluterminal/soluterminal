@@ -104,7 +104,7 @@ describe('arrival parameters', () => {
 describe('site installer config', () => {
   it('links the installer file itself, never the download page or a release host', () => {
     const fallback = 'https://soluterminal.com/download/SoluTerminal-Setup.exe';
-    expect(resolveSiteInstaller()).toEqual({ url: fallback, size: '74 MB' });
+    expect(resolveSiteInstaller()).toEqual({ url: fallback, size: '42 MB' });
     expect(resolveSiteInstaller('https://soluterminal.com/download/').url).toBe(fallback);
     expect(resolveSiteInstaller('https://github.com/o/r/releases/download/v1/Setup.exe').url).toBe(fallback);
     expect(resolveSiteInstaller('http://soluterminal.com/x.exe').url).toBe(fallback);
@@ -112,7 +112,7 @@ describe('site installer config', () => {
       url: 'https://www.soluterminal.com/download/SoluTerminal-Setup.exe',
       size: '80 MB',
     });
-    expect(resolveSiteInstaller(undefined, '<b>big</b>').size).toBe('74 MB');
+    expect(resolveSiteInstaller(undefined, '<b>big</b>').size).toBe('42 MB');
   });
 
   it('finds the download page beside the installer', () => {

@@ -7,7 +7,7 @@ export const AGENT_INTEGRATION_LABEL = 'Let Claude Code and Codex use SoluTermin
 export const AGENT_INTEGRATION_HINT =
   'Agents you start in SoluTerminal always work together. When on, Claude Code and Codex started outside ' +
   'SoluTerminal (another terminal, or typed in a Windows PowerShell pane) can see and message your panes too. ' +
-  'It adds four entries to their settings files, including Claude Code hooks; turning it off removes them and ' +
+  'It adds three entries to their settings files, including Claude Code hooks; turning it off removes them and ' +
   'keeps a backup of each file.';
 
 // The daemon owns this choice (it writes and removes the entries), so the

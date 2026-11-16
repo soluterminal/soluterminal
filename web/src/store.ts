@@ -3,6 +3,7 @@ import { reportClaimRefused } from './lib/claimFeedback';
 import { workspaceViewLayout, effectiveWorkspaceView, graftHiddenWorkspaceLeaves, isDerivedWorkspaceLayout, workspaceViewForPane, workspaceRootOf, workspaceViewHasSelection, isFilteredWorkspaceOverview, isTemporaryWorkspaceView, readWorkspaceAllPanes, saveWorkspaceAllPanes, workspaceViewKey, type WorkspaceView } from './lib/workspaceView';
 import { appendAutoPane, balancedLayout, DEFAULT_LAYOUT_ASPECT, DEFAULT_LAYOUT_COLUMNS, MAX_LAYOUT_COLUMNS, MIN_AUTO_PANE_WIDTH, removeCustomPane, resizedGridConfig, splitLargestPane } from './lib/autoLayout';
 import { createWorkspaceSaveQueue } from './lib/workspaceSaveQueue';
+import { runNowToast } from './lib/runNowToast';
 import { holdTerminalPlacement, reconcileConfirmedTerminalPanes } from './lib/terminalViewSessions';
 import { getMachineAccessState, subscribeMachineAccess } from './lib/machineAccess';
 import { clearOwnerURL, type MainPresentation, type WorkspaceReturnContext } from './lib/ownerView';
@@ -25,15 +26,11 @@ import { DEFAULT_LIGHT_THEME_NAME, DEFAULT_THEME_NAME, findTheme, type TerminalT
 import { APP_THEME_KEY, initialAppThemePref } from './appThemeDefault';
 import { getVoiceMode, isTauri, setVoiceMode, type VoiceMode } from './voice';
 import { isEmbedded } from './embed';
-import { type NativeMetaBarFields, NATIVE_METABAR_DEFAULTS, sanitizeMetaBarFields } from './native/metaBarFields';
-import { clearVitalsSnapshot } from './native/vitalsSnapshot';
-import { prettyModelName } from './native/modelInfo';
-import { hasAnyUnsentDraft, unsentDraftPaneId } from './native/useNativePane';
 import { applyShellUpdateSilentNative, exitForUpdateNative, getAppProcessId, getShellVersion, isDesktopApp, type ShellUpdateNativeResult } from './tauri-browser';
 import { isCloudLaunchMode, isVersionNewer } from './lib/useCloudShellUpdate';
 import { daemonOnThisComputer, shellAutoApplyEnabled, shellUpdateNeedsDaemon } from './lib/shellUpdateRoute';
 import { hasRegisteredUnsentInput } from './lib/unsentInput';
-import type { BrowserInfo, FileTileInfo, Layout, McpServer, NativeSettings, OrchestratorHostInfo, PaneAutoMode, PaneEffort, PaneInfo, PaneRole, Port, RecoveryResumeMode, RecoverySettings, RollbackDecline, Schedule, ScheduleInput, ShellAutoRestart, UpdateAutoApplyMode, UpdateHold, UpdateSettings, UpdateStatus, Workspace, WorkspaceSummary } from './types';
+import type { BrowserInfo, FileTileInfo, Layout, McpServer, OrchestratorHostInfo, PaneAutoMode, PaneEffort, PaneInfo, PaneRole, Port, RecoveryResumeMode, RecoverySettings, RollbackDecline, Schedule, ScheduleInput, ShellAutoRestart, UpdateAutoApplyMode, UpdateHold, UpdateSettings, UpdateStatus, Workspace, WorkspaceSummary } from './types';
 import { agentLabel, effectivePaneAgent } from './lib/agentKind';
 import {
   buildNxMFromLeaves,
@@ -466,12 +463,11 @@ function disarmShellAutoRestart(): void {
   if (useStore.getState().shellAutoRestart) useStore.setState({ shellAutoRestart: null });
 }
 
-// Text typed and not yet sent: a native pane's draft (kept per pane, mounted
-// or not) or any other compose box on this page (lib/unsentInput.ts). Both
-// unattended updates wait for it: the daemon swap reloads the page and the
-// installer update restarts the app.
+// Text typed and not yet sent in any compose box on this page
+// (lib/unsentInput.ts). Both unattended updates wait for it: the daemon swap
+// reloads the page and the installer update restarts the app.
 export function hasUnsentInput(): boolean {
-  return hasAnyUnsentDraft(useStore.getState().panes) || hasRegisteredUnsentInput();
+  return hasRegisteredUnsentInput();
 }
 
 // The desktop app's installer update runs only for the app on this computer,
@@ -548,8 +544,6 @@ function shellUpdateSafetyGate(): { idle: boolean; reason?: string; paneId?: str
   if (state.updateStatus?.workflowDeferred || (state.updateStatus?.workflowInflight ?? 0) > 0) {
     return { idle: false, reason: 'workflow invocation in flight' };
   }
-  const draftPane = unsentDraftPaneId(state.panes);
-  if (draftPane) return { idle: false, reason: 'unsent draft', paneId: draftPane };
   if (hasRegisteredUnsentInput()) return { idle: false, reason: 'unsent draft' };
   return { idle: true };
 }
@@ -664,8 +658,6 @@ const paneFlagSeq = new Map<string, number>();
 const paneRenameSeq = new Map<string, number>();
 const paneAutoModeSeq = new Map<string, number>();
 const paneAnnounceDelegationSeq = new Map<string, number>();
-const paneEffortSeq = new Map<string, number>();
-const paneModelSeq = new Map<string, number>();
 const paneRenamePending = new Map<string, string>();
 // Panes with a resume request in flight. The daemon frees a pane's id while it
 // respawns, so a pane-list refresh in that window would drop the tile and show
@@ -825,6 +817,12 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   portsUpdatedAt: number | null;
   workspaces: Workspace[];
   schedules: Schedule[];
+  // Whether the list above has been loaded from the selected machine at least
+  // once, and why the latest load failed (null after a good one). Without
+  // these an empty list reads as "no automations" while it is still loading
+  // or after the load failed.
+  schedulesLoaded: boolean;
+  schedulesError: string | null;
   orchestratorHosts: OrchestratorHostInfo[] | null;
   loadOrchestratorHosts: () => Promise<void>;
 
@@ -845,15 +843,6 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // isn't snoozed. Only an answer changes or records anything.
   maybeAskAutoUpdate: (now?: number) => Promise<void>;
   setUpdateShellAutoApply: (mode: UpdateAutoApplyMode) => Promise<void>;
-  // Per-machine native (Focus) toggles. promptSuggestions gates the composer
-  // ghost text AND the daemon --prompt-suggestions argv (opt-in, default OFF).
-  nativeSettings: NativeSettings | null;
-  loadNativeSettings: () => Promise<void>;
-  setNativePromptSuggestions: (enabled: boolean) => Promise<void>;
-  // Persist the default renderer for NEW Claude sessions ('' terminal |
-  // 'native' Focus). Daemon-stored (native_settings.json) so every device
-  // the user opens agrees; the new-session dialog preselects it.
-  setNativeDefaultClaudeMode: (mode: '' | 'native') => Promise<void>;
 
   mainPresentation: MainPresentation;
   ownerReturnContext: WorkspaceReturnContext | null;
@@ -954,26 +943,10 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   terminalLineHeight: number;
   setTerminalLineHeight: (lh: number) => void;
 
-  // Focus-mode prose size as a px OFFSET over the Terminal font size. The Focus
-  // (native) renderer is a proportional font, so it reads smaller than the mono
-  // terminal at equal px; this knob tunes the compensating gap. 1 = default
-  // (≈ the old size/14 anchor, ~+1px); 0 = Focus prose renders at the same px as
-  // the Terminal. NativePane turns this into --native-focus-scale on the pane
-  // root, so the whole Focus type ramp lands at term+offset. Terminal is untouched.
-  focusFontOffset: number;
-  setFocusFontOffset: (px: number) => void;
-
   // Shared workspace arrangement. Auto rebuilds a balanced grid when the
   // visible tile count changes; free preserves the user's custom geometry.
   paneLayoutMode: 'auto' | 'free';
   setPaneLayoutMode: (m: 'auto' | 'free') => void;
-  // Native bottom-bar "vitals" visibility — which read-only session indicators show
-  // in the NativeMetaBar's right cluster (model / context% / tokens / cost / cache /
-  // resets / cwd). GLOBAL + persisted (one JSON blob under solu.nativeMetaBar);
-  // purely presentational (gates already-available client data), so no daemon
-  // round-trip.
-  nativeMetaBarFields: NativeMetaBarFields;
-  setNativeMetaBarField: (field: keyof NativeMetaBarFields, on: boolean) => void;
   // Mouse copy/paste parity (X11 primary-selection convention). Both
   // default on — every mainstream terminal ships them by default.
   copyOnSelect: boolean;
@@ -1351,34 +1324,11 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   fireSchedule: (id: string) => Promise<void>;
   snoozeSchedule: (id: string) => Promise<void>;
 
-  createPane: (opts: { cwd: string; cmd: string[]; title?: string; kind?: 'native'; agent?: 'claude' | 'codex' | 'muse'; claudeSessionId?: string; codexThreadId?: string; provider?: 'anthropic' | 'glm'; effort?: PaneEffort; model?: string; role?: PaneRole; contextPack?: string }) => Promise<PaneInfo>;
+  createPane: (opts: { cwd: string; cmd: string[]; title?: string; agent?: 'claude' | 'codex' | 'muse'; claudeSessionId?: string; codexThreadId?: string; provider?: 'anthropic' | 'glm'; effort?: PaneEffort; model?: string; role?: PaneRole; contextPack?: string }) => Promise<PaneInfo>;
   renamePane: (id: string, title: string) => Promise<PaneInfo | null>;
   /** Set or clear the pane's @handle and working-on line; throws the
    *  daemon's message (e.g. a taken handle) for the caller to show. */
   setPaneIdentity: (id: string, change: { handle?: string; workingOn?: string }) => Promise<void>;
-  // Flip a live pane between the xterm terminal renderer (kind '') and the
-  // native conversation renderer (kind 'native') in place. Optimistically
-  // patches pane.kind so the render dispatch swaps the body immediately, then
-  // reconciles with the daemon DTO; rolls back on failure.
-  //
-  // `opts` selects the WIRE CONTRACT mode (back-compat: no opts ⇒ immediate):
-  //   • when:'now' (or omitted) — interrupt-and-switch now; optimistic kind flip
-  //     + paneModeSwitching like before.
-  //   • when:'deferred' — arm a LOSSLESS switch: NO optimistic flip, NO
-  //     paneModeSwitching; merges the returned DTO (which carries pendingSwitch).
-  //   • cancel:true — disarm a previously-armed deferred switch: optimistically
-  //     null pendingSwitch, POST, reconcile.
-  switchPaneMode: (
-    id: string,
-    kind: '' | 'native',
-    opts?: { when?: 'now' | 'deferred'; cancel?: boolean },
-  ) => Promise<PaneInfo | null>;
-  // Per-pane "renderer switch in flight" flag. switchPaneMode sets this true
-  // for the duration of the daemon round-trip (the kill+respawn grace) and
-  // clears it in finally. The pane-header toggle reads it to render a
-  // disabled/spinner state so the flip never looks like a silent stall.
-  // Memory-only; an entry is `true` only while a switch is pending.
-  paneModeSwitching: Record<string, boolean>;
   setPaneFlag: (id: string, flagged: boolean, memo: string) => Promise<PaneInfo | null>;
   // Set a pane's ARIA auto-approval mode with an optimistic local patch so the
   // header badge / palette flip instantly instead of waiting on the ~3s pane
@@ -1406,10 +1356,6 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // terminal reconnect backstop + the native pid cache-reset). Rolls back +
   // toasts on failure so the card returns for a retry.
   resumePane: (id: string, cols?: number, rows?: number, cwd?: string) => Promise<PaneInfo | null>;
-  // Restart a RUNNING native Claude or Codex pane's agent in place to reclaim
-  // its heap while keeping the conversation. Mirrors resumePane: POSTs /refresh
-  // and merges the new-pid DTO to drive native reconnect/replay. Toasts on failure.
-  refreshPane: (id: string) => Promise<PaneInfo | null>;
   // Restart THIS pane's agent in place, any pane kind, on the installed binary
   // (POST /api/panes/{id}/restart): same pane id, resumed conversation; fresh=true
   // starts a brand-new conversation. Merges the new-pid DTO so terminal/native
@@ -1418,10 +1364,6 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // other failure the caller toasts. force=true is the confirmed user override
   // of the busy settle gate. Use restartPaneFlow for the standard UX.
   restartPane: (id: string, fresh?: boolean, force?: boolean) => Promise<PaneInfo | null>;
-  // Change a native pane's reasoning-effort level. Optimistic badge flip +
-  // new-pid reconcile (the daemon respawns `claude --resume` with the new
-  // --effort). No-op when the level is unchanged. Toasts on success/failure.
-  setPaneEffort: (id: string, effort: PaneEffort) => Promise<PaneInfo | null>;
   // Attach/detach a local context pack. The daemon respawns the agent in place
   // and returns the new-pid pane DTO.
   setPaneContextPack: (id: string, contextPack: string) => Promise<PaneInfo | null>;
@@ -1429,11 +1371,6 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   // role's system brief is injected by the host adapter; the returned DTO is merged
   // only after that respawn succeeds.
   setPaneRole: (id: string, role: PaneRole | '') => Promise<PaneInfo | null>;
-  // Change a native pane's Claude model (respawn with --model; also rewrites
-  // the session's stored model so future bare resumes keep it). Optimistic
-  // field flip + new-pid reconcile, mirroring setPaneEffort.
-  setPaneModel: (id: string, model: string) => Promise<PaneInfo | null>;
-
   // The preview tile: one sandboxed iframe showing a service one of the
   // user's panes is running (Services, the "Preview detected" toast, an
   // agent's open_browser). Managed client-side — daemon knows nothing about
@@ -1497,7 +1434,7 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   consumeUserFocus: () => void;
   // Opens the pane on the named side of the focused tile (Split right, Split
   // down, Clone pane).
-  splitFocused: (direction: 'horizontal' | 'vertical', opts: { cwd: string; cmd: string[]; title?: string; kind?: 'native'; agent?: 'claude' | 'codex' | 'muse'; claudeSessionId?: string; codexThreadId?: string; provider?: 'anthropic' | 'glm'; effort?: PaneEffort; model?: string; role?: PaneRole; contextPack?: string }) => Promise<void>;
+  splitFocused: (direction: 'horizontal' | 'vertical', opts: { cwd: string; cmd: string[]; title?: string; agent?: 'claude' | 'codex' | 'muse'; claudeSessionId?: string; codexThreadId?: string; provider?: 'anthropic' | 'glm'; effort?: PaneEffort; model?: string; role?: PaneRole; contextPack?: string }) => Promise<void>;
   // One-click "launch claude here": live-cwd of the given pane + cmd=['claude'], split right.
   launchClaudeHere: (paneId: string, direction?: 'horizontal' | 'vertical', placement?: PanePlacement) => Promise<void>;
   // One-click "launch shell here": same but spawns $SHELL (daemon default).
@@ -2016,6 +1953,7 @@ function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
     && sameJsonValue(a.unsentMessage, b.unsentMessage)
     && sameJsonValue(a.heldMessages, b.heldMessages)
     && (a.heldStuck ?? false) === (b.heldStuck ?? false)
+    && (a.heldPaused ?? false) === (b.heldPaused ?? false)
     // Asks open and close with no other pane change.
     && sameJsonValue(a.asks, b.asks)
     && sameJsonValue(a.workerNotices, b.workerNotices)
@@ -2061,12 +1999,8 @@ function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
     && (a.agent ?? '') === (b.agent ?? '')
     && (a.codexThreadId ?? '') === (b.codexThreadId ?? '')
     && (a.museSessionId ?? '') === (b.museSessionId ?? '')
-    // Renderer kind + the two switch-state fields. Without these a deferred
-    // switch that fires on an otherwise-idle pane (flips `kind`, nulls
-    // `pendingSwitch`, may set `switchNotice`) changes NO compared field, so
-    // refreshPanes keeps the stale pane and the pending indicator never clears.
+    // Renderer kind (an older daemon's migration away from Focus flips it).
     && (a.kind ?? '') === (b.kind ?? '')
-    && sameJsonValue(a.pendingSwitch, b.pendingSwitch)
     // The buffered-update chip must invalidate the cached pane DTO.
     && sameJsonValue(a.delegatedPending, b.delegatedPending)
     // Turn tracking (working timer → "Δ files" chip, finished-turn unread).
@@ -2076,16 +2010,6 @@ function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
     // post-turn redraw tail): without it here, refreshPanes would keep the stale
     // pane and the switch confirm wouldn't update to one-click on settle.
     && (a.agentMidTurn ?? false) === (b.agentMidTurn ?? false)
-    // nativeEpoch changes on a daemon restart WITHOUT a pid/kind change (the agent
-    // survives the swap), so without it here refreshPanes would keep the stale pane
-    // and useNativePane's reset effect would never see the new epoch — the native
-    // pane would jumble the re-seq'd reattach instead of resetting + re-seeding.
-    && (a.nativeEpoch ?? 0) === (b.nativeEpoch ?? 0)
-    // workflowStatus appears/changes/clears entirely on the poll (no SSE edge),
-    // so without it here a background workflow's progress (agentsDone advancing,
-    // lastActivityMs ticking, the final clear) would change no compared field and
-    // refreshPanes would keep the stale pane — the footer would freeze.
-    && sameJsonValue(a.workflowStatus, b.workflowStatus)
     && promptsEqual(a.lastPrompts, b.lastPrompts);
 }
 
@@ -2940,13 +2864,10 @@ const appThemeLightDefault: boolean = (() => {
 const FONT_SIZE_KEY = 'solu.terminalFontSize';
 const LINE_HEIGHT_KEY = 'solu.terminalLineHeight';
 const UI_SCALE_KEY = 'solu.uiScale';
-const FOCUS_FONT_OFFSET_KEY = 'solu.focusFontOffset';
 const FONT_SIZE_MIN = 10;
 const FONT_SIZE_MAX = 22;
 const LINE_HEIGHT_MIN = 1.0;
 const LINE_HEIGHT_MAX = 1.8;
-const FOCUS_OFFSET_MIN = 0;
-const FOCUS_OFFSET_MAX = 8;
 function clampFontSize(n: number): number {
   if (!Number.isFinite(n)) return 14;
   return Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, Math.round(n)));
@@ -2954,11 +2875,6 @@ function clampFontSize(n: number): number {
 function clampLineHeight(n: number): number {
   if (!Number.isFinite(n)) return 1.2;
   return Math.max(LINE_HEIGHT_MIN, Math.min(LINE_HEIGHT_MAX, Math.round(n * 10) / 10));
-}
-function clampFocusOffset(n: number): number {
-  if (!Number.isFinite(n)) return 0.4;
-  // Snap to 0.1 steps so the pref accepts fine offsets (e.g. +1.3).
-  return Math.max(FOCUS_OFFSET_MIN, Math.min(FOCUS_OFFSET_MAX, Math.round(n * 10) / 10));
 }
 const fontSizeDefault: number = (() => {
   try {
@@ -2973,13 +2889,6 @@ const lineHeightDefault: number = (() => {
     if (!raw) return 1.2;
     return clampLineHeight(parseFloat(raw));
   } catch { return 1.2; }
-})();
-const focusFontOffsetDefault: number = (() => {
-  try {
-    const raw = localStorage.getItem(FOCUS_FONT_OFFSET_KEY);
-    if (raw == null) return 0.4;
-    return clampFocusOffset(parseFloat(raw));
-  } catch { return 0.4; }
 })();
 
 // UI scale (zoom factor for sidebar + topbar chrome). Continuous to
@@ -2999,18 +2908,6 @@ const uiScaleDefault: number = (() => {
     return clampUiScale(parseFloat(raw));
   } catch { return 1.0; }
 })();
-// Native bottom-bar vitals visibility — one JSON blob (structured object, so it
-// follows the customKeybindings blob idiom, not the scalar prefs). Missing/corrupt
-// → sane defaults; a partial blob is filled in per-field by sanitizeMetaBarFields.
-const NATIVE_METABAR_KEY = 'solu.nativeMetaBar';
-const nativeMetaBarDefault: NativeMetaBarFields = (() => {
-  try {
-    const raw = localStorage.getItem(NATIVE_METABAR_KEY);
-    if (!raw) return { ...NATIVE_METABAR_DEFAULTS };
-    return sanitizeMetaBarFields(JSON.parse(raw));
-  } catch { return { ...NATIVE_METABAR_DEFAULTS }; }
-})();
-
 // Mouse copy/paste parity, persisted per-browser. Absent key → on, so
 // existing installs adopt the convention; '0' is the explicit opt-out.
 const COPY_ON_SELECT_KEY = 'solu.copyOnSelect';
@@ -3047,46 +2944,6 @@ const keybindingsDefault: Record<string, string> = (() => {
     return out;
   } catch { return {}; }
 })();
-
-// Backstop for ending the renderer-switch overlay when the switch-mode POST
-// response is lost or slow. The kill+respawn of the very pane being switched
-// can drop its own switch-mode response even though the switch landed and
-// persisted server-side, so we never let that POST alone drive the overlay.
-// Must exceed the daemon's worst-case respawn made visible by the 3s panes
-// poll (settle ≤1.5s + up to 3 spawn attempts ≈5.5s + ≤3s poll) yet stay under
-// api.ts API_FETCH_TIMEOUT_MS (30s).
-const SWITCH_RECONCILE_TIMEOUT_MS = 20_000;
-
-// Resolve once the panes poll/SSE shows pane `id` respawned — a NEW valid pid
-// distinct from `prevPid`. A Term↔Focus switch ALWAYS kills and respawns the
-// agent (both directions), so a changed pid is the authoritative "the switch
-// actually landed" signal, independent of the (possibly lost) switch-mode POST
-// response. Resolves true on observing the respawn, false on timeout.
-function waitForPaneRespawn(
-  id: string,
-  prevPid: number | undefined,
-  timeoutMs: number,
-): Promise<boolean> {
-  const respawned = () => {
-    const p = useStore.getState().panes[id];
-    return !!p && typeof p.pid === 'number' && p.pid > 0 && p.pid !== prevPid;
-  };
-  if (respawned()) return Promise.resolve(true);
-  return new Promise<boolean>((resolve) => {
-    let done = false;
-    const finish = (v: boolean) => {
-      if (done) return;
-      done = true;
-      unsub();
-      clearTimeout(timer);
-      resolve(v);
-    };
-    const unsub = useStore.subscribe(() => {
-      if (respawned()) finish(true);
-    });
-    const timer = setTimeout(() => finish(false), timeoutMs);
-  });
-}
 
 // Build the spawn request used by Clone pane / Alt+Enter. Role is deliberately
 // included only when set so a clone of an orchestrator is faithful while the
@@ -3145,9 +3002,10 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
   portsUpdatedAt: null,
   workspaces: [],
   schedules: [],
+  schedulesLoaded: false,
+  schedulesError: null,
   orchestratorHosts: null,
   recoverySettings: null,
-  nativeSettings: null,
   updateSettings: null,
   updateStatus: null,
   updateApplyRequestInFlight: false,
@@ -3201,7 +3059,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
   lastViewedMs: loadPaneLastViewed(),
   clientActivityMs: {},
   lastPrompts: {},
-  paneModeSwitching: {},
   senders: {},
   claimers: {},
   redrawers: {},
@@ -3610,12 +3467,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     try { localStorage.setItem(LINE_HEIGHT_KEY, String(v)); } catch {}
     set({ terminalLineHeight: v });
   },
-  focusFontOffset: focusFontOffsetDefault,
-  setFocusFontOffset: (px) => {
-    const v = clampFocusOffset(px);
-    try { localStorage.setItem(FOCUS_FONT_OFFSET_KEY, String(v)); } catch {}
-    set({ focusFontOffset: v });
-  },
   uiScale: uiScaleDefault,
   setUiScale: (n) => {
     const v = clampUiScale(n);
@@ -3674,13 +3525,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     set({ layout, layoutColumns: config.columns, layoutAspect: config.aspect });
     scheduleAutosave(get);
   },
-
-  nativeMetaBarFields: nativeMetaBarDefault,
-  setNativeMetaBarField: (field, on) => set((s) => {
-    const next = { ...s.nativeMetaBarFields, [field]: on };
-    try { localStorage.setItem(NATIVE_METABAR_KEY, JSON.stringify(next)); } catch {}
-    return { nativeMetaBarFields: next };
-  }),
 
   copyOnSelect: copyOnSelectDefault,
   setCopyOnSelect: (v) => {
@@ -4478,6 +4322,8 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
         workspaces: [],
         ports: [],
         schedules: [],
+        schedulesLoaded: false,
+        schedulesError: null,
         browsers: {},
         files: {},
         activeWorkspace: CURRENT_WS,
@@ -4543,7 +4389,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       // again whenever the daemon's 15-min poll detects a new version.
       void get().refreshUpdateStatus();
       void get().loadRecoverySettings();
-      void get().loadNativeSettings();
       void get().loadUpdateSettings();
       void get().loadOrchestratorHosts();
       const paneMap: Record<string, PaneInfo> = {};
@@ -4995,14 +4840,24 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
 
   refreshSchedules: async () => {
     if (refreshSchedulesInFlight) return refreshSchedulesInFlight;
+    // An answer from the machine or backend selected when the request left
+    // must not land after a switch: it would show the other machine's rows as
+    // loaded. Drop it and ask the machine selected now.
+    const scope = currentRoutingScope().key;
+    let stale = false;
     refreshSchedulesInFlight = (async () => {
       try {
         const s = await api.listSchedules();
-        set({ schedules: s });
-      } catch {
-        // Non-fatal; retry happens on the next poll or uiBus event.
+        if (scope !== currentRoutingScope().key) { stale = true; return; }
+        set({ schedules: s, schedulesLoaded: true, schedulesError: null });
+      } catch (e) {
+        if (scope !== currentRoutingScope().key) { stale = true; return; }
+        // Non-fatal: the next reconnect or change event loads again, and the
+        // Automations list offers Retry. Rows already loaded stay on screen.
+        set({ schedulesError: e instanceof Error ? e.message : String(e) });
       } finally {
         refreshSchedulesInFlight = null;
+        if (stale) void get().refreshSchedules();
         for (const id of [...scheduleRowsDirty]) {
           if (refreshScheduleInFlight.has(id)) continue;
           scheduleRowsDirty.delete(id);
@@ -5072,49 +4927,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       // Older daemons have no endpoint. The UI's default keeps Claude working
       // and presents Codex as disabled until availability can be verified.
       set({ orchestratorHosts: slotValue('paneRoleHosts')?.legacyDaemonHosts ?? [] });
-    }
-  },
-  loadNativeSettings: async () => {
-    try {
-      const settings = await api.getNativeSettings();
-      set({ nativeSettings: settings });
-    } catch {
-      // Older daemons won't expose /api/native/settings; keep Preferences usable.
-    }
-  },
-  setNativePromptSuggestions: async (enabled) => {
-    const prev = get().nativeSettings;
-    const optimistic: NativeSettings = { ...prev, promptSuggestions: enabled };
-    set({ nativeSettings: optimistic });
-    try {
-      const settings = await api.putNativeSettings(optimistic);
-      set({ nativeSettings: settings });
-    } catch (e) {
-      set({ nativeSettings: prev });
-      get().toast(`Couldn't save prompt-suggestions setting: ${(e as Error).message}`, {
-        kind: 'error',
-        icon: '!',
-        ttlMs: 5000,
-      });
-    }
-  },
-  setNativeDefaultClaudeMode: async (mode) => {
-    const prev = get().nativeSettings;
-    const optimistic: NativeSettings = {
-      promptSuggestions: prev?.promptSuggestions ?? false,
-      defaultClaudeMode: mode,
-    };
-    set({ nativeSettings: optimistic });
-    try {
-      const settings = await api.putNativeSettings(optimistic);
-      set({ nativeSettings: settings });
-    } catch (e) {
-      set({ nativeSettings: prev });
-      get().toast(`Couldn't save default-mode setting: ${(e as Error).message}`, {
-        kind: 'error',
-        icon: '!',
-        ttlMs: 5000,
-      });
     }
   },
   setRecoveryResumeMode: async (mode) => {
@@ -5635,7 +5447,7 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
           return;
         }
         const isQuietDefer = body.deferred === true;
-        const cause = body.cause === 'focus' || body.cause === 'workflow'
+        const cause = body.cause === 'focus' || body.cause === 'workflow' || body.cause === 'agent-messaging-paused'
           ? body.cause
           : isQuietDefer
             ? 'workflow'
@@ -5738,7 +5550,7 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
           }));
           return;
         }
-        const cause = body.cause === 'focus' || body.cause === 'workflow'
+        const cause = body.cause === 'focus' || body.cause === 'workflow' || body.cause === 'agent-messaging-paused'
           ? body.cause
           : body.deferred === true ? 'workflow' : 'unknown';
         set((state) => ({
@@ -6027,10 +5839,14 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
   },
 
   fireSchedule: async (id) => {
-    const s = await api.fireSchedule(id);
+    const { runNow, ...s } = await api.fireSchedule(id);
     set((st) => ({
       schedules: st.schedules.map((sc) => (sc.id === id ? s : sc)),
     }));
+    // Say at once what Run now did. A daemon from before 0.0.1244 sends no
+    // runNow; nothing is claimed then.
+    const said = runNow && runNowToast(s, runNow);
+    if (said) get().toast(said.message, said.opts);
   },
 
   snoozeSchedule: async (id) => {
@@ -6116,166 +5932,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       panes: s.panes[id] ? { ...s.panes, [id]: { ...s.panes[id], identity: identity ?? undefined } } : s.panes,
     }));
     scheduleAutosave(get);
-  },
-
-  switchPaneMode: async (id, kind, opts) => {
-    const scope=currentRoutingScope(),generation=get().navigationGeneration;
-    const current=()=>scope.key === currentRoutingScope().key && generation === get().navigationGeneration;
-    const prev = get().panes[id];
-    if (!prev) return null;
-
-    // --- cancel: disarm a previously-armed deferred switch ---
-    // Optimistically null pendingSwitch (so the indicator clears at once), POST
-    // with cancel:true, then reconcile with the returned DTO. No kind flip, no
-    // paneModeSwitching.
-    if (opts?.cancel) {
-      set((s) => ({
-        panes: s.panes[id] ? { ...s.panes, [id]: { ...s.panes[id], pendingSwitch: null } } : s.panes,
-      }));
-      try {
-        const saved = await api.switchPaneMode(id, kind, { cancel: true },scope);
-        if(!current())return null;
-        set((s) => ({ panes: s.panes[id] ? { ...s.panes, [id]: saved } : s.panes }));
-        return saved;
-      } catch (e) {
-        if(!current())return null;
-        // Restore the armed indicator so the user can retry the cancel.
-        set((s) => ({
-          panes: s.panes[id]
-            ? { ...s.panes, [id]: { ...s.panes[id], pendingSwitch: prev.pendingSwitch ?? null } }
-            : s.panes,
-        }));
-        get().toast(
-          `Couldn't cancel the pending switch: ${(e as Error).message || 'request failed'}`,
-          { kind: 'error', icon: '⚠', ttlMs: 5000 },
-        );
-        throw e;
-      }
-    }
-
-    // --- deferred: arm a lossless switch that fires when the turn finishes ---
-    // Do NOT optimistically flip kind and do NOT set paneModeSwitching — the
-    // body stays put; we only POST and merge the DTO (which carries
-    // pendingSwitch). The current renderer keeps rendering until the daemon
-    // fires the switch on turn-end (propagated via the panes SSE/poll).
-    if (opts?.when === 'deferred') {
-      try {
-        const saved = await api.switchPaneMode(id, kind, { when: 'deferred' },scope);
-        if(!current())return null;
-        set((s) => ({ panes: s.panes[id] ? { ...s.panes, [id]: saved } : s.panes }));
-        return saved;
-      } catch (e) {
-        if(!current())return null;
-        get().toast(
-          `Couldn't arm the deferred switch: ${(e as Error).message || 'request failed'}`,
-          { kind: 'error', icon: '⚠', ttlMs: 5000 },
-        );
-        throw e;
-      }
-    }
-
-    // --- now (or omitted): interrupt-and-switch immediately ---
-    const prevKind = prev.kind ?? '';
-    if (prevKind === kind) return prev;
-    // Guard against a double-fire (palette + header racing the same pane):
-    // if a switch is already pending for this pane, no-op.
-    if (get().paneModeSwitching[id]) return prev;
-    // The pre-switch agent pid. A respawn (either direction) lands a NEW pid —
-    // the authoritative "the switch actually happened" signal (the optimistic
-    // kind flip below changes kind but NOT pid, so kind alone can't tell a real
-    // respawn from a no-op failure).
-    const prevPid = prev.pid;
-
-    // Optimistic: swap the body immediately. The render dispatch
-    // (WarmPaneLayer / PaneGrid) is gated on pane.kind==='native', so patching
-    // the field here flips Terminal↔Native without waiting for the round-trip.
-    // Also flag the switch as in flight so the header toggle can show a
-    // disabled/spinner state during the daemon kill+respawn grace. An override
-    // ("switch now" on an armed pending switch) also clears pendingSwitch
-    // optimistically so the indicator collapses straight into the flip.
-    set((s) => ({
-      panes: s.panes[id]
-        ? { ...s.panes, [id]: { ...s.panes[id], kind, pendingSwitch: null } }
-        : s.panes,
-      paneModeSwitching: { ...s.paneModeSwitching, [id]: true },
-    }));
-
-    // Do NOT let the switch-mode POST alone drive the overlay or the
-    // success/failure verdict. Killing + respawning THIS pane's agent can lose
-    // or badly delay the POST's own response even though the switch landed and
-    // persisted server-side — which previously stranded the "Switching
-    // renderer…" overlay (and, with the 30s fetch cap, falsely rolled the
-    // renderer back to Terminal with an error toast on a switch that actually
-    // succeeded). Instead reconcile against the AUTHORITATIVE pane state: a
-    // respawn lands a NEW pid (the panes poll/SSE propagates it), and the
-    // authoritative kind tells success (===target) from a rolled-back respawn
-    // (===prevKind). The POST is only a fast-path hint; a bounded timeout is the
-    // final backstop so a lost response can never strand the overlay.
-    const post = api
-      .switchPaneMode(id, kind, opts?.when ? { when: opts.when } : undefined,scope)
-      .then((saved) => ({ ok: true as const, saved }))
-      .catch((error: unknown) => ({ ok: false as const, error }));
-    const respawnP = waitForPaneRespawn(id, prevPid, SWITCH_RECONCILE_TIMEOUT_MS);
-
-    try {
-      const outcome = await Promise.race([
-        post.then((r) => ({ via: 'post' as const, r })),
-        respawnP.then((landed) => ({ via: 'respawn' as const, landed })),
-      ]);
-
-      if(!current())return null;
-      // Fast path (unchanged behaviour for an idle pane): the POST returned its
-      // DTO first — merge and return.
-      if (outcome.via === 'post' && outcome.r.ok) {
-        // Hoist out of the union before the closure — TS drops the discriminated
-        // narrowing of `outcome.r` inside the nested set() callback.
-        const saved = outcome.r.saved;
-        if(!current())return null;
-        set((s) => ({ panes: s.panes[id] ? { ...s.panes, [id]: saved } : s.panes }));
-        return saved;
-      }
-
-      // Either the POST errored, or a respawn was observed before any response
-      // (lost/slow response). Judge by the authoritative pane state — a NEW pid
-      // means the switch really happened; the authoritative kind says success
-      // vs a rolled-back respawn. In the post-error case, wait once more so a
-      // 500's rollback respawn has a chance to land (reuses the same promise —
-      // no extra subscription).
-      const landed = outcome.via === 'respawn' ? outcome.landed : await respawnP;
-      if(!current())return null;
-      const live = get().panes[id];
-      if (landed && live && (live.kind ?? '') === kind) {
-        // Respawned into the target kind → the switch landed despite a
-        // lost/slow/errored response. Keep the optimistic flip.
-        return live;
-      }
-
-      // No respawn into the target kind (daemon 500 → rollback to prevKind, or
-      // no respawn at all): a genuine failure. Roll the body back and surface
-      // it — the original failure contract.
-      set((s) => ({
-        panes: s.panes[id] ? { ...s.panes, [id]: { ...s.panes[id], kind: prevKind } } : s.panes,
-      }));
-      const errMsg =
-        outcome.via === 'post' && !outcome.r.ok ? (outcome.r.error as Error)?.message : '';
-      get().toast(`Couldn't switch renderer: ${errMsg || 'request failed'}`, {
-        kind: 'error',
-        icon: '⚠',
-        ttlMs: 5000,
-      });
-      if (outcome.via === 'post' && !outcome.r.ok) throw outcome.r.error;
-      throw new Error('switch-mode did not land');
-    } finally {
-      // Clear the in-flight flag regardless of outcome. Drop the key entirely
-      // (rather than set false) so the map stays small and selectors that
-      // read `!!paneModeSwitching[id]` see a clean false.
-      if(current())set((s) => {
-        if (!(id in s.paneModeSwitching)) return {};
-        const next = { ...s.paneModeSwitching };
-        delete next[id];
-        return { paneModeSwitching: next };
-      });
-    }
   },
 
   setPaneFlag: async (id, flagged, memo) => {
@@ -6457,26 +6113,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     }
   },
 
-  refreshPane: async (id) => {
-    const prev = get().panes[id];
-    if (!prev) return null;
-    try {
-      const saved = await api.refreshPane(id);
-      // New pid (same pane id) → triggers the native pid cache-reset + replay
-      // (useNativePane, keyed on pid), so the conversation re-seeds from
-      // the provider's resume path. Same merge the exited-pane resume uses.
-      set((s) => ({ panes: s.panes[id] ? { ...s.panes, [id]: saved } : s.panes }));
-      get().toast('Agent restarted — conversation kept', { kind: 'info', icon: '↻', ttlMs: 2500 });
-      return saved;
-    } catch (e) {
-      get().toast(
-        `Couldn't restart agent: ${(e as Error).message || 'try again'}`,
-        { kind: 'error', icon: '⚠', ttlMs: 5000 },
-      );
-      throw e;
-    }
-  },
-
   restartPane: async (id, fresh = false, force = false) => {
     if (!get().panes[id]) return null;
     // No toast here on failure: a 409+needsFresh is a user choice, not an
@@ -6487,46 +6123,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     set((s) => ({ panes: s.panes[id] ? { ...s.panes, [id]: saved } : s.panes }));
     get().toast(fresh ? 'Pane restarted — new session' : 'Pane restarted — conversation kept', { kind: 'info', icon: '↻', ttlMs: 2500 });
     return saved;
-  },
-
-  setPaneEffort: async (id, effort) => {
-    const prev = get().panes[id];
-    if (!prev) return null;
-    if ((prev.effort ?? '') === effort) return prev; // no-op, daemon also short-circuits
-    const seq = (paneEffortSeq.get(id) ?? 0) + 1;
-    paneEffortSeq.set(id, seq);
-
-    // Optimistic: show the new level immediately. The daemon RESPAWNS the
-    // headless claude (new pid), so on success we merge the returned DTO — its
-    // changed pid drives the native pid cache-reset + replay (useNativePane),
-    // re-seeding the conversation from `claude --resume`, exactly like refresh.
-    set((s) => ({
-      panes: s.panes[id] ? { ...s.panes, [id]: { ...s.panes[id], effort } } : s.panes,
-    }));
-
-    try {
-      const saved = await api.setPaneEffort(id, effort);
-      // Only reconcile + toast if no newer change superseded this one, so a
-      // rapid re-pick doesn't flash a stale level.
-      if (paneEffortSeq.get(id) === seq) {
-        set((s) => ({ panes: s.panes[id] ? { ...s.panes, [id]: saved } : s.panes }));
-        get().toast(
-          effort ? `Effort set to ${effort} — conversation kept` : 'Effort reset to default — conversation kept',
-          { kind: 'info', icon: '⚡', ttlMs: 2500 },
-        );
-      }
-      return saved;
-    } catch (e) {
-      // Roll back the optimistic level (only if no newer change superseded us).
-      if (paneEffortSeq.get(id) === seq) {
-        set((s) => ({ panes: s.panes[id] ? { ...s.panes, [id]: prev } : s.panes }));
-      }
-      get().toast(
-        `Couldn't change effort: ${(e as Error).message || 'request failed'}`,
-        { kind: 'error', icon: '⚠', ttlMs: 5000 },
-      );
-      throw e;
-    }
   },
 
   setPaneContextPack: async (id, contextPack) => {
@@ -6570,45 +6166,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
         { kind: 'error', icon: '⚠', ttlMs: 5000 },
       );
       return null;
-    }
-  },
-
-  setPaneModel: async (id, model) => {
-    const prev = get().panes[id];
-    if (!prev) return null;
-    // NO client-side no-op on equality: prev.model is OUR explicit flag, not the
-    // session's effective model (a ''-flag pane runs whatever --resume stored),
-    // so an equal-looking request can still be a real change. The daemon
-    // short-circuits the true no-op (same explicit flag) cheaply.
-    const seq = (paneModelSeq.get(id) ?? 0) + 1;
-    paneModelSeq.set(id, seq);
-
-    // Optimistic flag flip; on success merge the returned DTO — its changed pid
-    // drives the native reconnect + `claude --resume` replay, like effort.
-    set((s) => ({
-      panes: s.panes[id] ? { ...s.panes, [id]: { ...s.panes[id], model } } : s.panes,
-    }));
-
-    try {
-      const saved = await api.setPaneModel(id, model);
-      if (paneModelSeq.get(id) === seq) {
-        set((s) => ({ panes: s.panes[id] ? { ...s.panes, [id]: saved } : s.panes }));
-        get().toast(`Model → ${prettyModelName(model) || model} · conversation kept`, {
-          kind: 'info',
-          icon: '⚡',
-          ttlMs: 3000,
-        });
-      }
-      return saved;
-    } catch (e) {
-      if (paneModelSeq.get(id) === seq) {
-        set((s) => ({ panes: s.panes[id] ? { ...s.panes, [id]: prev } : s.panes }));
-      }
-      get().toast(
-        `Couldn't change model: ${(e as Error).message || 'request failed'}`,
-        { kind: 'error', icon: '⚠', ttlMs: 5000 },
-      );
-      throw e;
     }
   },
 
@@ -6661,11 +6218,6 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
           : s.parkedPaneIds,
       };
     });
-    // Prune this pane's last-known Focus vitals snapshot (a no-op for a
-    // terminal pane / a pane that never had one). Pane ids are unique forever,
-    // so without this the solu.nativeVitals.* localStorage keys would accumulate
-    // unbounded over a long-lived install.
-    clearVitalsSnapshot(id);
     scheduleAutosave(get);
     try {
       await Promise.allSettled([priorLayoutFlush, ...earlierSaves]);
@@ -7958,6 +7510,8 @@ export function effectiveVisiblePaneIds(s: { mainPresentation: MainPresentation;
 export function effectiveTerminalTarget(s: { mainPresentation: MainPresentation; focusedPaneId: string | null; layout: Layout | null; panes: Record<string, PaneInfo> } & import('./lib/workspaceView').WorkspaceViewState): string | null {
  if(!routingPrincipalAllowed())return null;
  if (s.mainPresentation.kind === 'owner') return !s.mainPresentation.history && !s.mainPresentation.loading && !s.mainPresentation.error ? s.mainPresentation.pane?.id ?? null : null;
+ // An older daemon (another machine, or a router's second backend) may still
+ // run a Focus pane: never type raw keys into its stream-json agent.
  return s.focusedPaneId && collectPaneIds(workspaceViewLayout(s)).includes(s.focusedPaneId) && s.panes[s.focusedPaneId]?.kind !== 'native' ? s.focusedPaneId : null;
 }
 let paneAliasScope = currentRoutingScope().key;

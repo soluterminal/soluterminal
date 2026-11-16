@@ -50,10 +50,9 @@ func shinoqueFrozenClock(tokens *shinoqueTokenCache) func(time.Duration) {
 // every copy held by the test, so only the "solud" holds the socket.
 func shinoqueSoludHolder(t *testing.T, listener *net.TCPListener) {
 	t.Helper()
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The stand-in, not the host's sleep: a multi-call coreutils exits at
+	// once when run under another name (standInSleeper).
+	sleep := standInSleeper(t)
 	binary := filepath.Join(t.TempDir(), "solud")
 	if err := os.Symlink(sleep, binary); err != nil {
 		t.Fatal(err)

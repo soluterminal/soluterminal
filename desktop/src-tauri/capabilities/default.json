@@ -26,6 +26,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-is-maximized",
     "allow-desktop-set-backend-mode",
+    "allow-desktop-wsl-readiness",
     "allow-desktop-set-up-wsl",
     "allow-desktop-set-launch-mode",
     "allow-desktop-get-autostart",

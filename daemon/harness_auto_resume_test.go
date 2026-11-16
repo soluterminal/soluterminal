@@ -22,7 +22,6 @@ func TestShouldAutoResumeHarnessOnExit(t *testing.T) {
 		want       bool
 	}{
 		{"auto off", func(s PaneSnapshot) PaneSnapshot { return s }, false, false},
-		{"native pane", func(s PaneSnapshot) PaneSnapshot { s.Kind = "native"; return s }, true, false},
 		{"not exited", func(s PaneSnapshot) PaneSnapshot { s.Status = PaneRunning; return s }, true, false},
 		{"not resumable", func(s PaneSnapshot) PaneSnapshot { s.Resumable = false; return s }, true, false},
 		{"plain shell", func(s PaneSnapshot) PaneSnapshot {
@@ -34,7 +33,6 @@ func TestShouldAutoResumeHarnessOnExit(t *testing.T) {
 		{"nil exit code (signal) resumes", func(s PaneSnapshot) PaneSnapshot { s.ExitCode = nil; return s }, true, true},
 		{"crash resumes", func(s PaneSnapshot) PaneSnapshot { return s }, true, true},
 		{"managed argv without provider field", func(s PaneSnapshot) PaneSnapshot { s.HarnessProvider = ""; return s }, true, true},
-		{"native kind wins over harness fields", func(s PaneSnapshot) PaneSnapshot { s.Kind = "native"; return s }, true, false},
 	}
 	for _, tc := range cases {
 		tc := tc

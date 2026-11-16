@@ -437,12 +437,19 @@ var peerIsBrowser = func(pid int) bool {
 // WSL's init (it forwards Windows localhost connections into the distro in
 // NAT mode) and another solud process (the Dual-mode router). Such callers
 // fall back to browser fetch metadata, like any untraceable caller.
+//
+// Any program can name itself "init" (prctl PR_SET_NAME), so the name alone
+// never makes a proxy: WSL's init counts only when it runs as root inside
+// WSL (peerIsWSLInit), which a same-user program can't fake.
 var peerIsRelayProxy = func(pid int) bool {
 	if pid == 1 {
 		return true
 	}
 	name := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(readComm(pid))), ".exe")
-	return name == "init" || name == "solud"
+	if name == "init" {
+		return peerIsWSLInit(pid)
+	}
+	return name == "solud"
 }
 
 // sharedNetworkServiceNames are macOS's WebKit network service (full name

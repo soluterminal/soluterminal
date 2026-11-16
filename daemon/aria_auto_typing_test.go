@@ -230,20 +230,6 @@ func TestAutoFireUserHold(t *testing.T) {
 	}
 }
 
-// TestDirectAutoFireNativeDoesNotHoldOnComposer pins the deliberate asymmetry:
-// a native resolve is a control_response frame bound to a RequestID, so it
-// cannot take a draft the user is holding, and must not be held for one.
-func TestAutoFireUserHoldIgnoresNativeComposerLease(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	native := &Pane{ID: "native", Kind: "native", subs: map[int64]*subEntry{}}
-	atomic.StoreInt64(&native.LastInputMs, now.Add(-time.Hour).UnixMilli())
-	native.SetComposerNonEmpty(true, now)
-	if hold, reason := autoFireUserHold(native, now); hold {
-		t.Fatalf("native composer lease held a resolve that cannot steal a draft: %q", reason)
-	}
-}
-
 // A split terminal reply used to leak its printable tail into promptRec.buf,
 // holding auto-approval for two minutes despite no user draft. Exercise the
 // actual successful-write bookkeeping and keep the real-draft protection.

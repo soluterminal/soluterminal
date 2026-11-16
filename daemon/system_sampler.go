@@ -988,6 +988,9 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 	reasons := []systemLevelReason{}
 	overall := "ok"
 	for key, level := range prev.Current {
+		if systemVerdictExcluded[key] {
+			continue
+		}
 		if level != "ok" {
 			reasons = append(reasons, systemLevelReason{Key: key, Level: level, Text: text[key], Detail: detail[key]})
 		}
@@ -1008,6 +1011,14 @@ func systemLevels(s systemSample, now time.Time, prev levelState) (systemLevelsD
 	}
 	return systemLevelsDTO{Overall: overall, Reason: reason, Reasons: reasons, Areas: cloneLevelMap(prev.Current)}, prev
 }
+
+// systemVerdictExcluded names the areas that are measured and reported under
+// Areas, and never decide the whole-system verdict or appear in its reasons.
+// The workflow engine is retired, so its area can only ever read "unknown" and
+// the verdict could never say all is well. A runtime's health is detail for
+// the System page, which names the runtime and why; a bare count in the
+// footer names nothing the person can act on.
+var systemVerdictExcluded = map[string]bool{"engine": true, "runtimes": true}
 
 // daemonCPUWarnShare is the share of the machine's cores the daemon may hold,
 // sustained, before the System chip warns: half of them. daemonCPUWarnMaxCores

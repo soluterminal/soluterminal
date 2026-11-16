@@ -86,24 +86,19 @@ func EnterGap(hasClaude bool) time.Duration {
 // Enter, so a line typed that way sits unsent in the composer forever. Write
 // the body, wait EnterGap, then write the carriage return as its own frame.
 //
-// A native (Focus) pane speaks a provider protocol rather than keystrokes, so
-// it routes through submitNativeInput — the same semantic path the composer
-// uses, which also updates prompt history and emits the input-time user_text
-// event. Claude and Codex terminal panes go through submitAgentMessage, which
+// Claude and Codex terminal panes go through submitDaemonMessage, which
 // also confirms the text left the input box (pane_delivery.go). Other
 // non-Claude terminal TUIs get bracketed paste so multi-word input survives;
 // Claude deliberately does not (paste mode confuses its composer).
+//
+// A terminal pane is never typed into while the person is typing there or
+// has a draft in it (tracker #35: a prompt schedule submitted a half-written
+// prompt with its own): the error then wraps errDraftGuardHeld and nothing
+// is typed. Retrying is the caller's choice.
 func submitLineToPane(p *Pane, body string, hasClaude bool) (int, error) {
 	body = strings.TrimRight(body, "\r\n")
-	if p.Snapshot().Kind == "native" {
-		res, err := p.submitNativeInput(body)
-		if err != nil {
-			return 0, err
-		}
-		return res.Bytes, nil
-	}
 	if agent, claude := paneAgentProvider(p); agent {
-		wrote, outcome, err := submitAgentMessage(p, body, claude)
+		wrote, outcome, err := submitDaemonMessage(p, body, claude)
 		if err == nil && outcome == deliveryLeftInComposer {
 			err = errDeliveryLeftInComposer
 		}
@@ -113,13 +108,46 @@ func submitLineToPane(p *Pane, body string, hasClaude bool) (int, error) {
 	if !hasClaude {
 		first = []byte("\x1b[200~" + body + "\x1b[201~")
 	}
-	wrote, err := p.Write(first)
+	// Its callers write unattended (schedules, ARIA mentions): neither the
+	// line nor its Enter may land in a permission menu (unattendedMenuCheck).
+	// Any other terminal program: its input line cannot be read off the
+	// screen, so the person's keystroke recency and the prompt recorder's
+	// draft decide. All of it is read under the writer lock with the paste.
+	var held string
+	var rev uint64
+	wrote, err := p.writeWithPrecondition(first, true, false, bothChecks(unattendedMenuCheck(p), func() error {
+		held = shellDraftReason(p, time.Now())
+		if held != "" {
+			return errDraftGuardHeld
+		}
+		rev = p.inputRevision.Load()
+		return nil
+	}))
+	if errors.Is(err, errDeliveryChoicePrompt) {
+		return wrote, err
+	}
+	if errors.Is(err, errDraftGuardHeld) {
+		return 0, draftGuardHeldError(held)
+	}
 	if err != nil {
 		return wrote, errors.New("write failed: " + err.Error())
 	}
 	time.Sleep(EnterGap(hasClaude))
-	n, err := p.Write([]byte("\r"))
+	// Enter only if nothing was typed since the paste (it would submit the
+	// person's keystrokes with it; the paste itself is one revision) and no
+	// menu opened over it.
+	n, err := p.writeWithPrecondition([]byte("\r"), true, false, bothChecks(func() error {
+		if p.inputRevision.Load() != rev+1 {
+			return errDeliveryLeftInComposer
+		}
+		return nil
+	}, unattendedMenuCheck(p)))
 	wrote += n
+	if errors.Is(err, errDeliveryChoicePrompt) || errors.Is(err, errDeliveryLeftInComposer) {
+		// The line waits in the box for the person, as an agent pane's
+		// delivery leaves it: callers must not also answer elsewhere.
+		return wrote, errDeliveryLeftInComposer
+	}
 	if err != nil {
 		return wrote, errors.New("submit-Enter failed: " + err.Error())
 	}
@@ -131,3 +159,20 @@ func submitLineToPane(p *Pane, body string, hasClaude bool) (int, error) {
 // fetches to keep web/src/ptySubmit.ts in sync without a rebuild.
 func EnterGapClaudeMS() int  { return int(enterGapClaude / time.Millisecond) }
 func EnterGapDefaultMS() int { return int(enterGapBracketedPaste / time.Millisecond) }
+
+// shellDraftReason is draftGuardReason for a terminal program whose input
+// line SoluTerminal cannot read (a shell, an editor): the person typed in
+// the last draftGuardQuiet, or the prompt recorder holds a draft they typed.
+// The draft never goes stale here: with no screen to check, a line left
+// unsent for minutes is still theirs, and Enter would run it. A recorder
+// draft that is not really there costs a skipped run, never their command.
+// Caller holds the writer lock (agentWriteMu).
+func shellDraftReason(p *Pane, now time.Time) string {
+	if last := p.lastHumanInputMs.Load(); last > 0 && now.Sub(time.UnixMilli(last)) < draftGuardQuiet {
+		return "the person is typing"
+	}
+	if n, _ := p.promptRec.humanDraft(); n > 0 {
+		return heldBoxTextReason
+	}
+	return ""
+}

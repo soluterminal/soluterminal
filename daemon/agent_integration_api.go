@@ -44,7 +44,6 @@ func agentIntegrationChanges() []agentIntegrationChange {
 	if cfgPath, err := codexConfigPath(); err == nil {
 		changes = append(changes,
 			agentIntegrationChange{What: "Codex: SoluTerminal's tools (MCP server \"soluterminal\")", Path: cfgPath},
-			agentIntegrationChange{What: "Codex: a short marked note in your global instructions", Path: filepath.Join(filepath.Dir(cfgPath), "AGENTS.md")},
 		)
 	}
 	return changes
@@ -138,7 +137,7 @@ func (a *apiServer) handleAckAgentIntegrationNotice(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusOK, agentIntegrationSnapshot(rec))
 }
 
-// applyAgentIntegrationOn writes the four entries now instead of waiting for
+// applyAgentIntegrationOn writes the three entries now instead of waiting for
 // the next restart. Each writer is idempotent and serialized internally.
 var applyAgentIntegrationOn = func(addr string) {
 	ensureClaudeMcpRegistration(addr)

@@ -56,11 +56,7 @@ func TestSpawnCmdForRoleHosts(t *testing.T) {
 	if !slices.Equal(codex, []string{"codex", "-c", codexDeveloperInstructionsKey + orchestratorBrief}) {
 		t.Fatalf("Codex argv = %#v", codex)
 	}
-	if got := spawnCmdForRole("native", paneRoleOrchestrator, agentCodex, []string{"codex", "app-server"}); len(got) != 2 {
-		t.Fatalf("native argv changed: %#v", got)
-	}
-
-	for _, kind := range []string{"", "native"} {
+	for _, kind := range []string{""} {
 		for _, role := range []string{"", paneRoleOrchestrator} {
 			for _, agent := range []string{"", agentClaude, agentCodex, agentMuse} {
 				cmd := []string{orchestratorHostLabel(agent)}

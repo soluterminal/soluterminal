@@ -44,37 +44,12 @@ func argvHas(argv []string, s string) bool {
 	return false
 }
 
-func TestNativeClaudeArgvEffort(t *testing.T) {
-	t.Parallel()
-	// Set effort -> "--effort <level>" pair present.
-	argv := nativeClaudeArgv("sess-1", true, "max", false, "")
-	if indexOfPair(argv, "--effort", "max") < 0 {
-		t.Fatalf("expected --effort max in argv, got %v", argv)
-	}
-	// --resume must still be emitted alongside (effort doesn't displace it).
-	if indexOfPair(argv, "--resume", "sess-1") < 0 {
-		t.Fatalf("expected --resume sess-1 in argv, got %v", argv)
-	}
-
-	// Empty effort -> no --effort flag at all (claude keeps its default).
-	bare := nativeClaudeArgv("", false, "", false, "")
-	if argvHas(bare, "--effort") {
-		t.Fatalf("expected no --effort flag for empty effort, got %v", bare)
-	}
-
-	// A non-max level rides through unchanged.
-	hi := nativeClaudeArgv("", false, "high", false, "")
-	if indexOfPair(hi, "--effort", "high") < 0 {
-		t.Fatalf("expected --effort high in argv, got %v", hi)
-	}
-}
-
 // TestPersistedPaneEffortRoundTrip mirrors TestPersistedPaneProviderRoundTrip:
 // Effort must survive snapshot -> on-disk -> JSON -> back, and a legacy entry
 // with no effort key must unmarshal to "".
 func TestPersistedPaneEffortRoundTrip(t *testing.T) {
 	t.Parallel()
-	pp := persistedFromSnapshot(PaneSnapshot{ID: "p1", Effort: "xhigh", Kind: "native"})
+	pp := persistedFromSnapshot(PaneSnapshot{ID: "p1", Effort: "xhigh"})
 	if pp.Effort != "xhigh" {
 		t.Fatalf("persistedFromSnapshot dropped Effort: got %q", pp.Effort)
 	}

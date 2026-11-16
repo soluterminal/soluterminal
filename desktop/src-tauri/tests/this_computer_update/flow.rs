@@ -180,6 +180,21 @@ fn closed_addr() -> String {
     addr
 }
 
+/// An address that never gives an HTTP answer and stays ours for the whole
+/// run: every connection is accepted and dropped at once. A closed port is
+/// not enough, because a concurrent test can bind the freed port for its own
+/// stub daemon, which then answers (seen as "up-to-date" in CI).
+fn silent_addr() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+    addr
+}
+
 #[test]
 fn only_the_main_window_may_update_this_computer() {
     assert!(require_main_webview("main").is_ok());
@@ -395,7 +410,7 @@ fn daemon_refusals_and_failures_come_back_as_messages() {
 fn a_daemon_that_never_answers_fails_and_is_stopped() {
     let stops = Arc::new(Mutex::new(0));
     let counted = stops.clone();
-    let dead = closed_addr();
+    let dead = silent_addr();
     let outcome = run_update(
         || true,
         || (),

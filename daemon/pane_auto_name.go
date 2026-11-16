@@ -286,7 +286,7 @@ func (a *apiServer) autoNameEligible(p *Pane) bool {
 	}
 	// A pane with an agent conversation of its own, from recorded fields
 	// only — no process walk, since the prompt hook also runs on a sweep.
-	if snap.Kind != "native" && snap.Agent != agentCodex && agentFromCmd(snap.Cmd) == "" &&
+	if snap.Agent != agentCodex && agentFromCmd(snap.Cmd) == "" &&
 		snap.ClaudeSessionID == "" && snap.ClaudeTranscriptPath == "" && snap.CodexThreadID == "" {
 		return false
 	}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +25,7 @@ func runSupportBundleCLI(args []string, stdout, stderr io.Writer) int {
 	out := flags.String("out", "", "destination file (must not already exist)")
 	data := flags.String("data", defaultDataDir(), "workspace data directory to inspect, without modifying it")
 	jsonOut := flags.Bool("json", false, "save the sectioned bundle as JSON instead of text")
+	addr := flags.String("addr", defaultDaemonAddr, "loopback address the daemon listens on (a side daemon's -addr), used to find its log and check its port")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprint(stderr, redactSensitive(diagnostics.String()))
 		if errors.Is(err, flag.ErrHelp) {
@@ -40,9 +42,14 @@ func runSupportBundleCLI(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "support-bundle: cannot resolve data directory")
 		return 1
 	}
+	daemonAddr, ok := supportBundleLoopbackAddr(*addr)
+	if !ok {
+		fmt.Fprintln(stderr, "support-bundle: --addr must be a loopback host:port, such as 127.0.0.1:8787")
+		return 2
+	}
 	shellDir, _ := soluShellDataDir()
 	exe, _ := os.Executable()
-	offline := &supportBundleOffline{dataDir: dataDir, shellDir: shellDir, executable: exe}
+	offline := &supportBundleOffline{dataDir: dataDir, shellDir: shellDir, executable: exe, addr: daemonAddr}
 	bundle := buildSupportBundle(nil, "", offline)
 	// Separate the timestamp with a dot so the generated name cannot look
 	// like one long opaque credential to the shared conservative redactor.
@@ -129,6 +136,36 @@ func encodeSupportBundleFile(bundle *supportBundleResponse, asJSON bool) ([]byte
 
 type supportBundleOffline struct {
 	dataDir, shellDir, executable string
+	// addr is the daemon's listen address (defaultDaemonAddr unless --addr
+	// names a side daemon's): it decides where the durable log lives and which
+	// port is checked.
+	addr string
+}
+
+// supportBundleLoopbackAddr normalises --addr to host:port on a loopback
+// host. The offline command never reaches beyond this machine.
+func supportBundleLoopbackAddr(addr string) (string, bool) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || port == "" {
+		return "", false
+	}
+	if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 {
+		return "", false
+	}
+	if !strings.EqualFold(host, "localhost") {
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return "", false
+		}
+	}
+	return net.JoinHostPort(host, port), true
+}
+
+func (o *supportBundleOffline) daemonAddr() string {
+	if o.addr == "" {
+		return defaultDaemonAddr
+	}
+	return o.addr
 }
 
 func (o *supportBundleOffline) sections() []supportBundleSection {
@@ -156,11 +193,12 @@ func (o *supportBundleOffline) sections() []supportBundleSection {
 		supportBundleReadJSON(filepath.Join(o.dataDir, "update_settings.json"), &settings)
 	// A TCP connect reports occupancy only; never mistake an unrelated service
 	// for solud, and never start a daemon or send a mutating request.
-	port := "127.0.0.1:8787: no TCP connection (daemon may be stopped or use another port)"
-	conn, err := supportBundleDial("tcp", "127.0.0.1:8787", 250*time.Millisecond)
+	addr := o.daemonAddr()
+	port := addr + ": no TCP connection (daemon may be stopped or use another port; pass --addr for a side daemon)"
+	conn, err := supportBundleDial("tcp", addr, 250*time.Millisecond)
 	if err == nil {
 		_ = conn.Close()
-		port = "127.0.0.1:8787: accepting TCP connections (service identity not checked)"
+		port = addr + ": accepting TCP connections (service identity not checked)"
 	}
 	return []supportBundleSection{
 		{ID: "versions", Title: "Offline versions and paths", Text: versions, SelectedByDefault: true},
@@ -174,7 +212,7 @@ func (o *supportBundleOffline) logPaths() []string {
 	paths := []string{}
 	envDir := strings.TrimSpace(os.Getenv("SOLU_DURABLE_LOG_DIR"))
 	if !strings.EqualFold(envDir, "off") {
-		durableDir, _ := resolveDurableLogDir(runtime.GOOS, envDir, o.dataDir, defaultDataDir(), func() (string, error) { return o.shellDir, nil })
+		durableDir, _ := resolveDurableLogDir(runtime.GOOS, envDir, o.daemonAddr(), o.dataDir, defaultDataDir(), func() (string, error) { return o.shellDir, nil })
 		if durableDir != "" {
 			paths = append(paths, filepath.Join(durableDir, durableLogName))
 		}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -83,20 +82,6 @@ func promptKeyForAttention(p *Pane, f attentionFacts, choicePos int64) attention
 	key := attentionPromptKey{State: f.State, Pos: choicePos}
 	if f.State == StateAwaitingInput {
 		key.Pos = atomic.LoadInt64(&p.LastAckedAwaitingInputPos)
-	}
-	if f.IsNative && len(f.Pending) > 0 {
-		var ids strings.Builder
-		// listNativePending already sorts by RequestID. Length prefixes keep
-		// distinct ID sets distinct even if an ID contains a separator.
-		for _, pending := range f.Pending {
-			if pending == nil {
-				continue
-			}
-			ids.WriteString(strconv.Itoa(len(pending.RequestID)))
-			ids.WriteByte(':')
-			ids.WriteString(pending.RequestID)
-		}
-		key.PendingIDs = ids.String()
 	}
 	return key
 }
@@ -199,16 +184,10 @@ type attentionFacts struct {
 	HumanOnlyReason string
 	State           PaneRuntimeState
 	AutoMode        string
-	IsNative        bool
-	// NativeAutoOn is the SOLU_ARIA_NATIVE_AUTO kill switch (native panes
-	// only): off means ARIA leaves native approvals for the human.
-	NativeAutoOn bool
 	// AutoGateReason is autoAllowed()'s denial code ("" when allowed).
 	// "paused" means auto-approval will NOT act; "burst-cap" is a transient
 	// the sweeper retries through, so it stays auto-pending.
 	AutoGateReason string
-	// Pending is the native pane's open approvals (nil for terminal panes).
-	Pending []*NativeApproval
 	// DeclineReason is a still-valid SetAutoDeclined record ("" when none).
 	DeclineReason string
 	// InputHoldReason is computed from current terminal input, not a historic
@@ -238,9 +217,6 @@ func classifyAttention(f attentionFacts) (PaneAttention, string) {
 	if f.AutoMode == "" {
 		return AttentionNeedsUser, ""
 	}
-	if f.IsNative && !f.NativeAutoOn {
-		return AttentionNeedsUser, ""
-	}
 	switch f.AutoGateReason {
 	case "":
 		// allowed
@@ -251,22 +227,6 @@ func classifyAttention(f attentionFacts) (PaneAttention, string) {
 		return AttentionNeedsUser, "auto-approval is paused"
 	default: // any future hard denial
 		return AttentionNeedsUser, "auto-approval " + autoSuppressReason(f.AutoGateReason)
-	}
-	// Native panes carry structured approvals, so "will auto-mode even try?"
-	// is answerable synchronously — no reason to wait for an eval to decline.
-	for _, ap := range f.Pending {
-		if ap == nil {
-			continue
-		}
-		if isNonAutoApprovableNativeTool(ap.ToolName) {
-			return AttentionNeedsUser, nativeNeverAutoReason(ap.ToolName)
-		}
-		// Deterministic cautious-mode safety needles.
-		if f.AutoMode == "cautious" {
-			if r := nativeCautiousAutoDenyReason(ap); r != "" {
-				return AttentionNeedsUser, "won't auto-approve — " + r
-			}
-		}
 	}
 	if f.DeclineReason != "" {
 		return AttentionNeedsUser, f.DeclineReason
@@ -359,8 +319,6 @@ func (e *attentionEngine) Refresh(p *Pane) {
 
 	f := attentionFacts{
 		State:         state,
-		IsNative:      false,
-		NativeAutoOn:  true,
 		DeclineReason: p.autoDeclineFor(pos),
 	}
 	snap := p.Snapshot()
@@ -371,11 +329,6 @@ func (e *attentionEngine) Refresh(p *Pane) {
 	if snap.NeverAutoAnswer {
 		f.AutoMode = ""
 		f.HumanOnlyReason = "automatic answers locked by user"
-	}
-	f.IsNative = snap.Kind == "native"
-	if f.IsNative {
-		f.NativeAutoOn = nativeAriaAutoEnabled()
-		f.Pending = p.listNativePending()
 	}
 	if a := e.aria.Load(); a != nil {
 		if _, reason := a.autoAllowed(); reason != "" {
@@ -392,11 +345,11 @@ func (e *attentionEngine) Refresh(p *Pane) {
 
 	// The escalation clock runs only while an auto policy could act (see
 	// dwell) — computed after the facts so a just-enabled policy resets it.
-	autoCandidate := f.AutoMode != "" && (!f.IsNative || f.NativeAutoOn)
-	if autoCandidate && !f.IsNative && state == StateChoicePrompt {
+	autoCandidate := f.AutoMode != ""
+	if autoCandidate && state == StateChoicePrompt {
 		_, f.InputHoldReason = autoFireUserHold(p, now)
 	}
-	if !f.IsNative && state != StateChoicePrompt {
+	if state != StateChoicePrompt {
 		// While no menu covers the input box, check the recorder's draft
 		// against it, so a phantom cannot hold the next approval.
 		p.reconcileComposerDraft(now)

@@ -23,7 +23,7 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking"] }
-dirs = "5"
+dirs = "6"
 # Verifies the signed update.json before the cloud-mode installer update trusts
 # any URL or digest in it (src/shell_update_manifest.rs).
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std"] }

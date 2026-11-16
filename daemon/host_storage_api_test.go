@@ -183,7 +183,7 @@ func TestHostStorageStatusMergesLauncherAndDaemonEventsChronologically(t *testin
 		t.Fatal(err)
 	}
 	base := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
-	src := &fakeHostStorageSource{sample: hostStorageSample{At: base, Available: true, State: hostStorageOK, Distro: "Ubuntu", Volume: `C:\`, FreeBytes: 100 << 30, TotalBytes: 2 << 40, LocalAppData: `C:\Users\benja\AppData\Local`}}
+	src := &fakeHostStorageSource{sample: hostStorageSample{At: base, Available: true, State: hostStorageOK, Distro: "Ubuntu", Volume: `C:\`, FreeBytes: 100 << 30, TotalBytes: 2 << 40, LocalAppData: `C:\Users\alice\AppData\Local`}}
 	e := hostPressureEngine(src, 667*1024)
 	e.hostLedger = newHostStorageLedger(t.TempDir())
 	now := base

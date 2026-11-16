@@ -37,7 +37,49 @@ type SoluBackend = {
   hostPlatform?: 'windows' | 'macos' | 'linux';
   launchMode?: 'local' | 'cloud';
   version?: string; // shell/installer version; absent on shells before it was added
+  // This session runs Dual's Windows side alone on a PC with Shinoque, so
+  // Shinoque's phone access is down until Windows mode (ST-245).
+  shinoqueNeedsWindowsMode?: boolean;
 };
+
+// The shell's desktop_wsl_readiness answer (backend::WslReadiness in
+// desktop/src-tauri/src/backend.rs).
+export type WslReadiness = 'ready' | 'not-installed' | 'no-distro' | 'needs-update' | 'not-ready' | 'unavailable';
+
+const WSL_READINESS: readonly string[] = ['ready', 'not-installed', 'no-distro', 'needs-update', 'not-ready', 'unavailable'];
+
+// Ask the shell whether WSL can run SoluTerminal before a restart into Dual or
+// Linux mode. Null when the shell is too old to say or the check failed; the
+// switch then restarts without a warning, as before.
+async function wslReadiness(invoke: InvokeFn | null): Promise<WslReadiness | null> {
+  if (!invoke) return null;
+  try {
+    const answer = await invoke('desktop_wsl_readiness');
+    return typeof answer === 'string' && WSL_READINESS.includes(answer) ? answer as WslReadiness : null;
+  } catch {
+    return null;
+  }
+}
+
+// What a restart into `mode` should warn about, given WSL's readiness. Empty
+// when there is nothing to say.
+export function wslReadinessWarning(mode: 'wsl' | 'dual', readiness: WslReadiness | null): string {
+  const target = mode === 'dual' ? 'Dual' : 'Linux';
+  switch (readiness) {
+    case 'not-installed':
+      return 'SoluTerminal isn’t set up in Linux (WSL) yet. The first start installs its background service there, so it takes longer.';
+    case 'no-distro':
+      return `Linux (WSL) has no Linux distribution installed, so ${target} mode would start on Windows only. Set up Linux (WSL) first.`;
+    case 'needs-update':
+      return `Linux (WSL) needs an update (run wsl --update in PowerShell), so ${target} mode may start on Windows only.`;
+    case 'not-ready':
+      return `Linux (WSL) didn’t answer just now, so ${target} mode may start on Windows only.`;
+    case 'unavailable':
+      return `Linux (WSL) isn’t available on this PC right now, so ${target} mode would start on Windows only.`;
+    default:
+      return '';
+  }
+}
 
 type InvokeFn = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -77,6 +119,23 @@ function osWordFromShellPlatform(p: string | undefined): string | null {
   if (s.startsWith('linux')) return 'Linux';
   if (s.startsWith('darwin') || s.startsWith('mac') || s.startsWith('osx')) return 'macOS';
   return null;
+}
+
+// The OS word for a cloud machine. On a Dual machine (relaying "wsl" and
+// "win") the record's shellPlatform is the desktop's host OS for both daemons,
+// so a phone on the WSL side read "Windows · WSL" (ST-102). There the side
+// being viewed decides; a single daemon keeps the record's platform.
+export function cloudMachineOsWord(
+  machine: { backends?: string[]; shellPlatform?: string } | undefined,
+  activeBackend: 'wsl' | 'win' | null,
+): string | null {
+  if (!machine) return null;
+  if (Array.isArray(machine.backends) && machine.backends.length > 1) {
+    if (activeBackend === 'wsl') return 'Linux';
+    if (activeBackend === 'win') return 'Windows';
+    return null;
+  }
+  return osWordFromShellPlatform(machine.shellPlatform);
 }
 
 // The desktop shell's own host OS (window.__SOLU_BACKEND__.hostPlatform).
@@ -157,6 +216,10 @@ export function useBackendEnv() {
   // and the app fell back, "Windows" looked selected, was disabled, and could
   // never be saved: every start tried WSL again.
   const savedStartup = startup;
+  // Running on something other than the saved mode (saved Dual, WSL didn't
+  // start): the pill says so, not just the popover.
+  const modeMismatch = showStartup && fallback && !!savedStartup && !!actual && savedStartup !== actual;
+  const shinoqueNeedsWindowsMode = fallback && desktopBackend?.shinoqueNeedsWindowsMode === true;
 
   // OS/backend word for an at-a-glance readout on the context pill (the pill
   // keeps its visible text short, so this rides along as a quiet secondary
@@ -164,10 +227,11 @@ export function useBackendEnv() {
   // Dual); cloud reports the selected remote machine's OS; a Linux/macOS desktop
   // reports its own host OS. Null when unknown (still detecting / bare browser
   // tab) so the pill simply omits it.
-  const selectedShellPlatform = machines.find((m) => m.id === selectedMachineId)?.shellPlatform;
+  const selectedMachine = machines.find((m) => m.id === selectedMachineId);
   let osWord: string | null = null;
-  if (showStartup && activeStartup) osWord = startupLabel(activeStartup);
-  else if (connActive === 'cloud') osWord = osWordFromShellPlatform(selectedShellPlatform);
+  if (modeMismatch) osWord = `${startupLabel(actual)}, not ${startupLabel(savedStartup)}`;
+  else if (showStartup && activeStartup) osWord = startupLabel(activeStartup);
+  else if (connActive === 'cloud') osWord = cloudMachineOsWord(selectedMachine, activeBackend);
   else if (desktopBackend?.hostPlatform) osWord = osWordFromHostPlatform(desktopBackend.hostPlatform);
 
   const requestStartup = async (mode: StartupMode) => {
@@ -176,11 +240,21 @@ export function useBackendEnv() {
     // restarts and tries that mode once more.
     const retry = mode === savedStartup;
     if (retry && !fallback) return;
+    // Dual and Linux need WSL: check it first, so a restart that would only
+    // fall back to Windows is explained before it happens.
+    let warning = '';
+    if (mode === 'dual' || mode === 'wsl') {
+      setPendingStartup(mode);
+      toast('Checking Linux (WSL)…', { ttlMs: 4000 });
+      warning = wslReadinessWarning(mode, await wslReadiness(invoke));
+      setPendingStartup(null);
+    }
+    const question = retry
+      ? `Restart soluterminal and try ${startupLabel(mode)} mode again?\n\nThe desktop shell and daemon connections will restart.`
+      : `Restart soluterminal in ${startupLabel(mode)} mode?\n\nThe desktop shell and daemon connections will restart.`;
     const ok = await confirmDialog({
       title: retry ? `Try ${startupLabel(mode)} again` : `Switch to ${startupLabel(mode)}`,
-      message: retry
-        ? `Restart soluterminal and try ${startupLabel(mode)} mode again?\n\nThe desktop shell and daemon connections will restart.`
-        : `Restart soluterminal in ${startupLabel(mode)} mode?\n\nThe desktop shell and daemon connections will restart.`,
+      message: warning ? `${warning}\n\n${question}` : question,
       confirmLabel: 'Restart',
     });
     if (!ok) return;
@@ -242,7 +316,7 @@ export function useBackendEnv() {
     pendingStartup, pendingSide, pendingConn,
     showStartup, showRouterSide, showLegacySwap, showConnSwitch, showConnDisplay,
     connActive, machineName, paneCounts,
-    actual, fallback, activeStartup, savedStartup, osWord,
+    actual, fallback, activeStartup, savedStartup, osWord, modeMismatch, shinoqueNeedsWindowsMode,
     requestStartup, requestSide, requestConn,
     legacyActiveLabel, legacyTargetLabel, legacyTarget,
     actionable, summary, nothingToRender,
@@ -310,6 +384,9 @@ export function BackendControls() {
               Saved mode: {startupLabel(env.savedStartup)}. It didn’t start, so this session is
               running on {startupLabel(env.actual)}. Choose {startupLabel(env.actual)} to stop
               trying {startupLabel(env.savedStartup)} at each start.
+              {env.shinoqueNeedsWindowsMode && (
+                <> Shinoque’s phone access isn’t available in this session: it needs Windows mode.</>
+              )}
             </div>
           )}
         </div>

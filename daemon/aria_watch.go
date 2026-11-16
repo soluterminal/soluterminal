@@ -108,16 +108,6 @@ func startAriaWatcher(ctx context.Context, mgr *Manager, bus *uiBus, aria *Aria)
 		}
 		mu.Unlock()
 		tail := tailOfPaneAdaptive(p, 30)
-		// Native panes keep raw stream-json JSONL in the ring buffer, which is
-		// useless as an observation. Replace the tail with a structured summary
-		// of the pending approval(s). evaluateObservation's native branch builds
-		// its own per-approval prompt, so this mainly improves the UI
-		// observation card; the terminal branch still gets its grid tail.
-		if p.Snapshot().Kind == "native" {
-			if nt := nativeObservationText(p); nt != "" {
-				tail = nt
-			}
-		}
 		bus.publish(uiEvent{
 			Type:      "aria-observation",
 			PaneID:    paneID,
@@ -273,7 +263,7 @@ func startAriaWatcher(ctx context.Context, mgr *Manager, bus *uiBus, aria *Aria)
 				continue
 			}
 			snap := p.Snapshot()
-			if snap.Status != PaneRunning || snap.AutoMode == "" || snap.Kind == "native" {
+			if snap.Status != PaneRunning || snap.AutoMode == "" {
 				continue
 			}
 			// Output wakeups are only hints. Recheck after the frame has

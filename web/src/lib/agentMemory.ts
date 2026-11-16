@@ -43,6 +43,9 @@ export function recordAgentMemory(paneId: string, mb: number, now = Date.now()):
     if (growth.size > MAX_TRACKED_PANES) growth.delete(growth.keys().next().value!);
   }
   if (!(mb > 0)) return h.fast;
+  // An unchanged reading adds nothing: the last sample already stands for it.
+  // Every pane-list update records (useAgentMemoryPill), so repeats are common.
+  if (h.samples.at(-1)?.mb === mb) return h.fast;
   if (mb < FAST_GROWTH_MIN_MB) h.fast = false;
   // A sample stands until the next one, so the newest one older than the
   // window is what memory was when the window opened.

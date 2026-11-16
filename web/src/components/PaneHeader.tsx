@@ -1,11 +1,11 @@
 import { isTemporaryWorkspaceView } from '../lib/workspaceView';
-import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type DragEventHandler, type MouseEvent as ReactMouseEvent, type SetStateAction, type ReactNode } from 'react';
+import { useRef, type Dispatch, type DragEventHandler, type MouseEvent as ReactMouseEvent, type SetStateAction, type ReactNode } from 'react';
 import { IconMinimize } from './ui/icons';
 import type { PaneInfo } from '../types';
 import { useStore } from '../store';
 import { confirmClosePane } from './usePaneContextMenu';
 import { useIsMobileView } from './useIsMobileView';
-import { PaneHeaderOverflow, PaneDetail, usePaneDetailVisible, DETAIL_PRIORITY } from './PaneHeaderOverflow';
+import { PaneHeaderOverflow, PaneDetail, DETAIL_PRIORITY } from './PaneHeaderOverflow';
 import { PaneHeaderBadges } from './PaneHeaderBadges';
 import { UnsentMessageChip } from './UnsentMessageChip';
 import { PaneAsksChip } from './PaneAsksChip';
@@ -16,37 +16,13 @@ import { messageSharesOrigin } from '../lib/paneHeaderDetails';
 import { PaneIdentityChip } from './PaneIdentityChip';
 import { PaneReviewChip } from './PaneReviewChip';
 import { PaneMessageChip } from './PaneMessageChip';
-import { useFocusEnabled } from '../lib/focusAvailability';
 import { PaneTurnChip } from './PaneTurnChip';
 import { turnChipModel } from '../lib/turnChip';
-import {
-  shouldConfirmModeSwitch,
-  switchRequestForChoice,
-  pendingSwitchKind,
-  toggleVisual,
-  focusHintDismissed,
-  markFocusUsed,
-} from '../native/modeSwitch';
-import { ModeSwitchConfirm, PaneModeToggle } from './native/NativeEventViews';
 import { Tooltip } from './Tooltip';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { useAgentMemoryPill } from '../lib/useAgentMemoryPill';
 import { AgentMemoryPill } from './AgentMemoryChip';
 import { paneTitleHint } from '../lib/altHeld';
-
-// Shared explainer copy for the renderer toggle. Surfaced as the group
-// tooltip in the header AND mirrored in the command-palette entry so the
-// "what is native mode" answer is the same wherever the user first meets it.
-const MODE_TOGGLE_TITLE =
-  'Renderer · Focus = structured chat that reflows at any width · Terminal = raw TUI (xterm)';
-
-// One-time "Try Focus" discovery hint. Shown ONCE (per install) under the
-// mode toggle of the first Terminal-mode Claude pane the user sees; dismissed
-// forever by the ✕, by touching the toggle, or by EVER having used Focus —
-// NativePane calls markFocusUsed() on mount (see modeSwitch.ts), so existing
-// Focus users (and a pane just switched AWAY from Focus) never see it.
-// Module-level claim so multiple visible Claude panes don't each pop the hint.
-let focusHintClaimedBy: string | null = null;
 
 type ConnStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
 
@@ -72,10 +48,6 @@ interface PaneHeaderProps {
   onRename: (title: string) => Promise<unknown>;
   onClose: () => void;
   onToggleZoom: () => void;
-  // Flip this pane between the xterm terminal renderer and the native
-  // conversation renderer. Only rendered (as a Terminal/Native segmented
-  // toggle) when the pane is Claude-capable. Absent ⇒ no toggle.
-  onSwitchMode?: (kind: '' | 'native') => void;
   // Open the pane context menu — the ⋯ button and right-click share this. Owned
   // by the parent (Pane.tsx), which holds the menu state. Absent ⇒ no ⋯ button.
   onOpenMenu?: (e: ReactMouseEvent) => void;
@@ -83,25 +55,18 @@ interface PaneHeaderProps {
   onRestartPane?: () => void;
 }
 
-// A direct/foreground Codex pane can enter Focus before its first message:
-// the daemon distinguishes a verified virgin process (thread/start) from an
-// unreadable or ambiguous identity (identityBlocked). A known thread remains
-// the continuity signal for shell-launched panes between process scans.
-function isFocusCapable(pane: PaneInfo) {
+// A Claude, Codex or Muse agent pane (by its agent label or detected CLI).
+function isAgentPane(pane: PaneInfo) {
   const agent = effectivePaneAgent(pane);
   if (agent === 'codex') return true;
-  // Muse: a terminal muse session's identity isn't discoverable, so a Focus
-  // flip would silently start a fresh conversation — the daemon refuses it
-  // (native_switch.go). Only offer the toggle when the id is known.
-  if (agent === 'muse') return pane.kind === 'native' || !!pane.museSessionId;
+  if (agent === 'muse') return !!pane.museSessionId;
   return pane.hasClaude === true || (agent === 'claude' && (
     pane.cmd[0] === 'claude' ||
-    pane.cmd[0]?.endsWith('/claude') === true ||
-    pane.kind === 'native'
+    pane.cmd[0]?.endsWith('/claude') === true
   ));
 }
 
-// Auto-approval is broader than the renderer toggle: the daemon detects and
+// Auto-approval is broader than Claude panes: the daemon detects and
 // auto-answers Codex's approval modals too (daemon/state.go codexApprovalPromptRE
 // + aria_auto.go passes hasCodex through), so the badge shows for Codex panes as
 // well — not just Claude. A managed Pi pane loads the SoluTerminal approval
@@ -110,7 +75,7 @@ function isFocusCapable(pane: PaneInfo) {
 // the same shape (hasDeepseek is detected from its client argv), so it is
 // capable too. Plain shells still have no approval prompts to answer.
 function isAutoApproveCapable(pane: PaneInfo) {
-  return isFocusCapable(pane) || pane.hasCodex === true || pane.hasMuse === true || pane.hasPi === true || pane.hasDeepseek === true;
+  return isAgentPane(pane) || pane.hasCodex === true || pane.hasMuse === true || pane.hasPi === true || pane.hasDeepseek === true;
 }
 
 function activityTooltip(c: string, label: string) {
@@ -158,7 +123,6 @@ export function PaneHeader({
   onRename,
   onClose,
   onToggleZoom,
-  onSwitchMode,
   onOpenMenu,
   onRestartPane,
 }: PaneHeaderProps) {
@@ -243,8 +207,8 @@ export function PaneHeader({
       {!isMobileView && <PaneHeaderBadges pane={pane} paneIndex={paneIndex} section="attention" showAutoMode={isAutoApproveCapable(pane)} />}
       {!isMobileView && <PaneNeedsYouChip pane={pane} />}
       {/* Status chip only when it carries SIGNAL — exited / (re)connecting.
-          The steady-state "running" was permanent header noise (and Focus
-          panes never had it), so the healthy state now shows nothing. */}
+          The steady-state "running" was permanent header noise, so the
+          healthy state now shows nothing. */}
       {(pane.status === 'exited' || connStatus !== 'open') && (
         <span className={`pane-status ${paneStatusClass(pane, connStatus)}`}>
           {paneStatusLabel(pane, connStatus)}
@@ -255,7 +219,6 @@ export function PaneHeader({
       <PaneAsksChip pane={pane} />
       </HeaderAttention>
       <div className="pane-actions">
-        <PaneDetail priority={DETAIL_PRIORITY.mode}><PaneModeControl pane={pane} onSwitchMode={onSwitchMode} /></PaneDetail>
         {/* Agent memory: hidden until unusual, then "1.8 GB · Restart?"
             (AgentMemoryChip.tsx). An unusual reading ranks with auto-approve
             so it is the last detail to fold into +N. */}
@@ -317,143 +280,4 @@ export function PaneHeader({
 
 function HeaderAttention({ enabled, children }: { enabled: boolean; children: ReactNode }) {
   return enabled ? <div className="pane-header-attention">{children}</div> : <>{children}</>;
-}
-
-// Each inline/popover copy owns its confirmation. Hiding an inline detail or
-// unmounting its popover cancels that copy instead of retaining an armed dialog.
-function PaneModeControl({ pane, onSwitchMode }: Pick<PaneHeaderProps, 'pane' | 'onSwitchMode'>) {
-  const detailVisible = usePaneDetailVisible();
-  const paneAgentLabel = agentLabel(effectivePaneAgent(pane));
-  const isNative = pane.kind === 'native';
-  const modeSwitchReady = isFocusCapable(pane) && !pane.identityBlocked;
-  const codexIdentityPending = !isNative && (pane.hasCodex === true || pane.hasMuse === true) && !modeSwitchReady;
-  // Focus retired: the toggle only remains on a pane that is STILL native, as
-  // its way back to Terminal.
-  const focusEnabled = useFocusEnabled();
-  const showModeToggle = !!onSwitchMode && (focusEnabled ? (modeSwitchReady || codexIdentityPending) : isNative);
-  const modeDisabledReason = codexIdentityPending
-    ? 'Focus is temporarily locked while conversation ownership is ambiguous. Leave one agent in the foreground and try again.'
-    : undefined;
-  // Per-pane "switch in flight" flag (set by store.switchPaneMode for the
-  // duration of the daemon kill+respawn grace). Subscribed here — not passed
-  // as a prop — so the header can show a disabled/spinner state without
-  // touching the native-pane component files. Selector is a primitive, so it
-  // only re-renders this header when THIS pane's flag flips.
-  const switching = useStore((s) => !!s.paneModeSwitching[pane.id]);
-  // The store's switchPaneMode, for the deferred/cancel/override paths that the
-  // (kind-only) onSwitchMode prop can't express. The immediate idle switch still
-  // routes through onSwitchMode for back-compat.
-  const switchPaneMode = useStore((s) => s.switchPaneMode);
-  // A renderer switch awaiting confirmation because the pane is WORKING (a turn
-  // is in flight / an approval is pending). Holds the target kind. null = no
-  // confirm open ⇒ idle switches stay one-click. The three-way ModeSwitchConfirm
-  // popover renders below the toggle while this is set. Named confirmTarget (not
-  // pendingSwitch) so it doesn't collide with the DTO's pane.pendingSwitch.
-  const [confirmTarget, setConfirmTarget] = useState<'' | 'native' | null>(null);
-
-  // One-time Focus discovery hint (see the note above focusHintClaimedBy).
-  const [showFocusHint, setShowFocusHint] = useState(false);
-  useEffect(() => {
-    if (!focusEnabled || !showModeToggle || !modeSwitchReady || isNative) return;
-    if (focusHintDismissed()) return;
-    if (focusHintClaimedBy && focusHintClaimedBy !== pane.id) return;
-    focusHintClaimedBy = pane.id;
-    setShowFocusHint(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusEnabled, isNative, modeSwitchReady, showModeToggle, pane.id]);
-  const closeFocusHint = () => {
-    markFocusUsed();
-    setShowFocusHint(false);
-  };
-
-  // The armed-but-waiting deferred switch (server state) and the precedence-
-  // resolved toggle visual (flipping > pending > idle).
-  const pendingSwitch = pane.pendingSwitch ?? null;
-  const visual = toggleVisual(switching, pendingSwitch);
-  const stillWorking = shouldConfirmModeSwitch(pane.state, pane.agentMidTurn);
-
-  // Click handler for a toggle segment: switch immediately when idle, else open
-  // the three-way confirm. `to` is the renderer being switched TO.
-  const requestSwitch = (to: '' | 'native') => {
-    if (switching || !modeSwitchReady) return;
-    if (stillWorking) {
-      setConfirmTarget(to);
-      return;
-    }
-    onSwitchMode?.(to);
-  };
-
-  // Cancel an armed pending switch (plain-click while pending, or its ✕).
-  const cancelPending = () => {
-    const kind = pendingSwitchKind(pendingSwitch);
-    if (kind == null) return;
-    void switchPaneMode(pane.id, kind, { cancel: true });
-  };
-  // Override an armed pending switch → switch now (Shift-click the target).
-  const switchNow = () => {
-    const kind = pendingSwitchKind(pendingSwitch);
-    if (kind == null) return;
-    void switchPaneMode(pane.id, kind, { when: 'now' });
-  };
-
-  useLayoutEffect(() => {
-    if (!detailVisible) setConfirmTarget(null);
-  }, [detailVisible]);
-
-  if (!showModeToggle) return null;
-  return (
-    <div className="pane-mode-toggle-wrap" onClickCapture={() => { if (showFocusHint) closeFocusHint(); }}>
-      {showFocusHint && confirmTarget === null && visual === 'idle' && (
-        <div className="pane-focus-hint" role="note">
-          <span className="pane-focus-hint-text">
-            Try <strong>Focus</strong> — this {paneAgentLabel} session as a structured chat
-            (rich diffs, one-tap approvals, reflows on any screen). Switch back anytime.
-          </span>
-          <button
-            type="button"
-            className="pane-focus-hint-x"
-            aria-label="Dismiss tip"
-            title="Dismiss"
-            onClick={(e) => {
-              e.stopPropagation();
-              closeFocusHint();
-            }}
-          >
-            ✕
-          </button>
-        </div>
-      )}
-      <PaneModeToggle
-        isNative={isNative}
-        visual={visual}
-        pending={pendingSwitch}
-        onSeg={requestSwitch}
-        onCancelPending={cancelPending}
-        onSwitchNow={switchNow}
-        termTitle="Terminal renderer — raw TUI (xterm). Shared PTY width."
-        nativeTitle="Focus renderer — structured chat that reflows at any width."
-        idleTitle={MODE_TOGGLE_TITLE}
-        agentLabel={paneAgentLabel}
-        disabledReason={modeDisabledReason}
-      />
-      {detailVisible && confirmTarget !== null && (
-        <ModeSwitchConfirm
-          target={confirmTarget}
-          working={stillWorking}
-          agentLabel={paneAgentLabel}
-          onConfirm={(choice) => {
-            const to = confirmTarget;
-            setConfirmTarget(null);
-            if (!stillWorking) {
-              // Settled mid-confirm → plain immediate switch (back-compat).
-              onSwitchMode?.(to);
-              return;
-            }
-            void switchPaneMode(pane.id, to, switchRequestForChoice(choice, to));
-          }}
-          onCancel={() => setConfirmTarget(null)}
-        />
-      )}
-    </div>
-  );
 }

@@ -547,21 +547,46 @@ func TestShinoqueRelayWebSocket(t *testing.T) {
 
 func TestShinoqueHealthCapability(t *testing.T) {
 	home := shinoqueTestToken(t, "")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("SHINOQUE_RELAY_PORT", "")
+	if err := os.Unsetenv("SHINOQUE_RELAY_PORT"); err != nil {
+		t.Fatal(err)
+	}
 	a := &apiServer{shinoqueTokens: &shinoqueTokenCache{}}
-	for _, present := range []bool{false, true} {
-		if present {
-			if err := os.WriteFile(filepath.Join(home, "relay-token"), []byte("token"), 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
+	health := func() map[string]any {
+		t.Helper()
 		w := httptest.NewRecorder()
 		a.health(w, httptest.NewRequest(http.MethodGet, "/api/health", nil))
 		var body map[string]any
 		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
 		}
-		if body["shinoqueRelay"] != present {
-			t.Fatalf("capability = %v, want %t", body["shinoqueRelay"], present)
-		}
+		return body
+	}
+	if body := health(); body["shinoqueRelay"] != false || body["shinoqueRelayReason"] != shinoqueRelayReasonNoKey {
+		t.Fatalf("no token: %v/%v", body["shinoqueRelay"], body["shinoqueRelayReason"])
+	}
+	if err := os.WriteFile(filepath.Join(home, "relay-token"), []byte("token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// SHINOQUE_HOME names the core, but nothing says it checks relay auth, so
+	// the relay refuses it (ST-256): health must not say true.
+	if body := health(); body["shinoqueRelay"] != false || body["shinoqueRelayReason"] != shinoqueRelayReasonRouteUnverified {
+		t.Fatalf("token without relay auth: %v/%v", body["shinoqueRelay"], body["shinoqueRelayReason"])
+	}
+	if runtime.GOOS != "linux" {
+		return
+	}
+	// The core's relay.json for the same home and port vouches for it.
+	path := filepath.Join(os.Getenv("XDG_STATE_HOME"), "shinoque", "relay.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]any{"version": 1, "home": home, "port": 4760, "relayAuth": 2, "privateDeviceProof": 1})
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if body := health(); body["shinoqueRelay"] != true {
+		t.Fatalf("matching relay.json: %v/%v", body["shinoqueRelay"], body["shinoqueRelayReason"])
 	}
 }

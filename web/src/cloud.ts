@@ -10,6 +10,7 @@ import { unsubscribePushFromCloud } from './push';
 import { isPreviewBuild } from './previewBoot';
 import { inDesktopApp, signupMetadata } from './lib/arrival';
 import { DEFAULT_SITE_INSTALLER, resolveSiteInstaller, type SiteInstaller } from './lib/siteInstaller';
+import type { BackendDevicePolicy } from './lib/machinePolicy';
 
 export interface CloudConfig {
   supabaseUrl: string;
@@ -24,11 +25,24 @@ export interface CloudConfig {
   // adds cloud features (phone access, relay, push).
   accountOptional?: boolean;
   // Extra sign-in providers enabled on the Supabase project, e.g. ['google'].
+  // On the cloud this is the PHONE app's list; the web reads webAuthProviders.
   authProviders?: string[];
+  // Cloud only: the providers the website shows (SOLU_WEB_AUTH_PROVIDERS).
+  // Absent on a local daemon, where authProviders applies.
+  webAuthProviders?: string[];
   // Cloud only: the website's installer file and its size label, for the
   // get-started card. Absent means the built-in defaults (lib/siteLinks).
   siteInstallerUrl?: string;
   siteInstallerSize?: string;
+}
+
+// webSignInProviders picks the sign-in buttons this web app shows. The cloud
+// sends the phone app's list in authProviders and the website's own list in
+// webAuthProviders, so Google and Apple can go live on the phone while the
+// website stays email-only (ST-190). A local daemon sends only authProviders.
+export function webSignInProviders(cfg: Pick<CloudConfig, 'authProviders' | 'webAuthProviders'>): string[] {
+  if (Array.isArray(cfg.webAuthProviders)) return cfg.webAuthProviders;
+  return Array.isArray(cfg.authProviders) ? cfg.authProviders : [];
 }
 
 const NO_ACCOUNT_STORAGE_KEY = 'solu.localNoAccount';
@@ -65,6 +79,12 @@ export interface CloudMachine {
   // login, not just its self-assigned name.
   ownerEmail?: string;
   ownerName?: string;
+  // Account-wide device policy (ST-250), your own machines only: per daemon,
+  // its remote-access policy and platform, and whether the account's strictest
+  // policy blocks it.
+  devicePolicy?: BackendDevicePolicy[];
+  // A computer on this account requires approval.
+  accountRequiresApproval?: boolean;
 }
 
 // Mode:
@@ -283,7 +303,7 @@ export const useCloud = create<CloudState>((set, get) => ({
         isLocal: cfg.isLocal === true,
         vapidPublicKey: cfg.vapidPublicKey ?? null,
         accountOptional,
-        authProviders: Array.isArray(cfg.authProviders) ? cfg.authProviders : [],
+        authProviders: webSignInProviders(cfg),
         siteInstaller: resolveSiteInstaller(cfg.siteInstallerUrl, cfg.siteInstallerSize),
         withoutAccount: accountOptional && storedWithoutAccount(),
       });
@@ -540,6 +560,7 @@ export const useCloud = create<CloudState>((set, get) => ({
       for (const m of machines) noteMachineBackends(m.id, Array.isArray(m.backends) ? m.backends : []);
       const selected = get().selectedMachineId;
       const requested = requestedMachineIdFromLocation();
+      settleMachineRequest();
       if (requested && selected !== requested) {
         const m = machines.find((x) => x.id === requested);
         if (canSelectMachine(m)) {
@@ -683,9 +704,31 @@ export function machineIdFromPath(pathname: string): string | null {
   }
 }
 
+// The machine a URL asks for: "?machine=<id>" (what a push tap opens, ST-117)
+// or the older "/m/<id>/" path. A cold load of "/m/<id>/" goes to the relay,
+// which needs the 1h session cookie, so a tap after that shows "missing bearer
+// token"; "/" loads the app, which signs in with its own session first.
+export function machineIdFromLocation(pathname: string, search: string): string | null {
+  const fromQuery = new URLSearchParams(search).get('machine');
+  if (fromQuery) return fromQuery;
+  return machineIdFromPath(pathname);
+}
+
 function requestedMachineIdFromLocation(): string | null {
   if (typeof window === 'undefined') return null;
-  return machineIdFromPath(window.location.pathname);
+  return machineIdFromLocation(window.location.pathname, window.location.search);
+}
+
+// "?machine=" is answered by the first machine list, then dropped from the
+// address bar, so picking another computer later is not pulled back to it by
+// the next refresh. The path form stays: there the page is that machine's.
+function settleMachineRequest() {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('machine')) return;
+    url.searchParams.delete('machine');
+    window.history.replaceState(window.history.state, '', url.toString());
+  } catch { /* ignore */ }
 }
 
 // DEV-only hook for local UI tooling (e.g. playwright driving `vite dev`):

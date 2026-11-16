@@ -27,4 +27,4 @@ export const INSTALL_SCRIPT_DEFAULT_CLOUD = 'https://soluterminal-cloud.onrender
 // and stays available for networks that block GitHub.
 export const INSTALL_SCRIPT_URL =
   'https://github.com/soluterminal/soluterminal-releases/releases/latest/download/install.sh';
-export const SITE_INSTALLER_SIZE = '74 MB';
+export const SITE_INSTALLER_SIZE = '42 MB';

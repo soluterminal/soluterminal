@@ -94,3 +94,7 @@ var tracedOutsiderJudgedUntraced = false
 // platformBrowserProcessNames are Windows browsers' exact executable names
 // (lower-cased, without .exe): Arc, Zen and LibreWolf.
 var platformBrowserProcessNames = map[string]bool{"arc": true, "zen": true, "librewolf": true}
+
+// peerIsWSLInit: WSL's init lives inside the distro, never on the Windows
+// side, so a Windows peer named "init" is an ordinary program.
+func peerIsWSLInit(int) bool { return false }

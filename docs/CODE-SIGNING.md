@@ -38,7 +38,8 @@ access, and a protected signing environment with a required reviewer.
 The software does not transfer information to other networked systems unless
 the user asks it to, with these exceptions: the update check, the optional
 anonymous daily check-in, and the optional hosted cloud when signed in.
-Self-built development versions send no check-in. See the
+Self-built development versions, and copies running on a CI runner, send no
+check-in. See the
 [privacy policy](https://soluterminal.com/privacy/) for details and controls.
 
 ## Verify a signed download

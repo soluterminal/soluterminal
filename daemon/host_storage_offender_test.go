@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const offenderFixture = `[{"label":"%TEMP%\\wsl-crashes","path":"C:\\Users\\benja\\AppData\\Local\\Temp\\wsl-crashes","exists":true,"bytes":54760833024,"files":10,"dumpFiles":10,"dumpBytes":54760833024,"complete":true,"newestUtc":"2026-08-26T20:46:00Z"},{"label":"%LOCALAPPDATA%\\Temp\\wsl-crashes","path":"","exists":false,"bytes":0,"files":0,"dumpFiles":0,"complete":true},{"label":"%TEMP%","path":"C:\\Users\\benja\\AppData\\Local\\Temp","exists":true,"bytes":55834574848,"files":1300,"dumpFiles":10,"dumpBytes":2621440,"complete":true},{"label":"%SystemRoot%\\Temp","path":"C:\\Windows\\Temp","exists":true,"bytes":1288490188,"files":55,"dumpFiles":0,"complete":true}]`
+const offenderFixture = `[{"label":"%TEMP%\\wsl-crashes","path":"C:\\Users\\alice\\AppData\\Local\\Temp\\wsl-crashes","exists":true,"bytes":54760833024,"files":10,"dumpFiles":10,"dumpBytes":54760833024,"complete":true,"newestUtc":"2026-08-26T20:46:00Z"},{"label":"%LOCALAPPDATA%\\Temp\\wsl-crashes","path":"","exists":false,"bytes":0,"files":0,"dumpFiles":0,"complete":true},{"label":"%TEMP%","path":"C:\\Users\\alice\\AppData\\Local\\Temp","exists":true,"bytes":55834574848,"files":1300,"dumpFiles":10,"dumpBytes":2621440,"complete":true},{"label":"%SystemRoot%\\Temp","path":"C:\\Windows\\Temp","exists":true,"bytes":1288490188,"files":55,"dumpFiles":0,"complete":true}]`
 
 func testOffenderProber(output string) (*hostOffenderProber, *atomic.Int64) {
 	calls := &atomic.Int64{}
@@ -31,7 +31,7 @@ func TestWfHostOffenderParsePickTextRedactionAndCache(t *testing.T) {
 		t.Fatalf("fresh=%v calls=%d", fresh, calls.Load())
 	}
 	for _, usage := range usages {
-		if strings.Contains(strings.ToLower(usage.Path), "benja") || strings.Contains(strings.ToLower(usage.Label), "benja") {
+		if strings.Contains(strings.ToLower(usage.Path), "alice") || strings.Contains(strings.ToLower(usage.Label), "alice") {
 			t.Fatalf("unredacted offender usage: %+v", usage)
 		}
 	}

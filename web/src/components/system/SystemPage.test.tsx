@@ -5,13 +5,13 @@ import { useStore } from '../../store';
 import { useEntitlements } from '../../entitlements';
 import { SystemPage } from './SystemPage';
 
-const mocks=vi.hoisted(()=>({selectedBackend:true,capability:vi.fn().mockResolvedValue({supported:true,pid:1}),restart:vi.fn().mockResolvedValue(undefined),engineAvailable:true,activation:vi.fn().mockResolvedValue([]),snapshot:{status:null as SystemStatus|null,error:null as null|string,polling:false},refresh:vi.fn(),hostRefresh:vi.fn().mockResolvedValue({available:true}),usage:vi.fn().mockResolvedValue(null)}));
+const mocks=vi.hoisted(()=>({selectedBackend:true,capability:vi.fn().mockResolvedValue({supported:true,pid:1}),restart:vi.fn().mockResolvedValue(undefined),engineAvailable:true,activation:vi.fn().mockResolvedValue([]),snapshot:{status:null as SystemStatus|null,error:null as null|string,polling:false},refresh:vi.fn(),hostRefresh:vi.fn().mockResolvedValue({available:true}),usage:vi.fn().mockResolvedValue(null),probe:vi.fn().mockResolvedValue({runtimes:[]})}));
 
 vi.mock('../../lib/useSystemStatus',()=>({SYSTEM_POLL_MS:10_000,useSystemStatus:()=>({...mocks.snapshot,lastOkMs:0}),refreshSystemStatus:mocks.refresh}));
 vi.mock('../../lib/useDaemonHealth',async(importOriginal)=>{const actual=await importOriginal<typeof import('../../lib/useDaemonHealth')>();return {...actual,useDaemonHealth:()=>({health:{version:'1'}})};});
 vi.mock('../../lib/useNow',()=>({useNow:()=>Date.parse('2026-01-01T00:00:10Z')}));
 vi.mock('../../lib/backgroundService',async(importOriginal)=>{const actual=await importOriginal<typeof import('../../lib/backgroundService')>();return {...actual,backgroundServiceCapability:mocks.capability,restartBackgroundService:mocks.restart};});
-vi.mock('../../api',async(importOriginal)=>{const actual=await importOriginal<typeof import('../../api')>();return {...actual,backgroundServiceIsSelectedBackend:()=>mocks.selectedBackend,api:{...actual.api,ccUsageSummaryCached:mocks.usage,hostStorageRefresh:mocks.hostRefresh,workflowActivation:mocks.activation}};});
+vi.mock('../../api',async(importOriginal)=>{const actual=await importOriginal<typeof import('../../api')>();return {...actual,backgroundServiceIsSelectedBackend:()=>mocks.selectedBackend,api:{...actual.api,ccUsageSummaryCached:mocks.usage,hostStorageRefresh:mocks.hostRefresh,workflowActivation:mocks.activation,workflowRuntimesProbe:mocks.probe}};});
 
 function fixture():SystemStatus{return {sampledAt:'2026-01-01T00:00:00Z',treeSampledAt:'2026-01-01T00:00:00Z',generatedAt:'2026-01-01T00:00:00Z',sampleIntervalSec:15,platform:{os:'linux',procfs:true},level:{overall:'warn',reason:'disk: 4.0 GB free',reasons:[],areas:{daemonMemory:'ok',hostMemory:'ok',disk:'warn',engine:'ok'}},daemon:{version:'1',webVersion:'1',backendID:'wsl',shellVersion:'1',pid:1,uptimeSec:10,startedAt:'',rssMB:512,goHeapMB:100,goroutines:10,cpuPct:2,memGuardMB:6144},host:{cores:8,cpuPct:4,loadAvg1:1,memTotalMB:8192,memAvailableMB:4096,memFloorMB:2048},footprint:{totalRssMB:1024,daemonRssMB:512,panesRssMB:512,workersRssMB:0,paneCount:1,workerCount:0,procs:3,cpuPct:2,complete:true},panes:[],workers:[],disk:{layer:'local',blockingLayer:'none',anyLow:false,host:null,path:'~/.solu',freeMB:4096,totalMB:10000,floorMB:2048,low:false,measuredAt:null,breakdown:null,breakdownAt:null,measuring:true,fresh:false,nextMeasureAfter:null,goCacheBytes:null,worktreesBytes:null},engine:{available:true,queue:{cap:4,running:1,runnable:0,capacityQueued:0,dependencyBlocked:0,overlapSerialized:0,awaitingApproval:0,quotaPaused:0,landingWait:0,resourceWait:0,heavyCap:2,heavyRunning:0,resourceDeferrals:0,memFloorMB:2048,diskFloorMB:2048,diskFreeMB:4096,diskLow:false,utilization:.25},runningInvocations:0,decide:2,gcLastSweepAt:null},runtimes:null,automation:{agents:{total:1,paused:0,running:0,blocked:0,errors24h:0,nextRunAt:null},schedules:{enabled:1,disabled:0,running:0,errors24h:0,nextFireAt:null},builtins:[],autonomy:{globalPaused:false,pausedCount:0}},surface:{addr:'127.0.0.1:8787',ports:{total:1,paneOwned:1},previews:{active:0},cloud:{configured:false,hasCreds:false,credsInvalid:false,relayState:'unconfigured'}},release:{running:'1',latest:'1',available:false,applying:false,lastSuccessMs:0,lastError:'',shellCurrent:'1',shellLatest:'1',shellAvailable:false,readiness:null}};}
 
@@ -30,6 +30,59 @@ describe('SystemPage',()=>{
     expect(screen.getByRole('button',{name:'Schedules'})).toBeInTheDocument();
     expect(screen.queryByRole('button',{name:'Open Tasks › Engine'})).not.toBeInTheDocument();
     expect(mocks.activation).not.toHaveBeenCalled();
+  });
+
+  it('names each runtime with its state, reason and since-when, and marks only the ones that need the person',()=>{
+    const status=fixture();
+    const since=Date.parse('2026-01-01T00:00:10Z')/1000-3*3600;
+    status.runtimes=[
+      {id:'claude-headless',provider:'anthropic',status:'healthy',installed:true,attention:false,statusSinceEpoch:since},
+      {id:'local-openai-headless',provider:'local-openai',status:'unknown',installed:null,attention:false,reason:'not checked yet',statusSinceEpoch:since},
+      {id:'codex-headless',provider:'openai',status:'signed_out',installed:true,attention:false,statusSinceEpoch:since},
+      {id:'muse-headless',provider:'muse',status:'degraded',installed:true,attention:true,probeErr:'connection refused',statusSinceEpoch:since},
+    ];
+    mocks.snapshot={status,error:null,polling:false};
+    render(<SystemPage onClose={()=>{}}/>);
+    const rows=Array.from(document.querySelectorAll('.system-runtimes > div')).map((row)=>row.textContent);
+    expect(rows[0]).toContain('Claude');
+    expect(rows[0]).toContain('Working');
+    expect(rows[0]).not.toContain('since');
+    expect(rows[1]).toContain('Local model');
+    expect(rows[1]).toContain('Not checked yet · since 3h ago');
+    expect(rows[2]).toContain('Signed out · since 3h ago');
+    expect(rows[3]).toContain('Not working · connection refused · since 3h ago');
+    // One runtime needs the person, by the daemon's rule: the signed-out one
+    // nobody uses and the unchecked one are not marked.
+    expect(document.querySelectorAll('.system-runtimes [title="Needs attention"]')).toHaveLength(1);
+  });
+  it('tests one runtime without spending, then re-reads the page',async()=>{
+    const status=fixture();
+    status.runtimes=[{id:'local-openai-headless',provider:'local-openai',status:'degraded',installed:null,attention:true,probeErr:'connection refused'}];
+    mocks.snapshot={status,error:null,polling:false};
+    render(<SystemPage onClose={()=>{}}/>);
+    mocks.refresh.mockClear();
+    fireEvent.click(screen.getByRole('button',{name:'Test connection to Local model'}));
+    expect(mocks.probe).toHaveBeenCalledWith({runtime:'local-openai-headless',observe:true});
+    await vi.waitFor(()=>expect(mocks.refresh).toHaveBeenCalled());
+  });
+  it('says which built-in agent is switched off, as the footer chip does',()=>{
+    const status=fixture();
+    status.automation.builtins=[
+      {id:'builtin:fix-agent',label:'Fix agent',on:false,present:true,running:false},
+      {id:'builtin:pr-agent',label:'PR reviewer',on:true,present:true,running:true},
+      {id:'builtin:triage',label:'Triage',on:false,present:false,running:false},
+    ];
+    mocks.snapshot={status,error:null,polling:false};
+    render(<SystemPage onClose={()=>{}}/>);
+    expect(screen.getByText('1 of 2 on · off: Fix agent · 1 running')).toBeInTheDocument();
+  });
+  it('keeps the retired engine and the runtimes count out of the operator verdict from an older daemon',()=>{
+    const status=fixture();
+    status.level={overall:'warn',reason:'runtimes: 1 unhealthy runtime',reasons:[{key:'runtimes',level:'warn',text:'runtimes: 1 unhealthy runtime'},{key:'engine',level:'unknown',text:'engine: unavailable'}],areas:{daemonMemory:'ok',hostMemory:'ok',disk:'ok',engine:'unknown',runtimes:'warn'}};
+    mocks.snapshot={status,error:null,polling:false};
+    render(<SystemPage onClose={()=>{}}/>);
+    expect(screen.getByText('All monitored systems healthy')).toBeInTheDocument();
+    expect(screen.queryByText(/unhealthy runtime/)).toBeNull();
   });
 
   it('renders KPI hierarchy and verdict',()=>{mocks.snapshot={status:fixture(),error:null,polling:false};render(<SystemPage onClose={()=>{}}/>);expect(screen.getByText('Footprint')).toBeInTheDocument();expect(screen.getByText('Host memory')).toBeInTheDocument();expect(screen.getAllByText('Disk').length).toBeGreaterThan(0);expect(screen.getByText('Engine')).toBeInTheDocument();expect(screen.getByText('disk: 4.0 GB free')).toBeInTheDocument();});

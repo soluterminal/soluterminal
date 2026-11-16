@@ -37,18 +37,6 @@ type ariaQueryReq struct {
 	// order. Mutating tools get an extra deterministic deny gate before
 	// any auto-confirm can be armed.
 	AutonomousCautious bool `json:"-"`
-	// AutonomousNative marks an autonomous turn that targets a native-renderer
-	// pane. The turn is offered the structured resolve_permission tool instead
-	// of the byte-scraping send_input tool (native approvals are answered with
-	// a control_response frame, not PTY keystrokes). Browser callers cannot set
-	// it; aria_auto.go stamps it for native panes.
-	AutonomousNative bool `json:"-"`
-	// AutonomousRequestID is the EXACT native approval RequestID this turn is
-	// evaluating. The daemon binds resolve_permission to this id server-side so
-	// the model never picks which parallel approval to resolve (the wrong-tool
-	// hazard — approve a safe Read, accidentally allow a dangerous Bash). Empty
-	// for terminal turns.
-	AutonomousRequestID string `json:"-"`
 }
 
 type ariaConfirmReq struct {

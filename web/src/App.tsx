@@ -137,6 +137,7 @@ import { paneRolesAvailable, roleHostSupport, slotList, uiEventHandler, type Glo
 import type { OrchestratorHostInfo } from './types';
 import { WelcomeOverlay } from './components/WelcomeOverlay';
 import { useSettings } from './settings';
+import { useDeveloperOverrides } from './lib/developerOverrides';
 import { SetupChecklist } from './components/SetupChecklist';
 import { WhatsNewToast } from './components/WhatsNewToast';
 import { BannerSetupModal } from './components/BannerSetupModal';
@@ -156,7 +157,7 @@ import { heldStuckSummary } from './components/AttentionInbox';
 import { DeviceApprovalPrompt } from './components/DeviceApprovalPrompt';
 import { ApproveThisScreenPrompt } from './components/ApproveThisScreenPrompt';
 import { HumanProofBanner } from './components/HumanProofBanner';
-import { remoteDevicePendingText } from './components/settings/RemoteDevicesSetting';
+import { announceRemoteDeviceRequest } from './components/settings/RemoteDevicesSetting';
 import { forgetPaneConfirm, notePaneConfirm, resyncPaneConfirms } from './lib/paneConfirm';
 import { PaneConfirmHost } from './components/PaneConfirmHost';
 import { PrivateRelayIdentityWarning } from './components/PrivateRelayIdentityWarning';
@@ -1157,7 +1158,7 @@ export default function App() {
     es.onmessage = (ev) => {
       if(!eventActive())return;
       try {
-        const msg = JSON.parse(ev.data) as { type: string; path?: string; url?: string; text?: string; paneId?: string; paneTitle?: string; ts?: number; tool?: string; hint?: string; fromState?: string; toState?: string; durationMs?: number; agentMidTurn?: boolean; prompts?: string[]; degraded?: boolean; attention?: string; attentionReason?: string; skipRecent?: boolean; workspace?: string; show?: boolean };
+        const msg = JSON.parse(ev.data) as { type: string; path?: string; url?: string; text?: string; paneId?: string; paneTitle?: string; ts?: number; tool?: string; hint?: string; fromState?: string; toState?: string; durationMs?: number; agentMidTurn?: boolean; prompts?: string[]; degraded?: boolean; attention?: string; attentionReason?: string; reason?: string; deviceId?: string; skipRecent?: boolean; workspace?: string; show?: boolean };
         const st = useStore.getState();
         // Every daemon-published event also feeds the Activity log. We
         // push unconditionally so the ring buffer reflects the full
@@ -1267,13 +1268,20 @@ export default function App() {
           // trusted_devices.go). It is approved here, at the computer, after
           // comparing codes, so a relayed view gets no prompt.
           if (!isRelayedSession(useCloud.getState())) {
-            st.toast(remoteDevicePendingText(msg.text, msg.hint), {
-              kind: 'warn',
-              ttlMs: 0,
-              logToRecent: true,
-              action: { label: 'Review', run: () => useSettings.getState().openSettings('privacy') },
-            });
+            void announceRemoteDeviceRequest(
+              { text: msg.text, hint: msg.hint, reason: msg.reason, deviceId: msg.deviceId },
+              (text, review) => st.toast(text, {
+                kind: 'warn',
+                ttlMs: 0,
+                logToRecent: true,
+                action: { label: 'Review', run: review },
+              }),
+              () => useSettings.getState().openSettings('privacy'),
+            );
           }
+        } else if (msg.type === 'developer-overrides') {
+          // Settings or an update-channel switch changed the switch.
+          void useDeveloperOverrides.getState().refresh();
         } else if (msg.type === 'toast' && msg.text) {
           // Resolve daemon glyph prefixes to shared SVGs here so ToastHost,
           // TopbarToast, and Alerts Recent all receive glyph-free copy.

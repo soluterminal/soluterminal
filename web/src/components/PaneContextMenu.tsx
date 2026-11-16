@@ -1,9 +1,8 @@
 import type { RefObject } from 'react';
-import type { PaneEffort, PaneInfo } from '../types';
+import type { PaneInfo } from '../types';
 import { AUTO_MODES, autoModeMenuLabel } from '../lib/autoMode';
-import { EFFORTS, effortMenuLabel } from '../lib/effort';
 import { useClampedMenuPosition } from './useClampedMenuPosition';
-import { agentFromCommand, effectivePaneAgent } from '../lib/agentKind';
+import { agentFromCommand } from '../lib/agentKind';
 import { SmartApprovalsHint } from './SmartApprovalsHint';
 import { declaredPaneTeamKind } from '../lib/paneTeam';
 import { paneConversation } from '../lib/paneConversation';
@@ -17,9 +16,6 @@ interface PaneContextMenuProps {
   y: number;
   menuRef: RefObject<HTMLDivElement>;
   isClaudePane: boolean;
-  // Native-renderer pane: hide terminal-only items (Fix display — native has
-  // no xterm grid to repaint). Defaults to false (terminal pane).
-  isNative?: boolean;
   onSplitRight: () => void;
   onSplitRightShellHere: () => void;
   onSplitRightClaudeHere: () => void;
@@ -37,10 +33,6 @@ interface PaneContextMenuProps {
   // soluterminal types into this session when work it delegated moves. Absent
   // ⇒ the item is hidden.
   onToggleAnnounceDelegation?: () => void;
-  // Native (Focus) panes only: change the reasoning-effort level. Changing it
-  // respawns the headless agent (`claude --resume` + new --effort). Absent ⇒
-  // the effort section is hidden (terminal panes use the /effort TUI command).
-  onSetEffort?: (effort: PaneEffort) => void;
   // Claude/Codex panes: attach/detach a local context pack. Both operations
   // restart the agent in place.
   onChangeContextPack?: () => void;
@@ -94,7 +86,6 @@ export function PaneContextMenu({
   y,
   menuRef,
   isClaudePane,
-  isNative = false,
   onSplitRight,
   onSplitRightShellHere,
   onSplitRightClaudeHere,
@@ -107,7 +98,6 @@ export function PaneContextMenu({
   onCreateSchedule,
   onSetAutoMode,
   onToggleAnnounceDelegation,
-  onSetEffort,
   onChangeContextPack,
   onDetachContextPack,
   onEditFlagMemo,
@@ -130,8 +120,7 @@ export function PaneContextMenu({
   onReviewChanges,
 }: PaneContextMenuProps) {
   const currentAutoMode = (pane.autoMode ?? '') as PaneAutoMode;
-  const currentEffort = (pane.effort ?? '') as PaneEffort;
-  const paneAgent = pane.kind === 'native' ? effectivePaneAgent(pane) : agentFromCommand(pane.cmd);
+  const paneAgent = agentFromCommand(pane.cmd);
   const contextPackCapable = paneAgent === 'claude' || paneAgent === 'codex';
   const conversation = paneConversation(pane);
   const packBase = pane.contextPack?.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? 'none';
@@ -229,10 +218,8 @@ export function PaneContextMenu({
           </button>
         );
       })}
-      {/* Jev smart approvals classify terminal permission menus. Native panes
-          use their structured approval path instead; non-team native cautious
-          mode intentionally leaves requests for the user. */}
-      {!isNative && <SmartApprovalsHint />}
+      {/* Jev smart approvals classify terminal permission menus. */}
+      <SmartApprovalsHint />
       {onToggleAnnounceDelegation && (
         <>
           <div className="pane-ctx-menu-sep" />
@@ -246,27 +233,6 @@ export function PaneContextMenu({
             <span className="pane-ctx-menu-check" aria-hidden>{pane.announceDelegation === true ? '☑' : '☐'}</span>
             Announce delegated-work updates
           </button>
-        </>
-      )}
-      {isNative && onSetEffort && pane.status === 'running' && (
-        <>
-          <div className="pane-ctx-menu-sep" />
-          <div className="pane-ctx-menu-label">Reasoning effort (restarts agent)</div>
-          {EFFORTS.map((level) => {
-            const checked = currentEffort === level;
-            return (
-              <button
-                key={level || 'default'}
-                role="menuitemradio"
-                aria-checked={checked}
-                className={checked ? 'is-checked' : ''}
-                onClick={() => onSetEffort(level)}
-              >
-                <span className="pane-ctx-menu-check" aria-hidden>{checked ? '●' : '○'}</span>
-                {effortMenuLabel(level)}
-              </button>
-            );
-          })}
         </>
       )}
       {contextPackCapable && onChangeContextPack && pane.status === 'running' && (
@@ -327,7 +293,7 @@ export function PaneContextMenu({
             title="Back to a plain pane of yours">Remove lead</button>}
         </>;
       })()}
-      {!isNative && onFixDisplay && pane.status === 'running' && (
+      {onFixDisplay && pane.status === 'running' && (
         <button
           role="menuitem"
           onClick={onFixDisplay}

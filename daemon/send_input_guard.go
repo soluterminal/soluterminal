@@ -18,7 +18,7 @@ const sendInputMenuAnswerMaxRunes = 2
 // caller can retry once the prompt resolves, or answer it explicitly with
 // answer_prompt. Nothing is written when it refuses.
 func sendInputMenuCollision(p *Pane, text string) string {
-	if p == nil || p.Snapshot().Kind == "native" {
+	if p == nil {
 		return ""
 	}
 	if !sendInputLongerThanMenuAnswer(text) {

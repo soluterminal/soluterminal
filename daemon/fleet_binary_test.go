@@ -36,7 +36,7 @@ func (f *fakeFleetBinaryPlatform) Process(pid int, reported string) (fleetProces
 }
 
 func fleetTestPane(mgr *Manager, id, conversation string, pid int) *Pane {
-	p := &Pane{ID: id, Title: id, Status: PaneRunning, Agent: agentMuse, Kind: "native",
+	p := &Pane{ID: id, Title: id, Status: PaneRunning, Agent: agentMuse,
 		MuseSessionID: conversation, Pid: pid, agentReportedPID: pid, Cols: 100, Rows: 30,
 		buffer: NewRingBuffer(1024), subs: map[int64]*subEntry{}, done: make(chan struct{})}
 	mgr.mu.Lock()
@@ -129,7 +129,7 @@ func TestFleetInventoryReportsUnavailableTargetMetadata(t *testing.T) {
 
 func TestFleetResumeOptionsPreserveIdentityAndConfiguration(t *testing.T) {
 	snap := PaneSnapshot{
-		ID: "pane-stable", Agent: agentClaude, Kind: "native", ClaudeSessionID: "claude-conversation",
+		ID: "pane-stable", Agent: agentClaude, ClaudeSessionID: "claude-conversation",
 		Provider: "claude", Role: paneRoleOrchestrator, ContextPack: "/context", Effort: "high",
 		Cols: 120, Rows: 40, Title: "Release executor", TitleOverride: "Pinned title",
 	}
@@ -139,8 +139,8 @@ func TestFleetResumeOptionsPreserveIdentityAndConfiguration(t *testing.T) {
 		opts.Cols != snap.Cols || opts.Rows != snap.Rows || opts.Title != snap.Title || opts.TitleOverride != snap.TitleOverride {
 		t.Fatalf("resume options lost stable identity/configuration:\n got %+v\nwant %+v", opts, snap)
 	}
-	if !reflect.DeepEqual(opts.Cmd, []string(nil)) {
-		t.Fatalf("native Claude resume command = %#v, want nil", opts.Cmd)
+	if !reflect.DeepEqual(opts.Cmd, []string{"claude", "--resume", "claude-conversation"}) {
+		t.Fatalf("Claude resume command = %#v", opts.Cmd)
 	}
 }
 

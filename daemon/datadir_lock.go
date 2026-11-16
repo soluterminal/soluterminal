@@ -158,17 +158,28 @@ func acquireDataDirLockPatiently(dir string, holder dataDirLockHolder, wait time
 // claimDataDirForBoot is called from main before any state is loaded. It
 // exits the process when another daemon serves this data directory; every
 // other outcome continues the boot.
+//
+// An update successor skips the lifetime lock until it owns the listener
+// (claimDataDirAfterHandoff), but only a real one: its parent must be the
+// live lock holder. It holds the handoff lock from here until it has the
+// lifetime lock, so an ordinary daemon started in the moment between the
+// predecessor's exit and the successor's lock (sign-in, an app, a repair
+// button) sees the handoff and leaves before it loads anything (ST-253).
 func claimDataDirForBoot(dir string, holder dataDirLockHolder) *dataDirLock {
 	if dataDirLockDisabled() {
 		log.Printf("data directory lock disabled by SOLU_DATA_DIR_LOCK; two daemons on %s would share state", dir)
 		return nil
 	}
 	if os.Getenv("SOLU_SUCCESSOR_OF_UPDATE") == "1" {
-		// Taken after the listener; see claimDataDirAfterHandoff.
-		return nil
+		return claimDataDirForSuccessor(dir, holder)
 	}
 	lock, err := acquireDataDirLock(dir, holder)
 	if err == nil {
+		if handoffInProgress(dir) {
+			lock.Release()
+			log.Printf("refusing to start: an update successor is taking over %s. It will own it within seconds; starting a second daemon would reattach and respawn the same panes.", dir)
+			os.Exit(exitDataDirOwned)
+		}
 		return lock
 	}
 	var owned *errDataDirOwned
@@ -180,6 +191,112 @@ func claimDataDirForBoot(dir string, holder dataDirLockHolder) *dataDirLock {
 	return nil
 }
 
+// The handoff lock: held by an update successor from its first instruction
+// until it holds the lifetime lock. A separate file, so neither lock ever
+// waits on the other.
+const dataDirHandoffLockName = ".daemon.handoff.lock"
+
+// dataDirHandoffHeld is the successor's handoff lock, released once the
+// lifetime lock is ours.
+var dataDirHandoffHeld *dataDirLock
+
+// tryDataDirHandoffLock takes the handoff lock without blocking. Only a
+// successor creates the file (create); a check opens it only if it exists, so
+// an ordinary boot writes nothing new to the data directory.
+func tryDataDirHandoffLock(dir string, create bool) (*dataDirLock, bool, error) {
+	flags := os.O_RDWR
+	if create {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, false, err
+		}
+		flags |= os.O_CREATE
+	}
+	f, err := os.OpenFile(filepath.Join(dir, dataDirHandoffLockName), flags, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	held, err := tryExclusiveFileLock(f)
+	if err != nil || !held {
+		_ = f.Close()
+		return nil, false, err
+	}
+	return &dataDirLock{release: func() {
+		unlockFile(f)
+		_ = f.Close()
+	}}, true, nil
+}
+
+// handoffInProgress reports whether an update successor holds the handoff
+// lock. An unusable handoff file is not a handoff (the lifetime lock already
+// decided).
+func handoffInProgress(dir string) bool {
+	lock, held, err := tryDataDirHandoffLock(dir, false)
+	if errors.Is(err, os.ErrNotExist) {
+		// No successor has ever handed off here.
+		return false
+	}
+	if err != nil {
+		log.Printf("data directory handoff lock unavailable (%v); ignoring it", err)
+		return false
+	}
+	if held {
+		lock.Release()
+		return false
+	}
+	return true
+}
+
+func claimHandoffForSuccessor(dir string) {
+	lock, held, err := tryDataDirHandoffLock(dir, true)
+	switch {
+	case err != nil:
+		log.Printf("update successor: handoff lock unavailable (%v); continuing without it", err)
+	case !held:
+		log.Printf("refusing to start: another update successor is already taking over %s", dir)
+		os.Exit(exitDataDirOwned)
+	default:
+		dataDirHandoffHeld = lock
+	}
+}
+
+// claimDataDirForSuccessor is the boot-time claim of a process started as an
+// update successor. Only spawnSuccessor sets SOLU_SUCCESSOR_OF_UPDATE, always
+// from the live lock holder, so:
+//   - the lock is free: the predecessor never held it (lock unusable or
+//     disabled there) or is gone. Take it now, unless another successor
+//     holds the handoff lock (then this one is not the real successor).
+//   - the holder is this process's parent: the real handoff. Hold the handoff
+//     lock and take the lifetime lock after the listener
+//     (claimDataDirAfterHandoff).
+//   - anyone else holds it: the flag didn't come from a predecessor, and a
+//     daemon already serves this directory. Leave, as an ordinary daemon would.
+func claimDataDirForSuccessor(dir string, holder dataDirLockHolder) *dataDirLock {
+	lock, err := acquireDataDirLock(dir, holder)
+	if err == nil {
+		// Free, but a real successor may be between its predecessor's exit
+		// and its own lock: it holds the handoff lock, and this process
+		// (which then can't be that successor) must leave.
+		if handoffInProgress(dir) {
+			lock.Release()
+			log.Printf("refusing to start: an update successor is taking over %s, and this process is not it", dir)
+			os.Exit(exitDataDirOwned)
+		}
+		return lock
+	}
+	var owned *errDataDirOwned
+	if !errors.As(err, &owned) {
+		log.Printf("update successor: data directory lock unavailable (%v); continuing without it", err)
+		return nil
+	}
+	if owned.Holder != nil && owned.Holder.PID > 0 && owned.Holder.PID == os.Getppid() {
+		claimHandoffForSuccessor(dir)
+		return nil
+	}
+	log.Printf("refusing to start: SOLU_SUCCESSOR_OF_UPDATE is set but the parent process does not hold the data directory, and %v", err)
+	os.Exit(exitDataDirOwned)
+	return nil
+}
+
 // claimDataDirAfterHandoff completes the successor's ownership once it holds
 // the listener. Its predecessor exits right after the handoff marker, so the
 // lock normally frees within a second.
@@ -187,9 +304,15 @@ func claimDataDirAfterHandoff(dir string, holder dataDirLockHolder) {
 	if dataDirLockDisabled() || os.Getenv("SOLU_SUCCESSOR_OF_UPDATE") != "1" {
 		return
 	}
+	if dataDirLockHeld != nil {
+		// Taken at boot: the predecessor never held it (claimDataDirForSuccessor).
+		releaseHandoff()
+		return
+	}
 	lock, err := acquireDataDirLockPatiently(dir, holder, 30*time.Second, 200*time.Millisecond)
 	if err == nil {
 		dataDirLockHeld = lock
+		releaseHandoff()
 		return
 	}
 	log.Printf("update successor: data directory lock not yet free (%v); retrying in the background", err)
@@ -199,16 +322,25 @@ func claimDataDirAfterHandoff(dir string, holder dataDirLockHolder) {
 			lock, err := acquireDataDirLock(dir, holder)
 			if err == nil {
 				dataDirLockHeld = lock
+				releaseHandoff()
 				log.Printf("update successor: data directory lock acquired")
 				return
 			}
 			var owned *errDataDirOwned
 			if !errors.As(err, &owned) {
 				log.Printf("update successor: data directory lock unavailable (%v); continuing without it", err)
+				releaseHandoff()
 				return
 			}
 		}
 	}()
+}
+
+func releaseHandoff() {
+	if dataDirHandoffHeld != nil {
+		dataDirHandoffHeld.Release()
+		dataDirHandoffHeld = nil
+	}
 }
 
 // dataDirLockHeld keeps the lock's file open for the life of the process.

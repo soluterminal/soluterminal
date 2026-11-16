@@ -20,6 +20,13 @@ type scheduleDTO struct {
 	// now. Set for both spawned kinds (agent and task) — the UI renders one
 	// "running…" state and doesn't care which.
 	AgentRunning bool `json:"agentRunning,omitempty"`
+	// WaitingForPane: a scheduled prompt could not go into its pane and is
+	// waiting for it (ScheduleStore.waitForPane); WaitingReason says why
+	// ("the pane is busy", "you are typing in the pane").
+	WaitingForPane bool   `json:"waitingForPane,omitempty"`
+	WaitingReason  string `json:"waitingReason,omitempty"`
+	// RunNow is set only on the answer to POST /api/schedules/{id}/fire.
+	RunNow *runNowOutcome `json:"runNow,omitempty"`
 }
 
 func (a *apiServer) makeScheduleDTO(s Schedule) scheduleDTO {
@@ -30,6 +37,7 @@ func (a *apiServer) makeScheduleDTO(s Schedule) scheduleDTO {
 		}
 	}
 	dto.AgentRunning = a.scheds.scheduleRunning(s)
+	dto.WaitingReason, dto.WaitingForPane = a.scheds.paneWaitReason(s.ID)
 	return dto
 }
 
@@ -155,7 +163,7 @@ func (a *apiServer) updateSchedule(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in, defaultJSONBodyBytes) {
 		return
 	}
-	sched, err := a.scheds.Update(id, in)
+	sched, err := a.scheds.UpdateBy(id, in, scheduleActorPerson)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -171,7 +179,7 @@ func (a *apiServer) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 	if a.scheduleMutationRefused(w, id) {
 		return
 	}
-	if err := a.scheds.Delete(id); err != nil {
+	if err := a.scheds.DeleteBy(id, scheduleActorPerson); err != nil {
 		http.Error(w, err.Error(), 404)
 		return
 	}
@@ -186,7 +194,7 @@ func (a *apiServer) enableSchedule(w http.ResponseWriter, r *http.Request) {
 	if a.scheduleMutationRefused(w, id) {
 		return
 	}
-	sched, err := a.scheds.SetEnabled(id, true)
+	sched, err := a.scheds.SetEnabledBy(id, true, scheduleActorPerson)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -228,7 +236,7 @@ func (a *apiServer) disableSchedule(w http.ResponseWriter, r *http.Request) {
 	if a.scheduleMutationRefused(w, id) {
 		return
 	}
-	sched, err := a.scheds.SetEnabled(id, false)
+	sched, err := a.scheds.SetEnabledBy(id, false, scheduleActorPerson)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -263,23 +271,20 @@ func (a *apiServer) fireSchedule(w http.ResponseWriter, r *http.Request) {
 	if a.scheduleMutationRefused(w, id) {
 		return
 	}
-	sched, err := a.scheds.FireNow(id)
+	sched, outcome, err := a.scheds.RunNow(id)
 	if err != nil {
 		http.Error(w, err.Error(), 404)
 		return
 	}
-	// Give the fire a moment to record its run, then return the refreshed
-	// schedule so the UI can show the new entry. The fire itself is
-	// synchronous from the caller's POV but the run-record write happens
-	// on the goroutine — a 50ms nap is a pragmatic compromise.
-	time.Sleep(50 * time.Millisecond)
-	for _, s := range a.scheds.List() {
-		if s.ID == sched.ID {
-			writeJSON(w, 200, a.makeScheduleDTO(s))
-			return
-		}
+	// The refreshed schedule, so the UI shows the new run, plus what Run now
+	// did (runNow), so it can say "Started" or "Skipped: why" at once
+	// instead of answering 200 either way.
+	dto := a.makeScheduleDTO(*sched)
+	if cur, ok := a.scheds.Get(sched.ID); ok {
+		dto = a.makeScheduleDTO(cur)
 	}
-	writeJSON(w, 200, a.makeScheduleDTO(*sched))
+	dto.RunNow = &outcome
+	writeJSON(w, 200, dto)
 }
 
 type injectReq struct {
@@ -306,6 +311,12 @@ func (a *apiServer) injectPane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caller := a.identifyCaller(r)
+	// The person's stop on agent messaging: an agent types into no other
+	// pane through here either (agent_messaging_pause.go).
+	if caller.Kind != callerHuman && !(caller.tracedPane() && caller.PaneID == id) && agentMessagingPaused() {
+		http.Error(w, agentMessagingRefusal("text typed into another pane cannot be held"), http.StatusConflict)
+		return
+	}
 	promptHeld := func() {
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error":   "human_required",

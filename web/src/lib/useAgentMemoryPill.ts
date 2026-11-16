@@ -48,12 +48,32 @@ export function resetHostMemoryForTests(): void {
   hostMemTotalMB = undefined;
 }
 
+// Growth is judged from a sample history, so every pane is sampled whenever the
+// pane list updates, shown or not. Sampled only while a header was mounted, a
+// pane hidden for an hour kept its old reading as "memory when the window
+// opened", and slow growth then read as fast: "Restart?" until it fell under
+// 1 GB (ST-204). Started by the first header, then kept for the session.
+let sampling = false;
+function startSampling() {
+  if (sampling) return;
+  sampling = true;
+  let seen: Record<string, PaneInfo> | null = null;
+  const sampleAll = (panes: Record<string, PaneInfo>) => {
+    if (panes === seen) return;
+    seen = panes;
+    for (const pane of Object.values(panes)) recordAgentMemory(pane.id, paneAgentRssMB(pane));
+  };
+  sampleAll(useStore.getState().panes);
+  useStore.subscribe(state => sampleAll(state.panes));
+}
+
 export interface AgentMemoryPillState { mb: number; label: string; unusual: boolean; show: boolean }
 
 // Whether a pane header shows its agent's memory. Unusual memory always shows
 // (on a phone too) and offers a restart; "Always show agent memory" adds a
 // plain readout on desktop.
 export function useAgentMemoryPill(pane: PaneInfo, isMobileView: boolean): AgentMemoryPillState {
+  startSampling();
   const mb = paneAgentRssMB(pane);
   const alwaysShow = useStore(s => s.alwaysShowAgentMemory);
   const hostMB = useSyncExternalStore(subscribe, () => hostMemTotalMB);

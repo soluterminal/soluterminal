@@ -87,6 +87,17 @@ func serveRelayClassified(ctx context.Context, relayURL, token, backendID string
 			}
 		}
 	}
+	// The remote-access policy and platform, so the cloud can apply the
+	// account's strictest policy (device_policy_report.go). Older clouds
+	// ignore both.
+	if liveDevicePolicy != nil {
+		if dp := liveDevicePolicy(); dp != "" {
+			q.Set("dp", dp)
+			if pl := devicePlatform(); pl != "" {
+				q.Set("pl", pl)
+			}
+		}
+	}
 	u.RawQuery = q.Encode()
 
 	dialer := websocket.Dialer{

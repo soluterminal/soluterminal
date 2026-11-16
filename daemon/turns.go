@@ -145,7 +145,6 @@ type turnPane interface {
 	id() string
 	title() string
 	running() bool
-	native() bool
 	state() PaneRuntimeState
 	agent() string // "claude" | "codex" | "muse" | ""
 	cwd() string
@@ -243,9 +242,6 @@ func (t *turnTracker) tick() {
 }
 
 func (t *turnTracker) observe(p turnPane) {
-	if p.native() {
-		return
-	}
 	id := p.id()
 	nowMs := t.now().UnixMilli()
 	st := t.load(id)
@@ -651,7 +647,6 @@ func (a turnPaneAdapter) running() bool {
 	defer a.p.mu.Unlock()
 	return a.p.Status == PaneRunning
 }
-func (a turnPaneAdapter) native() bool            { return a.p.Snapshot().Kind == "native" }
 func (a turnPaneAdapter) state() PaneRuntimeState { return a.p.computeStateCached() }
 func (a turnPaneAdapter) agent() string {
 	switch {

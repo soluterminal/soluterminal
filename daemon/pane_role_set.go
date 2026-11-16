@@ -92,7 +92,7 @@ func (a *apiServer) handleSetRole(w http.ResponseWriter, r *http.Request) {
 	}
 	defer p.releaseRespawn()
 
-	if p.IsAgentWorking() || p.hasNativePending() {
+	if p.IsAgentWorking() {
 		http.Error(w, "agent is busy — finish the current turn (or answer the pending approval) first", http.StatusConflict)
 		return
 	}
@@ -131,11 +131,7 @@ func (a *apiServer) handleSetRole(w http.ResponseWriter, r *http.Request) {
 			opts.CodexThreadID = ""
 			opts.MuseSessionID = ""
 			opts.CodexTurnInFlight = false
-			if snap.Kind != "native" {
-				opts.Cmd = append([]string(nil), host.bareCmd...)
-			} else {
-				opts.Cmd = nil
-			}
+			opts.Cmd = append([]string(nil), host.bareCmd...)
 		}
 	}
 

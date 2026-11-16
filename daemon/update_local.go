@@ -3,12 +3,15 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // POST /api/update/apply-local — the owner's "follow main" channel.
@@ -32,6 +35,25 @@ type applyLocalReq struct {
 	SHA256         string `json:"sha256"`
 	Version        string `json:"version"`
 	AllowDowngrade bool   `json:"allowDowngrade,omitempty"`
+}
+
+// developerOverridesOffMessage: apply-local refused in a release build with
+// the setting off. It says where to turn it on.
+const developerOverridesOffMessage = "local builds are off in this release: turn on Settings › Privacy & security › Developer overrides at this computer (switching the update channel to Preview also turns it on), then try again"
+
+// noteLocalBuildInstalled tells the person, in the app and the log, that a
+// local build is being installed, and who asked.
+func (a *apiServer) noteLocalBuildInstalled(r *http.Request, sha string) {
+	short := strings.ToLower(sha)
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	kind := a.identifyCallerQuietly(r).Kind
+	text := fmt.Sprintf("A local build was installed (sha256 %s) by %s", short, kind)
+	log.Printf("update: %s", text)
+	if a.uiBus != nil {
+		a.uiBus.publish(uiEvent{Type: "toast", Text: text, Ts: time.Now().UnixMilli()})
+	}
 }
 
 func localBuildsDir(dataDir string) string { return filepath.Join(dataDir, "local-builds") }
@@ -90,6 +112,14 @@ func (a *apiServer) updateApplyLocal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "local builds can only be installed from this machine", http.StatusForbidden)
 		return
 	}
+	if crossSiteBrowserRequest(r) {
+		http.Error(w, "local builds can't be installed from a web page", http.StatusForbidden)
+		return
+	}
+	if !a.developerOverridesAllowed() {
+		http.Error(w, developerOverridesOffMessage, http.StatusForbidden)
+		return
+	}
 	if r.Header.Get("X-Solu-Local-Build") != "1" || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		http.Error(w, "missing X-Solu-Local-Build / JSON content type", http.StatusBadRequest)
 		return
@@ -106,12 +136,18 @@ func (a *apiServer) updateApplyLocal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	// Off before the swap, so the successor starts with it off.
+	restore := a.closeChannelOverridesForStableInstall()
 	err = a.updater.ApplyLocal(r.Context(), os.Exit, localUpdateCandidate{
 		path: path, sha256: req.SHA256, version: req.Version, allowDowngrade: req.AllowDowngrade,
 	})
 	if err != nil {
+		if restore != nil {
+			restore()
+		}
 		writeUpdateApplyError(w, err)
 		return
 	}
+	a.noteLocalBuildInstalled(r, req.SHA256)
 	writeJSON(w, 200, map[string]any{"applying": true, "version": req.Version})
 }

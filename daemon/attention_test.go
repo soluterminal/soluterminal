@@ -1,10 +1,8 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -12,15 +10,12 @@ import (
 )
 
 func TestAttentionFocusAckPreservesUnansweredPrompt(t *testing.T) {
-	for _, kind := range []string{"choice", "awaiting", "native"} {
+	for _, kind := range []string{"choice", "awaiting"} {
 		t.Run(kind, func(t *testing.T) {
 			makePrompt := func() *Pane {
 				p := testPaneWithTail(t, "pane-focus-ack", "worker", "Do you want to proceed?\n❯ 1. Yes\n  2. No\n")
 				if kind == "awaiting" {
 					p = promptPane(t, 4*time.Second)
-				} else if kind == "native" {
-					p.Kind = "native"
-					p.setNativePending(&NativeApproval{RequestID: "pending-A", ToolName: "AskUserQuestion"})
 				}
 				return p
 			}
@@ -92,9 +87,6 @@ func TestAttentionFocusAckPreservesUnansweredPrompt(t *testing.T) {
 // classifyAttention is a pure function — every branch is a table row.
 func TestClassifyAttention(t *testing.T) {
 	t.Parallel()
-	ap := func(tool, input string) *NativeApproval {
-		return &NativeApproval{RequestID: "r1", ToolName: tool, RawInput: json.RawMessage(input)}
-	}
 	cases := []struct {
 		name       string
 		f          attentionFacts
@@ -123,64 +115,24 @@ func TestClassifyAttention(t *testing.T) {
 		},
 		{
 			name: "choice-prompt in always mode is auto-pending",
-			f:    attentionFacts{State: StateChoicePrompt, AutoMode: "always", NativeAutoOn: true},
+			f:    attentionFacts{State: StateChoicePrompt, AutoMode: "always"},
 			want: AttentionAutoPending,
 		},
 		{
-			name: "native kill-switch off needs the user despite auto mode",
-			f:    attentionFacts{State: StateChoicePrompt, AutoMode: "always", IsNative: true, NativeAutoOn: false},
-			want: AttentionNeedsUser,
-		},
-		{
 			name:       "paused gate needs the user",
-			f:          attentionFacts{State: StateChoicePrompt, AutoMode: "always", NativeAutoOn: true, AutoGateReason: "paused"},
+			f:          attentionFacts{State: StateChoicePrompt, AutoMode: "always", AutoGateReason: "paused"},
 			want:       AttentionNeedsUser,
 			wantReason: "auto-approval is paused",
 		},
 		{
 			name: "burst cap is transient — stays auto-pending",
-			f:    attentionFacts{State: StateChoicePrompt, AutoMode: "always", NativeAutoOn: true, AutoGateReason: "burst-cap"},
-			want: AttentionAutoPending,
-		},
-		{
-			name: "AskUserQuestion needs the user instantly even in always mode",
-			f: attentionFacts{
-				State: StateChoicePrompt, AutoMode: "always", IsNative: true, NativeAutoOn: true,
-				Pending: []*NativeApproval{ap("AskUserQuestion", `{}`)},
-			},
-			want:       AttentionNeedsUser,
-			wantReason: nativeNeverAutoReason("AskUserQuestion"),
-		},
-		{
-			name: "ExitPlanMode needs the user instantly even in always mode",
-			f: attentionFacts{
-				State: StateChoicePrompt, AutoMode: "always", IsNative: true, NativeAutoOn: true,
-				Pending: []*NativeApproval{ap("ExitPlanMode", `{}`)},
-			},
-			want:       AttentionNeedsUser,
-			wantReason: nativeNeverAutoReason("ExitPlanMode"),
-		},
-		{
-			name: "cautious deny-needle needs the user instantly with the needle reason",
-			f: attentionFacts{
-				State: StateChoicePrompt, AutoMode: "cautious", IsNative: true, NativeAutoOn: true,
-				Pending: []*NativeApproval{ap("Bash", `{"command":"cat .env"}`)},
-			},
-			want:       AttentionNeedsUser,
-			wantReason: "won't auto-approve — touches environment/secret files",
-		},
-		{
-			name: "safe native approval in always mode is auto-pending",
-			f: attentionFacts{
-				State: StateChoicePrompt, AutoMode: "always", IsNative: true, NativeAutoOn: true,
-				Pending: []*NativeApproval{ap("Read", `{"file_path":"main.go"}`)},
-			},
+			f:    attentionFacts{State: StateChoicePrompt, AutoMode: "always", AutoGateReason: "burst-cap"},
 			want: AttentionAutoPending,
 		},
 		{
 			name: "recorded decline needs the user with the decline reason",
 			f: attentionFacts{
-				State: StateChoicePrompt, AutoMode: "cautious", NativeAutoOn: true,
+				State: StateChoicePrompt, AutoMode: "cautious",
 				DeclineReason: "Deferring — writes to ~/.ssh, rule (d).",
 			},
 			want:       AttentionNeedsUser,
@@ -206,7 +158,7 @@ func TestClassifyAttention(t *testing.T) {
 		{
 			name: "dwell past the grace escalates to needs-user",
 			f: attentionFacts{
-				State: StateChoicePrompt, AutoMode: "always", NativeAutoOn: true,
+				State: StateChoicePrompt, AutoMode: "always",
 				Dwell: attentionAutoGrace,
 			},
 			want:       AttentionNeedsUser,
@@ -215,7 +167,7 @@ func TestClassifyAttention(t *testing.T) {
 		{
 			name: "dwell within the grace stays auto-pending",
 			f: attentionFacts{
-				State: StateChoicePrompt, AutoMode: "always", NativeAutoOn: true,
+				State: StateChoicePrompt, AutoMode: "always",
 				Dwell: attentionAutoGrace - time.Second,
 			},
 			want: AttentionAutoPending,
@@ -513,51 +465,6 @@ func TestAttentionRefreshUsesAwaitingInputPromptIdentity(t *testing.T) {
 	}
 }
 
-func TestAttentionRefreshUsesNativePendingRequestIDs(t *testing.T) {
-	t.Parallel()
-	p := testPaneWithTail(t, "native-prompt-identity", "worker", "")
-	p.Kind = "native"
-	e := newAttentionEngine(nil)
-	p.setNativePending(&NativeApproval{RequestID: "A", ToolName: "AskUserQuestion"})
-	e.Refresh(p)
-	if state, reason := p.AttentionNow(); state != AttentionNeedsUser || reason != "" {
-		t.Fatalf("native A attention = %q/%q", state, reason)
-	}
-	_, _, onlyA := p.attentionEpisodeNow()
-	e.Refresh(p)
-	if _, _, same := p.attentionEpisodeNow(); same != onlyA {
-		t.Fatal("stable native A changed episode")
-	}
-	p.setNativePending(&NativeApproval{RequestID: "B", ToolName: "AskUserQuestion"})
-	e.Refresh(p)
-	_, _, both := p.attentionEpisodeNow()
-	if both == onlyA || both == "" {
-		t.Fatal("native B arrival retained A's episode")
-	}
-	if state, reason := p.AttentionNow(); state != AttentionNeedsUser || reason != "" {
-		t.Fatalf("native A+B attention = %q/%q", state, reason)
-	}
-	pos := atomic.LoadInt64(&p.LastAckedChoicePromptPos)
-	if p.takeNativePending("A") == nil {
-		t.Fatal("native A was not pending")
-	}
-	e.Refresh(p)
-	if got := atomic.LoadInt64(&p.LastAckedChoicePromptPos); got != pos {
-		t.Fatalf("removing A advanced choice position: %d to %d", pos, got)
-	}
-	_, _, onlyB := p.attentionEpisodeNow()
-	if onlyB == both || onlyB == "" {
-		t.Fatal("native A+B to B retained A+B episode")
-	}
-	if state, reason := p.AttentionNow(); state != AttentionNeedsUser || reason != "" {
-		t.Fatalf("native B attention = %q/%q", state, reason)
-	}
-	e.Refresh(p)
-	if _, _, same := p.attentionEpisodeNow(); same != onlyB {
-		t.Fatal("stable native B changed episode")
-	}
-}
-
 // pushEffectiveState holds the pusher's grace clock while auto-approval is
 // expected to act, passes needs-user and unknown attention through, and
 // never touches non-attention states.
@@ -698,36 +605,30 @@ func TestCurrentForReconcilesStaleRecord(t *testing.T) {
 func TestAttentionRefreshNeverRequestsCompletion(t *testing.T) {
 	completionTestVerdict(t, true)
 	for _, mode := range []string{"", "cautious", "always"} {
-		for _, native := range []bool{false, true} {
-			t.Run(mode+"/native="+strconv.FormatBool(native), func(t *testing.T) {
-				fixture, calls := completionTestServer(t)
-				p := testPaneWithTail(t, "local-attention", "Fixture", "Do you want to proceed?\n❯ 1. Yes\n  2. No\n")
-				p.AutoMode = mode
-				if native {
-					p.Kind = "native"
-					p.setNativePending(&NativeApproval{RequestID: "fixture-request", ToolName: "AskUserQuestion", RawInput: json.RawMessage(`{"question":"Review this?"}`)})
-				}
-				p.computeStateCached()
-				p.SetAutoDeclined("Review this request")
-				mgr := testManagerWithPane(p)
-				base, credential := fixture.cloudCreds()
-				a, err := NewAria(mgr, nil, nil, nil, base, credential, t.TempDir(), nil)
-				if err != nil {
-					t.Fatal("could not construct attention fixture")
-				}
-				engine := newAttentionEngine(a.mgr)
-				engine.SetAria(a)
-				for i := 0; i < 3; i++ {
-					engine.Refresh(p)
-				}
-				if state, _ := p.AttentionNow(); state != AttentionNeedsUser {
-					t.Fatal("fixture does not need the person")
-				}
-				time.Sleep(100 * time.Millisecond)
-				if calls.Load() != 0 {
-					t.Fatal("attention refresh sent pane text for a completion")
-				}
-			})
-		}
+		t.Run(mode, func(t *testing.T) {
+			fixture, calls := completionTestServer(t)
+			p := testPaneWithTail(t, "local-attention", "Fixture", "Do you want to proceed?\n❯ 1. Yes\n  2. No\n")
+			p.AutoMode = mode
+			p.computeStateCached()
+			p.SetAutoDeclined("Review this request")
+			mgr := testManagerWithPane(p)
+			base, credential := fixture.cloudCreds()
+			a, err := NewAria(mgr, nil, nil, nil, base, credential, t.TempDir(), nil)
+			if err != nil {
+				t.Fatal("could not construct attention fixture")
+			}
+			engine := newAttentionEngine(a.mgr)
+			engine.SetAria(a)
+			for i := 0; i < 3; i++ {
+				engine.Refresh(p)
+			}
+			if state, _ := p.AttentionNow(); state != AttentionNeedsUser {
+				t.Fatal("fixture does not need the person")
+			}
+			time.Sleep(100 * time.Millisecond)
+			if calls.Load() != 0 {
+				t.Fatal("attention refresh sent pane text for a completion")
+			}
+		})
 	}
 }

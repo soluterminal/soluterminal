@@ -171,3 +171,72 @@
 /* Ports popover: the hosted PortPanel caps its own list height
    (.port-list-scroll); just give the filter toolbar a little air. */
 .ports-popover .port-toolbar { margin-bottom: 4px; }
+
+/* AgentMessagingChip: the person's stop on agent-to-agent messaging. Dim at
+   rest like its neighbours; paused is tinted so a stop is never missed. */
+.statusbar-agent-msgs {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 1px 6px;
+  color: var(--fg-dim);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.statusbar-agent-msgs:hover { background: var(--bg-elev); color: var(--fg); }
+.statusbar-agent-msgs:disabled { cursor: progress; opacity: 0.7; }
+.statusbar-agent-msgs-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+}
+.statusbar-agent-msgs.paused {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
+}
+.statusbar-agent-msgs.paused .statusbar-agent-msgs-dot { opacity: 1; border-radius: 1px; }
+.statusbar-agent-msgs.error { color: var(--danger); }
+.statusbar-agent-msgs.warn { color: var(--warn); }
+.statusbar-agent-msgs-dismiss {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+  border-radius: 10px;
+  padding: 0 6px;
+  margin-left: 2px;
+  color: var(--warn);
+  font: inherit;
+  cursor: pointer;
+}
+.statusbar-agent-msgs-dismiss:hover { background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.statusbar-agent-msgs-dismiss:disabled { cursor: progress; opacity: 0.7; }
+
+/* Agents chip (web/src/private/AgentsChip.tsx), beside its rules in
+   styles.css. Off is a person's own choice and rests in the same grey as the
+   kill-switch pause. A pause the daemon made is nobody's choice: yellow. */
+.statusbar-agents.off { color: color-mix(in srgb, var(--fg-dim) 70%, transparent); }
+.statusbar-agents.paused.by-daemon { color: var(--warn); }
+
+/* Developer overrides indicator: persistent while the setting is on. */
+.statusbar-dev-overrides {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 1px 6px;
+  color: var(--warn);
+  font: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.statusbar-dev-overrides:hover {
+  border-color: var(--border);
+}

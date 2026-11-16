@@ -11,6 +11,8 @@ import {
   isDesktopShell,
   type CloudStatus,
 } from '../cloudPair';
+import { disconnectMessage, REVOKE_REFUSED_TEXT } from '../lib/cloudRemoval';
+import { openInSystemBrowser } from '../tauri-browser';
 
 // The in-window PAIR PANEL — replaces the old native OS dialog + system-browser
 // bounce. Lives in the embedded web UI so it survives dismissal and is always
@@ -28,6 +30,26 @@ import {
 // outside Tauri, so this never renders on the phone/relay web.
 
 type Phase = 'starting' | 'waiting' | 'connected' | 'expired' | 'signin' | 'error';
+
+// RevokeRefusedNotice: the cloud refused, after a Disconnect, to remove this
+// computer from the account. The address is shown as text before it opens.
+function RevokeRefusedNotice({ url }: { url: string }) {
+  return (
+    <div className="phone-access-notice" role="note">
+      {REVOKE_REFUSED_TEXT}{' '}
+      <span className="phone-access-notice-url">{url}</span>{' '}
+      {url && (
+        <button
+          type="button"
+          className="phone-access-secondary"
+          onClick={(e) => { void openInSystemBrowser(url, e.nativeEvent); }}
+        >
+          Open
+        </button>
+      )}
+    </div>
+  );
+}
 
 function PairPanel({ onClose }: { onClose: () => void }) {
   const cardRef = useRef<HTMLDivElement>(null);
@@ -107,11 +129,11 @@ function PairPanel({ onClose }: { onClose: () => void }) {
   const disconnect = async () => {
     setDisconnecting(true);
     try {
-      await cloudPairApi.disconnect();
-      useStore.getState().toast('Cloud disconnected — this computer no longer connects to the cloud.', {
-        kind: 'info',
-        ttlMs: 7000,
-      });
+      const result = await cloudPairApi.disconnect();
+      const msg = disconnectMessage(result);
+      useStore.getState().toast(msg.text, msg.warn
+        ? { kind: 'info', icon: '!', ttlMs: 15000 }
+        : { kind: 'info', ttlMs: 7000 });
       onClose(); // success: dismiss; the chip/banner poll reverts to "not set up"
     } catch (e) {
       disconnectFailed(e);
@@ -216,6 +238,9 @@ function PairPanel({ onClose }: { onClose: () => void }) {
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        {status?.revokeRefused?.refused && phase !== 'connected' && (
+          <RevokeRefusedNotice url={status.revokeRefused.machinesUrl} />
+        )}
         {phase === 'connected' ? (
           <ConnectedBody
             ownerEmail={status?.ownerEmail}

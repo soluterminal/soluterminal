@@ -76,6 +76,16 @@ describe('workspace reboot recovery', () => {
     const p = { ...failed(), codexThreadId: undefined, claudeSessionId: 'stale-other-provider' };
     expect(paneRestoreRequest({ ...def, codexThreadId: undefined }).restore).toBe(true);
     expect(paneRetryRequest(p)).toMatchObject({ restore: false, cmd: ['codex', '--no-alt-screen', 'resume', '--all'] });
-    expect(paneRetryRequest({ ...p, kind: 'native' }).restore).toBe(true);
+    // A pane an older daemon still reports as Focus (native) gets the same
+    // picker instead of a restore the daemon would refuse.
+    expect(paneRetryRequest({ ...p, kind: 'native' })).toMatchObject({ restore: false, cmd: ['codex', '--no-alt-screen', 'resume', '--all'] });
+    expect(paneRetryRequest({ ...p, kind: 'native' })).not.toHaveProperty('kind');
+  });
+
+  it('restores a saved Focus pane as a terminal that resumes the same conversation', () => {
+    const legacy = { ...def, kind: 'native' as const, cmd: ['claude', '-p', '--input-format', 'stream-json'], agent: 'claude' as const, codexThreadId: undefined, claudeSessionId: 'session-1' };
+    const req = paneRestoreRequest(legacy);
+    expect(req).not.toHaveProperty('kind');
+    expect(req).toMatchObject({ restore: true, claudeSessionId: 'session-1' });
   });
 });

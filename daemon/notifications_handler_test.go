@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1065,5 +1067,31 @@ func TestApprovalNoticeKeptForAnAlertsDeviceApprovedInMemory(t *testing.T) {
 		if got := a.approvalNoticeDropped(tc.id, tc.err); got != tc.drop {
 			t.Fatalf("%s: dropped = %t, want %t", tc.name, got, tc.drop)
 		}
+	}
+}
+
+// ST-49: the cloud answers a Code alert another app shows with
+// {"sent":0,"handled":true}. That is a delivery, not a missing subscription.
+func TestPushHandledReplyIsDeliveredWithoutZeroSubsWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"sent":0,"handled":true}`))
+	}))
+	defer srv.Close()
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	p := NewPusher(srv.URL, "machine-token", nil, nil, nil)
+	body, _ := json.Marshal(map[string]any{"paneId": "handled-pane", "state": "awaiting-input", "skipFcm": true})
+	if !p.deliver(body, "handled-pane", "awaiting-input") {
+		t.Fatal("a handled reply was not a delivery")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "push handled by another app") || !strings.Contains(out, "pane=handled-pane") {
+		t.Fatalf("handled log missing: %q", out)
+	}
+	if strings.Contains(out, "zero subscriptions") {
+		t.Fatalf("handled reply warned about zero subscriptions: %q", out)
 	}
 }

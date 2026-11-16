@@ -8,7 +8,7 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { format } from 'node:util';
-import { canonicalDeepseekModel, validateDeepseekSelector } from './deepseek-model.mjs';
+import { canonicalDeepseekModel, dshModel, validateDeepseekSelector, dshPatchEntries, rotateDshAnonymousId, decodeDshModelValue, encodeDshModelValue } from './deepseek-model.mjs';
 
 const [runtime, rawModel = '', ...args] = process.argv.slice(2);
 if (!runtime || args.some(arg => arg !== '--help')) {
@@ -18,7 +18,7 @@ if (args.includes('--help')) {
   console.log('DeepSeek Harness in SoluTerminal. Commands: /new, /sessions, /resume, /model, /effort, /status, /context, /thinking, /allow, /clear, /help, /exit (also /quit). Type / for suggestions; Ctrl+C cancels a turn.'); process.exit(0);
 }
 let model;
-try { model = canonicalDeepseekModel(rawModel); }
+try { model = dshModel(rawModel); }
 catch (error) { console.error(error.message); process.exit(1); }
 // A managed launch always sets an absolute DSH_HOME (launch.mjs). Running the
 // client by hand without one would otherwise crash on path.join(undefined, …)
@@ -61,8 +61,12 @@ function sweepStalePatchDirs() {
 sweepStalePatchDirs();
 const patchDir = await fs.mkdtemp(path.join(dshHome, 'terminal-'));
 const patch = path.join(patchDir, 'route.yaml');
-await fs.writeFile(patch, JSON.stringify([{ id: 'acp', config: { provider: 'deepseek-official', model } }]), { mode: 0o600 });
-const child = spawn(process.execPath, [runtime, '--profile', 'acp', '--patch', patch], { env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+await fs.writeFile(patch, JSON.stringify(dshPatchEntries(model)), { mode: 0o600 });
+// dsh sends a per-home anonymous id (x-deepseek-harness-user-id) with every
+// request and offers no way to omit it. A fresh one per launch keeps it from
+// linking this pane's sessions to earlier ones.
+await rotateDshAnonymousId(dshHome);
+const child = spawn(process.execPath, [runtime, '--profile', 'acp', '--patch', patch], { env: { ...process.env, DSH_TELEMETRY_DISABLED: '1', DSH_TELEMETRY_MODE: 'DISABLED' }, stdio: ['pipe', 'pipe', 'pipe'] });
 // Local transcript + input history live under DSH_HOME so each managed
 // machine keeps its own. The transcript is ours, not DSH's: it lets /resume
 // replay recent context the ACP server never sends back.
@@ -70,7 +74,7 @@ const transcriptDir = path.join(dshHome, 'terminal-transcripts');
 await fs.mkdir(transcriptDir, { recursive: true, mode: 0o700 });
 const historyFile = path.join(dshHome, 'terminal-history');
 // Per-tool "always allow". DSH's ACP profile only offers allow_once/reject_once
-// (checked against @deepseek-ai/dsh@0.1.5-rc.1), so a remembered allowlist has
+// (checked against @deepseek-ai/dsh@0.1.5-rc.1 and 0.2.2-rc.1), so a remembered allowlist has
 // to live here: keyed on the tool kind, persisted under DSH_HOME, consulted
 // before the approval menu is drawn. /allow lists or clears it.
 const alwaysAllowFile = path.join(dshHome, 'terminal-allow.json');
@@ -79,6 +83,12 @@ const TOOL_KIND_LABELS = { execute: 'Bash', read: 'Read', edit: 'Edit', write: '
 // The renderer classifies tool calls from their title because the wire does not
 // always carry `kind`, so permission requests use the same heuristics.
 const TOOL_GLYPH_LABELS = { '$': 'Bash', read: 'Read', write: 'Write', edit: 'Edit', grep: 'Search', list: 'List', web: 'Web', agent: 'Agent', todo: 'Todo' };
+// "Always allow" is not offered for any DeepSeek tool. DSH's permission
+// request names only the call id (dsh-acp, 0.1.5-rc.1 and 0.2.2-rc.1), so the
+// tool can't be identified when it is answered, and even DSH's "read" kind
+// covers tools that reach the network or another process (Cordis inspect
+// queries, terminal reads, the workspace runtime install). Every request asks.
+function canAlwaysAllow() { return false; }
 // Map a permission request to a stable, user-facing tool category. An
 // unclassifiable tool returns an empty key: we do not offer "always allow" for
 // it rather than lumping every unknown tool into one blanket allowance.
@@ -98,7 +108,7 @@ function permissionChoices(request) {
     { answer: '1', label: 'Yes, allow once' },
     { answer: '2', label: 'No, reject' },
   ];
-  if (permissionTool(request).key) choices.push({ answer: '3', label: `Always allow ${permissionTool(request).label}` });
+  if (canAlwaysAllow(permissionTool(request).key)) choices.push({ answer: '3', label: `Always allow ${permissionTool(request).label}` });
   return choices;
 }
 // A single keypress that answers the prompt without Enter, matching the TUI
@@ -114,10 +124,16 @@ function permissionHotkey(ch) {
   return null;
 }
 let alwaysAllow = new Map(); // key -> label
+// Entries an older client saved for kinds that may no longer be remembered
+// (canAlwaysAllow): dropped on load, saved away below, and named once.
+let droppedAlwaysAllow = [];
 try {
   const saved = JSON.parse(await fs.readFile(alwaysAllowFile, 'utf8'));
   if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
-    alwaysAllow = new Map(Object.entries(saved).map(([key, label]) => [String(key), String(label)]));
+    for (const [key, label] of Object.entries(saved)) {
+      if (canAlwaysAllow(String(key))) alwaysAllow.set(String(key), String(label));
+      else droppedAlwaysAllow.push(String(label));
+    }
   }
 } catch {}
 // Small state files are replaced atomically so a crash cannot truncate them.
@@ -128,6 +144,10 @@ async function writePrivateAtomic(file, text) {
 }
 async function saveAlwaysAllow() {
   try { await writePrivateAtomic(alwaysAllowFile, JSON.stringify(Object.fromEntries(alwaysAllow))); } catch {}
+}
+if (droppedAlwaysAllow.length) {
+  await saveAlwaysAllow();
+  console.log(`Always allow is no longer available for DeepSeek tools; ${droppedAlwaysAllow.map(label => label.replace(/[\x00-\x1f\x7f-\x9f]/g, '')).join(', ')} will ask each time now.`);
 }
 // Single source of truth for the REPL surface. Powers /help, the live "/"
 // suggestion list, and Tab completion so the three can never drift apart.
@@ -827,20 +847,23 @@ const currentModelValue = () => {
   const option = configOptions.find(row => row.category === 'model' || row.id === 'model');
   return option?.currentValue || model;
 };
+// The model id inside the wire value (see decodeDshModelValue).
+const currentModelId = () => decodeDshModelValue(currentModelValue()).model;
 // DSH owns the live session after boot and can advertise model switching. The
 // boot patch alone is therefore not a sufficient spend boundary: recover a
 // stale live selection to Flash before every prompt, and fail locally if the
 // server reports an unknown model or refuses the recovery update.
 async function ensureCurrentDeepseekModel() {
-  const current = currentModelValue();
-  const canonical = canonicalDeepseekModel(current);
-  if (current !== canonical) {
+  const wire = decodeDshModelValue(currentModelValue());
+  const canonical = canonicalDeepseekModel(wire.model);
+  if (wire.model !== canonical) {
     const option = configOptions.find(row => row.category === 'model' || row.id === 'model');
-    if (!option) throw new Error(`Unsupported live DeepSeek model: ${current}`);
-    const result = await request('session/set_config_option', { sessionId: session, configId: option.id, value: canonical });
-    configOptions = result.configOptions ?? configOptions.map(row => row === option ? { ...row, currentValue: canonical } : row);
+    if (!option) throw new Error(`Unsupported live DeepSeek model: ${wire.model}`);
+    const value = encodeDshModelValue(canonical, wire.pair);
+    const result = await request('session/set_config_option', { sessionId: session, configId: option.id, value });
+    configOptions = result.configOptions ?? configOptions.map(row => row === option ? { ...row, currentValue: value } : row);
   }
-  return validateDeepseekSelector(currentModelValue());
+  return validateDeepseekSelector(currentModelId());
 }
 const imageCapableNow = () => imageCapableBoot && currentModelValue() === bootModelValue;
 function promptText() {
@@ -1142,7 +1165,7 @@ const raw = { text: '', cursor: 0, index: -1, draft: '', drawn: false, up: 0, pa
 let rawBound = false;
 function rawPrefix() {
   if (!permission) return '▸ ';
-  return permissionTool(permission).key ? 'Select [1/2/3]: ' : 'Select [1/2]: ';
+  return canAlwaysAllow(permissionTool(permission).key) ? 'Select [1/2/3]: ' : 'Select [1/2]: ';
 }
 function rawStatus() {
   if (permission) {
@@ -1672,7 +1695,7 @@ wire.on('line', line => {
   try { message = JSON.parse(line); } catch { console.error('\nInvalid response from DeepSeek Harness.'); void shutdown(1); return; }
   if (message.method === 'session/request_permission' && message.id != null) {
     const tool = permissionTool(message);
-    if (tool.key && alwaysAllow.has(tool.key)) {
+    if (canAlwaysAllow(tool.key) && alwaysAllow.has(tool.key)) {
       // Remembered approval: answer without drawing the menu. DSH has no
       // allow_always option, so this is an allow_once plus our own memory.
       // Only an explicit allow_once is used: falling back to options[0] could
@@ -1833,7 +1856,7 @@ async function recordPaneSession(sessionId) {
   try {
     await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
     await writePrivateAtomic(file, JSON.stringify({
-      provider: 'deepseek', sessionId, cwd: process.cwd(), model: currentModelValue(), updatedAt: Date.now(),
+      provider: 'deepseek', sessionId, cwd: process.cwd(), model: (() => { try { return currentModelId(); } catch { return model; } })(), updatedAt: Date.now(),
     }));
   } catch { /* best-effort; never block a session */ }
 }
@@ -1907,14 +1930,14 @@ async function chooseConfig(category, choice) {
   let values = (option.options ?? []).flatMap(row => row.options ?? [row]);
   if (category === 'model') {
     values = values.filter(row => {
-      try { validateDeepseekSelector(row.value); return true; }
+      try { validateDeepseekSelector(decodeDshModelValue(row.value).model); return true; }
       catch { return false; }
     });
   }
   if (!choice) { values.forEach((row, index) => console.log(`${index + 1}. ${safe(row.name)}${row.value === option.currentValue ? ' (selected)' : ''}`)); console.log(`Use /${category === 'reasoning_effort' ? 'effort' : 'model'} NUMBER`); return; }
   const selected = values[Number(choice) - 1];
   if (!selected) throw new Error('Choose a listed number.');
-  if (category === 'model') validateDeepseekSelector(selected.value);
+  if (category === 'model') validateDeepseekSelector(decodeDshModelValue(selected.value).model);
   const result = await request('session/set_config_option', { sessionId: session, configId: option.id, value: selected.value });
   configOptions = result.configOptions ?? configOptions;
   console.log(`Selected ${safe(selected.name)}`);
@@ -1926,12 +1949,14 @@ async function submit(line, options = {}) {
     const tool = permissionTool(current);
     // Focused option 1 is allow-once, so bare Enter (what SoluTerminal's
     // auto-approval writes) allows one invocation; 1/y/yes do the same.
-    // 3/a/always also allows and remembers the tool category across sessions,
-    // but only when we can name it — an unclassifiable tool is never blanket
-    // allowed. 2/n/no and every unrecognized answer reject.
+    // 3/a/always would remember the tool, but no DeepSeek tool is offered it
+    // (canAlwaysAllow), so like any unlisted answer it rejects. 2/n/no and every unrecognized answer reject.
     const answer = line.trim().toLowerCase();
-    const remember = (answer === '3' || answer === 'a' || answer === 'always') && !!tool.key;
-    const kind = answer === '3' || answer === 'a' || answer === 'always' || answer === '' || answer === '1' || answer === 'y' || answer === 'yes' ? 'allow_once' : 'reject_once';
+    const always = answer === '3' || answer === 'a' || answer === 'always';
+    const remember = always && canAlwaysAllow(tool.key);
+    // Option 3 isn't on the menu for this tool: like any other unlisted
+    // answer, it rejects.
+    const kind = remember || answer === '' || answer === '1' || answer === 'y' || answer === 'yes' ? 'allow_once' : 'reject_once';
     if (remember) { alwaysAllow.set(tool.key, tool.label); void saveAlwaysAllow(); }
     const option = current?.params?.options?.find(value => value.kind === kind);
     write({ id: current.id, result: { outcome: option ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } } });
@@ -1970,7 +1995,7 @@ async function submit(line, options = {}) {
       'locally and /resume replays recent history. /tools collapse hides a finished tool\'s body,',
       'which still reaches the model. DSH web-only cards and elicitation are not exposed.',
     ].join('\n'));
-    else if (text === '/allow') console.log(alwaysAllow.size ? `Always allow: ${[...alwaysAllow.values()].join(', ')} ${dim('· /allow clear to revoke')}` : 'No always-allow tools. Choose "3. Always allow" at an approval.');
+    else if (text === '/allow') console.log(alwaysAllow.size ? `Always allow: ${[...alwaysAllow.values()].join(', ')} ${dim('· /allow clear to revoke')}` : 'No always-allow tools: DeepSeek tools ask each time.');
     else if (text === '/allow clear') { alwaysAllow.clear(); void saveAlwaysAllow(); console.log('Cleared always-allow tools.'); }
     // Claude-parity /clear: wipe the screen AND start a fresh session, so the
     // context readout actually goes back to zero. The previous conversation is

@@ -3,7 +3,6 @@ import { useStore, type AppThemePref } from '../../store';
 import { THEMES } from '../../themes';
 import { SettingsGroup, SettingsRow } from './SettingsRow';
 import { NumberInput } from './NumberInput';
-import { useFocusEnabled } from '../../lib/focusAvailability';
 
 // Theme + type-size controls. Everything applies live to mounted panes, so
 // users can drag the Settings window aside and watch the effect as they tweak.
@@ -20,13 +19,8 @@ export function AppearanceTab() {
   const setTerminalFontSize = useStore((s) => s.setTerminalFontSize);
   const terminalLineHeight = useStore((s) => s.terminalLineHeight);
   const setTerminalLineHeight = useStore((s) => s.setTerminalLineHeight);
-  const focusFontOffset = useStore((s) => s.focusFontOffset);
-  const setFocusFontOffset = useStore((s) => s.setFocusFontOffset);
   const uiScale = useStore((s) => s.uiScale);
   const setUiScale = useStore((s) => s.setUiScale);
-  // Focus (the structured chat renderer) is retired for most installs; its
-  // text offset row only shows where Focus can still open.
-  const focusEnabled = useFocusEnabled();
 
   return (
     <>
@@ -109,28 +103,6 @@ export function AppearanceTab() {
             onCommit={setTerminalLineHeight}
           />
         </SettingsRow>
-        {/* Focus text offset: Focus is a proportional font (reads smaller than
-            mono at the same px), so the default +0.4 keeps the two modes
-            visually balanced; 0 makes Focus prose the same px as the Terminal.
-            Store clamps 0–8. */}
-        {focusEnabled && <SettingsRow
-          label="Focus text offset"
-          hint="How much larger Focus prose renders than the Terminal font (0 = same size, default +0.4 px)."
-        >
-          <input
-            type="number"
-            className="settings-input"
-            min={0}
-            max={8}
-            step={0.1}
-            value={focusFontOffset}
-            onChange={(e) => {
-              const n = parseFloat(e.target.value);
-              if (!Number.isNaN(n)) setFocusFontOffset(n);
-            }}
-          />
-          <span className="settings-unit">px</span>
-        </SettingsRow>}
         {/* Sidebar size: zoom factor on the sidebar SECTIONS only — topbar,
             account footer, statusbar and panes stay at true size. Store clamps
             0.7–1.4. */}

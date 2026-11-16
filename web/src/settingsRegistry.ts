@@ -69,7 +69,7 @@ export interface SettingsControlDef {
 const SETTINGS_CATEGORIES: SettingsCategoryDef[] = [
   { id: 'appearance', label: 'Appearance', description: 'Theme, terminal colours and text sizing.' },
   { id: 'workspace', label: 'Panes & sidebar', description: 'Pane layout, mouse behaviour and sidebar sections.' },
-  { id: 'sessions', label: 'Claude sessions', description: 'New-session, recovery, prompt and Focus behaviour.' },
+  { id: 'sessions', label: 'Claude sessions', description: 'Recovery and prompt behaviour.' },
   { id: 'workflows', label: 'Services', description: 'Model gateway, release train and resource limits.' },
   { id: 'agents', label: 'Agents', description: 'Agent settings.' },
   { id: 'credentials', label: 'Credentials', description: 'Protected provider accounts, runtime keys and repair status.' },
@@ -96,10 +96,10 @@ export function defineSection(
 
 const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   defineSection('appearance.theme', 'appearance', 'Theme', 'App and terminal colour themes.', { aliases: ['dark mode', 'light mode', 'theme'] }),
-  defineSection('appearance.text', 'appearance', 'Text size', 'Terminal, Focus and sidebar sizing.', { aliases: ['font size', 'zoom', 'scale'] }),
+  defineSection('appearance.text', 'appearance', 'Text size', 'Terminal and sidebar sizing.', { aliases: ['font size', 'zoom', 'scale'] }),
   defineSection('workspace.panes', 'workspace', 'Panes', 'Pane layout, arrangement and mouse behaviour.'),
   defineSection('workspace.sidebar', 'workspace', 'Sidebar', 'Choose, arrange and reset sidebar sections.'),
-  defineSection('sessions.behavior', 'sessions', 'Session behaviour', 'Claude session recovery, prompts and Focus vitals.'),
+  defineSection('sessions.behavior', 'sessions', 'Session behaviour', 'Claude session recovery and prompts.'),
   // The workflow task engine and its settings were retired (2026-10-25); what
   // remains under Services is the model gateway, the opt-in release train and
   // the resource limits that still gate agent runs and release work.
@@ -133,7 +133,6 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['appearance.theme', 'colorTheme', 'Color theme', ['terminal theme']],
   ['appearance.text', 'fontSize', 'Font size', ['zoom', 'scale']],
   ['appearance.text', 'lineHeight', 'Line height'],
-  ['appearance.text', 'focusTextOffset', 'Focus text offset'],
   ['appearance.text', 'sidebarSize', 'Sidebar text size', ['scale']],
   ['workspace.panes', 'paneLayout', 'Pane layout'],
   ['workspace.panes', 'arrange', 'Arrange'],
@@ -154,18 +153,8 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['workspace.sidebar', 'agents', 'Agents'],
   ['workspace.sidebar', 'mcp', 'MCP servers'],
   ['workspace.sidebar', 'resetSidebar', 'Reset to default'],
-  ['sessions.behavior', 'newClaudeSessions', 'New Claude sessions'],
   ['sessions.behavior', 'afterRestart', 'After a restart'],
-  ['sessions.behavior', 'suggestPrompt', 'Suggest next prompt (Focus)'],
   ['sessions.behavior', 'promptHistory', 'Show prompt history strip'],
-  ['sessions.behavior', 'focusVitals', 'Focus vitals'],
-  ['sessions.behavior', 'focusModel', 'Model'],
-  ['sessions.behavior', 'focusContext', 'Context %'],
-  ['sessions.behavior', 'focusTokens', 'Tokens'],
-  ['sessions.behavior', 'focusCost', 'Cost'],
-  ['sessions.behavior', 'focusCache', 'Cache'],
-  ['sessions.behavior', 'focusResets', 'Resets'],
-  ['sessions.behavior', 'focusCwd', 'Working dir'],
   ['workflows.modelsFallbacks', 'localOpenAI', 'Local OpenAI-compatible', ['local model', 'base url']],
   ['workflows.automation', 'releaseTrain', 'Auto-publish on cadence (release train)'],
   ['workflows.automation', 'trainLandings', 'Functional landings before a train'],

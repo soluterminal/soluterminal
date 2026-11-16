@@ -14,8 +14,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestDurableLogSurvivesCleanEnvReexec drives attachDurableLog ->
@@ -114,4 +119,175 @@ func durableLogReexecChild() {
 	maybeReexecCleanEnv() // replaces this process image; only returns on failure
 	fmt.Fprintln(os.Stderr, "maybeReexecCleanEnv returned without exec'ing")
 	os.Exit(3)
+}
+
+// TestCleanEnvSuccessorDetachesFromClaudeSession (ST-118): a primary daemon
+// started inside a claude session re-execs clean in place, then, after flag
+// parsing, continues as a copy of itself in a session of its own, so the
+// claude session ending (its process group hung up) does not take it along.
+func TestCleanEnvSuccessorDetachesFromClaudeSession(t *testing.T) {
+	if os.Getenv("SOLU_DETACH_REEXEC_CHILD") == "1" {
+		detachReexecChild()
+		return
+	}
+	dir := t.TempDir()
+	cmd := detachLineageCmd(t, dir, "TestCleanEnvSuccessorDetachesFromClaudeSession")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the starter should hand over and exit 0: %v\n%s", err, out)
+	}
+	starter := cmd.Process.Pid
+	// The claude session ends: hang up its whole process group.
+	_ = syscall.Kill(-starter, syscall.SIGHUP)
+
+	got := waitDurableLog(t, dir, "detached-successor-survived")
+	if !strings.Contains(got, "continuing as pid") {
+		t.Errorf("the hand-over was not logged; log:\n%s", got)
+	}
+	if strings.Contains(got, "pending="+"1") {
+		t.Errorf("the detached daemon inherited the one-time marker; log:\n%s", got)
+	}
+	var pid, sid, pgid int
+	for _, line := range strings.Split(got, "\n") {
+		if i := strings.Index(line, "detached-successor-started"); i >= 0 {
+			for _, f := range strings.Fields(line[i:]) {
+				k, v, ok := strings.Cut(strings.Trim(f, `"`), "=")
+				if !ok {
+					continue
+				}
+				n, _ := strconv.Atoi(v)
+				switch k {
+				case "pid":
+					pid = n
+				case "sid":
+					sid = n
+				case "pgid":
+					pgid = n
+				}
+			}
+		}
+	}
+	if pid == 0 || sid != pid || pgid != pid || pgid == starter {
+		t.Fatalf("successor pid=%d sid=%d pgid=%d (starter group %d): want a session and group of its own; log:\n%s", pid, sid, pgid, starter, got)
+	}
+}
+
+// A detached daemon that fails at once (another daemon owns the data
+// directory) must not look like a successful start.
+func TestDetachReportsAnImmediateFailure(t *testing.T) {
+	if os.Getenv("SOLU_DETACH_REEXEC_CHILD") == "1" {
+		detachReexecChild()
+		return
+	}
+	dir := t.TempDir()
+	cmd := detachLineageCmd(t, dir, "TestDetachReportsAnImmediateFailure")
+	cmd.Env = append(cmd.Env, "SOLU_DETACH_TEST_FAIL=1")
+	out, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 73 {
+		t.Fatalf("starter exit = %v, want status 73 from the detached daemon\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "exited at once (status 73)") {
+		t.Fatalf("the starter must say the daemon failed; output:\n%s", out)
+	}
+}
+
+func detachLineageCmd(t *testing.T, dir, test string) *exec.Cmd {
+	t.Helper()
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, envCleanedSentinel+"=") || strings.HasPrefix(kv, "INVOCATION_ID=") || strings.HasPrefix(kv, detachPendingEnv+"=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^"+test+"$")
+	cmd.Env = append(env, "SOLU_DETACH_REEXEC_CHILD=1", "SOLU_DURABLE_LOG_DIR="+dir, "CLAUDECODE=1")
+	// The starter gets a process group of its own, standing in for the claude
+	// session's.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
+}
+
+func waitDurableLog(t *testing.T, dir, needle string) string {
+	t.Helper()
+	var got string
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		body, _ := os.ReadFile(filepath.Join(dir, durableLogName))
+		got = string(body)
+		if strings.Contains(got, needle) {
+			return got
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("durable log never showed %q; log:\n%s", needle, got)
+	return got
+}
+
+// detachReexecChild is one process image of the lineage:
+//  1. the starter (inside the "claude session") re-execs clean in place;
+//  2. the clean image, marker set, detaches the daemon (as main does after
+//     flag parsing);
+//  3. the detached daemon, marker consumed, reports where it runs.
+func detachReexecChild() {
+	attachDurableLog()
+	if durableLog == nil {
+		fmt.Fprintln(os.Stderr, "durable log never attached")
+		os.Exit(3)
+	}
+	switch {
+	case os.Getenv(envCleanedSentinel) != "1":
+		maybeReexecCleanEnv() // replaces this process image
+		fmt.Fprintln(os.Stderr, "maybeReexecCleanEnv returned without re-exec")
+		os.Exit(3)
+	case os.Getenv(detachPendingEnv) == "1":
+		detachFromClaudeSessionFn = func(func(string) string, string, string, string, string, string) bool { return true }
+		detachEarlyExitWait = 300 * time.Millisecond
+		maybeDetachFromClaudeSession(defaultDaemonAddr, defaultDataDir(), "", "") // exits
+		fmt.Fprintln(os.Stderr, "maybeDetachFromClaudeSession returned without detaching")
+		os.Exit(3)
+	default:
+		if os.Getenv("SOLU_DETACH_TEST_FAIL") == "1" {
+			os.Exit(73)
+		}
+		sid, _ := unix.Getsid(0)
+		pgid, _ := syscall.Getpgid(0)
+		slog.Info("detached-successor-started pid="+strconv.Itoa(os.Getpid())+" sid="+strconv.Itoa(sid)+" pgid="+strconv.Itoa(pgid),
+			"pending", os.Getenv(detachPendingEnv), "claudeEnv", os.Getenv("CLAUDECODE"))
+		// Outlive the starter's hang-up by a margin before reporting.
+		time.Sleep(time.Second)
+		slog.Info("detached-successor-survived")
+		os.Exit(0)
+	}
+}
+
+func TestDetachFromClaudeSessionOnlyForThePrimary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", "")
+	none := func(string) string { return "" }
+	data := defaultDataDir()
+	if !detachFromClaudeSession(none, "linux", defaultDaemonAddr, data, "", "") {
+		t.Fatal("the primary daemon (default port and data) must detach")
+	}
+	for _, c := range []struct{ addr, data, backend, shell string }{
+		{"127.0.0.1:9791", data, "", ""},
+		{defaultDaemonAddr, filepath.Join(home, "side-data"), "", ""},
+		{defaultDaemonAddr, data, "wsl", ""},
+		{defaultDaemonAddr, data, "", "0.0.1243"},
+	} {
+		if detachFromClaudeSession(none, "linux", c.addr, c.data, c.backend, c.shell) {
+			t.Fatalf("%+v must stay in place: a side daemon, or one the desktop app supervises", c)
+		}
+	}
+	systemd := func(k string) string {
+		if k == "INVOCATION_ID" {
+			return "abc"
+		}
+		return ""
+	}
+	if detachFromClaudeSession(systemd, "linux", defaultDaemonAddr, data, "", "") {
+		t.Fatal("a systemd service must stay its unit's main process")
+	}
 }

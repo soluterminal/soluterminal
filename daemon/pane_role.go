@@ -69,7 +69,7 @@ const orchestratorBriefMarker = "You are the orchestrator for this machine"
 //   - No backticks (this is a Go raw string).
 const orchestratorBrief = `You are the orchestrator for this machine. Own the work and report progress.
 
-Work directly in your session: investigate, implement, test and prepare changes for the user to merge. The workflow task engine is retired. Do not create workflow tasks. Use list_panes, ask_pane, wait_for_pane and read_pane_tail to coordinate separate writers when work splits cleanly. Give each worker a self-contained assignment and avoid conflicting edits. Use spawn_pane for user-driven interaction and for workers that write code, choosing each worker’s agent for its task (cmd claude or codex, optionally with model and effort); keep in-session subagents for read-only research.
+Work directly in your session: investigate, implement, test and prepare changes for the user to merge. Use list_panes, ask_pane, wait_for_pane and read_pane_tail to coordinate separate writers when work splits cleanly. Give each worker a self-contained assignment and avoid conflicting edits. Use spawn_pane for user-driven interaction and for workers that write code, choosing each worker’s agent for its task (cmd claude or codex, optionally with model and effort); keep in-session subagents for read-only research.
 
 Leads own an area for the long term; workers own a task for their lead. With spawn_pane, pass lead with a role name to start a lead or sub-lead; omit it to start a worker. Workers close and archive automatically once finished, their result is read, and their work is committed and pushed, or once their work has merged into the default branch and their worktree is clean, so commit and push before reporting completion. Never close a lead. Close plain finished panes you started unless the user wants them kept. Message agents with ask_pane, never send_input.
 
@@ -77,29 +77,8 @@ Keep shared plans and handoffs in tracked repository files. Use create_schedule 
 
 Follow the repository AGENTS.md before handing back: get one independent review in a fresh context, fix each must-fix finding or explain the disagreement, and stop after at most two review rounds. In soluterminal use scripts/solu-review. The user decides what merges. Never bypass human approval gates or claim approval, merge or release without authoritative evidence.`
 
-// systemPromptAppend joins the native narration prompt and the role brief into
-// ONE --append-system-prompt value: claude takes a single flag, so the two
-// system-prompt additions are concatenated (narration first, blank line, then
-// the brief) rather than passed twice. Returns "" when neither applies.
-func systemPromptAppend(narrate bool, role string) string {
-	if role == paneRoleTaskOwner {
-		return ""
-	}
-	orchestrator := strings.TrimSpace(role) == paneRoleOrchestrator
-	switch {
-	case narrate && orchestrator:
-		return nativeNarrationPrompt + "\n\n" + orchestratorBrief
-	case narrate:
-		return nativeNarrationPrompt
-	case orchestrator:
-		return orchestratorBrief
-	}
-	return ""
-}
-
 // withOrchestratorBrief appends `--append-system-prompt <orchestratorBrief>` to
-// a BARE terminal claude argv (the native/headless argv gets it from
-// nativeClaudeArgvRole instead).
+// a BARE terminal claude argv.
 //
 // Idempotent and self-healing: any existing bare `--append-system-prompt <v>`
 // pair whose value carries orchestratorBriefMarker is dropped first, so a stale
@@ -107,12 +86,12 @@ func systemPromptAppend(narrate bool, role string) string {
 // --append-system-prompt without the marker is left untouched.
 //
 // A cmd that is not bare claude is returned unchanged. That is the login-shell-
-// wrapped `bash -lc '…'` form which workspace def-restore and the native_switch
-// rollback replay from a persisted snapshot: it already carries whatever brief it
+// wrapped `bash -lc '…'` form which workspace def-restore replays from a
+// persisted snapshot: it already carries whatever brief it
 // was spawned with, and re-quoting it here would be a text rewrite of a shell
 // string. Every clean respawn path rebuilds a bare ["claude","--resume",id] and
 // re-derives the brief from the pane's Role, so the wrapped form self-heals on
-// the next resume/refresh/effort/model/switch.
+// the next resume or restart.
 func withOrchestratorBrief(cmd []string) []string {
 	if !cmdStartsClaude(cmd) {
 		return cmd
@@ -129,20 +108,18 @@ func withOrchestratorBrief(cmd []string) []string {
 	return append(out, "--append-system-prompt", orchestratorBrief)
 }
 
-// spawnCmdForRole is the seam Manager.Spawn calls to decorate a TERMINAL pane's
-// argv for its role. Native panes are already done — nativeClaudeArgvRole baked
-// the brief into the headless argv from opts.Role — and a pane without the
-// orchestrator role is untouched.
+// spawnCmdForRole is the seam Manager.Spawn calls to decorate a pane's argv for
+// its role. A pane without the orchestrator role is untouched.
 //
 // It exists as a pure function so the kind/role→argv wiring is table-testable
 // without launching a process (review finding: the decoration itself was
 // covered, but nothing pinned that Spawn actually applied it, and only for the
 // right kind).
 func spawnCmdForRole(kind, role, agent string, cmd []string) []string {
-	if kind != "native" && role == paneRoleTaskOwner {
+	if role == paneRoleTaskOwner {
 		return withTaskOwnerBrief(agent, cmd)
 	}
-	if kind == "native" || strings.TrimSpace(role) != paneRoleOrchestrator {
+	if strings.TrimSpace(role) != paneRoleOrchestrator {
 		return cmd
 	}
 	host, ok := orchestratorHostFor(agent)

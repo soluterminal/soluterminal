@@ -57,6 +57,10 @@ type cleanProc struct {
 type cleanVariant struct {
 	profile voiceclean.Profile
 	withCtx bool
+	// apiKey: the run uses the person's exported ANTHROPIC_API_KEY instead of
+	// their Claude login (ST-181). Part of the variant so a spare started
+	// one way is never used the other way.
+	apiKey bool
 }
 
 // newCleanVariant normalises a request into the prompt it needs: the
@@ -106,7 +110,10 @@ type localCleaner struct {
 
 	// Seams for tests.
 	bin       func() (string, error)
-	env       func(bin string) []string
+	env       func(bin string, apiKey bool) []string
+	// useAPIKey reports whether a run should use the person's API key rather
+	// than their Claude plan; set by the API server (localCleanupMode).
+	useAPIKey func() bool
 	deadline  time.Duration
 	idleAfter time.Duration
 	now       func() time.Time
@@ -123,19 +130,32 @@ func newLocalCleaner() *localCleaner {
 	}
 }
 
-// localCleanupEnv is the daemon's environment minus ANTHROPIC_*, so the run
-// always uses the user's Claude login (their plan) and never an API key that
-// happens to be exported, plus thinking off for speed.
-func localCleanupEnv(bin string) []string {
+// localCleanupEnv is the daemon's environment minus ANTHROPIC_*, plus
+// thinking off for speed. On the plan path (apiKey false) the run therefore
+// always uses the person's Claude login and never an API key that happens to
+// be exported. On the API-key path only ANTHROPIC_API_KEY is kept, so Claude
+// Code bills that key at Anthropic's own endpoint (no base URL or other
+// token from the environment).
+func localCleanupEnv(bin string, apiKey bool) []string {
 	base := withResolvedNodeBin(os.Environ(), resolveNodeBin)
 	out := make([]string, 0, len(base)+1)
 	for _, kv := range providerChildEnvForBin(bin, base) {
+		if apiKey && strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			out = append(out, kv)
+			continue
+		}
 		if strings.HasPrefix(kv, "ANTHROPIC_") || strings.HasPrefix(kv, "MAX_THINKING_TOKENS=") {
 			continue
 		}
 		out = append(out, kv)
 	}
 	return append(out, "MAX_THINKING_TOKENS=0")
+}
+
+// withMode stamps the current login choice on a variant.
+func (c *localCleaner) withMode(v cleanVariant) cleanVariant {
+	v.apiKey = c.useAPIKey != nil && c.useAPIKey()
+	return v
 }
 
 func localCleanupArgs(v cleanVariant) []string {
@@ -175,7 +195,7 @@ func (c *localCleaner) spawn(v cleanVariant) (*cleanProc, error) {
 	cmd := exec.Command(bin, args...)
 	// A neutral directory: cleanup needs no project files or CLAUDE.md.
 	cmd.Dir = os.TempDir()
-	cmd.Env = c.env(bin)
+	cmd.Env = c.env(bin, v.apiKey)
 	cmd.SysProcAttr = pipeChildSysProcAttr()
 	applyNoWindow(cmd)
 	stdin, err := cmd.StdinPipe()
@@ -216,6 +236,7 @@ func (c *localCleaner) paused() bool {
 // Prewarm starts a spare for the given prompt variant if none is ready, so
 // the next dictation skips the ~1.5 s start. Cheap to call repeatedly.
 func (c *localCleaner) Prewarm(v cleanVariant) {
+	v = c.withMode(v)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.now().Before(c.pausedUntil) {
@@ -306,7 +327,7 @@ func (c *localCleaner) CleanWithLanguage(ctx context.Context, profile voiceclean
 		return cleanupOutcome{Text: rawText, Status: "failed", Detail: "busy"}
 	}
 
-	v := newCleanVariant(profile, termContext)
+	v := c.withMode(newCleanVariant(profile, termContext))
 	if !v.withCtx {
 		termContext = ""
 	}
@@ -325,6 +346,9 @@ func (c *localCleaner) CleanWithLanguage(ctx context.Context, profile voiceclean
 
 	out := c.run(ctx, p, v.profile, rawText, termContext, language)
 	out.Provider = "local/claude"
+	if v.apiKey {
+		out.Provider = "local/api-key"
+	}
 	c.record(out.Status != "failed")
 	return out
 }
@@ -334,7 +358,7 @@ type cleanupOutcome struct {
 	Text     string
 	Status   string // "ok" | "skipped" | "failed"
 	Detail   string
-	// Tokens the run used on the user's plan (from the result event).
+	// Tokens the run used on the person's plan or API key (from the result event).
 	InputTokens, OutputTokens int
 }
 

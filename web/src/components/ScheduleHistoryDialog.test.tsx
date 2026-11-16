@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../store';
 import { api } from '../api';
@@ -146,7 +146,75 @@ describe('TaskReportReader', () => {
   });
 });
 
+describe('TaskReportReader load errors', () => {
+  // A failed load used to leave "Loading…" up for good, with only a toast.
+  it('says the report could not be loaded and loads it on Retry', async () => {
+    const logSpy = vi.spyOn(api, 'scheduleRunLog').mockRejectedValueOnce(new Error('HTTP 502'));
+    vi.spyOn(api, 'markScheduleRead').mockResolvedValue(undefined);
+    render(<ScheduleHistoryDialog schedule={sched()} onClose={() => {}} />);
+
+    const failure = await screen.findByRole('alert');
+    expect(failure).toHaveTextContent("Couldn't load this report: HTTP 502");
+    expect(screen.queryByText('Loading the report…')).not.toBeInTheDocument();
+
+    logSpy.mockResolvedValueOnce(TASK_LOG);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Overnight digest');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(logSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows loading while the report is on its way', async () => {
+    let answer: (text: string) => void = () => {};
+    vi.spyOn(api, 'scheduleRunLog').mockReturnValue(new Promise<string>((resolve) => { answer = resolve; }));
+    vi.spyOn(api, 'markScheduleRead').mockResolvedValue(undefined);
+    render(<ScheduleHistoryDialog schedule={sched()} onClose={() => {}} />);
+    expect(await screen.findByRole('status')).toHaveTextContent('Loading the report…');
+    await act(async () => { answer(TASK_LOG); });
+    await screen.findByText('Overnight digest');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('a failed report does not block paging to another run', async () => {
+    const logSpy = vi.spyOn(api, 'scheduleRunLog').mockRejectedValueOnce(new Error('HTTP 502')).mockResolvedValue(TASK_LOG);
+    vi.spyOn(api, 'markScheduleRead').mockResolvedValue(undefined);
+    render(<ScheduleHistoryDialog schedule={sched()} onClose={() => {}} />);
+    await screen.findByRole('alert');
+    fireEvent.click(screen.getByText('‹ Older'));
+    await screen.findByText('Overnight digest');
+    expect(logSpy).toHaveBeenLastCalledWith('s1', 'run-99.log');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
 describe('RunListDialog', () => {
+  it('keeps a failed log on its row with Retry', async () => {
+    const logSpy = vi.spyOn(api, 'scheduleRunLog').mockRejectedValueOnce(new Error('HTTP 502'));
+    render(
+      <ScheduleHistoryDialog
+        schedule={sched({ kind: 'agent', name: 'Fix agent' })}
+        onClose={() => {}}
+      />,
+    );
+    const failure = await screen.findByRole('alert');
+    expect(failure).toHaveTextContent("Couldn't load this log: HTTP 502");
+
+    logSpy.mockResolvedValueOnce('event=selftest status=green');
+    fireEvent.click(within(failure).getByRole('button', { name: 'Retry' }));
+    await screen.findByText(/event=selftest status=green/);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('says an automation has not run yet', () => {
+    render(
+      <ScheduleHistoryDialog
+        schedule={sched({ kind: 'prompt', name: 'Morning prompt', runs: [] })}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText("No runs yet: this automation hasn't run.")).toBeInTheDocument();
+  });
+
   it('keeps the raw log list for non-task schedules', async () => {
     vi.spyOn(api, 'scheduleRunLog').mockResolvedValue('event=selftest status=green');
     render(

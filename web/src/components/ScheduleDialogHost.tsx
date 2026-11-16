@@ -10,7 +10,6 @@ import { ScheduleDialog } from './ScheduleDialog';
 // lesson as ScheduleHistoryDeepLink: deep-link style events need a host
 // that is mounted unconditionally in App.
 export function ScheduleDialogHost() {
-  const focusedPaneId = useStore((s) => s.focusedPaneId);
   const [state, setState] = useState<{ open: boolean; paneId?: string; fromPaneMenu: boolean }>({
     open: false,
     fromPaneMenu: false,
@@ -19,7 +18,14 @@ export function ScheduleDialogHost() {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { paneId?: string; fromPaneMenu?: boolean } | undefined;
-      setState({ open: true, paneId: detail?.paneId, fromPaneMenu: detail?.fromPaneMenu === true });
+      // The pane to seed from is fixed here, at the moment of opening. Following
+      // the focused pane while the form is open would re-seed it on background
+      // focus changes, under what the person is typing.
+      setState({
+        open: true,
+        paneId: detail?.paneId ?? useStore.getState().focusedPaneId ?? undefined,
+        fromPaneMenu: detail?.fromPaneMenu === true,
+      });
     };
     window.addEventListener('solu:open-schedule-dialog', handler);
     return () => window.removeEventListener('solu:open-schedule-dialog', handler);
@@ -29,7 +35,7 @@ export function ScheduleDialogHost() {
     <ScheduleDialog
       open={state.open}
       editing={null}
-      initialPaneId={state.paneId ?? focusedPaneId ?? undefined}
+      initialPaneId={state.paneId}
       fromPaneMenu={state.fromPaneMenu}
       onClose={() => setState({ open: false, fromPaneMenu: false })}
     />

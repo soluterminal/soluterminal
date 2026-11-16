@@ -4,7 +4,7 @@ import type { WorkflowSettingsUpdate } from './ServicesTab';
 import { SettingsGroup, SettingsRow } from './SettingsRow';
 type Resources=NonNullable<WorkflowSettings['resources']>;
 const knobs=[
- {key:'maxAgentRuns',label:'Max agent runs',min:1,max:8,hint:'Managed-agent and scheduled runs share this pool.'},
+ {key:'maxAgentRuns',label:'Max agent runs',min:1,max:8,hint:'Managed-agent and automation runs share this pool.'},
  {key:'memFloorMB',label:'Memory floor',min:0,hint:'New release operations wait below this many available MB. 0 disables the gate.'},
  {key:'diskFloorMB',label:'Disk floor',min:0,hint:'New release operations wait below this many free MB. 0 disables the gate.'},
  {key:'hostDiskFloorMB',label:'Host disk floor (WSL)',min:0,hint:'Minimum free MB on the Windows volume holding the WSL disk.'},

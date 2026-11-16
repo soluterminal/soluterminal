@@ -7,8 +7,16 @@ the wrapper, native Muse driver, startup prefix, init functions and nonconstant
 global initializers. Imported packages include source, assembly and embed data.
 Every main-package import is covered, including named imports used only by daemon
 handlers, because their package initializers run before pane startup too.
-The startup prefix includes both pane dispatches and any code between them;
-missing or unrecognized dispatches stop the build for review. Nonconstant
+The startup prefix runs through the last required pane dispatch, including
+any code between the dispatches;
+missing or unrecognized dispatches stop the build for review. The Muse driver
+(a root) and the Codex terminal bridge (a required dispatch, covered through the
+prefix) count while something in the package refers to `runMuseDriver` or
+`runCodexTerminal`; then main must dispatch each as above (a terminating
+`return` or `os.Exit`). Once nothing refers to the Muse driver
+(the Focus removal drops main's `muse-driver` dispatch and then the driver), no
+pane can start it and the prefix ends at the last remaining pane dispatch.
+`runAgent` stays mandatory. Nonconstant
 initializers are covered even when their result variables are unused, including
 builtin calls and non-call expressions that can panic or block before main.
 The web provenance reader is covered, but its UI bundle/version-label input is

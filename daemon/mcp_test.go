@@ -67,7 +67,7 @@ func TestMCPMutationPolicyDeniesConfiguredMutators(t *testing.T) {
 	t.Setenv(mcpMutationPolicyEnv, "deny")
 
 	for _, tool := range []string{
-		"send_input", "spawn_pane", "create_schedule", "cancel_schedule", "write_file_line",
+		"send_input", "spawn_pane", "create_schedule", "cancel_schedule",
 		// Gated in the MCP hardening pass — before it, `deny` still left
 		// these callable (including kill_pane).
 		"kill_pane", "rename_pane", "set_pane_flag", "create_workspace", "switch_workspace", "preview_file", "answer_prompt",
@@ -94,89 +94,85 @@ func TestMCPMutationPolicyDoesNotDenyReadOnlyTools(t *testing.T) {
 	}
 }
 
-func TestMCPReadFileReturnsMtimeForWriteGuard(t *testing.T) {
+// read_file, search_files and write_file_line duplicated what every pane
+// agent already has (its own Read, Glob/Grep and Edit), and get_pane_state and
+// get_pane_livecwd folded into list_panes. git_status, read_file and
+// search_files stay for scoped managed agents only
+// (TestMCPFileToolsOnlyForScopedCallers).
+func TestMCPRemovedToolsAreGoneForPanes(t *testing.T) {
+	removed := []string{"read_file", "search_files", "write_file_line", "get_pane_state", "get_pane_livecwd", "git_status"}
+	advertised := map[string]bool{}
+	for _, tool := range mcpToolsForScope(nil) {
+		advertised[tool.Name] = true
+	}
 	path := filepath.Join(t.TempDir(), "notes.txt")
-	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := &apiServer{aria: &Aria{}}
-
-	text, isErr := mcpResultText(t, a.mcpToolReadFile(map[string]any{
-		"path":      path,
-		"max_lines": float64(10),
-	}))
-	if isErr {
-		t.Fatalf("read_file returned error: %q", text)
+	a := &apiServer{aria: &Aria{}, mgr: NewManager("")}
+	for _, name := range removed {
+		if advertised[name] {
+			t.Errorf("%s is still advertised to panes", name)
+		}
+		if mcpPublicToolNames[name] {
+			t.Errorf("%s is still on the public surface", name)
+		}
+		b, _ := json.Marshal(toolCallParams{Name: name, Arguments: map[string]any{
+			"path": path, "line_number": float64(1), "new_text": "changed", "expected_mtime": float64(1), "query": "notes",
+		}})
+		text, isErr := mcpResultText(t, a.mcpCallTool(b, nil, ""))
+		if !isErr || text != "unknown tool: "+name {
+			t.Errorf("%s from a pane = %q (isError=%v), want unknown tool", name, text, isErr)
+		}
 	}
-	var parsed struct {
-		Mtime int64 `json:"mtime"`
+	if data, _ := os.ReadFile(path); string(data) != "one\n" {
+		t.Fatalf("file changed: %q", data)
 	}
-	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		t.Fatalf("read_file result is not JSON: %v (%q)", err, text)
+	for _, name := range soluReadOnlyMCPTools {
+		if !advertised[name] {
+			t.Errorf("auto-approved read-only tool %s is not a tool", name)
+		}
 	}
-	if parsed.Mtime == 0 {
-		t.Fatalf("mtime = 0, want nonzero")
+	for _, tool := range mcpTools() {
+		for _, name := range removed[:5] {
+			if strings.Contains(tool.Description, name) {
+				t.Errorf("%s description still points at %s", tool.Name, name)
+			}
+		}
 	}
 }
 
-func TestMCPWriteFileLineRequiresNonzeroExpectedMtime(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "notes.txt")
-	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0o644); err != nil {
-		t.Fatal(err)
+// git_status, read_file and search_files are for daemon-minted scopes only:
+// a managed agent runs with no shell or file tools of its own, so they are
+// how it reads its repository. A pane's agent has its own git, Read and Grep.
+func TestMCPFileToolsOnlyForScopedCallers(t *testing.T) {
+	// A scope that lists them (the managed-agent read set does; see
+	// TestAgentMintedScopeExposesOnlyReadTools, private).
+	agent := &mcpScope{Identity: "agent:fix", Tools: map[string]bool{"git_status": true, "read_file": true, "search_files": true, "list_panes": true}, Expires: farFuture()}
+	listed := map[string]bool{}
+	for _, tool := range mcpToolsForScope(agent) {
+		listed[tool.Name] = true
 	}
-	a := &apiServer{}
-
-	text, isErr := mcpResultText(t, a.mcpToolWriteFileLine(map[string]any{
-		"path":           path,
-		"line_number":    float64(1),
-		"new_text":       "ONE",
-		"expected_mtime": float64(0),
-	}))
-	if !isErr {
-		t.Fatalf("write_file_line succeeded without mtime guard: %q", text)
+	for _, name := range []string{"git_status", "read_file", "search_files"} {
+		if !listed[name] {
+			t.Errorf("a scope that lists %s doesn't get it", name)
+		}
 	}
-	if !strings.Contains(text, "expected_mtime must be nonzero") {
-		t.Fatalf("error = %q, want nonzero expected_mtime refusal", text)
+	for _, tool := range mcpTools() {
+		if tool.Name == "git_status" || tool.Name == "read_file" || tool.Name == "search_files" {
+			t.Errorf("%s is advertised to panes", tool.Name)
+		}
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	repo := testGitRepo(t)
+	a := &apiServer{aria: &Aria{}, mgr: NewManager("")}
+	b, _ := json.Marshal(toolCallParams{Name: "git_status", Arguments: map[string]any{"path": repo}})
+	if text, isErr := mcpResultText(t, a.mcpCallTool(b, agent, "")); isErr {
+		t.Fatalf("scoped git_status = %q, want a summary", text)
 	}
-	if string(data) != "one\ntwo\n" {
-		t.Fatalf("file changed despite refusal: %q", data)
-	}
-}
-
-func TestMCPWriteFileLineRefusesSensitiveFiles(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{".env", "service.env", "deploy.key", "id_rsa", "api_token.txt"} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte("secret\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		text, isErr := mcpResultText(t, (&apiServer{}).mcpToolWriteFileLine(map[string]any{
-			"path":           path,
-			"line_number":    float64(1),
-			"new_text":       "changed",
-			"expected_mtime": float64(info.ModTime().UnixMilli()),
-		}))
-		if !isErr {
-			t.Fatalf("%s write succeeded, want refusal: %q", name, text)
-		}
-		if !strings.Contains(text, "refusing to access likely") {
-			t.Fatalf("%s error = %q, want sensitive-file refusal", name, text)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(data) != "secret\n" {
-			t.Fatalf("%s changed despite refusal: %q", name, data)
+	other := &mcpScope{Identity: "x", Tools: map[string]bool{"list_panes": true}, Expires: farFuture()}
+	for _, tool := range mcpToolsForScope(other) {
+		if tool.Name == "git_status" || tool.Name == "read_file" || tool.Name == "search_files" {
+			t.Fatalf("a scope without %s lists it", tool.Name)
 		}
 	}
 }

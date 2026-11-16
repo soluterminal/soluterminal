@@ -117,7 +117,7 @@ func registeredWritePatterns(t *testing.T) []string {
 			return true
 		})
 	}
-	if !patterns["/api/panes/{id}/io"] || !patterns["GET /api/panes/{id}/native/ws"] ||
+	if !patterns["/api/panes/{id}/io"] ||
 		!patterns["POST /api/file/line"] || !patterns[jevBridgePath] || !patterns[modelGatewayPrefix+"/"] {
 		t.Fatal("registration inventory is incomplete")
 	}
@@ -153,7 +153,7 @@ func TestRegisteredWritesUseBrowserOriginGate(t *testing.T) {
 				}
 			}
 			path = strings.Join(parts, "/")
-			socket := strings.HasSuffix(path, "/io") || strings.HasSuffix(path, "/native/ws")
+			socket := strings.HasSuffix(path, "/io")
 			if socket {
 				methods = []string{http.MethodGet}
 			}

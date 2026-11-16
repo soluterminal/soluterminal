@@ -21,7 +21,8 @@
 // v30: the pane-mark app icon; icons are served stale-while-revalidate from
 //      this cache, so without a bump the old 2×2 grid lingers for a load.
 // v31: a tapped feedback notification reaches an already-open window.
-const SW_VERSION = 'solu-sw-v31';
+// v32: a push tap opens /?machine=<id>&pane=<id>, not the relay path /m/<id>/.
+const SW_VERSION = 'solu-sw-v32';
 const APP_SHELL_CACHE = 'solu-shell-' + SW_VERSION;
 const NAVIGATION_NETWORK_TIMEOUT_MS = 10000;
 
@@ -326,10 +327,11 @@ self.addEventListener('push', (event) => {
     title = location;
     body = `Claude finished — tap to review${machineLine}`;
   } else if (payload.state === 'schedule-error') {
-    // Schedule pushes (sw v16): payload.title = the schedule's name,
-    // payload.summary = the run detail. paneId carries "sched:<id>" purely
-    // for tag coalescing — the click handler opens the app as usual.
-    title = '⚠️ Schedule failed';
+    // Automation (formerly schedule) pushes (sw v16): payload.title = the
+    // automation's name, payload.summary = the run detail. paneId carries
+    // "sched:<id>" purely for tag coalescing — the click handler opens the
+    // app as usual. Same title as the phone's FCM push (cloud/fcm.go).
+    title = '⚠️ Automation failed';
     body = rawTitle + (summary ? ` — ${summary}` : '') + machineLine;
   } else if (payload.state === 'schedule-fired') {
     title = `⏰ ${rawTitle || 'Automation'}`;
@@ -467,31 +469,35 @@ self.addEventListener('push', (event) => {
 // browsers allow a notification click to focus or open a window.
 const TAP_READY_WAIT_MS = 400;
 
-// Resolves true when the window answers, i.e. the app (its listener in
-// lib/notificationTap.ts) is mounted there. A sign-in screen, the computer
-// picker and a standalone page never answer, and a tap posted to one is lost.
+// Resolves to the window's answer when the app (its listener in
+// lib/notificationTap.ts) is mounted there, else null. A sign-in screen, the
+// computer picker and a standalone page never answer, and a tap posted to one
+// is lost. The answer names the machine the window shows ({ready, machineId});
+// an app from before sw v32 answers the bare string "ready".
 function tapReady(client) {
   return new Promise((resolve) => {
     let timer = 0;
     try {
       const channel = new MessageChannel();
-      const done = (ok) => { clearTimeout(timer); channel.port1.close(); resolve(ok); };
-      channel.port1.onmessage = () => done(true);
-      timer = setTimeout(() => done(false), TAP_READY_WAIT_MS);
+      const done = (reply) => { clearTimeout(timer); channel.port1.close(); resolve(reply); };
+      channel.port1.onmessage = (e) => done(e.data && typeof e.data === 'object' ? e.data : { ready: true });
+      timer = setTimeout(() => done(null), TAP_READY_WAIT_MS);
       client.postMessage({ type: 'solu:notification-tap-ready' }, [channel.port2]);
     } catch {
       clearTimeout(timer);
-      resolve(false);
+      resolve(null);
     }
   });
 }
 
-// The best window that answers: the focused one, then a visible one, then any.
-// Every window is asked at once, so the wait never adds up.
-function readyAppWindow(list) {
+// The best window that answers (and, given a machineId, shows that machine):
+// the focused one, then a visible one, then any. Every window is asked at
+// once, so the wait never adds up.
+function readyAppWindow(list, machineId) {
   const rank = (c) => (c.focused ? 0 : c.visibilityState === 'visible' ? 1 : 2);
   const windows = list.filter((c) => 'focus' in c).sort((a, b) => rank(a) - rank(b));
-  const asked = windows.map((c) => tapReady(c).then((ok) => (ok ? c : null)));
+  const fits = (reply) => !!reply && (machineId === undefined || reply.machineId === machineId);
+  const asked = windows.map((c) => tapReady(c).then((reply) => (fits(reply) ? c : null)));
   return asked.reduce((best, next) => best.then((found) => found || next), Promise.resolve(null));
 }
 
@@ -503,9 +509,14 @@ function readyAppWindow(list) {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const data = event.notification.data || {};
-  const paneQuery = data.paneId ? `?pane=${encodeURIComponent(data.paneId)}` : '';
-  const machinePath = data.machineId ? `/m/${encodeURIComponent(data.machineId)}/` : '/';
-  const targetPath = machinePath + paneQuery;
+  // The app's own page with the machine as a query (cloud.ts
+  // machineIdFromLocation), never "/m/<id>/": a cold load of that path goes to
+  // the relay, which needs the 1h session cookie, so a tap with the app closed
+  // later than that opened a blank "missing bearer token" page (ST-117, sw v32).
+  const targetQuery = new URLSearchParams();
+  if (data.machineId) targetQuery.set('machine', data.machineId);
+  if (data.paneId) targetQuery.set('pane', data.paneId);
+  const targetPath = '/' + (targetQuery.toString() ? '?' + targetQuery.toString() : '');
 
   // No window can take the target as a message: load it from the URL.
   const openAtTarget = (list) => {
@@ -550,6 +561,18 @@ self.addEventListener('notificationclick', (event) => {
         return readyAppWindow(list).then((open) => {
           if (!open) return openAtTarget(list);
           try { open.postMessage({ type: 'solu:notification-tap', paneId: data.paneId }); } catch { /* best effort */ }
+          return open.focus();
+        });
+      }
+      // The cloud app runs at "/", so a window showing the tapped machine is
+      // found by asking, not by its URL: hand it the pane instead of reloading
+      // it. Any other window loads the target from the URL. (sw v32)
+      if (data.machineId) {
+        return readyAppWindow(list, data.machineId).then((open) => {
+          if (!open) return openAtTarget(list);
+          if (data.paneId) {
+            try { open.postMessage({ type: 'solu:notification-tap', paneId: data.paneId, machineId: data.machineId }); } catch { /* best effort */ }
+          }
           return open.focus();
         });
       }

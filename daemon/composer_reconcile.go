@@ -36,7 +36,7 @@ func (p *Pane) reconcileComposerDraft(now time.Time) bool {
 	if atomic.LoadInt64(&p.composerReconcileAfterMs) > now.UnixMilli() {
 		return false
 	}
-	if p.Snapshot().Kind == "native" || p.computeStateCached() == StateChoicePrompt {
+	if p.computeStateCached() == StateChoicePrompt {
 		return false
 	}
 	// Claude only: its input box has a layout that proves emptiness (below).

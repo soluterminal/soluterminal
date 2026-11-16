@@ -106,7 +106,7 @@ describe('onServiceWorkerTapMessage', () => {
     const { port1, port2 } = new MessageChannel();
     const answered = new Promise((resolve) => { port1.onmessage = (e) => resolve(e.data); });
     onServiceWorkerTapMessage(new MessageEvent('message', { data: { type: 'solu:notification-tap-ready' }, ports: [port2] }));
-    expect(await answered).toBe('ready');
+    expect(await answered).toEqual({ ready: true, machineId: null });
     port1.close();
     expect(inbox).toEqual([]);
   });

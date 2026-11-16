@@ -5,6 +5,7 @@ import (
 
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -169,29 +170,23 @@ func TestTeamCloudLLMAllowed(t *testing.T) {
 	}
 }
 
-func TestCodexAgentsPublicBlock(t *testing.T) {
-	prev := codexAgentsPublicPolicy.Load()
-	t.Cleanup(func() { codexAgentsPublicPolicy.Store(prev) })
-
-	codexAgentsPublicPolicy.Store(false)
-	teamBlock := codexAgentsManagedBlock()
-	existing := "user notes\n\n" + teamBlock + "\n"
-
-	codexAgentsPublicPolicy.Store(true)
-	got, changed, ok := codexAgentsApply(existing)
-	if !ok || !changed {
-		t.Fatalf("public sync must replace a team block: changed=%t ok=%t", changed, ok)
+func TestCodexPaneInstructionsPublic(t *testing.T) {
+	home := scratchCodexHome(t)
+	if got := withCodexPaneInstructions([]string{"resume", "t1"}, false, "", home); !reflect.DeepEqual(got, []string{"resume", "t1"}) {
+		t.Fatalf("public pane without a pack must get nothing: %v", got)
 	}
-	if strings.Contains(got, "create_workflow_task") || strings.Contains(got, "workflow") {
-		t.Fatalf("public block still mentions the workflow pipeline:\n%s", got)
+	got := withCodexPaneInstructions(nil, false, "/pack", home)
+	text := codexDevInstructionsForTest(t, got)
+	if text != codexAgentsContextPackLine {
+		t.Fatalf("public pane with a pack = %q", text)
 	}
-	if !strings.Contains(got, "SOLU_CONTEXT_PACK") || !strings.HasPrefix(got, "user notes\n") {
-		t.Fatalf("public block must keep context packs and the user's text:\n%s", got)
+	if strings.Contains(text, "workflow") || strings.Contains(text, "solu-review") {
+		t.Fatalf("public pane got the team brief: %q", text)
 	}
 }
 
 func TestCodexAgentsRemove(t *testing.T) {
-	block := codexAgentsManagedBlock()
+	block := legacyCodexAgentsBlock()
 	got, changed, ok := codexAgentsRemove("user notes\n\n" + block + "\nmore\n")
 	if !ok || !changed || got != "user notes\nmore\n" {
 		t.Fatalf("remove = %q changed=%t ok=%t", got, changed, ok)

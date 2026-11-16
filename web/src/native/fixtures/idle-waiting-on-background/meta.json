@@ -1,1 +1,0 @@
-{"agentMidTurn":false,"pendingCount":0,"paneId":"p","fixtureFormatVersion":1,"description":"the turn settled (turn_end) but a run_in_background shell never reported completion → the agent is parked; idleBackgroundShells=1 drives the metabar 'waiting on N background shell' hint (the 'running or stuck?' fix)"}

@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -29,7 +30,7 @@ import (
 // and never tied to an account, machine or IP. The user can turn it off in
 // Settings (PUT /api/settings/checkin, local-only) or with
 // SOLU_DISABLE_CHECKIN=1 in ~/.solu/env. Development builds (version "dev")
-// never send.
+// and daemons on a CI or test runner (checkinOnCIRunner) never send.
 
 const (
 	checkinInstallIDFile = "checkin_install_id"
@@ -99,12 +100,53 @@ func newInstallCheckin(dataDir, version string, base func() string, signedIn fun
 	return c
 }
 
+// checkinEnvDisabled: SOLU_DISABLE_CHECKIN is set, or the daemon runs on a
+// CI or test runner, which is never a real install (ST-95).
 func checkinEnvDisabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(checkinDisabledEnv))) {
 	case "1", "true", "yes", "on":
 		return true
 	}
-	return false
+	return checkinOnCIRunner(os.Getenv, checkinUsername)
+}
+
+// checkinUsername is a test seam.
+var checkinUsername = currentUsername
+
+// checkinCIRunnerEnv are set in every GitHub Actions job (hosted, larger and
+// Blacksmith runners alike), and inherited by an app a job installs and starts.
+var checkinCIRunnerEnv = []string{"GITHUB_ACTIONS", "RUNNER_OS", "RUNNER_TEMP", "RUNNER_TOOL_CACHE"}
+
+// checkinOnCIRunner reports a CI runner: a GitHub Actions job environment, or
+// the Windows hosted runner's account (runneradmin), which also covers an
+// installed app started outside the job's environment (a logon task, a
+// restart by the updater).
+func checkinOnCIRunner(getenv func(string) string, username func() string) bool {
+	for _, k := range checkinCIRunnerEnv {
+		if strings.TrimSpace(getenv(k)) != "" {
+			return true
+		}
+	}
+	return strings.EqualFold(username(), "runneradmin")
+}
+
+// currentUsername is the account name without a Windows domain prefix ("" when
+// unknown).
+func currentUsername() string {
+	name := ""
+	if u, err := user.Current(); err == nil {
+		name = u.Username
+	}
+	if name == "" {
+		name = os.Getenv("USERNAME")
+	}
+	if name == "" {
+		name = os.Getenv("USER")
+	}
+	if i := strings.LastIndexAny(name, `\/`); i >= 0 {
+		name = name[i+1:]
+	}
+	return strings.TrimSpace(name)
 }
 
 // userEnabled is the persisted setting (default on).

@@ -10,7 +10,6 @@ import (
 // cannot resurrect it.
 func TestMigrateInplaceKeepsSlotAndTombstonesRetiredPane(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SOLU_NATIVE_RENDERER", "1")
 	p := switchTestPane("old", "", []string{"claude"}, "session-migrate")
 	p.ClaudeTranscriptPath = writeTempTranscript(t)
 	p.NeverAutoAnswer = true

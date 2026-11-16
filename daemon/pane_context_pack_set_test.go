@@ -44,7 +44,7 @@ func TestSetPaneContextPackValidationAndGuards(t *testing.T) {
 		agent string
 		cmd   []string
 	}{
-		{"muse", "native", agentMuse, nil},
+		{"muse", "", agentMuse, []string{"muse"}},
 		{"bash", "", "", []string{"bash"}},
 	} {
 		t.Run(tc.name+" unsupported", func(t *testing.T) {
@@ -72,8 +72,8 @@ func TestSetPaneContextPackValidationAndGuards(t *testing.T) {
 
 	t.Run("busy", func(t *testing.T) {
 		dir := makeContextPack(t, "CLAUDE.md")
-		p := switchTestPane("pack_busy", "native", nil, "session")
-		p.nativeInTurn.Store(true)
+		p := switchTestPane("pack_busy", "", []string{"claude"}, "session")
+		markPaneWorking(p)
 		api, spawned, killed := resumeTestServer(t, p)
 		rec := postSetContextPack(api, p.ID, `{"contextPack":"`+dir+`"}`)
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "agent is busy") {
@@ -165,13 +165,6 @@ func TestSetPaneContextPackRespawnRecipes(t *testing.T) {
 			wantCmd: []string{"claude"},
 		},
 		{
-			name: "native claude starts fresh",
-			pane: func(*testing.T) *Pane {
-				return switchTestPane("pack_native", "native", []string{"claude", "-p"}, "")
-			},
-			wantKind: "native", wantCmd: nil,
-		},
-		{
 			name: "codex thread resume kept",
 			pane: func(*testing.T) *Pane {
 				p := switchTestPane("pack_codex", "", []string{"codex"}, "")
@@ -194,7 +187,6 @@ func TestSetPaneContextPackRespawnRecipes(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("SOLU_NATIVE_RENDERER", "1")
 			p := tc.pane(t)
 			api, spawned, killed := resumeTestServer(t, p)
 			requestedPack := pack

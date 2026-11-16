@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -196,6 +197,9 @@ type apiServer struct {
 	// agentAuthority is the person's grant letting agents in panes approve
 	// for them (caller_authority.go).
 	agentAuthority *agentAuthority
+	// devOverrides is the person's switch for the developer paths in a
+	// release build (developer_overrides.go).
+	devOverrides *developerOverrides
 	// trustedDevices decides which remote devices may use the relay
 	// (trusted_devices.go).
 	trustedDevices *trustedDevices
@@ -218,9 +222,6 @@ type apiServer struct {
 	// Controls whether resumable Claude panes are suspended for user action or
 	// background-respawned with `claude --resume` on daemon startup.
 	recoverySettings *recoverySettingsStore
-	// Per-machine native (Focus-renderer) toggles, e.g. the prompt-suggestions
-	// opt-in. Read fresh at every native (re)spawn (Manager.promptSuggestionsEnabled).
-	nativeSettings *nativeSettingsStore
 	// Per-install self-update preference (off | when-idle). The client reads it
 	// to decide whether to auto-apply the daemon swap once safe; the daemon just
 	// persists it (headless auto-apply is a future v2).
@@ -240,6 +241,10 @@ type apiServer struct {
 	// Same as main.go's --data flag; mirrored here so updateApplyShell
 	// has a stable per-user path to write into.
 	dataDir string
+	// sideDaemon is true when this is not the primary daemon (daemon_role.go):
+	// handlers that would rotate the shared provider credentials refuse.
+	// Zero value (primary) keeps focused tests' servers unchanged.
+	sideDaemon bool
 	// Adopt-mode preview registry. Nil in older focused tests and when boot
 	// loading failed; every route still remains hidden unless SOLU_PREVIEWS=1.
 	previews *previewManager
@@ -517,7 +522,6 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/panes/{id}", a.deletePane)
 	mux.HandleFunc("POST /api/panes/{id}/resume", a.handleResumePane)
 	mux.HandleFunc("/api/recovery/settings", a.handleRecoverySettings)
-	mux.HandleFunc("/api/native/settings", a.handleNativeSettings)
 	mux.HandleFunc("/api/update/settings", a.handleUpdateSettings)
 
 	mux.HandleFunc("POST /api/panes/{id}/resize", a.resizePane)
@@ -529,7 +533,6 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/panes/{id}/auto-mode", a.setPaneAutoMode)
 	mux.HandleFunc("POST /api/panes/{id}/never-auto-answer", a.setPaneNeverAutoAnswer)
 	mux.HandleFunc("POST /api/panes/{id}/announce-delegation", a.setPaneAnnounceDelegation)
-	mux.HandleFunc("POST /api/panes/{id}/composer-state", a.setPaneComposerState)
 	mux.HandleFunc("POST /api/panes/{id}/flag", a.setPaneFlag)
 	mux.HandleFunc("GET /api/asks", a.listAsks)
 	mux.HandleFunc("POST /api/asks/{id}/dismiss", a.dismissAsk)
@@ -568,45 +571,13 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	// Debug only: walks /proc, so it must never back a poll.
 	mux.HandleFunc("GET /api/debug/fleet", a.getDebugFleet)
 	mux.HandleFunc("GET /api/panes/{id}/conversation", a.paneConversation)
-	// Native-renderer pane surface (Component 6). SSE stream + ring backfill +
-	// user-turn input. Default-off: all three 409 when the pane isn't native.
-	// Go 1.22 ServeMux: the longer literal /native/history wins over /native for
-	// its path, and method+pattern specificity disambiguates — no conflict.
-	mux.HandleFunc("GET /api/panes/{id}/native", a.paneNativeStream)
-	// WebSocket transport for the native event stream (native_ws.go). Same
-	// payload/ordering as the SSE handler above, but on the WS pool so visible
-	// native panes don't exhaust the browser's ~6 HTTP/1.1 connections-per-host
-	// on the Local desktop. The SSE route is KEPT this release for rollout
-	// safety (old bundles + a one-line client revert path).
-	mux.HandleFunc("GET /api/panes/{id}/native/ws", handleNativeWS(a.mgr))
-	mux.HandleFunc("GET /api/panes/{id}/native/history", a.paneNativeHistory)
-	mux.HandleFunc("POST /api/panes/{id}/native/input", a.paneNativeInput)
-	// Per-pane tool-approval allowlist ("always allow this tool"). GET lists the
-	// current set; POST {tool,action} adds/removes by EXACT tool name. An
-	// allowlisted tool's can_use_tool is auto-allowed on arrival (no pending
-	// card), bypassing the ARIA fire-budget cap (deliberate user opt-in).
-	mux.HandleFunc("GET /api/panes/{id}/native/allowlist", a.paneNativeAllowlistGet)
-	mux.HandleFunc("POST /api/panes/{id}/native/allowlist", a.paneNativeAllowlistPost)
-	// Native approvals: answer a parked can_use_tool permission request
-	// (lock-screen / app). Idempotent — a double-tap returns 200, not 404.
-	mux.HandleFunc("POST /api/panes/{id}/approvals/{reqId}/resolve", a.handlePaneApprovalResolve)
-	mux.HandleFunc("POST /api/panes/{id}/native/interrupt", a.handlePaneNativeInterrupt)
-	// Flip a pane between terminal and native rendering: kill + respawn-with-
-	// resume, rolling back to the original pane if the new one fails to come up
-	// (never leaves a dead Kind=="native" session). Gated by SOLU_NATIVE_RENDERER
-	// for the "native" target.
-	mux.HandleFunc("POST /api/panes/{id}/switch-mode", a.handleSwitchMode)
-	// Restart a native pane's headless agent in place (same id, resume same
-	// Claude session or Codex thread) to reclaim the long-lived process's heap. Native-only,
-	// settle-gated, shares the respawn single-flight. Gated by SOLU_PANE_REFRESH.
-	mux.HandleFunc("POST /api/panes/{id}/refresh", a.handleRefresh)
+	// Phone one-tap on a terminal Claude Code permission menu (ST-265).
+	mux.HandleFunc("POST /api/panes/{id}/choice-prompt/resolve", a.handlePaneChoicePromptResolve)
 	// Restart this pane's agent in place on the installed binary, resuming its
 	// conversation; ?fresh=1 starts a brand-new one. Any pane kind, settle-gated,
 	// shares the respawn single-flight. Also the action behind the per-pane
 	// "older build" dot (paneDTO.agentStale).
 	mux.HandleFunc("POST /api/panes/{id}/restart", a.handleRestartPane)
-	mux.HandleFunc("POST /api/panes/{id}/effort", a.handleSetEffort)
-	mux.HandleFunc("POST /api/panes/{id}/model", a.handleSetModel)
 	mux.HandleFunc("POST /api/panes/{id}/role", a.handleSetRole)
 	mux.HandleFunc("POST /api/panes/{id}/context-pack", a.handleSetContextPack)
 	mux.HandleFunc("GET /api/orchestrator-hosts", a.handleOrchestratorHosts)
@@ -714,11 +685,6 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/schedules/{id}/read", a.markScheduleRead)
 	mux.HandleFunc("GET /api/schedules/{id}/runlog", a.scheduleRunLog)
 
-	// Todos was removed; every old route answers 410 Gone for one release
-	// (daemon/todos_removed.go).
-	mux.HandleFunc("/api/todos", a.todosRemoved)
-	mux.HandleFunc("/api/todos/", a.todosRemoved)
-
 	// Inject raw bytes into a pane's PTY. Powers "Fire now" in the
 	// Schedules UI and is a general-purpose primitive for any future
 	// automation. Same auth as the rest of /api/panes/*.
@@ -808,6 +774,8 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	// can turn them on.
 	mux.HandleFunc("GET /api/settings/agent-authority", a.handleGetAgentAuthority)
 	mux.HandleFunc("PUT /api/settings/agent-authority", a.handlePutAgentAuthority)
+	mux.HandleFunc("GET /api/settings/developer-overrides", a.handleGetDeveloperOverrides)
+	mux.HandleFunc("PUT /api/settings/developer-overrides", a.handlePutDeveloperOverrides)
 	// Remote devices (trusted_devices.go): enrolment and status are reachable
 	// by unapproved devices over the relay; approval and the policy are local.
 	mux.HandleFunc("GET /api/pane-confirmations", a.handleListPaneConfirms)
@@ -887,6 +855,17 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 type cloudStatusResponse struct {
 	cloudStatus
 	Pairing pairingSnapshot `json:"pairing"`
+	// RevokeRefused: after a Disconnect, the cloud refused to remove this
+	// computer from the account (cloud_revoke.go). Shown only while the
+	// computer isn't paired again. A time and a flag only; MachinesURL is
+	// the account page of the cloud that refused.
+	RevokeRefused *revokeRefusedStatus `json:"revokeRefused,omitempty"`
+}
+
+type revokeRefusedStatus struct {
+	Refused     bool   `json:"refused"`
+	At          string `json:"at"`
+	MachinesURL string `json:"machinesUrl"`
 }
 
 // handleCloudStatus returns the relay supervisor's live state plus any in-flight
@@ -902,6 +881,11 @@ func (a *apiServer) handleCloudStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	if a.pairing != nil {
 		resp.Pairing = a.pairing.snapshot()
+	}
+	if !resp.HasCreds {
+		if rec := readCloudRevokeRefused(a.dataDir); rec != nil {
+			resp.RevokeRefused = &revokeRefusedStatus{Refused: true, At: rec.At, MachinesURL: cloudMachinesURL(rec.CloudBase)}
+		}
 	}
 	writeJSON(w, 200, resp)
 }
@@ -988,6 +972,7 @@ func (a *apiServer) handleCloudDisconnect(w http.ResponseWriter, r *http.Request
 	}
 	claim, _ := loadClaimSafe(a.dataDir)
 	token := ""
+	var revoke *pendingCloudRevoke
 	if claim != nil {
 		token = claim.Token
 		// Queue the revoke before deleting the token: if this fails we keep
@@ -996,7 +981,7 @@ func (a *apiServer) handleCloudDisconnect(w http.ResponseWriter, r *http.Request
 		if a.pairing != nil {
 			fallbackRelay = a.pairing.relayURL
 		}
-		revoke := cloudRevokeFromClaim(claim, fallbackRelay, time.Now())
+		revoke = cloudRevokeFromClaim(claim, fallbackRelay, time.Now())
 		if err := a.queueCloudRevoke(revoke); err != nil {
 			http.Error(w, "could not queue the cloud revoke: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1018,7 +1003,24 @@ func (a *apiServer) handleCloudDisconnect(w http.ResponseWriter, r *http.Request
 	if a.cloudSup != nil {
 		a.cloudSup.signalTokenChanged()
 	}
-	w.WriteHeader(http.StatusOK)
+	// The token is gone; now say whether the account removed the computer.
+	// Wait up to a few seconds for the first send; anything slower carries
+	// on in the background (cloud_revoke.go).
+	if revoke == nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	clearCloudRevokeRefused(a.dataDir) // an earlier refusal is about an old pairing
+	outcome := revokePending
+	if a.cloudRevoker != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), cloudRevokeDisconnectWait)
+		outcome = a.cloudRevoker.attempt(ctx, *revoke)
+		cancel()
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"cloudRemoval": string(outcome),
+		"machinesUrl":  cloudMachinesURL(revoke.CloudBase),
+	})
 }
 
 // handleEnterGap returns the resolved (env-overridden, else default) PTY
@@ -1050,6 +1052,10 @@ func (a *apiServer) liveHealthIdentity() map[string]any {
 		"version":   a.ver,
 		"pid":       os.Getpid(),
 		"backendID": a.backendID,
+		// goos is the daemon's own OS (runtime.GOOS), so a phone or another
+		// client can tell a Windows-native daemon apart (ST-158). backendID
+		// and shellPlatform describe the launcher and the desktop host.
+		"goos": runtime.GOOS,
 	}
 	if identity := a.serviceDaemonIdentity(); identity != "" {
 		body["daemonIdentity"] = identity
@@ -1076,13 +1082,17 @@ func (a *apiServer) health(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, body)
 		return
 	}
-	// Capability bits only. Never expose the token, the key or a path.
-	relay, pushedKey := false, false
+	// Capability bits and a fixed reason code only. Never expose the token,
+	// the key, a path or free text (docs/shinoque-windows-relay.md "Health").
+	relay, pushedKey, relayReason := false, false, shinoqueRelayReasonNoKey
 	if a.shinoqueTokens != nil {
-		relay, pushedKey = a.shinoqueTokens.relayCapability()
+		relay, pushedKey, relayReason = a.shinoqueTokens.relayCapability(a.backendID)
 	}
 	body["shinoqueRelay"] = relay
 	body["shinoqueRelayKey"] = pushedKey
+	if !relay {
+		body["shinoqueRelayReason"] = relayReason
+	}
 	body["build"] = buildProvenance()
 
 	exe, _ := os.Executable()
@@ -1111,10 +1121,13 @@ func (a *apiServer) health(w http.ResponseWriter, r *http.Request) {
 	// Named capabilities of this build (daemon_features.go) — clients gate
 	// features on these instead of comparing versions.
 	body["features"] = daemonFeatures
-	// Focus (native) renderer availability: clients hide every Focus entry
-	// point when false (the default since Focus was retired).
-	body["focusEnabled"] = nativeRendererEnabled()
 	body["workflowEngineAvailable"] = false
+	// The person's stop on agent-to-agent messaging (agent_messaging_pause.go).
+	body["agentMessagingPaused"] = agentMessagingPaused()
+	if w := agentMessagingWarning(); w != "" {
+		body["agentMessagingWarning"] = w
+		body["agentMessagingWarningKind"] = agentMessagingWarningKind(w)
+	}
 	body["workflowBoot"] = map[string]any{"state": "retired", "ready": true}
 	ms := a.currentMuseStatus()
 	body["museChecked"] = ms.checked
@@ -1202,18 +1215,11 @@ type paneDTO struct {
 	// healthy and undetectable panes look identical on the wire.
 	Degraded       bool   `json:"degraded,omitempty"`
 	DegradedReason string `json:"degradedReason,omitempty"`
-	// SwitchNotice is set when the most recent Terminal↔Native mode switch
-	// INTERRUPTED an in-flight turn, so the client can show a "previous response
-	// interrupted — Continue" marker. null/omitted when there's no outstanding
-	// notice. Cleared on the next user turn (or explicit ack). Shape:
-	// {"interrupted":true,"fromKind":"native"|"terminal","at":<unixMillis>}.
+	// SwitchNotice is set when a resume repaired a cut-off response or dropped
+	// a --resume (see switchNotice), so the client can show a banner.
+	// null/omitted when there's no outstanding notice. Cleared on the next user
+	// turn (or explicit ack).
 	SwitchNotice *switchNotice `json:"switchNotice,omitempty"`
-	// PendingSwitch is set when a DEFERRED Terminal↔Native switch is armed but
-	// not yet fired (waiting for the agent's current turn to settle). null/omitted
-	// when none is armed. Shape: {"target":"native"|"terminal","at":<unixMillis>}.
-	// target is the destination kind, with the empty terminal kind normalized to
-	// "terminal" (mirroring switchNotice.fromKind).
-	PendingSwitch *pendingSwitchDTO `json:"pendingSwitch,omitempty"`
 	// DelegatedPending is the durable delegation queue summarized for the pane
 	// header. It is omitted while no updates are buffered.
 	DelegatedPending *delegatedPendingDTO `json:"delegatedPending,omitempty"`
@@ -1241,6 +1247,10 @@ type paneDTO struct {
 	// ones already running in it cannot reach their account) until the
 	// terminal is restarted.
 	TerminalAddressLost bool `json:"terminalAddressLost,omitempty"`
+	// AddressLost: this agent pane was started before the Backend setting
+	// moved this daemon's port, so its SoluTerminal tools and hooks still call
+	// the old address until it is restarted (pane_address_moved.go).
+	AddressLost bool `json:"addressLost,omitempty"`
 	// ClaudeRssMB is a compatibility alias for clients loaded before AgentRssMB
 	// shipped. Emit both during the rolling update; new clients prefer AgentRssMB.
 	ClaudeRssMB int `json:"claudeRssMB,omitempty"`
@@ -1251,12 +1261,6 @@ type paneDTO struct {
 	// transcript has been read at least once (opened, or a completed turn) — the
 	// client's list subtitle prefers titleOverride, then this, then last-prompt.
 	AITitle string `json:"aiTitle,omitempty"`
-	// PendingApproval surfaces the pane's SINGLE open native tool-permission so a
-	// client can render Approve/Deny instantly (no /native/history fetch) and a
-	// push can carry the requestId for a one-tap resolve. Set only for a native
-	// pane with exactly one open approval — resolution needs a concrete requestId
-	// and an arbitrary pick among parallel approvals could answer the wrong tool.
-	PendingApproval *approvalHintDTO `json:"pendingApproval,omitempty"`
 	// ResumeReady gates the header "resume" badge: true only when this pane's
 	// captured claudeSessionId has a transcript actually on disk. The id is pinned
 	// at SessionStart — BEFORE the transcript is written (a brand-new claude writes
@@ -1268,43 +1272,9 @@ type paneDTO struct {
 	// temporarily unverifiable. Both providers' durable IDs remain stored for
 	// recovery but are hidden from this DTO, and renderer switching is refused.
 	IdentityBlocked bool `json:"identityBlocked,omitempty"`
-	// NativeEpoch is the daemon's per-process id (daemonEpoch). It changes only when
-	// the daemon restarts — exactly when every native pane's event ring is rebuilt
-	// from seq 1 by AttachExisting while the surviving agent keeps its pid. A native
-	// client resets + re-seeds its fold cache on an epoch change (the same reset a
-	// pid respawn triggers), so a mid-turn daemon swap reattaches LOSSLESSLY instead
-	// of jumbling the re-seq'd replay against the surviving client cursor. omitempty:
-	// an older daemon omits it → the client sees undefined and never false-resets (it
-	// resets only on a defined→defined change).
-	NativeEpoch uint64 `json:"nativeEpoch,omitempty"`
-	// WorkflowStatus surfaces a background Claude Code Workflow still running after
-	// the launching turn ended — the Workflow tool returns immediately + notifies on
-	// completion, so nativeInTurn settles to idle while subagents keep churning and
-	// the pane would otherwise look done. Present only while the pane's
-	// nativeWorkflowActive latch is set (Workflow tool_call seen, not yet cleared by
-	// the next turn). The client renders a "workflow · N/M agents · active Xs ago"
-	// footer line and infers stalled-vs-working from lastActivityMs. omitted (nil)
-	// when no workflow is running, so it costs absent panes nothing. See
-	// pane_provider_status.go.
-	WorkflowStatus *workflowStatus `json:"workflowStatus,omitempty"`
 	// Turn summarizes terminal-mode agent turns (turns.go): whether one is
 	// running and since when, plus the last completed turn's change stats.
 	Turn *paneTurnDTO `json:"turn,omitempty"`
-}
-
-// approvalHintDTO is the wire shape of a pane's single open native approval.
-type approvalHintDTO struct {
-	RequestID string `json:"requestId"`
-	ToolName  string `json:"toolName"`
-	Summary   string `json:"summary,omitempty"`
-}
-
-// pendingSwitchDTO is the wire shape of an armed deferred mode switch. Target is
-// normalized ("" → "terminal") so the client never sees the empty kind. At is
-// the arm time in unix millis.
-type pendingSwitchDTO struct {
-	Target string `json:"target"`
-	At     int64  `json:"at"`
 }
 
 type delegatedPendingDTO struct {
@@ -1352,9 +1322,9 @@ func sweepCodexIdentities(mgr *Manager) {
 	tree := snapshotProcessTree()
 	for _, p := range mgr.List() {
 		snap := p.Snapshot()
-		// Native panes learn identity over their protocol. Exited panes have
-		// no processes to scan, but their failed durable writes still need retry.
-		if snap.Status == PaneRunning && snap.Kind != "native" {
+		// Exited panes have no processes to scan, but their failed durable
+		// writes still need retry.
+		if snap.Status == PaneRunning {
 			snapshotPaneProcessesFromTree(p, tree)
 		}
 		// Retry durable identity writes even when discovery sees the same ID.
@@ -1436,62 +1406,59 @@ func snapshotPaneProcessesFromTree(p *Pane, tree processTreeSnapshot) paneProces
 	// subagent, malformed, outside-CODEX_HOME, and multi-candidate cases.
 	// Background descendants do not own the pane. The foreground provider may
 	// replace a previously persisted provider/thread when a shell is reused.
-	identity := p.Snapshot()
-	if identity.Kind != "native" {
-		museID, foregroundMuse := discoverMuseIdentity(p.ID, musePids)
-		codexIdentity := discoverCodexIdentity(p.ID, codexPids)
-		foregroundCodex := codexIdentity.active
-		// Codex discovery performs bounded filesystem I/O, so sample Claude
-		// foreground ownership afterwards to minimize provider-handoff races.
-		foregroundClaude := false
-		for _, pid := range claudePids {
-			if paneDescendantIsForeground(pid) {
-				foregroundClaude = true
-				break
-			}
+	museID, foregroundMuse := discoverMuseIdentity(p.ID, musePids)
+	codexIdentity := discoverCodexIdentity(p.ID, codexPids)
+	foregroundCodex := codexIdentity.active
+	// Codex discovery performs bounded filesystem I/O, so sample Claude
+	// foreground ownership afterwards to minimize provider-handoff races.
+	foregroundClaude := false
+	for _, pid := range claudePids {
+		if paneDescendantIsForeground(pid) {
+			foregroundClaude = true
+			break
 		}
+	}
+	switch {
+	case foregroundMuse:
+		// Never resume an old Codex/Claude conversation over a manually
+		// launched Muse. An unverified foreground identity blocks replacement.
+		if foregroundCodex || foregroundClaude {
+			museID = ""
+		}
+		adoptForegroundMuse(p, museID)
+	case foregroundCodex && !foregroundClaude:
 		switch {
-		case foregroundMuse:
-			// Never resume an old Codex/Claude conversation over a manually
-			// launched Muse. An unverified foreground identity blocks replacement.
-			if foregroundCodex || foregroundClaude {
-				museID = ""
-			}
-			adoptForegroundMuse(p, museID)
-		case foregroundCodex && !foregroundClaude:
-			switch {
-			case codexIdentity.threadID != "":
-				adoptDiscoveredCodexThread(p, codexIdentity.threadID)
-			case codexIdentity.fresh:
-				adoptFreshCodexIdentity(p)
-			case codexIdentity.resumeThreadID != "":
-				// An explicit `codex resume <uuid>` from a user shell is itself
-				// a strong identity claim once the process, pane ownership and
-				// foreground checks above have passed.  Previously this branch
-				// required the pane to already carry the same durable id, which
-				// only held for SOLU-created Terminal↔Focus switches and left a
-				// manually resumed shell stuck as an untracked `shell` pane.
-				// The rollout is still validated by the actual resume/restart
-				// path; this early adoption only lets the DTO converge and show
-				// the copyable resume identity.
-				adoptResumingCodexIdentity(p, codexIdentity.resumeThreadID)
-			default:
-				adoptDiscoveredCodexThread(p, "")
-			}
-		case foregroundClaude && !foregroundCodex:
-			adoptForegroundClaude(p)
-		case !foregroundCodex && !foregroundClaude:
-			if p.Snapshot().Status == PaneExited {
-				break
-			}
-			// A transient unidentified-Codex block must not outlive the process;
-			// once the shell is foreground again, its last known thread is safe to
-			// offer as resumable continuity.
-			p.setCodexIdentityBlocked(false)
-		case foregroundCodex && foregroundClaude:
-			// Ambiguous foreground ownership: retain durable metadata, expose none.
-			p.setCodexIdentityBlocked(true)
+		case codexIdentity.threadID != "":
+			adoptDiscoveredCodexThread(p, codexIdentity.threadID)
+		case codexIdentity.fresh:
+			adoptFreshCodexIdentity(p)
+		case codexIdentity.resumeThreadID != "":
+			// An explicit `codex resume <uuid>` from a user shell is itself
+			// a strong identity claim once the process, pane ownership and
+			// foreground checks above have passed.  Previously this branch
+			// required the pane to already carry the same durable id, which
+			// only held for SOLU-created Terminal↔Focus switches and left a
+			// manually resumed shell stuck as an untracked `shell` pane.
+			// The rollout is still validated by the actual resume/restart
+			// path; this early adoption only lets the DTO converge and show
+			// the copyable resume identity.
+			adoptResumingCodexIdentity(p, codexIdentity.resumeThreadID)
+		default:
+			adoptDiscoveredCodexThread(p, "")
 		}
+	case foregroundClaude && !foregroundCodex:
+		adoptForegroundClaude(p)
+	case !foregroundCodex && !foregroundClaude:
+		if p.Snapshot().Status == PaneExited {
+			break
+		}
+		// A transient unidentified-Codex block must not outlive the process;
+		// once the shell is foreground again, its last known thread is safe to
+		// offer as resumable continuity.
+		p.setCodexIdentityBlocked(false)
+	case foregroundCodex && foregroundClaude:
+		// Ambiguous foreground ownership: retain durable metadata, expose none.
+		p.setCodexIdentityBlocked(true)
 	}
 	// Managed terminal harnesses (DeepSeek today) write their durable session
 	// to a per-pane sidecar; adopt it so the resume paths and panes.json see a
@@ -1544,19 +1511,6 @@ func adoptForegroundClaude(p *Pane) bool {
 	return true
 }
 
-// approvalHint returns the pane's single open native approval as a wire hint, or
-// nil when there are zero or multiple — resolution needs a concrete requestId,
-// and an arbitrary pick among parallel approvals could answer the wrong tool.
-// Cheap: listNativePending returns nil before sorting for every terminal pane.
-func approvalHint(p *Pane) *approvalHintDTO {
-	pending := p.listNativePending()
-	if len(pending) != 1 {
-		return nil
-	}
-	title, preview := nativeApprovalSummary(pending[0])
-	return &approvalHintDTO{RequestID: pending[0].RequestID, ToolName: title, Summary: preview}
-}
-
 func makePaneDTO(p *Pane, aria *Aria, att *attentionEngine) paneDTO {
 	proc := snapshotPaneProcesses(p)
 	return makePaneDTOWithProcessSnapshot(p, aria, att, proc)
@@ -1580,6 +1534,7 @@ func makePaneDTOWithProcessSnapshot(p *Pane, aria *Aria, att *attentionEngine, p
 			c.ConnectionLost = true
 		}
 		d.TerminalAddressLost = d.Kind == "" && paneRoute.terminalLost != nil && paneRoute.terminalLost(p.ID)
+		d.AddressLost = paneAddressLost(p.ID)
 	}
 	// Capability badges must not hinge on the live process scan alone: it
 	// misses whenever a client argv is unreadable or hasn't appeared yet,
@@ -1626,24 +1581,9 @@ func makePaneDTOWithProcessSnapshot(p *Pane, aria *Aria, att *attentionEngine, p
 		d.AgentVersion = version
 		d.AgentStale = d.Status == PaneRunning && agentProtoStale(proto)
 	}
-	// Per-SPAWN id: a change is a native client's only signal that its event ring
-	// was rebuilt from seq 1 — on a daemon restart/swap (surviving agent, same pid)
-	// AND on a Term↔Focus respawn (new agent, same daemon). It resets + re-seeds on
-	// the change for a lossless reattach / non-blank switch. ensureNative stamps it;
-	// a terminal pane (never ensureNative'd) reads 0, so fall back to daemonEpoch.
-	d.NativeEpoch = p.nativeEpoch.Load()
-	if d.NativeEpoch == 0 {
-		d.NativeEpoch = daemonEpoch
-	}
 	// Cheap atomic load — the title is warmed off the request path, never
 	// scanned from the transcript here (keeps the list hot path I/O-free).
 	d.AITitle = p.AITitleCache()
-	// Single open native approval → instant Approve/Deny on the client + a
-	// one-tap-resolvable push (nil for terminal + parallel-approval panes).
-	d.PendingApproval = approvalHint(p)
-	// Background-workflow footer signal. nil unless this native pane has a Workflow
-	// latched (gated on one atomic load), so non-workflow panes do no filesystem I/O.
-	d.WorkflowStatus = paneWorkflowStatus(p)
 	// Gate the header "resume" badge on the transcript actually existing — the id
 	// is captured at SessionStart before the file is written. One os.Stat, never a
 	// transcript walk (claudeTranscriptOnDisk); only when an id is present.
@@ -1671,16 +1611,6 @@ func makePaneDTOWithProcessSnapshot(p *Pane, aria *Aria, att *attentionEngine, p
 	// interrupted an in-flight turn) for EVERY pane; the client only renders it
 	// for native panes. Omitted (nil) when there's no outstanding notice.
 	d.SwitchNotice = p.switchNoticeSnapshot()
-	// Surface an armed-but-not-yet-fired deferred switch so the client can show a
-	// "switching after this turn" affordance / offer cancel. target normalized
-	// "" → "terminal" (mirrors switchNotice.fromKind). Omitted when none armed.
-	if pend := p.pendingSwitchSnapshot(); pend != nil {
-		target := pend.Target
-		if target == "" {
-			target = "terminal"
-		}
-		d.PendingSwitch = &pendingSwitchDTO{Target: target, At: pend.RequestedAt}
-	}
 	if pending := p.delegationPendingSnapshot(); pending != nil {
 		d.DelegatedPending = &delegatedPendingDTO{
 			Count: pending.Count, NeedsYou: pending.NeedsYou, OldestAt: pending.OldestAt.UnixMilli(),
@@ -1753,25 +1683,18 @@ type createPaneReq struct {
 	Workspace       string   `json:"workspace,omitempty"`
 	WorkspaceTarget string   `json:"workspaceTarget,omitempty"`
 	WorkspaceSplit  string   `json:"workspaceSplit,omitempty"`
-	// Kind opts a pane into native-renderer mode ("native"). Default ""
-	// (terminal) keeps today's byte-identical behavior. Gated by the global
-	// SOLU_NATIVE_RENDERER env flag — a native request is rejected (400) when
-	// the feature is off, so terminal panes are entirely unaffected.
+	// Kind is the retired renderer selector. Only "" (terminal) is accepted; a
+	// saved Focus pane's "native" is converted by retireNativeCreateRequest.
 	Kind string `json:"kind,omitempty"`
-	// Agent selects the agent protocol independently from the renderer. Omitted
-	// or "claude" keeps the legacy Claude path; "codex" selects the Codex
-	// app-server protocol and "muse" the Muse Spark protocol for Focus panes.
+	// Agent selects the agent. Omitted or "claude" keeps the legacy Claude
+	// path; "codex" and "muse" select those CLIs.
 	Agent         string `json:"agent,omitempty"`
 	CodexThreadID string `json:"codexThreadId,omitempty"`
 	// MuseSessionID, when set, resumes an existing Muse session (`muse
-	// resume <id>` for terminal panes; the native adapter passes it as
-	// `muse exec --session-id`). Empty = a fresh session.
+	// resume <id>`). Empty = a fresh session.
 	MuseSessionID string `json:"museSessionId,omitempty"`
 	// ClaudeSessionID, when set, resumes an existing Claude conversation:
-	// the pane spawns `claude [-p] --resume <id>`, and a native pane also
-	// seeds its transcript history (GET /native/history) from it. Empty =
-	// a fresh session. This is how you open an existing conversation
-	// directly in native mode.
+	// the pane spawns `claude --resume <id>`. Empty = a fresh session.
 	ClaudeSessionID string `json:"claudeSessionId,omitempty"`
 	// Provider routes the pane's claude to "glm" (Z.ai) instead of Anthropic
 	// (""/"anthropic"). This is a NAME only — the daemon resolves the Z.ai key
@@ -1784,12 +1707,12 @@ type createPaneReq struct {
 	Effort string `json:"effort,omitempty"`
 	// Model sets the pane's Claude model (--model id, e.g. "claude-fable-5-1").
 	// "" keeps claude's default (fresh session) or the session's stored model
-	// (resume). Native panes only care; a terminal pane ignores it.
+	// (resume).
 	Model string `json:"model,omitempty"`
 	// Role sets the pane's product role: "" (plain) or "orchestrator" — the
 	// chief-of-staff pane spawned with the delegation brief. Valid for a
-	// supported Claude or Codex host: native, or a terminal command running the
-	// selected host.
+	// supported Claude or Codex host: a terminal command running the selected
+	// host.
 	Role string `json:"role,omitempty"`
 	// ContextPack names an absolute or ~-prefixed directory containing
 	// CLAUDE.md and/or AGENTS.md. Empty inherits the workspace default; the
@@ -1838,6 +1761,10 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 	if req.NeverAutoAnswer && !a.requireHuman(w, r, "restore pane automatic-answer lock") {
 		return
 	}
+	if err := retireNativeCreateRequest(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if req.Restore {
 		if err := preparePaneRestore(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1858,11 +1785,7 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 		workspace = resolved
 	}
 	kind := strings.TrimSpace(req.Kind)
-	if kind == "native" && !nativeRendererEnabled() {
-		http.Error(w, "native renderer is disabled: Focus mode has been retired — open a terminal pane instead", 400)
-		return
-	}
-	if kind != "" && kind != "native" {
+	if kind != "" {
 		http.Error(w, "unknown pane kind: "+kind, 400)
 		return
 	}
@@ -1883,11 +1806,11 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent is claude but command starts Muse", http.StatusBadRequest)
 		return
 	}
-	if kind != "native" && effectiveAgentKind(agent) == agentCodex && !cmdRunsCodex(req.Cmd) {
+	if effectiveAgentKind(agent) == agentCodex && !cmdRunsCodex(req.Cmd) {
 		http.Error(w, "agent is codex but command does not start Codex", http.StatusBadRequest)
 		return
 	}
-	if kind != "native" && effectiveAgentKind(agent) == agentMuse && !cmdStartsMuse(req.Cmd) {
+	if effectiveAgentKind(agent) == agentMuse && !cmdStartsMuse(req.Cmd) {
 		http.Error(w, "agent is muse but command does not start Muse", http.StatusBadRequest)
 		return
 	}
@@ -1921,10 +1844,8 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 	}
 	if role != "" {
 		agentForRole := effectiveAgentKind(agent)
-		if kind != "native" {
-			if fromCmd := agentFromCmd(req.Cmd); fromCmd != "" {
-				agentForRole = fromCmd
-			}
+		if fromCmd := agentFromCmd(req.Cmd); fromCmd != "" {
+			agentForRole = fromCmd
 		}
 		if !orchestratorHostSupported(agentForRole) {
 			label := orchestratorHostLabel(agentForRole)
@@ -1935,7 +1856,7 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		host, _ := orchestratorHostFor(agentForRole)
-		if kind != "native" && !host.runsCmd(req.Cmd) {
+		if !host.runsCmd(req.Cmd) {
 			http.Error(w, "orchestrator role requires a claude or codex command", http.StatusBadRequest)
 			return
 		}
@@ -2002,7 +1923,6 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 		Title:                        req.Title,
 		Cols:                         req.Cols,
 		Rows:                         req.Rows,
-		Kind:                         kind,
 		Agent:                        agent,
 		CodexThreadID:                strings.TrimSpace(req.CodexThreadID),
 		MuseSessionID:                strings.TrimSpace(req.MuseSessionID),

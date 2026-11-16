@@ -12,7 +12,7 @@ import (
 // Only consult the screen for single keys; ordinary typing and paste keep the
 // existing recorder path. Never clear a draft that predates the menu.
 func terminalPermissionShortcut(p *Pane, b []byte) bool {
-	if p == nil || p.buffer == nil || len(b) != 1 || p.Snapshot().Kind == "native" {
+	if p == nil || p.buffer == nil || len(b) != 1 {
 		return false
 	}
 	key := b[0]

@@ -2,7 +2,8 @@ import { cleanup, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   __recomputeEmbedForTests, embedParentOrigin, getEmbedTheme, installEmbedBridge,
-  isEmbedded, matchesHostKey, openEmbedUrl, parseHostMessage, sendEmbedNotification, sendEmbedReady,
+  isEmbedded, matchesHostKey, openEmbedUrl, parseHostMessage, sendEmbedClaimRefused, sendEmbedNotification,
+  sendEmbedReady, sendEmbedScreenApproval,
 } from './embed';
 import { DesktopInstallerLink } from './components/DesktopInstallerLink';
 import { useStore } from './store';
@@ -372,4 +373,60 @@ it('hides installer chrome only in embed mode', () => {
   __recomputeEmbedForTests({ ...base, framed: false });
   rerender(<DesktopInstallerLink>Download desktop app</DesktopInstallerLink>);
   expect(container).not.toBeEmptyDOMElement();
+});
+
+// ST-248: what the frame tells Shinoque about typing and this screen's
+// approval, and the one thing Shinoque may ask for.
+describe('approval events', () => {
+  const env = { source: 'soluterminal', v: 1 };
+
+  it('claim-refused carries only a known reason', () => {
+    const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
+    sendEmbedClaimRefused('not-person');
+    sendEmbedClaimRefused('owner-active');
+    sendEmbedClaimRefused('bogus' as never);
+    expect(post.mock.calls).toEqual([
+      [{ ...env, kind: 'claim-refused', reason: 'not-person' }, origin],
+      [{ ...env, kind: 'claim-refused', reason: 'owner-active' }, origin],
+    ]);
+  });
+
+  it('screen-approval is sent on change only, with the state and nothing else', () => {
+    const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
+    sendEmbedScreenApproval('none');
+    sendEmbedScreenApproval('none');
+    sendEmbedScreenApproval('pending');
+    sendEmbedScreenApproval('bogus' as never);
+    sendEmbedScreenApproval('approved');
+    expect(post.mock.calls).toEqual([
+      [{ ...env, kind: 'screen-approval', state: 'none' }, origin],
+      [{ ...env, kind: 'screen-approval', state: 'pending' }, origin],
+      [{ ...env, kind: 'screen-approval', state: 'approved' }, origin],
+    ]);
+  });
+
+  it('sends nothing outside an embed', () => {
+    __recomputeEmbedForTests({ ...base, framed: false });
+    const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
+    sendEmbedClaimRefused('not-person');
+    sendEmbedScreenApproval('approved');
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('approve-screen from the exact parent becomes a frame event; anything else is ignored', () => {
+    const approve = { source: 'shinoque', v: 1, kind: 'approve-screen' };
+    expect(parseHostMessage(host(approve))).toEqual({ kind: 'approve-screen' });
+    expect(parseHostMessage(host({ ...approve, code: 'X' }))).toEqual({ kind: 'approve-screen' });
+    expect(parseHostMessage(host(approve, 'http://localhost:4700'))).toBeNull();
+    expect(parseHostMessage(host(approve, origin, null))).toBeNull();
+    expect(parseHostMessage(host({ ...approve, source: 'other' }))).toBeNull();
+    const seen = vi.fn();
+    window.addEventListener('solu:embed-approve-screen', seen);
+    stop = installEmbedBridge(() => {});
+    window.dispatchEvent(host(approve, 'http://localhost:4700'));
+    expect(seen).not.toHaveBeenCalled();
+    window.dispatchEvent(host(approve));
+    expect(seen).toHaveBeenCalledTimes(1);
+    window.removeEventListener('solu:embed-approve-screen', seen);
+  });
 });

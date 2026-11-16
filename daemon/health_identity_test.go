@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -89,7 +90,10 @@ func TestHealthIdentityIsAuthenticatedAndSkipsFullHealthDecoration(t *testing.T)
 	if body["updateHoldVersion"] != "0.0.1131" {
 		t.Fatalf("identity rollback hold = %#v", body["updateHoldVersion"])
 	}
-	if len(body) != 5 {
+	if body["goos"] != runtime.GOOS {
+		t.Fatalf("identity goos = %#v, want %q", body["goos"], runtime.GOOS)
+	}
+	if len(body) != 6 {
 		t.Fatalf("identity included full-health fields: %#v", body)
 	}
 	if calls := platform.calls.Load(); calls != 0 {
@@ -119,7 +123,7 @@ func TestOrdinaryHealthRetainsFullPayloadWithoutFleet(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"status", "version", "pid", "backendID", "uptimeSec", "panes", "shellVersion", "binaryPath"} {
+	for _, field := range []string{"status", "version", "pid", "backendID", "goos", "uptimeSec", "panes", "shellVersion", "binaryPath"} {
 		if _, ok := body[field]; !ok {
 			t.Fatalf("ordinary health omitted %q: %#v", field, body)
 		}

@@ -187,11 +187,13 @@ func TestAgentFanoutConnectionBehindWholeRingResumesAtOldest(t *testing.T) {
 
 	// Wait until the stream reaches the newest byte.
 	var got []byte
+	var pieces [][]byte
 	deadline := time.After(5 * time.Second)
 	for !bytes.HasSuffix(got, all[len(all)-ringSize:]) {
 		select {
 		case b := <-ch:
 			got = append(got, b...)
+			pieces = append(pieces, b)
 		case <-deadline:
 			t.Fatalf("stream never reached the newest output (got %d bytes)", len(got))
 		}
@@ -199,8 +201,19 @@ func TestAgentFanoutConnectionBehindWholeRingResumesAtOldest(t *testing.T) {
 	if len(got) > len(all) {
 		t.Fatalf("got %d bytes, more than the %d written", len(got), len(all))
 	}
-	if !bytes.HasPrefix(all, got[:min(len(got), 512)]) && !bytes.Contains(all, got[:min(len(got), 512)]) {
-		t.Fatal("stream start is not output that was written")
+	// A connection that fell behind skips what the ring overwrote, so the
+	// stream may jump between pieces (even inside its first 512 bytes, when the
+	// first read found one short write). Each piece is one read of the ring and
+	// must be output that was written, in one piece, after the piece before it.
+	// Searching from the previous piece's end finds a match no later than the
+	// true one, so a correct stream always passes.
+	pos := 0
+	for i, piece := range pieces {
+		at := bytes.Index(all[pos:], piece)
+		if at < 0 {
+			t.Fatalf("piece %d of %d (%d bytes) is not output written after the piece before it", i, len(pieces), len(piece))
+		}
+		pos += at + len(piece)
 	}
 }
 

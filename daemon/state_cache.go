@@ -39,16 +39,6 @@ type stateCache struct {
 	// the primary "has the output advanced" signal.
 	totalWritten int64
 
-	// nativePending mirrors the hasNativePending() short-circuit at the very
-	// top of computeState. For native panes the parser goroutine can set or
-	// clear a pending permission request asynchronously (off the readLoop),
-	// so this can flip with NO change to totalWritten. Including it in the
-	// key makes a native approval surface (or clear) on the very next watcher
-	// tick instead of waiting up to the TTL — preserving the exact prior
-	// behavior. For terminal panes (Kind=="") it is always false: one cheap
-	// atomic load, no effect.
-	nativePending bool
-
 	// computedAt retains time.Now's monotonic clock for the in-memory TTL.
 	// Wall-clock corrections must not extend the lifetime of a cached state.
 	computedAt time.Time
@@ -110,7 +100,6 @@ const stateCacheTTL = 1000 * time.Millisecond
 func (p *Pane) computeStateCached() PaneRuntimeState {
 	c := &p.stateCacheData
 	written := p.buffer.TotalWritten()
-	nativePending := p.hasNativePending()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -119,7 +108,6 @@ func (p *Pane) computeStateCached() PaneRuntimeState {
 
 	if c.valid &&
 		c.totalWritten == written &&
-		c.nativePending == nativePending &&
 		elapsed >= 0 && elapsed < stateCacheTTL {
 		return c.state
 	}
@@ -131,7 +119,6 @@ func (p *Pane) computeStateCached() PaneRuntimeState {
 	c.valid = true
 	c.state = state
 	c.totalWritten = written
-	c.nativePending = nativePending
 	c.computedAt = now
 	c.computedAtMs = now.UnixMilli()
 	return state

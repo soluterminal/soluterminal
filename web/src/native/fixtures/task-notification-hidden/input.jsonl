@@ -1,3 +1,0 @@
-{"seq":1,"paneId":"p","type":"user_text","text":"add a feature"}
-{"seq":2,"paneId":"p","type":"text","messageId":"m1","text":"On it."}
-{"seq":3,"paneId":"p","type":"user_text","text":"<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\nexit code 0\n</task-notification>"}

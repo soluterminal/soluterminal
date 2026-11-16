@@ -20,32 +20,12 @@ func TestValidModelID(t *testing.T) {
 	}
 }
 
-// TestNativeClaudeArgvModel — the --model pair rides the headless argv, and its
-// absence means NO flag (the resume-stickiness contract: a bare resume keeps the
-// session-stored model).
-func TestNativeClaudeArgvModel(t *testing.T) {
-	t.Parallel()
-	argv := nativeClaudeArgv("sess-1", true, "max", false, "claude-fable-5")
-	if indexOfPair(argv, "--model", "claude-fable-5") < 0 {
-		t.Fatalf("expected --model claude-fable-5 in argv, got %v", argv)
-	}
-	// Neither --resume nor --effort is displaced by the model flag.
-	if indexOfPair(argv, "--resume", "sess-1") < 0 || indexOfPair(argv, "--effort", "max") < 0 {
-		t.Fatalf("expected --resume + --effort alongside --model, got %v", argv)
-	}
-
-	bare := nativeClaudeArgv("sess-1", false, "", false, "")
-	if argvHas(bare, "--model") {
-		t.Fatalf("expected no --model flag for empty model, got %v", bare)
-	}
-}
-
 // TestPersistedPaneModelRoundTrip mirrors TestPersistedPaneEffortRoundTrip:
 // Model must survive snapshot -> on-disk -> JSON -> back, legacy entries load
 // as "", and empty stays omitted (panes.json byte-identical for old panes).
 func TestPersistedPaneModelRoundTrip(t *testing.T) {
 	t.Parallel()
-	pp := persistedFromSnapshot(PaneSnapshot{ID: "p1", Model: "claude-fable-5", Kind: "native"})
+	pp := persistedFromSnapshot(PaneSnapshot{ID: "p1", Model: "claude-fable-5"})
 	if pp.Model != "claude-fable-5" {
 		t.Fatalf("persistedFromSnapshot dropped Model: got %q", pp.Model)
 	}

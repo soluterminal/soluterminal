@@ -13,8 +13,8 @@ import (
 
 // These run real processes laid out the way a Codex pane runs on Linux: the
 // pane's shell, our solud pane shim named codex, and the npm vendor binary
-// under @openai/codex-linux-x64. The binaries are copies of sleep (and, for
-// the shim found by its build, of this test binary).
+// under @openai/codex-linux-x64. The binaries are copies of a stand-in
+// sleeper (and, for the shim found by its build, of this test binary).
 
 // TestAgentExeVersionSleeper is not a test: it is the body of the test-binary
 // copy that stands in for an old solud shim, run with SOLU_AGENT_EXE_SLEEPER.
@@ -50,15 +50,11 @@ func copyExecutable(t *testing.T, from, to string) {
 	}
 }
 
+// sleepBinary is the stand-in sleeper (standInSleeper): a copy of the host's
+// sleep would exit at once under a multi-call coreutils once named codex.
 func sleepBinary(t *testing.T) string {
 	t.Helper()
-	p, err := exec.LookPath("sleep")
-	if err != nil {
-		// Every Linux host has sleep; a skip here would hide that these
-		// tests never ran.
-		t.Fatalf("no sleep binary: %v", err)
-	}
-	return p
+	return standInSleeper(t)
 }
 
 // codexInstall lays out an npm Codex install and returns its vendor binary.
@@ -80,7 +76,7 @@ func codexInstall(t *testing.T, vendorName, vendorVersion string) string {
 	return bin
 }
 
-// shimByPath is a sleep copy named codex at a path listed as an installed
+// shimByPath is a sleeper copy named codex at a path listed as an installed
 // solud (ownSoludExes), like ~/.solu/codex-inline-bin/codex → solud.
 func shimByPath(t *testing.T) string {
 	t.Helper()

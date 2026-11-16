@@ -50,12 +50,20 @@ func (a *apiServer) transcribeAudio(w http.ResponseWriter, r *http.Request) {
 	// so paired users get voice for free and we don't need a key in
 	// ~/.solu/env. Kicks in whenever --relay is set and a claim exists.
 	localOK, _ := a.localCleanupAvailable()
+	// Another product's dictation (ST-180): never cleaned on this person's
+	// Claude login and sent without context. A query flag, so it is known
+	// before the upload is read. Dropping context buffers the upload, within
+	// the cloud's own 4 MB cap (cloudVoiceBodyBytes).
+	cloudOnly := r.URL.Query().Get("cloudOnly") == "1" || a.voiceForcedCloudOnly(r)
+	if cloudOnly {
+		localOK = false
+	}
 	if base, tok := a.cloudCreds(); base != "" && tok != "" {
 		if localOK {
 			a.transcribeViaCloudCleanLocally(w, r)
 			return
 		}
-		a.proxyTranscribeToCloud(w, r)
+		a.proxyTranscribeToCloud(w, r, cloudOnly)
 		return
 	}
 
@@ -158,7 +166,8 @@ func (a *apiServer) voiceCleanup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "read body: "+err.Error(), 400)
 		return
 	}
-	if ok, _ := a.localCleanupAvailable(); ok {
+	cloudOnly := voiceCloudOnlyBody(body) || a.voiceForcedCloudOnly(r)
+	if ok, _ := a.localCleanupAvailable(); ok && !cloudOnly {
 		var req struct {
 			Text    string `json:"text"`
 			Context string `json:"context"`
@@ -184,14 +193,74 @@ func (a *apiServer) voiceCleanup(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("voice[daemon]: local cleanup failed detailLen=%d; using the cloud", len(out.Detail))
 	}
-	a.proxyCleanupToCloud(w, r, cloudCleanupBody(body, a.trustedDevices.policy() == remoteAccessApproved))
+	if cloudOnly {
+		if base, tok := a.cloudCreds(); base == "" || tok == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"error":   voicePlanCleanupNotForRelay,
+				"message": "Clean-up for another app runs only on SoluTerminal's cloud service, and this computer isn't connected to it.",
+			})
+			return
+		}
+	}
+	a.proxyCleanupToCloud(w, r, cloudCleanupBody(body, cloudOnly || a.trustedDevices.policy() == remoteAccessApproved))
+}
+
+// voicePlanCleanupNotForRelay is the 503 code for a cloud-only clean-up
+// request on a computer with no cloud connection (ST-180; Shinoque's core
+// reads it as "SoluTerminal has no clean-up for me").
+const voicePlanCleanupNotForRelay = "plan_cleanup_not_for_relay"
+
+// voiceForcedCloudOnly is cloud-only clean-up the daemon imposes itself,
+// whatever the caller sends (@secure's condition on ST-180): a request read
+// from the relay tunnel or a private relay channel, or one from the Shinoque
+// core that serves relayed Shinoque users (the process whose relay-key push
+// was accepted). A Shinoque build that forgets the flag still can't put a
+// relayed person's dictation on this computer owner's Claude plan.
+func (a *apiServer) voiceForcedCloudOnly(r *http.Request) bool {
+	if requestViaRelay(r) || privateRelayDevice(r) != "" {
+		return true
+	}
+	return a.shinoqueCoreCaller(r)
+}
+
+// shinoqueCoreCaller reports whether r's socket traces to the process whose
+// Shinoque relay-key push was accepted: the same pid AND the same executable,
+// traced the way the push itself was, so a pid reused after Shinoque exits
+// doesn't make an unrelated program cloud-only. Shinoque itself sends
+// cloudOnly on every clean-up (it never uses the owner's plan through
+// solud), so this only catches a build that forgets the flag. No key pushed
+// (always the case on macOS) means no peer lookup at all.
+func (a *apiServer) shinoqueCoreCaller(r *http.Request) bool {
+	if a.shinoqueTokens == nil {
+		return false
+	}
+	pid, exe := a.shinoqueTokens.pushedKey.pusher()
+	if pid <= 0 || exe == "" {
+		return false
+	}
+	peerPID, peerExe, traced := shinoqueRelayKeyPeer(r)
+	return traced && peerPID == pid && peerExe == exe
+}
+
+// voiceCloudOnlyBody reports whether a JSON clean-up or prewarm body asks for
+// cloud-only clean-up ("cloudOnly": true). Another product relaying a person's
+// dictation (Shinoque) sends it: Anthropic's terms don't let one product route
+// requests through a person's Claude login for them, so such a request never
+// runs on the local Claude plan and never sends context.
+func voiceCloudOnlyBody(body []byte) bool {
+	var req struct {
+		CloudOnly bool `json:"cloudOnly"`
+	}
+	return json.Unmarshal(body, &req) == nil && req.CloudOnly
 }
 
 // cloudCleanupBody is what may leave this computer for the cloud fallback. A
 // writing (prose) request's context is the user's open conversation, which is
 // only ever shared with their own Claude login, so it is dropped here. With
-// only approved devices allowed (private), terminal context is dropped too:
-// the person has chosen that the cloud should not see their sessions.
+// only approved devices allowed (private), or for a cloud-only request from
+// another product, terminal context is dropped too: the person has chosen
+// that the cloud should not see their sessions, or the caller has no business
+// sending them.
 func cloudCleanupBody(body []byte, private bool) []byte {
 	var m map[string]any
 	if json.Unmarshal(body, &m) != nil {
@@ -283,7 +352,7 @@ func tagCleanupBy(payload []byte, by string) ([]byte, bool) {
 // audio uploads on memory-tight hosts. We preserve the upstream status
 // code and rate-limit headers so the browser's existing error handling
 // (429 toast, X-Transcribe-Remaining hint) works transparently.
-func (a *apiServer) proxyTranscribeToCloud(w http.ResponseWriter, r *http.Request) {
+func (a *apiServer) proxyTranscribeToCloud(w http.ResponseWriter, r *http.Request, cloudOnly bool) {
 	cloudBase, cloudToken := a.cloudCreds()
 	url := cloudBase + "/api/transcribe"
 	var bodyReader io.Reader = r.Body
@@ -292,7 +361,7 @@ func (a *apiServer) proxyTranscribeToCloud(w http.ResponseWriter, r *http.Reques
 	words := a.voiceWords().formValue()
 	// With "Only devices I approve" on, the terminal snapshot stays on this
 	// computer, as it does for the cleanup calls (cloudCleanupBody).
-	private := a.trustedDevices.policy() == remoteAccessApproved
+	private := cloudOnly || a.trustedDevices.policy() == remoteAccessApproved
 	if words != "" || private {
 		// The user's own words go with the audio; the cloud adds them to the
 		// fixed name list it sends to Whisper.

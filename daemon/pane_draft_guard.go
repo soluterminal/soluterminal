@@ -28,8 +28,10 @@ import (
 // person has been quiet, usually right after they submit their own prompt.
 // Held messages go in in the order they arrived, and a new one waits behind
 // any already held. Nothing is ever added to, or removed from, the person's
-// draft. The person's own message box and schedules (deliveryPlain) are not
-// held.
+// draft. The person's own message box (deliveryPlain) is not held. The
+// daemon's own deliveries (a prompt schedule, an ARIA mention) are not queued
+// here either, but they are not typed while the person is typing or has a
+// draft: submitDaemonMessage refuses, and the caller retries (tracker #35).
 
 // draftGuardQuiet is how long after the person's last keystroke in a pane an
 // agent's message waits. It also covers a keystroke the screen has not
@@ -243,6 +245,11 @@ func (p *Pane) holdDelivery(body string, claude bool, mode deliveryMode, sender 
 	// The reason is read again even behind other held messages, so senders
 	// are told what holds the pane now, not what held it before.
 	reason := p.draftGuardReason(!claude, true, time.Now(), p.humanComposerPendingSnapshot)
+	// The person's stop on agent messaging holds every agent's message,
+	// whatever the input box shows (agent_messaging_pause.go).
+	if agentMessagingPaused() {
+		reason = agentMessagingPausedReason
+	}
 	if !queued && reason == "" {
 		return false, nil
 	}
@@ -403,7 +410,7 @@ func (p *Pane) putBackReceipt() *unsentPaneMessage {
 // Caller holds mu. Kept receipts still protect input while their text remains.
 func (p *Pane) putBackReceiptLocked() *unsentPaneMessage {
 	msg := p.unsentMessage
-	if msg == nil || !msg.PutBack || p.Status != PaneRunning || p.Kind == "native" || p.respawning.Load() || msg.connection != p.agentConn {
+	if msg == nil || !msg.PutBack || p.Status != PaneRunning || p.respawning.Load() || msg.connection != p.agentConn {
 		return nil
 	}
 	return msg
@@ -613,7 +620,9 @@ func (p *Pane) heldStuckLocked(now time.Time) bool {
 	if p.heldReason != heldBoxTextReason && !strings.HasPrefix(p.heldReason, unsentInBoxPrefix) {
 		return false
 	}
-	if now.Sub(time.UnixMilli(p.heldDeliveries[0].At)) < heldStuckAfter {
+	// From the last resume at the latest: time held by the person's pause on
+	// agent messaging is not time stuck behind the input box.
+	if now.Sub(heldClockStart(p.heldDeliveries[0].At)) < heldStuckAfter {
 		return false
 	}
 	last := p.lastHumanInputMs.Load()
@@ -820,15 +829,22 @@ func (p *Pane) drainHeldDeliveries() {
 			}
 			p.deliveryMu.Unlock()
 			continue
-		case time.Since(time.UnixMilli(head.At)) >= heldDeliveryLimit:
+		// Paused messages never expire, and get their full wait again once
+		// messaging resumes: the stop holds them, it never drops them.
+		case !agentMessagingPaused() && time.Since(heldClockStart(head.At)) >= heldDeliveryLimit:
 			p.resolveHeld(head, "expired", nil)
 			continue
 		}
-		reason := p.draftGuardReason(!head.claude, true, time.Now(), p.humanComposerPendingSnapshot)
-		// The menu first: Codex's "› 1. Yes, proceed" row reads as text in the
-		// box, and a menu is not text anyone can send or clear.
-		if menuBeforeKey(p, !head.claude) {
-			reason = heldMenuReason
+		var reason string
+		if agentMessagingPaused() {
+			reason = agentMessagingPausedReason
+		} else {
+			reason = p.draftGuardReason(!head.claude, true, time.Now(), p.humanComposerPendingSnapshot)
+			// The menu first: Codex's "› 1. Yes, proceed" row reads as text in
+			// the box, and a menu is not text anyone can send or clear.
+			if menuBeforeKey(p, !head.claude) {
+				reason = heldMenuReason
+			}
 		}
 		// Refreshed every pass, cleared too: a message sent or cleared since
 		// must not still be named to senders.
@@ -888,6 +904,9 @@ func (p *Pane) deliverHeld(h *heldDelivery, typing bool) (deliveryOutcome, error
 
 // heldNotice is send_input's answer for a held message.
 func heldNotice(paneID, reason string) string {
+	if reason == agentMessagingPausedReason {
+		return fmt.Sprintf("held: the person has paused agent messaging, so nothing was typed. Your message is held on pane %s with your name and the reason, and goes in by itself once they resume messaging (they can also send it now or discard it). It does not expire while paused. Do not resend it; use ask_pane or wait_for_pane to wait for a reply, or tell the user what you need.", paneID)
+	}
 	if strings.HasPrefix(reason, unsentInBoxPrefix) {
 		return fmt.Sprintf("held: %s %s, so nothing was typed. Your message waits on that pane, queued behind it, and goes in once the person sends or clears that message. Do not resend it; use ask_pane to wait for a reply.", strings.TrimSuffix(reason, " is in that pane's input box"), "is in pane "+paneID+"'s input box")
 	}
@@ -924,7 +943,13 @@ func (a *apiServer) actOnHeldDelivery(w http.ResponseWriter, p *Pane, h *heldDel
 		writeJSON(w, http.StatusOK, map[string]any{"outcome": "cleared"})
 		return
 	}
+	paused := agentMessagingPaused()
 	outcome, err := p.deliverHeld(h, false)
+	if paused && err == nil {
+		// The person's override of their own stop: recorded with the sender,
+		// never the text.
+		coordLog.record(coordinationEvent{Kind: "held", Pane: p.ID, By: h.Sender, Outcome: "sent_while_paused"})
+	}
 	switch {
 	case errors.Is(err, errDraftGuardHeld):
 		http.Error(w, "your input box has text: send or clear it first, then send this message", http.StatusConflict)

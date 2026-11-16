@@ -349,8 +349,14 @@ func (u *Updater) verifySignatureAtOpts(ctx context.Context, sigURL string, body
 	return nil
 }
 
+// updateManifestPublicKey is the key update.json must be signed with: the one
+// compiled in. Only a dev build (version "dev") takes SOLU_UPDATE_MANIFEST_PUBKEY
+// in its place; a release build never lets its environment choose the key.
 func updateManifestPublicKey() (ed25519.PublicKey, error) {
-	key := strings.TrimSpace(os.Getenv("SOLU_UPDATE_MANIFEST_PUBKEY"))
+	key := ""
+	if version == "dev" {
+		key = strings.TrimSpace(os.Getenv("SOLU_UPDATE_MANIFEST_PUBKEY"))
+	}
 	if key == "" {
 		key = strings.TrimSpace(defaultUpdateManifestPubKey)
 	}

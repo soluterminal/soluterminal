@@ -187,8 +187,8 @@ func TestPrependDirsOnPath(t *testing.T) {
 	t.Parallel()
 	t.Run("prepends and preserves path key spelling", func(t *testing.T) {
 		env := []string{`Path=C:\Windows;C:\Old`, "FOO=bar"}
-		got := prependDirsOnPath(env, []string{`C:\Users\benja\AppData\Local\Programs\OpenAI\Codex\bin`}, ";", true)
-		want := `C:\Users\benja\AppData\Local\Programs\OpenAI\Codex\bin;C:\Windows;C:\Old`
+		got := prependDirsOnPath(env, []string{`C:\Users\alice\AppData\Local\Programs\OpenAI\Codex\bin`}, ";", true)
+		want := `C:\Users\alice\AppData\Local\Programs\OpenAI\Codex\bin;C:\Windows;C:\Old`
 		if envValue(got, "Path") != want {
 			t.Fatalf("Path = %q, want %q", envValue(got, "Path"), want)
 		}
@@ -198,8 +198,8 @@ func TestPrependDirsOnPath(t *testing.T) {
 	})
 
 	t.Run("case insensitive dedup", func(t *testing.T) {
-		dir := `C:\Users\benja\AppData\Local\Programs\OpenAI\Codex\bin`
-		env := []string{`Path=c:\users\benja\appdata\local\programs\openai\codex\bin\;C:\Windows`}
+		dir := `C:\Users\alice\AppData\Local\Programs\OpenAI\Codex\bin`
+		env := []string{`Path=c:\users\alice\appdata\local\programs\openai\codex\bin\;C:\Windows`}
 		got := prependDirsOnPath(env, []string{dir}, ";", true)
 		if envValue(got, "Path") != dir+`;C:\Windows` {
 			t.Fatalf("Path was not deduped: %q", envValue(got, "Path"))
@@ -215,8 +215,8 @@ func TestPrependDirsOnPath(t *testing.T) {
 
 	t.Run("collapses duplicate Windows path keys", func(t *testing.T) {
 		env := []string{`Path=C:\Windows`, "FOO=bar", `PATH=C:\Stale`}
-		got := prependDirsOnPath(env, []string{`C:\Users\benja\AppData\Local\Programs\OpenAI\Codex\bin`}, ";", true)
-		want := `C:\Users\benja\AppData\Local\Programs\OpenAI\Codex\bin;C:\Windows;C:\Stale`
+		got := prependDirsOnPath(env, []string{`C:\Users\alice\AppData\Local\Programs\OpenAI\Codex\bin`}, ";", true)
+		want := `C:\Users\alice\AppData\Local\Programs\OpenAI\Codex\bin;C:\Windows;C:\Stale`
 		if envValue(got, "Path") != want {
 			t.Fatalf("Path = %q, want %q", envValue(got, "Path"), want)
 		}
@@ -251,8 +251,8 @@ func TestWindowsChildPathHelpers(t *testing.T) {
 	})
 
 	t.Run("converts WSL mount path to Windows path", func(t *testing.T) {
-		got := hostPathToWindowsPath(`/mnt/c/Users/benja/AppData/Local/Programs/OpenAI/Codex/bin`)
-		want := `C:\Users\benja\AppData\Local\Programs\OpenAI\Codex\bin`
+		got := hostPathToWindowsPath(`/mnt/c/Users/alice/AppData/Local/Programs/OpenAI/Codex/bin`)
+		want := `C:\Users\alice\AppData\Local\Programs\OpenAI\Codex\bin`
 		if got != want {
 			t.Fatalf("hostPathToWindowsPath = %q, want %q", got, want)
 		}
@@ -262,8 +262,8 @@ func TestWindowsChildPathHelpers(t *testing.T) {
 		if os.PathListSeparator == ';' {
 			t.Skip("native Windows keeps Windows paths unchanged")
 		}
-		got := windowsPathToHostPath(`C:\Users\benja\AppData\Local\Programs\OpenAI\Codex\bin`)
-		want := `/mnt/c/Users/benja/AppData/Local/Programs/OpenAI/Codex/bin`
+		got := windowsPathToHostPath(`C:\Users\alice\AppData\Local\Programs\OpenAI\Codex\bin`)
+		want := `/mnt/c/Users/alice/AppData/Local/Programs/OpenAI/Codex/bin`
 		if got != want {
 			t.Fatalf("windowsPathToHostPath = %q, want %q", got, want)
 		}

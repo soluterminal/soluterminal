@@ -5,6 +5,7 @@ import { useStore, terminalSessionKey } from '../store';
 import { CLAIM_ACK_TIMEOUT_MS, INPUT_HOLD_MS } from '../lib/paneInputOwnership';
 import * as interaction from '../lib/terminalInteractionState';
 import { lifecycleLog } from '../debug';
+import { beginTypeHere, clearClaimFeedback, useClaimFeedback } from '../lib/claimFeedback';
 import { Pane } from './Pane';
 import type { PaneInfo } from '../types';
 
@@ -104,6 +105,20 @@ afterEach(() => {
 });
 
 describe('Pane input ownership wiring', () => {
+  // ST-248: a passing owner:"other" frame (another device's claim, a
+  // dropped-keystroke notice) is not a refusal; only the daemon's reason is.
+  it('reports a refused Type here only with the daemon reason', () => {
+    const socket = mount();
+    act(() => socket.ownership(false, 'other'));
+    act(() => { beginTypeHere(); useStore.getState().claimAllPanes(); });
+    expect(socket.claims()).toContain('takeover');
+    act(() => socket.ownership(false, 'other'));
+    expect(useClaimFeedback.getState()).toEqual({ state: 'pending' });
+    act(() => socket.onmessage?.({ data: JSON.stringify({ type: 'ownership', owned: false, owner: 'other', denied: 'not-person' }) }));
+    expect(useClaimFeedback.getState()).toEqual({ state: 'refused', reason: 'not-person' });
+    act(() => clearClaimFeedback(true));
+  });
+
   it('preserves Take over intent after a slow reconnect claim and local hold expiry; only a real peer revokes it', () => {
     const first = mount();
     act(() => first.ownership(true, 'you'));

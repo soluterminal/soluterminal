@@ -1,5 +1,3 @@
-//go:build !windows
-
 package main
 
 import (
@@ -115,15 +113,20 @@ func TestDataDirLockPatientAcquireGivesUpAtDeadline(t *testing.T) {
 // lock: when the daemon dies the next daemon has to be able to start, even
 // though the agents it spawned keep running.
 func TestDataDirLockIsNotInheritedByChildren(t *testing.T) {
-	if _, err := exec.LookPath("sleep"); err != nil {
-		t.Skip("sleep not available")
+	if os.Getenv("SOLU_DATADIR_LOCK_SLEEPER") == "1" {
+		time.Sleep(5 * time.Second)
+		os.Exit(0)
 	}
 	dir := t.TempDir()
 	lock, err := acquireDataDirLock(dir, dataDirLockHolder{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	child := exec.Command("sleep", "5")
+	// Release is idempotent; this covers a failed child start, which on
+	// Windows would otherwise leave the file open and fail TempDir cleanup.
+	defer lock.Release()
+	child := exec.Command(os.Args[0], "-test.run=^TestDataDirLockIsNotInheritedByChildren$")
+	child.Env = append(os.Environ(), "SOLU_DATADIR_LOCK_SLEEPER=1")
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +142,7 @@ func TestDataDirLockIsNotInheritedByChildren(t *testing.T) {
 	next.Release()
 }
 
-func TestClaimDataDirForBootSkipsSuccessorsAndHonorsOptOut(t *testing.T) {
+func TestClaimDataDirForBootHonorsOptOut(t *testing.T) {
 	dir := t.TempDir()
 	holder, err := acquireDataDirLock(dir, dataDirLockHolder{})
 	if err != nil {
@@ -147,10 +150,8 @@ func TestClaimDataDirForBootSkipsSuccessorsAndHonorsOptOut(t *testing.T) {
 	}
 	defer holder.Release()
 
-	t.Setenv("SOLU_SUCCESSOR_OF_UPDATE", "1")
-	if got := claimDataDirForBoot(dir, dataDirLockHolder{}); got != nil {
-		t.Fatalf("a successor must not take the lock before the handoff")
-	}
+	// Successors are covered by datadir_lock_handoff_test.go: the check
+	// depends on the parent process, so it runs in a child.
 	t.Setenv("SOLU_SUCCESSOR_OF_UPDATE", "")
 	t.Setenv("SOLU_DATA_DIR_LOCK", "off")
 	if got := claimDataDirForBoot(dir, dataDirLockHolder{}); got != nil {

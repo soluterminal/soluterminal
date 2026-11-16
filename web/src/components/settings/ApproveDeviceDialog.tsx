@@ -42,10 +42,12 @@ function refusalText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-export function ApproveDeviceDialog({ device, recovery, reload, onClose }: {
+export function ApproveDeviceDialog({ device, recovery, policyNotice, reload, onClose }: {
   device: RemoteDevice;
   /** SOLU_HUMAN_PROOF=off at this computer. */
   recovery: boolean;
+  /** Under "any": the new-device notice's own wording, shown in full. */
+  policyNotice?: string;
   /** Re-read the device list. */
   reload: () => Promise<RemoteDevicesState | null>;
   onClose: () => void;
@@ -59,7 +61,9 @@ export function ApproveDeviceDialog({ device, recovery, reload, onClose }: {
   const [notice, setNotice] = useState('');
   const [noCodeConfirmed, setNoCodeConfirmed] = useState(false);
 
-  useEffect(() => { dialogRef.current?.focus(); }, []);
+  // Cancel is the default: approving is never one key away (@secure, ST-249).
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { (cancelRef.current ?? dialogRef.current)?.focus(); }, []);
 
   const reread = async (): Promise<RemoteDevice | null> => {
     const list = await reload().catch(() => null);
@@ -141,6 +145,9 @@ export function ApproveDeviceDialog({ device, recovery, reload, onClose }: {
               <dt style={{ color: 'var(--fg-dim)' }}>From</dt>
               <dd style={{ margin: 0 }}>{surfaceText(shown.surface)}</dd>
             </dl>
+            {policyNotice && (
+              <div data-testid="approve-device-policy" className="settings-error" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>{policyNotice}</div>
+            )}
             {notice && <div role="status" style={{ marginTop: 10, fontSize: 12 }}>{notice}</div>}
             {!pending ? (
               <div style={{ marginTop: 10, fontSize: 12 }}>
@@ -168,7 +175,7 @@ export function ApproveDeviceDialog({ device, recovery, reload, onClose }: {
         )}
         {error && <div className="settings-error" role="alert" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>{error}</div>}
         <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8, marginTop: 16 }}>
-          <button type="button" className="settings-btn" onClick={onClose}>Cancel</button>
+          <button ref={cancelRef} type="button" className="settings-btn" onClick={onClose}>Cancel</button>
           {shown && pending && <>
             <button type="button" className="settings-btn" disabled={busy} onClick={() => void remove(shown)}>
               {CODES_DIFFER_REMOVE}

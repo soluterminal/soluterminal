@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
+import { create } from 'zustand';
 import { api, currentRoutingScope } from '../../api';
 import { confirmDialog } from '../../lib/dialog';
 import type { RemoteDevice, RemoteDevicesState } from '../../api';
 import { privateRelayCandidate, privateRelayEnabled, privateRelayTarget, setPrivateRelayEnabled } from '../../lib/privateRelay';
 import { isEmbedded } from '../../embed';
+import { deviceIdentity } from '../../lib/deviceIdentity';
 import { useLocalProof } from '../../lib/useLocalProof';
 import { deviceClaimedName } from '../../lib/deviceClaimedName';
 import { SettingsGroup, SettingsRow } from './SettingsRow';
@@ -24,11 +26,51 @@ export { ALERTS_SCOPE_TEXT, FULL_SCOPE_TEXT, deviceScopeText } from './deviceSco
 // name is the device's own claim, so it is shown as such and the person is
 // told to compare codes. The prompt only opens Settings: approving happens in
 // ApproveDeviceDialog. An alerts-only device says so.
-export function remoteDevicePendingText(name: string, scope?: string): string {
+export function remoteDevicePendingText(name: string, scope?: string, policy?: string): string {
+  if (policy === 'any' && scope !== 'alerts') {
+    // Under "any" the device can already reach this computer; approving
+    // trusts it more. A stranger can ask too (@secure, ST-249).
+    return `A new device calling itself “${deviceClaimedName(name)}” asked to be approved. This computer already lets any signed-in device in; approving also trusts it with an end-to-end private channel and approved-device standing. Only approve it if you're using it right now and it shows the same code as Settings → Privacy & security.`;
+  }
   if (scope === 'alerts') {
     return `A device calling itself “${deviceClaimedName(name)}” is asking to take over this computer's push alerts (${ALERTS_SCOPE_TEXT.toLowerCase()}). Approve it only if it shows the same code as Settings → Privacy & security.`;
   }
   return `A device calling itself “${deviceClaimedName(name)}” is asking to use this computer. Approve it only if it shows the same code as Settings → Privacy & security.`;
+}
+
+// The request a new-device notice's Review was for. Settings opens its code
+// comparison when this screen can approve, then forgets it. A Review older
+// than REVIEW_REQUEST_TTL_MS is dropped: only a fresh click opens a dialog.
+export const REVIEW_REQUEST_TTL_MS = 60_000;
+const useReviewRequest = create<{ id: string | null; at: number }>(() => ({ id: null, at: 0 }));
+
+/** A daemon remote-device.pending event. */
+export interface RemoteDevicePendingEvent {
+  text: string;
+  hint?: string;
+  reason?: string;
+  deviceId?: string;
+}
+
+/**
+ * Show a new device request as a notice whose Review opens Settings →
+ * Privacy & security at that request. An embedded frame doesn't show its own
+ * request back to itself: it can't approve there, and its own prompt already
+ * says where to approve.
+ */
+export async function announceRemoteDeviceRequest(
+  ev: RemoteDevicePendingEvent,
+  show: (text: string, review: () => void) => void,
+  openPrivacy: () => void,
+): Promise<void> {
+  if (isEmbedded() && ev.deviceId) {
+    const me = await deviceIdentity().catch(() => null);
+    if (me?.id === ev.deviceId) return;
+  }
+  show(remoteDevicePendingText(ev.text, ev.hint, ev.reason), () => {
+    useReviewRequest.setState({ id: ev.deviceId ?? null, at: Date.now() });
+    openPrivacy();
+  });
 }
 
 export const PRIVATE_RELAY_LABEL = "Encrypt this browser's connection end to end";
@@ -120,6 +162,23 @@ export function RemoteDevicesSetting() {
     const timer = window.setInterval(load, 5000);
     return () => window.clearInterval(timer);
   }, [load]);
+
+  // Review on a new-device notice: read the list afresh (an open Settings
+  // may hold one from before the request) and open that request's
+  // comparison if this screen may approve. Either way it is listed. The
+  // request is used once, fresh or not, loaded or not.
+  const reviewId = useReviewRequest((s) => s.id);
+  useEffect(() => {
+    if (!reviewId) return;
+    const { at } = useReviewRequest.getState();
+    useReviewRequest.setState({ id: null, at: 0 });
+    if (Date.now() - at > REVIEW_REQUEST_TTL_MS) return;
+    void reload().then((fresh) => {
+      if (!fresh) return;
+      const d = fresh.devices.find((x) => x.id === reviewId && x.status === 'pending');
+      if (d && approveOfferedHere(fresh)) setReviewing(d);
+    }).catch(() => { /* older or unreachable daemon: nothing to open */ });
+  }, [reviewId, reload]);
 
   if (!state) {
     // The list can be unavailable (an older daemon); this browser's own
@@ -240,6 +299,9 @@ export function RemoteDevicesSetting() {
         <ApproveDeviceDialog
           device={reviewing}
           recovery={!!localStatus?.envOff}
+          // Under "any" the dialog repeats the notice's warning in full
+          // (@secure): the device is already let in; approving trusts it more.
+          policyNotice={state.policy === 'any' ? remoteDevicePendingText(reviewing.name, reviewing.scope, 'any') : undefined}
           reload={reload}
           onClose={() => setReviewing(null)}
         />

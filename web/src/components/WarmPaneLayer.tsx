@@ -39,8 +39,9 @@ function TerminalPortal({ session }: { session: TerminalViewSession }) {
     acquirePaneHost(session.key),
   );
 }
-// Sole terminal component owner on every layout. NativePane remains in the
-// active grid; unvisited task rows and historical attempts mount no terminal.
+// Sole terminal component owner on every layout. A pane still reported as
+// Focus (native) mounts no terminal: PaneGrid shows RetiredFocusPane for it.
+// Unvisited task rows and historical attempts mount no terminal either.
 export function WarmPaneLayer() {
  const panes = useStore(s=>s.panes);
  const view = useStore(s=>s.mainPresentation);

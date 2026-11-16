@@ -139,6 +139,10 @@ type uiEvent struct {
 	From   string `json:"from,omitempty"`
 	To     string `json:"to,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// DeviceID (remote-device.pending): the asking device's id, a hash of
+	// its public key, as Settings → Remote devices lists it. A screen uses it
+	// to skip its own request and to open that request from the notice.
+	DeviceID string `json:"deviceId,omitempty"`
 	// Degraded is populated only on workflow.fallback when the promoted entry
 	// sits below the role's configured model floor.
 	Degraded  bool   `json:"degraded,omitempty"`

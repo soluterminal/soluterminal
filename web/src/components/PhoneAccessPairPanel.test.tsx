@@ -212,3 +212,31 @@ it('names the phone button that really exists, and where it is', async () => {
     'Tap “+ Claim a new machine” (under “Other ways to connect” if you don’t see it) and enter this code.'));
   expect(dialog.textContent).not.toContain('Add a computer');
 });
+
+it('Disconnect says when the account refused to remove this computer, with the address as text', async () => {
+  mocks.status.mockReturnValue({configured:true, hasCreds:true, relayState:'online'});
+  mocks.disconnect.mockResolvedValue({cloudRemoval:'refused', machinesUrl:'https://cloud.example/'});
+  const realToast = useStore.getState().toast;
+  const toast = vi.fn();
+  useStore.setState({toast} as never);
+  try {
+    render(<PhoneAccessPairPanelGate />);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', {name:'Disconnect'}));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      "Cloud disconnected, but your account didn't remove this computer. Remove it in Your machines: https://cloud.example/",
+      expect.objectContaining({icon:'!'})));
+  } finally {
+    useStore.setState({toast: realToast});
+  }
+});
+
+it('shows a later refusal to remove this computer until it is paired again', async () => {
+  mocks.status.mockReturnValue({configured:true, hasCreds:false, relayState:'offline',
+    revokeRefused:{refused:true, at:'2026-11-14T06:00:00Z', machinesUrl:'https://cloud.example/'}});
+  render(<PhoneAccessPairPanelGate />);
+  const note = await screen.findByRole('note');
+  expect(note).toHaveTextContent("Your account didn't remove this computer");
+  expect(note).toHaveTextContent('https://cloud.example/');
+  expect(screen.getByRole('button', {name:'Open'})).toBeInTheDocument();
+});

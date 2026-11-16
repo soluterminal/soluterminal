@@ -112,6 +112,7 @@ describe('VersionPopover', () => {
   it.each([
     ['focus', 'Update now — interrupt Focus', 'Focus pane focus-7 finishes its turn'],
     ['unknown', 'Update now — interrupt active work', 'Applies when active work finishes'],
+    ['agent-messaging-paused', 'Update now — interrupt active work', 'agent messaging is paused with held messages'],
   ] as const)('uses cause-honest queued copy and force only on the %s override', (cause, label, detail) => {
     const applyUpdate = vi.fn().mockResolvedValue(undefined);
     useStore.setState({
@@ -129,6 +130,16 @@ describe('VersionPopover', () => {
     expect(screen.getByText(new RegExp(detail))).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: new RegExp(label) }));
     expect(applyUpdate).toHaveBeenCalledWith({ force: true });
+  });
+
+  it('names an automatic update waiting on paused agent messaging', () => {
+    useStore.setState({ deferredUpdate: null });
+    renderPopover({
+      current: '1.0.0', latest: '2.0.0', available: true,
+      idleWaitCause: 'agent-messaging-paused',
+      idleWaitReason: 'agent messaging is paused and messages are held on pane p1; resume, or send or discard them, to update',
+    });
+    expect(screen.getByText(/agent messaging is paused with held messages/)).toBeInTheDocument();
   });
 
   it('uses cause-honest queued copy and force only on the workflow override', () => {

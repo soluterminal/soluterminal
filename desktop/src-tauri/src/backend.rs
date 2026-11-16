@@ -381,15 +381,23 @@ fn wsl_probe_once() -> (WslStatus, String) {
     if !crate::daemon::wsl_start_allowed() {
         return (WslStatus::Unavailable, String::new());
     }
-    let out = match crate::daemon::run_wsl_bounded(&["-e", "true"], WSL_PROBE_TIMEOUT) {
-        Ok(o) if o.status.success() => return (WslStatus::Ready, String::new()),
+    let (status, text, _) = wsl_run_classified(&["-e", "true"], None, WSL_PROBE_TIMEOUT);
+    (status, text)
+}
+
+/// Run a command in the default distro and classify a failure as
+/// wsl_probe_once does. On success, also returns the command's stdout.
+#[cfg(windows)]
+fn wsl_run_classified(args: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> (WslStatus, String, Vec<u8>) {
+    let out = match crate::daemon::run_wsl_bounded_with_stdin(args, stdin, timeout) {
+        Ok(o) if o.status.success() => return (WslStatus::Ready, String::new(), o.stdout),
         Ok(o) => o,                                      // ran but failed — classify
-        Err(e) if e.contains("timed out") => return (WslStatus::Failed, e),
-        Err(_) => return (WslStatus::Unavailable, String::new()), // wsl.exe not callable
+        Err(e) if e.contains("timed out") => return (WslStatus::Failed, e, Vec::new()),
+        Err(_) => return (WslStatus::Unavailable, String::new(), Vec::new()), // wsl.exe not callable
     };
     let text = wsl_output_text(&out.stdout, &out.stderr);
     if let Some(status) = classify_wsl_error(&text) {
-        return (status, text);
+        return (status, text, Vec::new());
     }
 
     // Secondary signal: enumerate distros. `wsl -l -q` succeeds with at
@@ -406,7 +414,90 @@ fn wsl_probe_once() -> (WslStatus, String) {
         Err(e) if e.contains("timed out") => WslStatus::Failed,
         _ => WslStatus::NoDistro,
     };
-    (status, text)
+    (status, text, Vec::new())
+}
+
+/// What the Dual (or Linux) option can expect from WSL right now, for the
+/// Backend switch's warning before it restarts (ST-245). One bounded wsl.exe
+/// call answers both questions: can a command run, and is SoluTerminal's
+/// background service already there. Only the person's click runs it.
+#[cfg(any(windows, test))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WslReadiness {
+    /// WSL runs and already has SoluTerminal's background service.
+    Ready,
+    /// WSL runs, but SoluTerminal hasn't been set up in it yet: the first
+    /// start installs it and takes longer.
+    NotInstalled,
+    /// No Linux distribution is installed.
+    NoDistro,
+    /// WSL says it needs `wsl --update`.
+    NeedsUpdate,
+    /// WSL is there but didn't run a command (busy, starting, or broken).
+    NotReady,
+    /// wsl.exe isn't usable here, or the Windows drive is too full to start it.
+    Unavailable,
+}
+
+#[cfg(any(windows, test))]
+impl WslReadiness {
+    /// The code the page reads (BackendSwitcher.tsx). Fixed; add, never rename.
+    pub fn code(self) -> &'static str {
+        match self {
+            WslReadiness::Ready => "ready",
+            WslReadiness::NotInstalled => "not-installed",
+            WslReadiness::NoDistro => "no-distro",
+            WslReadiness::NeedsUpdate => "needs-update",
+            WslReadiness::NotReady => "not-ready",
+            WslReadiness::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Prints `installed` or `missing`: whether start-wsl.sh's daemon copy
+/// ($DAEMON_DIR/solud in daemon.rs) is there. Sent on stdin, so no quoting
+/// passes through wsl.exe's command line.
+#[cfg(any(windows, test))]
+const WSL_INSTALLED_CHECK: &str =
+    "if [ -x \"$HOME/.local/share/soluterminal/solud\" ]; then echo installed; else echo missing; fi\n";
+
+/// Short enough to answer a click; a cold VM boot usually fits.
+#[cfg(windows)]
+const WSL_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(any(windows, test))]
+fn readiness_from(status: WslStatus, stdout: &[u8]) -> WslReadiness {
+    match status {
+        WslStatus::Ready => {
+            let out = String::from_utf8_lossy(stdout).replace('\0', "");
+            match out.trim() {
+                "installed" => WslReadiness::Ready,
+                "missing" => WslReadiness::NotInstalled,
+                _ => WslReadiness::NotReady,
+            }
+        }
+        WslStatus::NoDistro => WslReadiness::NoDistro,
+        WslStatus::NeedsUpdate => WslReadiness::NeedsUpdate,
+        WslStatus::Failed => WslReadiness::NotReady,
+        WslStatus::Unavailable => WslReadiness::Unavailable,
+    }
+}
+
+#[cfg(windows)]
+pub fn wsl_readiness() -> WslReadiness {
+    if !crate::daemon::wsl_start_allowed() {
+        return WslReadiness::Unavailable;
+    }
+    let (status, text, stdout) = wsl_run_classified(
+        &["-e", "sh", "-s"],
+        Some(WSL_INSTALLED_CHECK.as_bytes()),
+        WSL_READINESS_TIMEOUT,
+    );
+    let readiness = readiness_from(status, &stdout);
+    if readiness != WslReadiness::Ready {
+        crate::daemon::launch_log(&format!("WSL readiness: {readiness:?}: {}", wsl_failure_detail(&text)));
+    }
+    readiness
 }
 
 /// wsl_probe_once, with one retry for an unexplained failure: a WSL that
@@ -917,6 +1008,69 @@ pub fn label(b: Backend) -> &'static str {
         Backend::Wsl => "Linux (WSL)",
         Backend::HostNative => "Windows",
         Backend::Dual => "Dual (WSL + Windows)",
+    }
+}
+
+#[cfg(test)]
+mod wsl_readiness_tests {
+    use super::{readiness_from, WslReadiness, WslStatus};
+
+    #[test]
+    fn readiness_reads_the_installed_check_and_wsl_failures() {
+        assert_eq!(readiness_from(WslStatus::Ready, b"installed\n"), WslReadiness::Ready);
+        assert_eq!(readiness_from(WslStatus::Ready, b"missing\n"), WslReadiness::NotInstalled);
+        assert_eq!(readiness_from(WslStatus::Ready, b"m\0i\0s\0s\0i\0n\0g\0"), WslReadiness::NotInstalled);
+        assert_eq!(readiness_from(WslStatus::Ready, b""), WslReadiness::NotReady);
+        assert_eq!(readiness_from(WslStatus::NoDistro, b""), WslReadiness::NoDistro);
+        assert_eq!(readiness_from(WslStatus::NeedsUpdate, b""), WslReadiness::NeedsUpdate);
+        assert_eq!(readiness_from(WslStatus::Failed, b"installed"), WslReadiness::NotReady);
+        assert_eq!(readiness_from(WslStatus::Unavailable, b""), WslReadiness::Unavailable);
+    }
+
+    #[test]
+    fn codes_are_the_page_contract() {
+        let codes: Vec<_> = [
+            WslReadiness::Ready,
+            WslReadiness::NotInstalled,
+            WslReadiness::NoDistro,
+            WslReadiness::NeedsUpdate,
+            WslReadiness::NotReady,
+            WslReadiness::Unavailable,
+        ]
+        .iter()
+        .map(|r| r.code())
+        .collect();
+        assert_eq!(codes, ["ready", "not-installed", "no-distro", "needs-update", "not-ready", "unavailable"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_installed_check_runs_in_sh() {
+        use super::WSL_INSTALLED_CHECK;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let home = std::env::temp_dir().join(format!("solu-readiness-{}", std::process::id()));
+        let dir = home.join(".local/share/soluterminal");
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = || {
+            let mut child = Command::new("sh")
+                .arg("-s")
+                .env("HOME", &home)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(WSL_INSTALLED_CHECK.as_bytes()).unwrap();
+            let out = child.wait_with_output().unwrap();
+            readiness_from(WslStatus::Ready, &out.stdout)
+        };
+        assert_eq!(run(), WslReadiness::NotInstalled);
+        let solud = dir.join("solud");
+        std::fs::write(&solud, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&solud, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(run(), WslReadiness::Ready);
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
 

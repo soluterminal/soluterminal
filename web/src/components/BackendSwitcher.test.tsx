@@ -4,6 +4,7 @@ import { useStore } from '../store';
 import type { PaneInfo } from '../types';
 import { useCloud } from '../cloud';
 import { ContextPill } from './ContextPill';
+import { cloudMachineOsWord, wslReadinessWarning } from './BackendSwitcher';
 import { noteRelayConfigured, resetRelayConfiguredForTests } from '../lib/relayConfigured';
 
 // Mock the shared daemon-health poller so tests can drive the relayed host
@@ -244,6 +245,80 @@ describe('BackendControls via the hosting chip', () => {
     );
   });
 
+  it('says on the pill itself when the running mode is not the saved one', () => {
+    setDesktopBackend({ requested: 'dual', actual: 'host', fallback: true });
+    render(<ContextPill />);
+    const badge = document.querySelector('.context-env-os');
+    expect(badge?.textContent).toBe('Windows, not Dual');
+    expect(badge).toHaveClass('mismatch');
+    expect(screen.getByRole('button', { name: /^Environment: Local · Windows, not Dual/ })).toBeInTheDocument();
+  });
+
+  it('keeps the plain mode on the pill without a fallback', () => {
+    setDesktopBackend({ requested: 'dual', actual: 'dual' });
+    render(<ContextPill />);
+    const badge = document.querySelector('.context-env-os');
+    expect(badge?.textContent).toBe('Dual');
+    expect(badge).not.toHaveClass('mismatch');
+  });
+
+  it('says Shinoque phone access needs Windows mode when the shell reports it', () => {
+    Object.defineProperty(window, '__SOLU_TAURI__', { value: true, configurable: true });
+    Object.defineProperty(window, '__SOLU_BACKEND__', {
+      value: {
+        hostPlatform: 'windows', launchMode: 'local', requested: 'dual', actual: 'host',
+        fallback: true, shinoqueNeedsWindowsMode: true,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke: vi.fn() }, configurable: true });
+    render(<ContextPill />);
+    openEnv();
+    expect(screen.getByRole('note').textContent).toContain(
+      'Shinoque’s phone access isn’t available in this session: it needs Windows mode.',
+    );
+  });
+
+  it('warns before restarting into Dual when WSL is not ready, and restarts if confirmed', async () => {
+    setDesktopBackend({ requested: 'host', actual: 'host' });
+    const invoke = vi.fn(async (cmd: string) => (cmd === 'desktop_wsl_readiness' ? 'not-installed' : undefined));
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    const messages: string[] = [];
+    useStore.setState({
+      openDialog: (d: { message: string; resolve: (v: unknown) => void }) => {
+        messages.push(d.message);
+        d.resolve(true);
+      },
+    } as never);
+
+    render(<ContextPill />);
+    openEnv();
+    fireEvent.click(screen.getByRole('button', { name: 'Dual' }));
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('desktop_set_backend_mode', { mode: 'dual' }),
+    );
+    expect(invoke).toHaveBeenCalledWith('desktop_wsl_readiness');
+    expect(messages[0]).toMatch(/^SoluTerminal isn’t set up in Linux \(WSL\) yet\./);
+    expect(messages[0]).toContain('Restart soluterminal in Dual mode?');
+  });
+
+  it('switching to Windows does not ask about WSL', async () => {
+    setDesktopBackend({ requested: 'dual', actual: 'dual' });
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    useStore.setState({
+      openDialog: (d: { resolve: (v: unknown) => void }) => d.resolve(true),
+    } as never);
+    render(<ContextPill />);
+    openEnv();
+    fireEvent.click(screen.getByRole('button', { name: 'Windows' }));
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('desktop_set_backend_mode', { mode: 'host' }),
+    );
+    expect(invoke).not.toHaveBeenCalledWith('desktop_wsl_readiness');
+  });
+
   it('without a fallback the saved mode is the selected, disabled one and there is no note', () => {
     setDesktopBackend({ requested: 'dual', actual: 'dual' });
 
@@ -319,5 +394,36 @@ describe('BackendControls via the hosting chip', () => {
 
     expect(screen.queryByTitle(/^Environment/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Environment/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('wslReadinessWarning', () => {
+  it('says nothing when WSL is ready or the shell could not say', () => {
+    expect(wslReadinessWarning('dual', 'ready')).toBe('');
+    expect(wslReadinessWarning('dual', null)).toBe('');
+  });
+
+  it('names the mode that would fall back to Windows', () => {
+    expect(wslReadinessWarning('dual', 'no-distro')).toContain('Dual mode would start on Windows only');
+    expect(wslReadinessWarning('wsl', 'no-distro')).toContain('Linux mode would start on Windows only');
+    expect(wslReadinessWarning('dual', 'needs-update')).toContain('wsl --update');
+    expect(wslReadinessWarning('dual', 'not-ready')).toContain('may start on Windows only');
+    expect(wslReadinessWarning('dual', 'unavailable')).toContain('isn’t available on this PC');
+  });
+});
+
+// ST-102: a Dual machine's record carries the desktop's host OS for both
+// daemons, so the phone read "Windows" while it showed the WSL side.
+describe('cloudMachineOsWord', () => {
+  const dual = { backends: ['wsl', 'win'], shellPlatform: 'windows-amd64' };
+  it('follows the side being viewed on a Dual machine', () => {
+    expect(cloudMachineOsWord(dual, 'wsl')).toBe('Linux');
+    expect(cloudMachineOsWord(dual, 'win')).toBe('Windows');
+    expect(cloudMachineOsWord(dual, null)).toBeNull();
+  });
+  it('keeps the record platform for a single daemon', () => {
+    expect(cloudMachineOsWord({ backends: ['host'], shellPlatform: 'darwin-arm64' }, null)).toBe('macOS');
+    expect(cloudMachineOsWord({ backends: ['host'], shellPlatform: 'windows-amd64' }, 'wsl')).toBe('Windows');
+    expect(cloudMachineOsWord(undefined, 'wsl')).toBeNull();
   });
 });

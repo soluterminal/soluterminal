@@ -287,7 +287,7 @@ func writeAgentFixtures(t *testing.T, home string) {
 	writeTestFile(t, filepath.Join(home, ".claude.json"), testClaudeJSON)
 	writeTestFile(t, filepath.Join(home, ".claude", "settings.json"), testClaudeSettings())
 	writeTestFile(t, filepath.Join(home, ".codex", "config.toml"), testCodexConfig)
-	writeTestFile(t, filepath.Join(home, ".codex", "AGENTS.md"), "My own notes.\n\n"+codexAgentsManagedBlock()+"\n")
+	writeTestFile(t, filepath.Join(home, ".codex", "AGENTS.md"), "My own notes.\n\n"+legacyCodexAgentsBlock()+"\n")
 }
 
 func TestRemoveAgentIntegrationRemovesOnlyOurEntries(t *testing.T) {
@@ -405,7 +405,7 @@ func TestAgentIntegrationAPI(t *testing.T) {
 	if err := json.Unmarshal(get.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Effective != agentIntegrationAsk || !got.NeedsAnswer || len(got.Changes) != 4 {
+	if got.Effective != agentIntegrationAsk || !got.NeedsAnswer || len(got.Changes) != 3 {
 		t.Fatalf("fresh GET: %+v", got)
 	}
 

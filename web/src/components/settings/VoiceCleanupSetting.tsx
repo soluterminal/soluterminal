@@ -40,15 +40,36 @@ const REASONS: Record<string, string> = {
   paused: "Paused for a few minutes after Claude Code didn't answer. SoluTerminal is cleaning your dictation meanwhile.",
 };
 
-export function voiceLocalHint(s: VoiceLocalSettings): string {
+// ST-181 (Benjamin, 14 Nov; @secure's ruling): SoluTerminal's cloud cleans
+// dictation by default. The person's Claude plan and their own Anthropic API
+// key are explicit choices; an exported key is never used on its own.
+// Wording: @cmo, launch/marketing/site-copy/soluterminal-voice-cleanup-st181.md.
+export const VOICE_LOCAL_OFF_HINT =
+  'Off: SoluTerminal’s cloud tidies your dictation, and the terminal text it reads, through our ' +
+  'clean-up provider. We don’t store the text. It counts toward your daily voice allowance. Tick ' +
+  'this to use your Claude plan instead.';
+export const VOICE_LOCAL_ON_HINT =
+  'On: your Claude Code login tidies your dictation and counts toward your Claude plan’s usage. ' +
+  'The terminal text it reads goes only to Anthropic, and it doesn’t use your daily voice allowance.';
+export const VOICE_API_KEY_LABEL =
+  'Use my Anthropic API key (ANTHROPIC_API_KEY). Clean-up then goes to Anthropic under your key ' +
+  'and is billed to it.';
+export const VOICE_CLEANUP_NOTICE =
+  'Dictation clean-up now runs in SoluTerminal’s cloud by default. To use your Claude plan again, ' +
+  'turn it on in Settings › Voice.';
+
+// The plan row's hint. With the API key chosen the off hint (the cloud)
+// would be wrong, so the plan row says nothing and the key row explains.
+export function voiceLocalHint(s: VoiceLocalSettings): string | undefined {
   if (s.enabled && !s.available && s.reason && REASONS[s.reason]) return REASONS[s.reason];
-  if (!s.enabled) {
-    return 'Off: SoluTerminal cleans your dictation, which counts toward your daily voice allowance.';
-  }
-  return (
-    'Claude Haiku tidies your dictation on your own Claude Code login, so the terminal text it ' +
-    'reads goes only to Anthropic, and it doesn’t count toward your daily voice allowance.'
-  );
+  if (!s.enabled && s.apiKeyChosen) return undefined;
+  return s.enabled ? VOICE_LOCAL_ON_HINT : VOICE_LOCAL_OFF_HINT;
+}
+
+// The API-key row's hint: only why the chosen key can't be used right now.
+export function voiceApiKeyHint(s: VoiceLocalSettings): string | undefined {
+  if (s.apiKeyChosen && !s.available && s.reason && REASONS[s.reason]) return REASONS[s.reason];
+  return undefined;
 }
 
 // Settings › Voice: every voice preference in one group — auto-send and
@@ -91,15 +112,18 @@ export function VoiceCleanupSetting() {
     };
   }, []);
 
-  const change = async (next: boolean) => {
+  const change = async (which: 'plan' | 'apiKey', next: boolean) => {
     if (!settings || pendingRef.current) return;
     pendingRef.current = true;
     setPending(true);
     setError(null);
     const previous = settings;
-    setSettings({ ...previous, enabled: next });
+    // The plan and the API key are alternatives: choosing one clears the other.
+    setSettings(which === 'plan'
+      ? { ...previous, enabled: next, apiKeyChosen: next ? false : previous.apiKeyChosen }
+      : { ...previous, apiKeyChosen: next, enabled: next ? false : previous.enabled });
     try {
-      setSettings(await api.setVoiceLocal(next));
+      setSettings(await (which === 'plan' ? api.setVoiceLocal(next) : api.setVoiceApiKey(next)));
     } catch (e) {
       setSettings(previous);
       setError(`Couldn't save the voice setting: ${String(e)}`);
@@ -146,8 +170,18 @@ export function VoiceCleanupSetting() {
           label={VOICE_LOCAL_LABEL}
           checked={settings.enabled}
           disabled={pending}
-          onChange={(next) => void change(next)}
+          onChange={(next) => void change('plan', next)}
           hint={voiceLocalHint(settings)}
+        />
+      )}
+      {/* Offered only when a key is exported to SoluTerminal (or was chosen). */}
+      {settings && (settings.apiKey || settings.apiKeyChosen) && (
+        <SettingsCheck
+          label={VOICE_API_KEY_LABEL}
+          checked={!!settings.apiKeyChosen}
+          disabled={pending}
+          onChange={(next) => void change('apiKey', next)}
+          hint={voiceApiKeyHint(settings)}
         />
       )}
       <VoiceWordsSetting />

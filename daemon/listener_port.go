@@ -1,14 +1,22 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 )
 
+// listenDaemon binds one of the daemon's own listeners. On Windows it sets
+// SO_EXCLUSIVEADDRUSE (listener_exclusive_windows.go, ST-233).
+func listenDaemon(network, addr string) (net.Listener, error) {
+	lc := net.ListenConfig{Control: daemonListenControl}
+	return lc.Listen(context.Background(), network, addr)
+}
+
 func listenOnConfiguredPort(network, addr string) (net.Listener, error) {
 	// Never enable SO_REUSEPORT here: Shinoque's core proves which process
 	// answers this port by the pid holding its only listening socket.
-	ln, err := net.Listen(network, addr)
+	ln, err := listenDaemon(network, addr)
 	if err != nil {
 		return nil, err
 	}

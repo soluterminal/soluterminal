@@ -2,13 +2,16 @@
 // global recorder and its status, the Alt+S / Alt+C / Esc shortcuts, dictation
 // in the composer and into terminal panes, and its Settings › Notifications & voice section.
 // Public since 2026-10-27 (soluvoice is Apache-2.0).
+import { useEffect } from 'react';
 import type { WebExtension } from '../extensions';
+import { api, currentPrefix } from '../api';
+import { useSettings } from '../settings';
 import { useAccountFeatures } from '../entitlements';
 import { useStore } from '../store';
 import { VoiceButton, VoiceAutoSendToggle, VoiceLanguageSelect } from '../components/VoiceButton';
 import { VoiceConfigMenu } from '../components/VoiceConfigMenu';
 import { VoiceSessionStatus } from '../components/VoiceSessionStatus';
-import { VOICE_SETTINGS_TAB, VoiceCleanupSetting } from '../components/settings/VoiceCleanupSetting';
+import { VOICE_CLEANUP_NOTICE, VOICE_SETTINGS_TAB, VoiceCleanupSetting } from '../components/settings/VoiceCleanupSetting';
 import { useComposerVoice } from '../components/composer/useComposerVoice';
 import { notePaneTyped } from '../lib/voiceGuards';
 import { ComposerVoiceRecording } from './ComposerVoiceRecording';
@@ -17,6 +20,34 @@ import { createVoiceKeys } from './voice.keys';
 
 // Dictation needs a free account (cloud voice); without one none of this shows.
 
+// ST-181: clean-up on the Claude plan used to be on by default and is now an
+// explicit choice. Once per computer, someone this device shows was getting
+// plan clean-ups (a 'local' entry in its voice history, all made before the
+// API-key choice existed) and who never chose either way is told, with a way
+// to turn it back on. Older daemons don't report the fields, so nothing shows.
+export function VoiceCleanupNotice() {
+  useEffect(() => {
+    if (currentPrefix() !== '') return; // the phone path cleans in the cloud anyway
+    // Only someone this device shows was cleaning on the plan can need it, so
+    // nobody else's app asks the daemon at all.
+    if (!useStore.getState().voiceHistory.some((e) => e.cleanedBy === 'local')) return;
+    let live = true;
+    void api.getVoiceLocal().then((s) => {
+      if (!live || !s || s.enabled || s.planChoiceSet !== false || s.noticeSeen !== false) return;
+      useStore.getState().toast(VOICE_CLEANUP_NOTICE, {
+        kind: 'info',
+        ttlMs: 20_000,
+        action: { label: 'Voice settings', run: () => useSettings.getState().openSettings(VOICE_SETTINGS_TAB) },
+      });
+      void api.markVoiceCleanupNoticeSeen().catch(() => {});
+    }).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+  return null;
+}
+
 // The headless root recorder (Alt+S target when no visible mic is mounted)
 // and the global session status.
 function VoiceRoot() {
@@ -24,6 +55,7 @@ function VoiceRoot() {
   if (!voiceAllowed) return null;
   return (
     <>
+      <VoiceCleanupNotice />
       <VoiceButton headless />
       <div className="voice-global-status"><VoiceSessionStatus global /></div>
     </>

@@ -146,9 +146,11 @@ func TestHeldSummaryNeverCarriesTextAndUnverifiedGetsCounts(t *testing.T) {
 			t.Fatal("list_panes carried message text")
 		}
 	}
-	state, isErr := mcpResultText(t, a.mcpToolGetPaneState(map[string]any{"pane_id": p.ID}))
-	if isErr || !strings.Contains(state, "2 held") || strings.Contains(state, "@a") || strings.Contains(state, heldStuckSecret) {
-		t.Fatalf("get_pane_state = %q", state)
+	// One pane (list_panes pane_id, which replaced get_pane_state) carries
+	// the same counts-only summary to a caller with no pane.
+	one, isErr := mcpResultText(t, a.mcpToolListPanes(map[string]any{"pane_id": p.ID}, ""))
+	if isErr || !strings.Contains(one, `"held_messages":{"count":2,"stuck":true}`) || strings.Contains(one, "@a") || strings.Contains(one, heldStuckSecret) {
+		t.Fatalf("list_panes pane_id = %q", one)
 	}
 }
 

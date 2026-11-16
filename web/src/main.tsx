@@ -10,6 +10,7 @@ import { useStore } from './store';
 import { installLifecycleDebugGlobal, lifecycleLog } from './debug';
 import { installEmbedBridge, isEmbedded } from './embed';
 import { captureArrival } from './lib/arrival';
+import { clearRetiredFocusStorage } from './lib/retiredFocusStorage';
 import { standalonePageFor } from './standalonePages';
 import { RootErrorBoundary } from './components/RootErrorBoundary';
 import './prefs'; // activate cloud-synced user-preferences sync (see prefs.ts)
@@ -35,6 +36,7 @@ const StandalonePage = standalonePage ? React.lazy(standalonePage.load) : null;
 // a first-touch tag. Keep them for this tab and clean the address bar before
 // anything logs or shares the URL.
 captureArrival();
+clearRetiredFocusStorage();
 const initialView = readViewFromHash();
 if (initialView === 'system') useStore.getState().setSystemPageOpen(true);
 

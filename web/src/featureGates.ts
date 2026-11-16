@@ -33,7 +33,6 @@ export const FEATURE_GATES: readonly FeatureGate[] = [
   { file: 'components/SettingsModal.tsx', flag: 'operator', surface: 'Services tab' },
   { file: 'components/CommandPalette.tsx', flag: 'operator', surface: 'Tasks and Orchestrator palette actions' },
   { file: 'components/Pane.tsx', flag: 'operator', surface: 'Announce delegation, convert to Orchestrator' },
-  { file: 'components/NativePane.tsx', flag: 'operator', surface: 'Announce delegation, convert to Orchestrator' },
   { file: 'components/NewPaneDialog.tsx', flag: 'operator', surface: 'Orchestrator role, GLM model chip' },
   { file: 'components/VersionPopover.tsx', flag: 'operator', surface: 'Raw commit notes' },
   { file: 'components/WhatsNewToast.tsx', flag: 'operator', surface: 'Raw commit notes' },

@@ -736,3 +736,35 @@ func goroutineWaitsForLockIn(fn string) bool {
 	}
 	return false
 }
+
+// conditionalClaudeComposer ends the draft at the box's closing rule: rows
+// between that rule and the status line are Claude's notices (ST-263b).
+func TestClaudeBoxDraftEndsAtTheClosingRule(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	status := "  ~/repo [Haiku 4.5 | ctx: 4%]\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+	notice := "  ⚠ Transcript saving is off — inherited marker\n"
+	for _, tc := range []struct {
+		name, screen, draft string
+		known               bool
+	}{
+		{"empty box", "● ok\n\n" + rule + "\n❯ \n" + rule + "\n" + status, "", true},
+		{"notice under an empty box", "● ok\n\n" + rule + "\n❯ \n" + rule + "\n" + notice + status, "", true},
+		{"two notices", rule + "\n❯ \n" + rule + "\n" + notice + "  You've used 80% of your weekly limit\n" + status, "", true},
+		{"draft above a notice", rule + "\n❯ fix the build\n" + rule + "\n" + notice + status, "fixthebuild", true},
+		{"wrapped draft above a notice", rule + "\n❯ fix the build\n  and the tests\n" + rule + "\n" + notice + status, "fixthebuildandthetests", true},
+		// A rule-only draft row is indented inside the box and narrower than
+		// its rules: it does not close the box, and the rows after it count.
+		{"rule characters in the draft", rule + "\n❯ see below\n  ────────\n  the plan\n" + rule + "\n" + notice + status, "seebelowtheplan", true},
+		// Anything else under the box still reads as box text, as before.
+		{"left-edge row under the box", rule + "\n❯ \n" + rule + "\n$ make test\n" + status, "$maketest", true},
+		{"too many rows under the box", rule + "\n❯ \n" + rule + "\n" + strings.Repeat(notice, claudeFooterRows+1) + status, conditionalDraftText(notice), true},
+		{"no top rule", "● ok\n❯ \n" + rule + "\n" + notice + status, conditionalDraftText(notice), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, draft, known := conditionalClaudeComposer(tc.screen)
+			if known != tc.known || (known && draft != tc.draft) {
+				t.Fatalf("draft=%q known=%v, want %q %v", draft, known, tc.draft, tc.known)
+			}
+		})
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -19,9 +20,6 @@ import (
 //     `option` must be one of the numbered options currently on the menu.
 //     The chosen digit is written to the PTY (Claude/Codex menus action a
 //     bare digit keypress — the ARIA auto-mode convention, no Enter).
-//   - native (Focus) panes: `option` must be "allow" or "deny"; resolves the
-//     single pending NativeApproval through the same resolveApproval path the
-//     UI and lock-screen use (idempotent, confirm-registry bridged).
 //
 // It cannot free-type, cannot answer a prose "should I continue?" question
 // (that is not a choice-prompt), and cannot act on a pane with no live
@@ -72,6 +70,13 @@ func atoiSafe(s string) int {
 // mcpToolAnswerPrompt also returns the prompt it answered, read before the
 // answer changes it: the approval it resolved, or the menu's input revision.
 func (a *apiServer) mcpToolAnswerPrompt(args map[string]any) (any, string) {
+	return a.mcpToolAnswerPromptChecked(args, nil)
+}
+
+// mcpToolAnswerPromptChecked runs recheck (nil: none) under the pane's
+// writer lock before each write of the answer; its error refuses the answer
+// with nothing written.
+func (a *apiServer) mcpToolAnswerPromptChecked(args map[string]any, recheck func() error) (any, string) {
 	paneID, _ := args["pane_id"].(string)
 	option, _ := args["option"].(string)
 	option = strings.TrimSpace(option)
@@ -79,7 +84,7 @@ func (a *apiServer) mcpToolAnswerPrompt(args map[string]any) (any, string) {
 		return toolErr("pane_id is required"), ""
 	}
 	if option == "" {
-		return toolErr(`option is required — a menu number ("1") for a terminal pane, or "allow"/"deny" for a native pane`), ""
+		return toolErr(`option is required — a menu number ("1")`), ""
 	}
 	p, ok := a.mgr.Get(paneID)
 	if !ok {
@@ -90,54 +95,12 @@ func (a *apiServer) mcpToolAnswerPrompt(args map[string]any) (any, string) {
 		return toolErr("pane " + paneID + " has exited — nothing to answer"), ""
 	}
 
-	if snap.Kind == "native" {
-		return a.answerNativePrompt(p, option)
-	}
-	return a.answerTerminalPrompt(p, paneID, option)
-}
-
-// answerNativePrompt resolves a Focus pane's single pending approval.
-func (a *apiServer) answerNativePrompt(p *Pane, option string) (any, string) {
-	var allow bool
-	switch strings.ToLower(option) {
-	case "allow", "yes", "approve", "y":
-		allow = true
-	case "deny", "no", "reject", "n":
-		allow = false
-	default:
-		return toolErr(`native pane: option must be "allow" or "deny" (got ` + option + ")"), ""
-	}
-	pending := p.peekNativePending("")
-	if pending == nil {
-		return toolErr("pane " + p.ID + " has no pending approval to answer"), ""
-	}
-	denyReason := ""
-	if !allow {
-		denyReason = "declined via answer_prompt"
-	}
-	policy := p.autoModePolicy()
-	resolved, err := p.resolveApprovalWithPolicy(pending.RequestID, allow, denyReason, &policy)
-	if err != nil {
-		if err == errNoPendingApproval {
-			return toolErr("the approval was already resolved (someone else answered it)"), ""
-		}
-		return toolErr("resolve failed: " + err.Error()), ""
-	}
-	// Converge with the in-app ConfirmCard / lock-screen paths, exactly like
-	// handlePaneApprovalResolve does.
-	if a.aria != nil && resolved != nil && resolved.ConfirmID != "" {
-		a.aria.signalConfirm(resolved.ConfirmID, allow, false)
-	}
-	verb := "Allowed"
-	if !allow {
-		verb = "Denied"
-	}
-	return toolOK(fmt.Sprintf("%s the pending %s approval on pane %s ('%s').", verb, resolved.ToolName, p.ID, p.Title)), approvalPromptID(pending.RequestID)
+	return a.answerTerminalPrompt(p, paneID, option, recheck)
 }
 
 // answerTerminalPrompt validates the pane is on a menu and the option exists,
 // then writes the digit to the PTY.
-func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string) (any, string) {
+func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string, recheck func() error) (any, string) {
 	if state := p.computeStateCached(); state != StateChoicePrompt {
 		return toolErr("pane " + paneID + " is not on a choice prompt (state=" + string(state) +
 			"). answer_prompt only acts on a live numbered menu; it will not type into a running or idle pane."), ""
@@ -167,13 +130,17 @@ func (a *apiServer) answerTerminalPrompt(p *Pane, paneID, option string) (any, s
 	prompt := promptRevID(p)
 	policy := p.autoModePolicy()
 	writeAnswer := func(b []byte) (int, error) {
-		return p.writeWithAutoModePolicy(b, false, policy, time.Now().Add(ariaJevTimeout))
+		return p.writeWithFleetAdmissionPolicy(b, false, false, &policy, time.Now().Add(ariaJevTimeout), recheck)
 	}
 	// Write the bare digit — Claude/Codex numbered menus action the keypress
 	// immediately (ARIA auto-mode convention: no Enter). WriteNoPromptRecord,
 	// like every menu-choice reply: the digit is a control answer, not a user
 	// prompt, and must stay out of the prompt-recorder strip.
 	if _, err := writeAnswer([]byte(option)); err != nil {
+		var revoked errPromptAnswerRevoked
+		if errors.As(err, &revoked) {
+			return toolErr(revoked.refusal + " Nothing was written."), ""
+		}
 		return toolErr("write to pane " + paneID + " failed: " + err.Error()), ""
 	}
 	// Codex's submit-style menus ("enter to submit") can treat the digit as

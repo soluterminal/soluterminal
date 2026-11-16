@@ -1,1 +1,0 @@
-{"agentMidTurn":true,"pendingCount":0,"paneId":"p","fixtureFormatVersion":1,"description":"an auto-approve pane emits one resolved permission_request per edit; dropping the resolved ones keeps the edits adjacent so they still form one edit-group"}

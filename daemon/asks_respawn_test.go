@@ -51,25 +51,6 @@ func TestAsksSurviveRespawnInPlace(t *testing.T) {
 	}
 }
 
-// Switching a pane between terminal and native respawns it under the same id.
-func TestAsksSurviveModeSwitch(t *testing.T) {
-	t.Setenv("SOLU_NATIVE_RENDERER", "1")
-	p := switchTestPane("pane_switch", "", []string{"bash"}, "sess-123")
-	p.LastPrompts = []string{"hi"}
-	api := respawnAskServer(t, p)
-	mustPost(t, api.asks, "pane_switch", "deploy", "OK to deploy?")
-	req := httptest.NewRequest(http.MethodPost, "/api/panes/pane_switch/switch-mode", strings.NewReader(`{"kind":"native"}`))
-	req.SetPathValue("id", "pane_switch")
-	rec := httptest.NewRecorder()
-	api.handleSwitchMode(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("switch: %d %s", rec.Code, rec.Body.String())
-	}
-	if open := api.asks.openFor("pane_switch"); len(open) != 1 {
-		t.Fatalf("asks after switch = %+v, want the ask kept", open)
-	}
-}
-
 // Closing a pane for good closes its asks: from the app, and by kill_pane.
 func TestAsksCloseWhenThePaneIsClosed(t *testing.T) {
 	a := confirmTestServer(t)

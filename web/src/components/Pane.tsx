@@ -12,7 +12,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { isEmbedded, openEmbedUrl } from '../embed';
+import { isEmbedded } from '../embed';
+import { openTerminalLink } from '../tauri-browser';
 import { openTerminalFileLink } from '../terminalFileLink';
 import { SearchAddon } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
@@ -40,8 +41,7 @@ import { ApprovalActions } from './ApprovalActions';
 import { logScrollDiag } from '../scrollDiag';
 import { attachPaneImagePasteHandlers } from './paneImagePaste';
 import { attachPaneMousePasteHandlers } from './paneMousePaste';
-import { SwitchInterruptedBanner } from './native/NativeEventViews';
-import { shouldShowSwitchNotice, switchNoticeKey } from '../native/modeSwitch';
+import { SwitchInterruptedBanner, shouldShowSwitchNotice, switchNoticeKey } from './SwitchNoticeBanner';
 import { PaneBodyOverlays } from './PaneBodyOverlays';
 import { PaneFindBar } from './PaneFindBar';
 import { PaneContextMenu } from './PaneContextMenu';
@@ -179,7 +179,6 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
    const saved=await api.renamePane(pane.id,title,session.scope);
    if(valid()) {ensureTerminalSession(session.scope,saved,session.retained);useStore.setState(s=>s.panes[pane.id]?.pid===saved.pid?{panes:{...s.panes,[pane.id]:saved}}:{});}
   };
-  const switchPaneMode = useStore((s) => s.switchPaneMode);
   const applyPaneSnapshot=(changed:PaneInfo)=>{ensureTerminalSession(session.scope,changed,session.retained);useStore.setState(s=>s.panes[pane.id]?.pid===pane.pid?{panes:{...s.panes,[pane.id]:changed}}:{});};
   const setPaneContextPack = async (_id:string,dir:string)=> {
    const valid=captureSessionGesture(session);if(!valid())return;
@@ -247,16 +246,12 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
   // Managed by the WS lifecycle below (begin on replay-start, end when
   // the replay flush completes or the socket closes).
   const [catchup, setCatchup] = useState<null | 'active' | 'fading'>(null);
-  // Conversation-discontinuity banner (pane.switchNotice): a Focus→Terminal
-  // switch that interrupted a turn, a restart-repaired resume, or a dropped
-  // --resume (fresh start). Session-local dismissal keyed by notice.at — same
-  // contract as NativePane's banner; the daemon clears the notice itself on
-  // the next committed prompt.
+  // Conversation-discontinuity banner (pane.switchNotice): a restart-repaired
+  // resume, or a dropped --resume (fresh start). Session-local dismissal keyed
+  // by notice.at; the daemon clears the notice itself on the next committed
+  // prompt.
   const [dismissedNotices, setDismissedNotices] = useState<Set<number>>(() => new Set());
   const paneSender = useStore((s) => s.senders[key]);
-  // Renderer switch in flight (Focus→Terminal): drives the labeled scrim so
-  // the fresh xterm's blank beat reads as an intentional transition.
-  const modeSwitching = useStore((s) => !!s.paneModeSwitching[pane.id]);
   useEffect(() => {
     // 300ms covers the two refit passes (fitAddon runs at mount + 250ms)
     // plus xterm's internal layout flush. Previously 650ms, which added
@@ -277,7 +272,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
   useEffect(() => {
     // Spend the deliberate-selection marker UP-FRONT (one-shot in time) so a
     // later background re-run can't replay userPicked and bypass the typing
-    // guard. Mirror of NativePane. (Audit 2026-06-26.)
+    // guard. (Audit 2026-06-26.)
     if (!canAct()) return;
     const userPicked = viewKind === 'workspace' && useStore.getState().lastUserFocusId === pane.id;
     if (userPicked) useStore.getState().consumeUserFocus();
@@ -535,7 +530,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
     (debugWin.__soluTerms ??= new Map()).set(key, term);
 
     const fit = new FitAddon();
-    const weblinks = isEmbedded() ? new WebLinksAddon((event, url) => { openEmbedUrl(url, event); }) : new WebLinksAddon();
+    const weblinks = new WebLinksAddon(openTerminalLink);
     // Search addon powers "reveal match" from the cross-pane search in
     // CommandPalette. The addon runs against what xterm has in its own
     // scrollback (raw rendered text), not what the daemon returned, so
@@ -2696,45 +2691,28 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         let exitedCloseStaleRunning = false;
         if (ev.code === 1000 && ev.reason === 'pane exited') {
           const live = session.pane;
-          // A renderer mode switch (Terminal↔Focus) KILLS + RESPAWNS the agent,
-          // firing this exact "pane exited" close for the dying agent before the
-          // new one comes up on the SAME pane id. During that window
-          // paneModeSwitching[pane.id] is true — so NEVER paint the scary
-          // "[session exited]" line (it would flash in the terminal for the whole
-          // respawn). Fall through to the reconnect loop, which adopts the new
-          // agent (the optimistic kind-swap already kept the body visible). The
-          // status==='running' check below catches the same respawn for daemons/
-          // races where the flag has already cleared; the flag catches the common
-          // case where the switch POST hasn't returned yet.
-          const switching = !!useStore.getState().paneModeSwitching[pane.id];
-          if (!switching && (!live || live.status !== 'running')) {
+          // A kill+respawn on the SAME pane id (resume / refresh) fires this exact
+          // "pane exited" close for the dying agent; a pane that still reads
+          // running falls through to the reconnect loop, which adopts the new
+          // agent, instead of painting "[session exited]".
+          if (!live || live.status !== 'running') {
             setConnStatus('closed');
             term.writeln('\r\n\x1b[90m[session exited]\x1b[0m');
             return;
           }
-          // A switch-mode RESPAWN in flight: skip BOTH the "[session exited]" paint
-          // (above) AND the exit-settle gate (below). The agent is being
-          // kill+respawned on the same pane id; we want a plain, quiet reconnect to
-          // adopt the new agent (the respawn-reconnect effect also nudges it),
-          // never a settle-to-closed — which could prematurely show the
-          // Session-closed overlay if the reconnect timer fires before the new
-          // agent's 'running' status lands. The optimistic kind-swap keeps the body
-          // visible meanwhile, so the switch reads as an in-place re-render.
-          if (!switching) {
-            // Store still says 'running', but a non-switch close here has two very
-            // different causes: a daemon-reattach RESPAWN body-swap (reconnect to
-            // adopt the new agent on the same pane id) OR a genuine natural exit
-            // whose 'exited' status hasn't reached the 3s refreshPanes poll yet.
-            // Pane-exit is NOT pushed over SSE — only the poll flips .status — so
-            // without a nudge the client keeps reconnecting + re-replaying the ring
-            // for up to 3s (the visible "flash" on session exit) and the
-            // Resume/Close overlay (which needs status==='exited') is delayed. Force
-            // an authoritative refresh now and gate the reconnect below on it: a
-            // dead pane settles to 'closed' instead of reconnecting; a respawn keeps
-            // status 'running' and reconnects as before.
-            exitedCloseStaleRunning = true;
-            void useStore.getState().refreshPanes();
-          }
+          // Store still says 'running', but a non-switch close here has two very
+          // different causes: a daemon-reattach RESPAWN body-swap (reconnect to
+          // adopt the new agent on the same pane id) OR a genuine natural exit
+          // whose 'exited' status hasn't reached the 3s refreshPanes poll yet.
+          // Pane-exit is NOT pushed over SSE — only the poll flips .status — so
+          // without a nudge the client keeps reconnecting + re-replaying the ring
+          // for up to 3s (the visible "flash" on session exit) and the
+          // Resume/Close overlay (which needs status==='exited') is delayed. Force
+          // an authoritative refresh now and gate the reconnect below on it: a
+          // dead pane settles to 'closed' instead of reconnecting; a respawn keeps
+          // status 'running' and reconnects as before.
+          exitedCloseStaleRunning = true;
+          void useStore.getState().refreshPanes();
         }
         setConnStatus('reconnecting');
         // Don't retry while the daemon is mid-self-update — the
@@ -3591,7 +3569,6 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         onRename={async (title) => {if(actionValid()) await renamePane(pane.id, title);}}
         onClose={() => { if(actionValid()) {void killPane(pane.id);} }}
         onToggleZoom={() => {if(actionValid() && !ownerPresentation) toggleZoom(pane.id);}}
-        onSwitchMode={(kind) => { if(actionValid() && !ownerPresentation) void switchPaneMode(pane.id, kind); }}
         onOpenMenu={openContextMenu}
         onRestartPane={() => { if (actionValid()) void restartPaneFlow(pane.id,{scope:session.scope,valid:captureSessionGesture(session)}); }}
       />}
@@ -3743,22 +3720,10 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
         {catchup && (
           <div className={`pane-catchup${catchup === 'fading' ? ' done' : ''}`} aria-hidden />
         )}
-        {/* Renderer-switch scrim: masks the fresh xterm's blank/connecting beat
-            while the daemon respawns the pane as a terminal (Focus→Terminal
-            switch). Mirrors NativePane's scrim in the other direction. */}
-        {modeSwitching && (
-          <div className="pane-switching-scrim" role="status" aria-live="polite">
-            <span className="pane-switching-spin" aria-hidden />
-            <span className="pane-switching-label">
-              Switching to Terminal — restoring your session…
-            </span>
-          </div>
-        )}
         {canAct() && pane.state === 'choice-prompt' && (
           <ApprovalActions paneId={pane.id} sessionKey={key} actionGuard={actionValid} />
         )}
-        {/* Conversation-discontinuity banner — mirrors NativePane's. For an
-            interrupted notice, Continue types the resume nudge straight into
+        {/* Conversation-discontinuity banner. For an interrupted notice, Continue types the resume nudge straight into
             the PTY (submitting it clears the daemon's notice). */}
         {shouldShowSwitchNotice(pane.switchNotice, dismissedNotices) && pane.switchNotice && (
           <div className="pane-switch-notice">

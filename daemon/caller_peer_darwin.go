@@ -30,3 +30,7 @@ var tracedOutsiderJudgedUntraced = true
 
 // platformBrowserProcessNames: macOS's names are in browserProcessNames.
 var platformBrowserProcessNames = map[string]bool{}
+
+// peerIsWSLInit: macOS has no WSL init, so a peer named "init" is an ordinary
+// program.
+func peerIsWSLInit(int) bool { return false }

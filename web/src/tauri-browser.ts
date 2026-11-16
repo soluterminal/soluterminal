@@ -232,8 +232,40 @@ export function getShellVersion(): Promise<string | null> {
 // desktop app.
 //
 // Returns true when handed to the system browser; false when it fell back to
-// window.open (browser/PWA build, where that IS the user's real browser).
-export async function openInSystemBrowser(url: string, triggerEvent?: Event): Promise<boolean> {
+// window.open (browser/PWA build, where that IS the user's real browser), or
+// refused a scheme other than http, https or mailto.
+// Only these schemes ever reach the opener plugin or window.open. Windows hands
+// any other one (file:, ms-*, custom protocols) to whatever app registered it,
+// so no caller may pass one through, whatever it was given.
+const SYSTEM_BROWSER_SCHEMES = new Set(['http:', 'https:', 'mailto:']);
+
+// The URL exactly as checked: parsing drops tabs, newlines and leading control
+// characters, so the raw string is never what gets handed on. Null when it is
+// not absolute, its scheme is not allowed, or it carries a user name or
+// password ("https://trusted.example@evil.example" disguises the real host),
+// as openEmbedUrl refuses too.
+function systemBrowserHref(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (!SYSTEM_BROWSER_SCHEMES.has(parsed.protocol)) return null;
+    if (parsed.username || parsed.password) return null;
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+/** True when `url` is absolute and uses a scheme openInSystemBrowser accepts. */
+export function systemBrowserSchemeAllowed(url: string): boolean {
+  return systemBrowserHref(url) !== null;
+}
+
+export async function openInSystemBrowser(rawUrl: string, triggerEvent?: Event): Promise<boolean> {
+  const url = systemBrowserHref(rawUrl);
+  if (url === null) {
+    console.warn('openInSystemBrowser: refused a link that is not a plain http, https or mailto link');
+    return false;
+  }
   if (isEmbedded()) return openEmbedUrl(url, triggerEvent);
   const invoke = tauriInvoke();
   if (invoke) {
@@ -249,6 +281,15 @@ export async function openInSystemBrowser(url: string, triggerEvent?: Event): Pr
   }
   window.open(url, '_blank', 'noopener,noreferrer');
   return false;
+}
+
+// Click handler for links in a terminal pane (xterm's WebLinksAddon). The
+// addon's default handler calls a bare window.open(), which the desktop app's
+// WebView2 swallows, so a clicked link did nothing in the app, Local or Cloud
+// (ST-200, ST-197). Route it like every other external link: the embed host
+// when embedded, the opener plugin in the app, window.open in a browser.
+export function openTerminalLink(event: MouseEvent, url: string): void {
+  void openInSystemBrowser(url, event);
 }
 
 // The shell-version sentinel (desktop/src-tauri/src/shell_ping.rs). Named for

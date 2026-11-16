@@ -99,16 +99,13 @@ func main() {
 
 func TestFleetBinarySameAndDeletedInodeClassification(t *testing.T) {
 	dir := t.TempDir()
-	sleepPath, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The stand-in sleeper, not the host's sleep: a multi-call coreutils
+	// (uutils on Ubuntu 26.04) exits at once as solud, even with argv[0]
+	// still saying sleep (standInSleeper).
+	sleepPath := standInSleeper(t)
 	installed := filepath.Join(dir, "solud")
 	fleetTestCopyExecutable(t, sleepPath, installed)
 	cmd := exec.Command(installed, "30")
-	// Multi-call coreutils (uutils, BusyBox) pick the applet from argv[0], and
-	// the copy is named solud: keep argv[0] as sleep so the helper stays alive.
-	cmd.Args[0] = filepath.Base(sleepPath)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +124,7 @@ func TestFleetBinarySameAndDeletedInodeClassification(t *testing.T) {
 		t.Fatalf("same inode classified stale: %+v", stale)
 	}
 	if proc.Version != "" {
-		t.Fatalf("non-Go helper version = %q, want unknown", proc.Version)
+		t.Fatalf("unversioned helper version = %q, want unknown", proc.Version)
 	}
 
 	replacement := filepath.Join(dir, "replacement")
