@@ -146,6 +146,10 @@ type workerSettings struct {
 	// the remote default branch closes this long after the merge is seen,
 	// without its lead's read receipt (worker_archives.go).
 	WorkerMergedGraceMinutes int `json:"workerMergedGraceMinutes"`
+	// WorkerModel is the model a Claude worker that spawn_pane starts without
+	// one is given (`--model`, ST-283). "" (the default) passes no flag, so
+	// Claude Code picks its own default as before. Only the person changes it.
+	WorkerModel string `json:"workerModel"`
 }
 
 func defaultWorkerSettings() workerSettings {
@@ -194,6 +198,16 @@ func (a *apiServer) loadWorkerSettingsLocked(q *workerQueue) {
 	if json.Unmarshal(raw, &s) == nil && s.valid() {
 		q.settings = s
 	}
+}
+
+// workerModelSetting is the person's worker-model setting as it stands now:
+// read on each spawn, so a change in Settings needs no daemon restart.
+func (a *apiServer) workerModelSetting() string {
+	q := a.workers()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	a.loadWorkerSettingsLocked(q)
+	return q.settings.WorkerModel
 }
 func workerPriority(p string) int {
 	switch p {
@@ -718,10 +732,10 @@ func init() {
 			a.loadWorkerSettingsLocked(q)
 			s, changed := patch.apply(q.settings)
 			if !changed || !s.valid() {
-				http.Error(w, "set maxRunning (1..32), finishAfterMinutes (1..1440), workerLeadReservePct (0..100), workerExpectedRunMinutes (1..1440), workerMergedGraceMinutes (0..1440), workerAutoArchive, or workerAccounts (active, saved, team)", 400)
+				http.Error(w, "set maxRunning (1..32), finishAfterMinutes (1..1440), workerLeadReservePct (0..100), workerExpectedRunMinutes (1..1440), workerMergedGraceMinutes (0..1440), workerAutoArchive, workerAccounts (active, saved, team), or workerModel (a model id such as opus, or empty for none)", 400)
 				return
 			}
-			if s.widens(q.settings) && !a.requireHuman(w, r, "widen worker spending or automatic archiving") {
+			if s.widens(q.settings) && !a.requireHuman(w, r, "widen worker spending or automatic archiving, or change the worker model") {
 				return
 			}
 			raw, _ := json.Marshal(s)

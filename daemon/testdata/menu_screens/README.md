@@ -340,3 +340,51 @@ save escalated_command
 key esc
 settle 6
 ```
+
+Recorded 2026-11-17 for ST-287 (Codex 0.168/0.169 idle panes held agent
+messages, `codex_empty_box_test.go`), with the official npm builds of Codex
+0.166.0, 0.167.0, 0.168.0 and 0.169.0 (`@openai/codex`, integrity-checked by
+npm), each in an `env -i` scratch HOME, in a fresh git repo, `codex
+--no-alt-screen -s read-only -a on-request`. No account was used: the scratch
+`config.toml` points Codex at a model provider on a dead local port, so Codex
+shows its input box without a login, and nothing was submitted.
+
+```toml
+model = "gpt-5.1"            # "Daybreak Red" for the *_daybreak_* sessions
+model_provider = "dummy"
+check_for_update_on_startup = false
+experimental_use_exec_command_tool = true   # *_warning_* sessions only:
+[features]                                  # two unknown settings give
+bogus_feature_st287 = true                  # Codex's "⚠ 1 warning" chip
+[model_providers.dummy]
+name = "dummy"
+base_url = "http://127.0.0.1:9/v1"
+wire_api = "responses"
+requires_openai_auth = false
+[projects."<repo>"]
+trust_level = "trusted"
+```
+
+- `codex_0166_empty_100x40` … `codex_0169_empty_100x40`: the plain footer
+  (`gpt-5.1 default · <cwd>`). Codex 0.169 adds a hint row under it
+  (`← for agents · ? for shortcuts`) while the box is empty, and wraps the
+  working directory onto a second footer row once text is typed.
+- `codex_0166_warning_60x40` … `codex_0169_warning_60x40`: the same, narrow,
+  with the warning chip (on the footer row up to 0.168, on 0.169's hint row).
+- `codex_0168_daybreak_100x40`, `codex_0169_daybreak_100x40`: a model whose
+  name does not start with GPT, as Codex's "Daybreak Red" and "Daybreak Blue"
+  are shown.
+
+The scratch path's username was replaced at equal length. Step script, the
+same for every session:
+
+```
+settle 6
+save idle
+send hello draft text
+settle 2
+save typed
+key ctrl-c
+settle 2
+save cleared
+```

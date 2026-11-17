@@ -74,3 +74,138 @@ func spawnAgentModelArgv(cmd []string, model, effort string) ([]string, error) {
 	}
 	return out, nil
 }
+
+// Where a spawn_pane agent pane's model came from, as its result reports it.
+const (
+	spawnModelFromCaller  = "caller"               // the spawn_pane call named it
+	spawnModelFromSetting = "worker_model_setting" // the person's worker-model setting
+	spawnModelFromNone    = "none"                 // no flag: the agent's own default
+)
+
+// spawnPaneModel picks the model flag for a spawn_pane agent pane (ST-283). A
+// model the caller names always wins. Otherwise a Claude worker (no lead, not
+// an auto worker) takes the person's worker-model setting, so it no longer
+// inherits whatever /model pick last rewrote the `model` key in Claude Code's
+// own settings.json. Otherwise none: the agent picks its own default, exactly
+// as before the setting existed. Leads, Codex and other commands never take
+// the setting.
+func spawnPaneModel(cmd []string, callerModel string, worker bool, setting string) (model, source string) {
+	if m := strings.TrimSpace(callerModel); m != "" {
+		return m, spawnModelFromCaller
+	}
+	if s := strings.TrimSpace(setting); worker && s != "" && cmdStartsClaude(cmd) {
+		return s, spawnModelFromSetting
+	}
+	return "", spawnModelFromNone
+}
+
+// spawnModelNote explains a pane started without a model flag, for the
+// spawn_pane result and list_panes.
+func spawnModelNote(cmd []string) string {
+	if cmdStartsCodex(cmd) {
+		return "no model flag passed: Codex uses its own default model"
+	}
+	return "no model flag passed: Claude Code uses its own default (the model key in ~/.claude/settings.json, which a /model pick in any pane rewrites; a resumed session keeps its own model)"
+}
+
+// paneStartModel is the model a claude or codex pane was started with, read
+// from the flags on its argv (Pane.Cmd): claude --model, codex -m/--model or
+// -c model=. The last one wins, as in the CLIs. "" when none was passed or the
+// argv is not a claude or codex command (bare, or in the login-shell wrapper,
+// paneAgentArgv). It reads only the argv, never a transcript, so list_panes
+// can call it for every pane.
+func paneStartModel(cmd []string) string {
+	cmd = paneAgentArgv(cmd)
+	codex := cmdStartsCodex(cmd)
+	if cmd == nil {
+		return ""
+	}
+	model := ""
+	for i := 1; i < len(cmd); i++ {
+		name, value, joined := strings.Cut(cmd[i], "=")
+		isModel := name == "--model" || (codex && name == "-m" && !joined)
+		isConfig := codex && (name == "-c" || name == "--config")
+		if !isModel && !isConfig {
+			continue
+		}
+		if !joined {
+			if i+1 >= len(cmd) {
+				break
+			}
+			i++
+			value = cmd[i]
+		}
+		if isConfig {
+			key, v, ok := strings.Cut(value, "=")
+			if !ok || strings.TrimSpace(key) != "model" {
+				continue
+			}
+			value = strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+		if v := strings.TrimSpace(value); v != "" {
+			model = v
+		}
+	}
+	return model
+}
+
+// paneStartModelNote is list_panes' plain word for a claude or codex pane
+// started with no model flag; "" otherwise.
+func paneStartModelNote(cmd []string) string {
+	if paneAgentArgv(cmd) == nil || paneStartModel(cmd) != "" {
+		return ""
+	}
+	return "none passed: the agent's own default"
+}
+
+// paneAgentArgv is a pane's claude or codex argv: Pane.Cmd itself when it
+// starts with the agent, or the agent's words recovered from the login-shell
+// wrapper tryLoginShellWrap stores when the agent isn't on the daemon's PATH
+// (`bash -lc "<init>; 'claude' '--model' 'opus'; exec bash -i"`). nil for
+// anything else.
+func paneAgentArgv(cmd []string) []string {
+	if cmdStartsClaude(cmd) || cmdStartsCodex(cmd) {
+		return cmd
+	}
+	if len(cmd) != 3 || (cmd[1] != "-lc" && cmd[1] != "-c") {
+		return nil
+	}
+	for _, name := range []string{"claude", "codex"} {
+		for _, lead := range []string{"; ", "exec "} {
+			if i := strings.Index(cmd[2], lead+"'"+name+"'"); i >= 0 {
+				return singleQuotedWords(cmd[2][i+len(lead):])
+			}
+		}
+	}
+	return nil
+}
+
+// singleQuotedWords reads the leading run of space-separated words that
+// shellSingleQuote wrote (each word in single quotes, a quote inside it
+// closed, escaped and reopened), stopping at the first character that isn't
+// part of one.
+func singleQuotedWords(s string) []string {
+	var out []string
+	for strings.HasPrefix(s, "'") {
+		var word strings.Builder
+		for {
+			end := strings.IndexByte(s[1:], '\'')
+			if end < 0 {
+				return out
+			}
+			word.WriteString(s[1 : 1+end])
+			s = s[2+end:]
+			if !strings.HasPrefix(s, `\''`) {
+				break
+			}
+			word.WriteByte('\'')
+			s = s[2:]
+		}
+		out = append(out, word.String())
+		if !strings.HasPrefix(s, " ") {
+			break
+		}
+		s = s[1:]
+	}
+	return out
+}

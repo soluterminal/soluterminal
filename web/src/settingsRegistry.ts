@@ -155,6 +155,7 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['workspace.sidebar', 'resetSidebar', 'Reset to default'],
   ['sessions.behavior', 'afterRestart', 'After a restart'],
   ['sessions.behavior', 'promptHistory', 'Show prompt history strip'],
+  ['sessions.behavior', 'workerModel', 'Worker model', ['model', 'worker', 'opus', 'sonnet', 'haiku', 'spawn']],
   ['workflows.modelsFallbacks', 'localOpenAI', 'Local OpenAI-compatible', ['local model', 'base url']],
   ['workflows.automation', 'releaseTrain', 'Auto-publish on cadence (release train)'],
   ['workflows.automation', 'trainLandings', 'Functional landings before a train'],

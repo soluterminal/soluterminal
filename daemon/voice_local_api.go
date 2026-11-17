@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"soluterminal-shared/voiceclean"
 )
@@ -93,9 +94,19 @@ const (
 	voiceCleanupCloud  = "cloud"   // no local run: SoluTerminal's cloud service
 )
 
+// voiceAPIKeyPresentHook, when set, replaces the environment check (tests
+// only). It is atomic because a clean-up's background prewarm reads it while
+// a finishing test puts the previous one back.
+var voiceAPIKeyPresentHook atomic.Pointer[func() bool]
+
 // voiceAPIKeyPresent reports whether the daemon has an ANTHROPIC_API_KEY to
-// give the clean-up run. Only presence is read. A seam for tests.
-var voiceAPIKeyPresent = func() bool { return strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" }
+// give the clean-up run. Only presence is read.
+func voiceAPIKeyPresent() bool {
+	if f := voiceAPIKeyPresentHook.Load(); f != nil {
+		return (*f)()
+	}
+	return strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != ""
+}
 
 // localCleanupMode is where a dictation would be cleaned: on the plan when
 // the person opted in, on their API key when they chose it and it is still

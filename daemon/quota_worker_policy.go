@@ -168,10 +168,11 @@ type workerSettingsPatch struct {
 	WorkerAutoArchive        *bool   `json:"workerAutoArchive"`
 	WorkerAccounts           *string `json:"workerAccounts"`
 	WorkerMergedGraceMinutes *int    `json:"workerMergedGraceMinutes"`
+	WorkerModel              *string `json:"workerModel"`
 }
 
 func (s workerSettings) valid() bool {
-	return workerAccountsRank(s.WorkerAccounts) >= 0 && s.MaxRunning >= 1 && s.MaxRunning <= 32 && s.FinishAfterMinutes >= 1 && s.FinishAfterMinutes <= 1440 && s.WorkerLeadReservePct >= 0 && s.WorkerLeadReservePct <= 100 && s.WorkerExpectedRunMinutes >= 1 && s.WorkerExpectedRunMinutes <= 1440 && s.WorkerMergedGraceMinutes >= 0 && s.WorkerMergedGraceMinutes <= 1440
+	return workerAccountsRank(s.WorkerAccounts) >= 0 && s.MaxRunning >= 1 && s.MaxRunning <= 32 && s.FinishAfterMinutes >= 1 && s.FinishAfterMinutes <= 1440 && s.WorkerLeadReservePct >= 0 && s.WorkerLeadReservePct <= 100 && s.WorkerExpectedRunMinutes >= 1 && s.WorkerExpectedRunMinutes <= 1440 && s.WorkerMergedGraceMinutes >= 0 && s.WorkerMergedGraceMinutes <= 1440 && (s.WorkerModel == "" || spawnModelPattern.MatchString(s.WorkerModel))
 }
 func (p workerSettingsPatch) apply(s workerSettings) (workerSettings, bool) {
 	changed := false
@@ -190,6 +191,10 @@ func (p workerSettingsPatch) apply(s workerSettings) (workerSettings, bool) {
 	}
 	if p.WorkerAccounts != nil {
 		s.WorkerAccounts = *p.WorkerAccounts
+		changed = true
+	}
+	if p.WorkerModel != nil {
+		s.WorkerModel = strings.TrimSpace(*p.WorkerModel)
 		changed = true
 	}
 	return s, changed
@@ -219,5 +224,6 @@ func (s workerSettings) widens(old workerSettings) bool {
 		(s.WorkerAutoArchive && !old.WorkerAutoArchive) ||
 		s.FinishAfterMinutes != old.FinishAfterMinutes ||
 		s.WorkerExpectedRunMinutes > old.WorkerExpectedRunMinutes ||
-		s.WorkerMergedGraceMinutes < old.WorkerMergedGraceMinutes
+		s.WorkerMergedGraceMinutes < old.WorkerMergedGraceMinutes ||
+		s.WorkerModel != old.WorkerModel
 }

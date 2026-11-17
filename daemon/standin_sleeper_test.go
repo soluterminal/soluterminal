@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -81,14 +82,39 @@ func standInSleeper(t testing.TB) string {
 	if runtime.GOOS == "windows" {
 		bin += ".exe"
 	}
-	build := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", bin, src)
+	build := exec.Command(standInGoCommand(t), "build", "-trimpath", "-buildvcs=false", "-o", bin, src)
 	build.Dir = standIn.dir
-	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=on", "GOFLAGS=")
+	// GOTOOLCHAIN=local: the go command found above builds with its own tools
+	// and never switches to another release.
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=on", "GOFLAGS=", "GOTOOLCHAIN=local")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build the stand-in sleeper: %v\n%s", err, out)
 	}
 	standIn.path = bin
 	return bin
+}
+
+// standInGoCommand returns the go command in this test's GOROOT (set by `go
+// test`, or inherited when the daemon gate runs the compiled test binary), not
+// whichever go comes first on PATH. A go command of another release reading
+// that GOROOT runs a compiler that is not its own and fails: on the 0.0.1244
+// testbox PATH's go1.25.13 met go.mod's go1.26.11 tools ("compile: version
+// "go1.26.11" does not match go tool version "go1.25.13"").
+func standInGoCommand(t testing.TB) string {
+	t.Helper()
+	root := runtime.GOROOT()
+	if root == "" {
+		// No GOROOT to disagree with: PATH's go uses its own tools.
+		return "go"
+	}
+	goCmd := filepath.Join(root, "bin", "go")
+	if runtime.GOOS == "windows" {
+		goCmd += ".exe"
+	}
+	if _, err := os.Stat(goCmd); err != nil {
+		t.Fatalf("the go command of this test's toolchain (GOROOT %s): %v", root, err)
+	}
+	return goCmd
 }
 
 // removeStandInSleeper deletes the stand-in's build directory; TestMain calls
@@ -99,5 +125,37 @@ func removeStandInSleeper() {
 	if standIn.dir != "" {
 		_ = os.RemoveAll(standIn.dir)
 		standIn.dir, standIn.path = "", ""
+	}
+}
+
+// TestStandInGoCommandUsesItsOwnGOROOT: the stand-in's go command is the one
+// in the GOROOT this test was handed, whatever go comes first on PATH, so the
+// go command and the compiler it runs are one release.
+func TestStandInGoCommandUsesItsOwnGOROOT(t *testing.T) {
+	root := runtime.GOROOT()
+	if root == "" {
+		t.Skip("no GOROOT: PATH's go is the only go command and uses its own tools")
+	}
+	fake := t.TempDir()
+	name := "go"
+	if runtime.GOOS == "windows" {
+		name = "go.bat"
+	}
+	if err := os.WriteFile(filepath.Join(fake, name), []byte("exit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+	goCmd := standInGoCommand(t)
+	if !filepath.IsAbs(goCmd) || filepath.Dir(goCmd) == fake {
+		t.Fatalf("stand-in go command %q comes from PATH", goCmd)
+	}
+	cmd := exec.Command(goCmd, "env", "GOROOT")
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOFLAGS=")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%s env GOROOT: %v", goCmd, err)
+	}
+	if got := filepath.Clean(strings.TrimSpace(string(out))); got != filepath.Clean(root) {
+		t.Fatalf("%s uses the tools in %s, not this test's GOROOT %s", goCmd, got, root)
 	}
 }

@@ -92,6 +92,8 @@ export interface WorkerSettings {
   workerAutoArchive: boolean;
   workerAccounts: 'active' | 'saved' | 'team';
   workerMergedGraceMinutes?: number;
+  /** Model for Claude workers spawn_pane starts without one ('' = none passed). Person-only. */
+  workerModel?: string;
 }
 
 export interface PaneOrigin {

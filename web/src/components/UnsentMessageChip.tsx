@@ -24,6 +24,19 @@ function HeldMessageChip({ pane, actionGuard }: { pane: PaneInfo; actionGuard?: 
     if (pending || actionGuard?.() === false) return;
     setPending(true);
     try {
+      // Stuck behind the input box, Discard is the only button, and the
+      // sender is told the person discarded the message. Ask first, with
+      // Cancel focused, so a stray click or Enter doesn't drop it (ST-287).
+      if (action === 'clear' && pane.heldStuck && !behindUnsent(pane)) {
+        const ok = await confirmDialog({
+          title: `Discard ${msg.sender}'s message?`,
+          message: `It will not be typed, and ${msg.sender} is told you discarded it.${held.length > 1 ? ' The other waiting messages stay.' : ''}`,
+          confirmLabel: 'Discard',
+          danger: true,
+          focusCancel: true,
+        });
+        if (!ok) return;
+      }
       const result = await api.actOnUnsentMessage(pane.id, msg.id, action);
       await useStore.getState().refreshPanes();
       if (result.outcome === 'left_in_composer' || result.outcome === 'sent_unconfirmed') {

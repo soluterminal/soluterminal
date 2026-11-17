@@ -238,3 +238,33 @@ it('stops saying "while you type" once held messages are stuck, and offers no Se
   expect(screen.queryByRole('button', { name: 'Send now' })).toBeNull();
   expect(screen.getByRole('button', { name: 'Discard' })).toBeTruthy();
 });
+
+// ST-287: stuck behind the input box, Discard is the only button and its
+// sender is told the person discarded the message, so it asks first.
+it('asks before discarding a stuck held message, and keeps it on Cancel', async () => {
+  const act = vi.spyOn(api, 'actOnUnsentMessage').mockResolvedValue({ outcome: 'cleared' });
+  const refresh = vi.fn().mockResolvedValue(undefined);
+  type Asked = { title?: string; message: string; focusCancel?: boolean; resolve: (v: unknown) => void };
+  const asked: Asked[] = [];
+  useStore.setState({ refreshPanes: refresh, openDialog: ((req: Asked) => { asked.push(req); }) as never });
+  render(<UnsentMessageChip pane={{
+    id: 'p10',
+    heldMessages: [{ id: 'h1', sender: '@a', text: 'first', at: 1 }, { id: 'h2', sender: '@b', text: 'second', at: 2 }],
+    heldStuck: true,
+  } as PaneInfo} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+  await waitFor(() => expect(asked).toHaveLength(1));
+  expect(asked[0].title).toBe("Discard @a's message?");
+  expect(asked[0].message).toContain('@a is told you discarded it');
+  expect(asked[0].message).toContain('The other waiting messages stay');
+  expect(asked[0].focusCancel).toBe(true);
+  asked[0].resolve(false);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Discard' }).hasAttribute('disabled')).toBe(false));
+  expect(act).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+  await waitFor(() => expect(asked).toHaveLength(2));
+  asked[1].resolve(true);
+  await waitFor(() => expect(refresh).toHaveBeenCalled());
+  expect(act).toHaveBeenCalledExactlyOnceWith('p10', 'h1', 'clear');
+});

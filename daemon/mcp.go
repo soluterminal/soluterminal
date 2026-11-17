@@ -461,6 +461,7 @@ func mcpCoreTools() []mcpTool {
 				"(busy, recent, idle, awaiting-input, choice-prompt, exited), agent identity (claude | " +
 				"codex | muse, empty for a plain shell), title, cwd and flagged state. Optional JSON fields: " +
 				"open_asks (person asks only; omitted when zero), held_messages (messages waiting on the pane, untyped: count, senders, and stuck when they wait behind text in its input box that only the person can clear; do not resend), worker_notices (lead notes with id, text, workerPane, createdAt and needsUser; only marked person escalations count or push), flagOwner (bookmark owner; omitted when unset; flags are the person’s bookmarks), agent_messaging_paused (on every row while the person has paused agent messaging: messages to agent panes are held, spawning and other pane input refused), " +
+				"model (the model a claude or codex pane was started with, from its command-line flags; it can differ from the live model after a /model pick in the pane), model_note (says when such a pane was started with no model flag, so it runs the agent's own default), " +
 				"teamKind (lead or worker), leadRole (a lead’s role), handle (stable @name), " +
 				"workingOn (current one-line status), startedBy (who opened it and why; absent for user-opened panes). " +
 				"Also includes worker requests without a pane yet: status queued, running (starting), or closed " +
@@ -666,7 +667,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"model": {
 						"type": "string",
-						"description": "Optional model for a claude or codex pane, passed as the agent's own model flag (e.g. \"opus\" or \"sonnet\" for Claude, a Codex model id for Codex). Omit to use the agent's default."
+						"description": "Optional model for a claude or codex pane, passed as the agent's own model flag (e.g. \"opus\" or \"sonnet\" for Claude, a Codex model id for Codex). A model named here always wins. If omitted for a claude WORKER (no lead), the pane gets the worker model the person set in Settings (Terminal & panes › Workers), if any; if omitted otherwise (a lead, codex, or no worker model set), no flag is passed and the agent uses its own default (for Claude Code, the model key in ~/.claude/settings.json, which any /model pick rewrites). The result's model and model_source (caller, worker_model_setting or none) say what the pane got."
 					},
 					"effort": {
 						"type": "string",
@@ -1470,6 +1471,11 @@ type mcpPaneSummary struct {
 	// callers). Orchestrators use Agent to pick a pane to drive.
 	Agent string `json:"agent,omitempty"`
 	Kind  string `json:"kind"`
+	// Model is the model a claude or codex pane was started with, read from
+	// the flags on its argv (paneStartModel), not its live model. ModelNote
+	// says plainly when such a pane was started with none (ST-283).
+	Model     string `json:"model,omitempty"`
+	ModelNote string `json:"model_note,omitempty"`
 	// Flagged/FlagMemo mirror the sidebar's "come back to this" marker.
 	Flagged   bool   `json:"flagged,omitempty"`
 	FlagMemo  string `json:"flagMemo,omitempty"`
@@ -1596,6 +1602,8 @@ func (a *apiServer) mcpToolListPanes(args map[string]any, callerPane string) any
 			LastActivityMs: snap.LastActivityMs,
 			Agent:          agent,
 			Kind:           kind,
+			Model:          paneStartModel(snap.Cmd),
+			ModelNote:      paneStartModelNote(snap.Cmd),
 			Flagged:        snap.Flagged,
 			FlagMemo:       snap.FlagMemo,
 			FlagOwner:      snap.FlagOwner,
@@ -1921,8 +1929,7 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 	}
 	modelArg, _ := args["model"].(string)
 	effortArg, _ := args["effort"].(string)
-	cmd, err := spawnAgentModelArgv(cmd, modelArg, effortArg)
-	if err != nil {
+	if _, err := spawnAgentModelArgv(cmd, modelArg, effortArg); err != nil {
 		return toolErr(err.Error())
 	}
 	role = strings.TrimSpace(role)
@@ -1941,6 +1948,17 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 		leadRole = r
 	} else if role == paneRoleOrchestrator && worker == nil {
 		leadRole = paneRoleOrchestrator
+	}
+	// The model flag (ST-283): the caller's model, else for a Claude worker
+	// the person's worker-model setting as it stands now, else none.
+	baseCmd := cmd
+	spawnModel, spawnModelSource := spawnPaneModel(baseCmd, modelArg, leadRole == "" && worker == nil, a.workerModelSetting())
+	cmd, err := spawnAgentModelArgv(baseCmd, spawnModel, effortArg)
+	if err != nil {
+		if spawnModelSource == spawnModelFromSetting {
+			return toolErr("the worker model setting: " + err.Error())
+		}
+		return toolErr(err.Error())
 	}
 	if role != "" && !a.operatorFeaturesOn() {
 		return toolErr("the orchestrator role is not available in this edition of soluterminal")
@@ -2063,6 +2081,14 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 		return toolErr("workspace attach failed: " + err.Error())
 	}
 	resp := map[string]any{"id": p.ID, "workspace": workspace, "title": spawnTitle}
+	if cmdStartsClaude(baseCmd) || cmdStartsCodex(baseCmd) {
+		resp["model_source"] = spawnModelSource
+		if spawnModel != "" {
+			resp["model"] = spawnModel
+		} else {
+			resp["model_note"] = spawnModelNote(baseCmd)
+		}
+	}
 	number := 0
 	if slot, ok := paneSlotsByID(a.ws)[p.ID]; ok {
 		resp["number"] = slot.Number

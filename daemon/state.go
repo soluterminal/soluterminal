@@ -1364,11 +1364,25 @@ var (
 	// codexFooterShapeRE: a line shaped like Codex's footer. Wide, with the
 	// working directory ("Context 2% used · GPT-6.1-Sol high · ~/projects/demo"),
 	// or narrow, where Codex elides it ("Context 59% used · GPT-6.1-Sol high
-	// …", maybe followed by "⚠ 1 warning · f2 to view"). The shape alone
-	// proves nothing, since text typed into the box can look the same: only
-	// codexFooterIndex says which line is the footer.
-	codexFooterShapeRE = regexp.MustCompile(`(?i)^\s*(?:Context\s+\d+%\s+used\s+·\s+(?:gpt|codex)|(?:gpt|codex)[^\n·]*\s+·\s+(?:[/~]|[a-z]:[\\/]))`)
-	codexActiveTurnRE  = regexp.MustCompile(`(?mi)^\s*[•·]?\s*Working\s*\([^\n)]*esc to interrupt[^\n)]*\)`)
+	// …", maybe followed by "⚠ 1 warning · f2 to view"). Without a ChatGPT
+	// login there is no usage part ("gpt-5.1 default · /home/me/repo"). The
+	// model is whatever the person picked, and Codex shows its display name,
+	// which need not start with GPT ("Daybreak Red high"), so the shape does
+	// not name models (ST-287). The shape alone proves nothing, since text
+	// typed into the box can look the same: only codexFooterIndex says which
+	// line is the footer.
+	codexFooterShapeRE = regexp.MustCompile(`(?i)^\s*(?:Context\s+\d+%\s+used\s+·\s+\S|[^\s·›][^\n·]*\s+·\s+(?:[/~]|[a-z]:[\\/]|\\\\))`)
+	// codexFooterPathEndRE: a footer-shaped line that ends in its working
+	// directory, which Codex 0.169 wraps onto a second row when the hint row
+	// is hidden (codexFooterIndex).
+	codexFooterPathEndRE = regexp.MustCompile(`(?i)\s·\s+(?:[/~]|[a-z]:[\\/]|\\\\)[^·]*[^…\s]$`)
+	// codexFooterHintSplitRE and codexFooterHintPartRE read the row Codex
+	// 0.169 draws under its footer while the box is empty: key hints and the
+	// warning chip ("← for agents · ? for shortcuts      ⚠ 1 warning · f2 to
+	// view"). Each part between "·" or a wide gap is one hint.
+	codexFooterHintSplitRE = regexp.MustCompile(`\s+·\s+|\s{2,}`)
+	codexFooterHintPartRE  = regexp.MustCompile(`(?i)^(?:⚠\s*\d+\s+warnings?|(?:[←→↑↓?]|esc|f\d{1,2}|(?:shift|ctrl|alt)\+\S+)\s+(?:for|to)\s+\p{L}+(?:\s\p{L}+){0,2})$`)
+	codexActiveTurnRE      = regexp.MustCompile(`(?mi)^\s*[•·]?\s*Working\s*\([^\n)]*esc to interrupt[^\n)]*\)`)
 )
 
 // Codex 0.166 chrome around a running turn. With a draft in the box the footer
@@ -1511,23 +1525,68 @@ func looksLikeCodexPrompt(s string) bool {
 	return codexComposerLineRE.MatchString(s) && codexFooterIndex(strings.Split(s, "\n")) >= 0
 }
 
-// codexFooterIndex is the index of Codex's footer in a screen's lines: its
-// last non-blank line, when that line is footer-shaped (codexFooterShapeRE),
-// and -1 otherwise. A footer-shaped line above it is text in the input box.
-// Every reader of Codex's box ends it here, and when there is no footer to
-// end it the box runs to the end of the screen: an unclear screen reads as
-// holding text, never as empty.
+// codexFooterIndex is the index of Codex's footer in a screen's lines: the
+// first row of the footer block at the bottom of the screen, when it is
+// footer-shaped (codexFooterShapeRE), and -1 otherwise. A footer-shaped line
+// above it is text in the input box. Every reader of Codex's box ends it
+// here, and when there is no footer to end it the box runs to the end of the
+// screen: an unclear screen reads as holding text, never as empty.
+//
+// The block is the screen's last non-blank lines. Up to Codex 0.168 it is the
+// footer alone. Codex 0.169 adds, right under it, a hint row while the box is
+// empty ("← for agents · ? for shortcuts", codexFooterHint), and when that row
+// is hidden it wraps a long working directory onto a second footer row
+// ("…/e780000a-08e0-468c-" then "  8e32-d6aff1577b38/scratchpad/repo"). The
+// block was read as text in the box, so every agent message to an idle 0.169
+// pane was held (ST-287). Only those rows extend it: the queue hint a running
+// turn shows there is not one of them.
 func codexFooterIndex(lines []string) int {
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) == "" {
-			continue
-		}
-		if codexFooterShapeRE.MatchString(lines[i]) {
-			return i
-		}
+	last := len(lines) - 1
+	for last >= 0 && strings.TrimSpace(lines[last]) == "" {
+		last--
+	}
+	if last < 0 {
 		return -1
 	}
+	i := last
+	for hints := 0; hints < 2 && i > 0 && codexFooterHint(lines[i]); hints++ {
+		i--
+	}
+	if codexFooterShapeRE.MatchString(lines[i]) {
+		return i
+	}
+	// The wrapped working directory: the last line, under a footer row that
+	// ends in a path cut mid-name, indented as Codex indents its footer.
+	if i == last && i > 0 && codexFooterShapeRE.MatchString(lines[i-1]) && codexFooterPathEndRE.MatchString(lines[i-1]) && codexFooterWrapRow(lines[i]) {
+		return i - 1
+	}
 	return -1
+}
+
+// codexFooterHint reports a hint row Codex 0.169 draws right under its
+// footer: every part is a key hint or the warning chip.
+func codexFooterHint(line string) bool {
+	t := strings.TrimSpace(line)
+	if t == "" || codexQueueHintRE.MatchString(t) {
+		return false
+	}
+	for _, part := range codexFooterHintSplitRE.Split(t, -1) {
+		if !codexFooterHintPartRE.MatchString(part) {
+			return false
+		}
+	}
+	return true
+}
+
+// codexFooterWrapRow: the second row of a wrapped footer, which carries only
+// the rest of the working directory: one word, or a path with a separator.
+// Never the queue hint a running turn shows there, or a hint row.
+func codexFooterWrapRow(line string) bool {
+	rest, ok := strings.CutPrefix(line, "  ")
+	if !ok || rest == "" || unicode.IsSpace([]rune(rest)[0]) || strings.Contains(rest, "·") || codexQueueHintRE.MatchString(rest) || codexFooterHint(rest) {
+		return false
+	}
+	return !strings.ContainsFunc(rest, unicode.IsSpace) || strings.ContainsAny(rest, `/\`)
 }
 
 func (p *Pane) codexPromptVisible() bool {

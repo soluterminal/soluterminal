@@ -1,9 +1,10 @@
 import { useStore } from '../../store';
 import { SettingsGroup, SettingsCheck, SettingsRow } from './SettingsRow';
 import type { RecoveryResumeMode } from '../../types';
+import { WorkerModelSetting } from './WorkerModelSetting';
 
-// Agent-session behavior: the prompt-history strip and what panes do after a
-// WSL restart.
+// Agent-session behavior: the prompt-history strip, what panes do after a
+// WSL restart, and the model agent-started Claude workers get.
 
 export function ClaudeTab() {
   const recoverySettings = useStore((s) => s.recoverySettings);
@@ -39,6 +40,7 @@ export function ClaudeTab() {
           hint="Your recent prompts in a collapsible strip at the top of each Claude pane. Hover a row to copy it."
         />
       </SettingsGroup>
+      <WorkerModelSetting />
     </>
   );
 }

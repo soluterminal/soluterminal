@@ -28,7 +28,7 @@ func feedRecorded(p *Pane, raw []byte) {
 	_ = p.replayEmu.DrainReplies()
 }
 
-// Two reports had the same shape: an idle agent pane refused other agents'
+// Three reports had the same shape: an idle agent pane refused other agents'
 // messages because the daemon misread what its screen showed.
 //
 //   - F-019 (ST-217): Codex's placeholder "Ask Codex to do anything" was read
@@ -39,6 +39,9 @@ func feedRecorded(p *Pane, raw []byte) {
 //     shell ended, the "1" of "1 shell still running" followed a repaint of
 //     the input box's ❯ in the byte stream, which is the shape of a focused
 //     "❯ 1" option row.
+//   - F-027 (ST-287): on Codex 0.169 the hint row under the footer ("← for
+//     agents · ? for shortcuts") hid the footer, so the box ran to the end
+//     of the screen and the footer read as typed text.
 //
 // Each session is a real recording (testdata/menu_screens). The pane is
 // polled while the bytes arrive, as the state pollers do, and no input is
@@ -65,6 +68,10 @@ func TestMisreadScreensDoNotHoldAgentMessages(t *testing.T) {
 			[]step{{name: "idle"}, {name: "teach_dialog", menu: true}}},
 		{"F-019 codex placeholder", "codex_0166_100x40", agentCodex, true,
 			[]step{{name: "list_idle"}, {name: "echo_idle"}, {name: "approval", menu: true}}},
+		// F-027 (ST-287): Codex 0.169 draws a hint row and the warning chip
+		// under its footer; that row was read as text in the box.
+		{"F-027 codex 0.169 hint row", "codex_0169_ro_100x40", agentCodex, true,
+			[]step{{name: "idle"}, {name: "write_command", menu: true}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, raw := loadMenuScreenSession(t, tc.session)

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -123,19 +124,28 @@ func TestVoiceCleanupAPIKeyModeRunsWithoutAClaudeLogin(t *testing.T) {
 	if ok, reason := a.localCleanupAvailable(); !ok {
 		t.Fatalf("API-key mode unavailable: %q", reason)
 	}
-	var gotKey []bool
+	// The clean-up's background prewarm calls env too, so the record is locked.
+	var (
+		keyMu  sync.Mutex
+		gotKey []bool
+	)
 	c := a.localCleaner()
 	prevEnv := c.env
 	c.env = func(bin string, apiKey bool) []string {
+		keyMu.Lock()
 		gotKey = append(gotKey, apiKey)
+		keyMu.Unlock()
 		return prevEnv(bin, apiKey)
 	}
 	out := c.Clean(t.Context(), "", rawDictation, "")
 	if out.Status != "ok" || out.Provider != "local/api-key" {
 		t.Fatalf("outcome = %+v", out)
 	}
-	if len(gotKey) == 0 || !gotKey[0] {
-		t.Fatalf("run not started on the API key: %v", gotKey)
+	keyMu.Lock()
+	first := append([]bool(nil), gotKey...)
+	keyMu.Unlock()
+	if len(first) == 0 || !first[0] {
+		t.Fatalf("run not started on the API key: %v", first)
 	}
 	if snap := a.voiceLocalSnapshot(); snap.Using != voiceCleanupAPIKey || !snap.APIKey || !snap.APIKeyChosen || snap.Enabled {
 		t.Fatalf("snapshot = %+v", snap)

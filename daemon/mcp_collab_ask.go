@@ -457,7 +457,9 @@ func noteHeldAsk(p *Pane, heldID string, res *collabResult) {
 func heldUnsentHint(status string, err error) string {
 	switch status {
 	case "discarded":
-		return "The person discarded your message: it was held while they typed in that pane, and nothing was typed. Do not resend it unless they ask."
+		// Only the person's Discard on the held message resolves it so; it
+		// may have been held behind their input box, not their typing.
+		return "The person discarded your held message (Discard on that pane), so nothing was typed. Do not resend it unless they ask."
 	case "expired":
 		return fmt.Sprintf("Your message was held for %s while the person typed in that pane and was dropped, untyped. Tell the user rather than resending.", heldDeliveryLimit)
 	case "failed":

@@ -16,7 +16,7 @@ const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
     'Detached sessions', 'Credentials', 'Automations', 'Agents', 'MCP servers', 'Reset to default',
   ],
   sessions: [
-    'After a restart', 'Show prompt history strip',
+    'After a restart', 'Show prompt history strip', 'Worker model',
   ],
   workflows: [
     'Local OpenAI-compatible',

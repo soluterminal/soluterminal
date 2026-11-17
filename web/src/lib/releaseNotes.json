@@ -1,4 +1,10 @@
 {
+  "0.0.1245": [
+    "Fixed: with Codex 0.168 and newer, messages from other agents to an idle Codex pane could be held instead of delivered.",
+    "If a held message gets stuck, Discard now asks before throwing it away, and the agent that sent it is no longer told you were typing.",
+    "Settings › Claude has a new Worker model choice: the model Claude uses in helper panes an agent starts without naming one. Codex panes aren't affected.",
+    "Security: built with Go 1.26.11, which fixes a flaw in Go's web server code (GO-2026-6859)."
+  ],
   "0.0.1244": [
     "The Focus view has been removed. Panes saved from it come back as normal terminal panes and can resume the same conversation.",
     "Settings › Privacy & security has a new Developer overrides switch, off by default. It lets local builds be installed on this computer and is only for people who develop SoluTerminal.",

@@ -256,11 +256,14 @@ func newVoiceAPI(t *testing.T, mode string) (*apiServer, string) {
 	return a, dir
 }
 
+// withVoiceAPIKey fakes whether ANTHROPIC_API_KEY is exported. The hook is
+// atomic: a clean-up's background prewarm may still read it after the test.
 func withVoiceAPIKey(t *testing.T, present bool) {
 	t.Helper()
-	prev := voiceAPIKeyPresent
-	voiceAPIKeyPresent = func() bool { return present }
-	t.Cleanup(func() { voiceAPIKeyPresent = prev })
+	prev := voiceAPIKeyPresentHook.Load()
+	f := func() bool { return present }
+	voiceAPIKeyPresentHook.Store(&f)
+	t.Cleanup(func() { voiceAPIKeyPresentHook.Store(prev) })
 }
 
 func postCleanup(a *apiServer, text string) *httptest.ResponseRecorder {
