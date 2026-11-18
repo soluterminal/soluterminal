@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_HIDDEN,
   DEFAULT_MIDDLE_ORDER,
-  MIDDLE_SECTION_LABELS,
   effectiveMiddleOrder,
   isMiddleKey,
   isUnclaimedSidebarSpace,
@@ -40,32 +38,11 @@ describe('resolvedMiddleOrder', () => {
   });
 });
 
-// docs/DESIGN-agents-surface.md §1.3: the Agents section sits beside Schedules
-// and must NOT default hidden — a surface whose whole purpose is "you can see
-// what runs unattended" is useless if the user has to find it first.
-describe('the Agents section', () => {
-  it('sits immediately after schedules in the default order', () => {
-    const schedules = DEFAULT_MIDDLE_ORDER.indexOf('schedules');
-    expect(schedules).toBeGreaterThanOrEqual(0);
-    expect(DEFAULT_MIDDLE_ORDER[schedules + 1]).toBe('agents');
-  });
-
-  it('is labeled for the customizer and the right-click menu', () => {
-    expect(MIDDLE_SECTION_LABELS.agents).toBe('Agents');
-  });
-
-  it('is not hidden by default', () => {
-    expect(DEFAULT_HIDDEN).not.toContain('agents');
-    expect(effectiveMiddleOrder(undefined, undefined)).toContain('agents');
-  });
-
-  it('appears for a user whose saved order predates it, with no migration', () => {
-    const saved = DEFAULT_MIDDLE_ORDER.filter((k) => k !== 'agents');
-    const out = resolvedMiddleOrder(saved);
-    expect(out).toContain('agents');
-    expect(out).toHaveLength(DEFAULT_MIDDLE_ORDER.length);
-    // Their explicit order is preserved; the new section lands after it.
-    expect(out.slice(0, saved.length)).toEqual(saved);
+// Managed agents were removed: a saved 'agents' key is an unknown key now.
+describe('the retired Agents section', () => {
+  it('is no longer a section, and a saved order that names it drops it', () => {
+    expect(isMiddleKey('agents')).toBe(false);
+    expect(resolvedMiddleOrder(['schedules', 'agents', 'files'])).not.toContain('agents');
   });
 });
 

@@ -34,6 +34,9 @@ const (
 	promptAnswerUntraced  = "Only an agent traced to its own pane can answer prompts: turn on agent tracing (MCP bridge), or answer it in the app. Codex panes can't answer other panes' prompts until Codex has the MCP bridge."
 	promptAnswerOwnPrompt = "A pane can't answer a prompt shown in its own pane; the person answers it in the app."
 	promptAnswerWorker    = "Workers and managed agents never answer prompts; the person answers it in the app."
+	// ST-289: Codex's own update menu. "Update now" runs a global npm
+	// install, so it is the person's to answer, under any grant.
+	promptAnswerCodexUpdate = "That pane shows Codex's own update menu (Update now runs a global npm install); only the person answers it, in the pane."
 )
 
 // mcpCallMeta is how an MCP call reached the daemon, for the prompt rules.
@@ -78,6 +81,9 @@ func (a *apiServer) decidePromptAnswer(m mcpCallMeta, scoped bool, target *Pane)
 	}
 	if target != nil && target.ID == m.id.PaneID {
 		return promptAnswerVerdict{refusal: promptAnswerOwnPrompt}
+	}
+	if target != nil && paneShowsCodexUpdateMenu(target) {
+		return promptAnswerVerdict{refusal: promptAnswerCodexUpdate}
 	}
 	return promptAnswerVerdict{allowed: true, pane: m.id.PaneID}
 }

@@ -19,7 +19,7 @@ func observeRequestMedia(r *http.Request, pattern string) {
 		return
 	}
 	path := appPolicyPath(r.URL.Path)
-	if strings.HasPrefix(path, "/api/proxy/") || strings.HasPrefix(path, "/api/preview-serve/") || path == "/api/transcribe" {
+	if strings.HasPrefix(path, "/api/proxy/") || path == "/api/transcribe" {
 		return
 	}
 	kind, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))

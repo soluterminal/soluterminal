@@ -19,7 +19,7 @@ const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
     'After a restart', 'Show prompt history strip', 'Worker model',
   ],
   workflows: [
-    'Local OpenAI-compatible',
+    'Local OpenAI-compatible', 'Base URL', 'Model',
     'Auto-publish on cadence (release train)', 'Functional landings before a train',
     'Max unreleased age (hours)', 'Veto window (minutes)',
     'Max agent runs', 'Memory floor', 'Disk floor', 'Host disk floor (WSL)',
@@ -27,13 +27,25 @@ const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
   ],
   agents: [],
   credentials: [
-    'Provider accounts', 'Runtime API keys',
+    'Provider accounts', 'Runtime API keys', 'Allow Shinoque to use these credentials',
   ],
   team: [],
   devices: [
     'Presentation mode', 'Desktop app', 'Phone access', 'Launch on startup', 'Automatic updates',
     'Desktop app restarts', 'Send an anonymous daily check-in',
     'Let Claude Code and Codex use SoluTerminal',
+    // ST-281: today's Account, Notifications & voice, Privacy & security and
+    // Devices & updates rows.
+    'Account', 'View as personal', 'Email me product updates (you can unsubscribe anytime)',
+    'Send dictation automatically', 'Language',
+    'Keep the microphone ready for 2 minutes after dictating (faster start; your system’s mic light stays on)',
+    'Tick when the mic is listening', 'Clean up dictation with my Claude plan',
+    'Use my Anthropic API key (ANTHROPIC_API_KEY). Clean-up then goes to Anthropic under your key and is billed to it.',
+    'Words to recognise', 'Let agents in panes approve for me',
+    'Require approved devices for actions that need you', 'This browser', 'Who can use this computer remotely',
+    "Encrypt this browser's connection end to end", 'Verify this browser', 'Alerts handled by another app',
+    'Share usage statistics', 'Send crash reports', 'Developer overrides', 'Paused updates',
+    'Restart background service', 'Display fixes used',
   ],
 };
 

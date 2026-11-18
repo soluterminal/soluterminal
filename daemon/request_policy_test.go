@@ -7,12 +7,10 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestRelayPreviewRouteCompatibility(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SOLU_PREVIEWS", "1")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Soluterminal-Preview-Proxy") != "" {
 			t.Error("preview received daemon authority")
@@ -22,10 +20,7 @@ func TestRelayPreviewRouteCompatibility(t *testing.T) {
 	}))
 	defer upstream.Close()
 	port := webTestPort(t, upstream.URL)
-	m := previewTestManager(t)
-	now := time.Now().UTC()
-	m.targets[daemonPreviewTestID] = &PreviewTarget{ID: daemonPreviewTestID, Mode: previewModeAdopt, TargetPort: port.Port, State: previewStateRunning, CreatedAt: now, LastActivityAt: now, ExpiresAt: now.Add(time.Hour)}
-	a := &apiServer{gate: &authGate{token: "test-master"}, ports: &PortRegistry{seen: map[string]*Port{"owned": port}}, previews: m}
+	a := &apiServer{gate: &authGate{token: "test-master"}, ports: &PortRegistry{seen: map[string]*Port{"owned": port}}}
 	t.Cleanup(func() {
 		for _, transport := range a.ports.transports {
 			transport.CloseIdleConnections()
@@ -34,58 +29,35 @@ func TestRelayPreviewRouteCompatibility(t *testing.T) {
 	mux := http.NewServeMux()
 	a.routes(mux)
 	proxyPath := fmt.Sprintf("/api/proxy/%d/page", port.Port)
-	previewPath := "/api/preview-serve/" + daemonPreviewTestID + "/page"
-	for _, tc := range []struct {
-		path, prefix string
-		public       bool
-	}{
-		{proxyPath, "/m/test-machine/b/wsl", false},
-		{previewPath, "/m/test-machine", false},
-		{previewPath, "/preview/" + daemonPreviewTestID, true},
-	} {
-		for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
-			for _, source := range []string{"null", "https://preview.example"} {
-				r := httptest.NewRequest(method, "http://daemon.preview.invalid"+tc.path, strings.NewReader(`{}`))
-				r.Header.Set("Origin", source)
-				r.Header.Set("Sec-Fetch-Site", "cross-site")
-				r.Header.Set("X-Forwarded-Prefix", tc.prefix)
-				if method == "OPTIONS" {
-					r.Header.Set("Access-Control-Request-Method", "POST")
-				}
-				w := httptest.NewRecorder()
-				markRelayTransport(a.apiHandler(mux)).ServeHTTP(w, r)
-				want := http.StatusOK
-				if method == "OPTIONS" && tc.path == proxyPath {
-					want = http.StatusNoContent
-				}
-				if w.Code != want {
-					t.Fatalf("relay %s %s %s = %d: %s", method, tc.prefix, source, w.Code, w.Body.String())
-				}
-				if tc.path == proxyPath && w.Header().Get("Access-Control-Allow-Origin") != "null" {
-					t.Fatal("opaque CORS contract lost")
-				}
-				if !tc.public && !strings.HasPrefix(w.Header().Get("Content-Security-Policy"), "sandbox") && method != "OPTIONS" {
-					t.Fatal("preview sandbox lost")
-				}
-				// Identical headers over the direct listener confer no relay authority.
-				w = httptest.NewRecorder()
-				a.gate.middleware(a.apiHandler(mux)).ServeHTTP(w, r)
-				if w.Code != http.StatusForbidden {
-					t.Fatalf("direct preview accepted relay headers: %d", w.Code)
-				}
-			}
-		}
-		// Public share links may navigate here with cross-site metadata.
-		if tc.public {
-			r := httptest.NewRequest(http.MethodGet, "http://daemon.preview.invalid"+tc.path, nil)
+	for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+		for _, source := range []string{"null", "https://preview.example"} {
+			r := httptest.NewRequest(method, "http://daemon.preview.invalid"+proxyPath, strings.NewReader(`{}`))
+			r.Header.Set("Origin", source)
 			r.Header.Set("Sec-Fetch-Site", "cross-site")
-			r.Header.Set("Sec-Fetch-Mode", "navigate")
-			r.Header.Set("Sec-Fetch-Dest", "document")
-			r.Header.Set("X-Forwarded-Prefix", tc.prefix)
+			r.Header.Set("X-Forwarded-Prefix", "/m/test-machine/b/wsl")
+			if method == "OPTIONS" {
+				r.Header.Set("Access-Control-Request-Method", "POST")
+			}
 			w := httptest.NewRecorder()
 			markRelayTransport(a.apiHandler(mux)).ServeHTTP(w, r)
-			if w.Code != http.StatusOK {
-				t.Fatalf("share navigation status=%d", w.Code)
+			want := http.StatusOK
+			if method == "OPTIONS" {
+				want = http.StatusNoContent
+			}
+			if w.Code != want {
+				t.Fatalf("relay %s %s = %d: %s", method, source, w.Code, w.Body.String())
+			}
+			if w.Header().Get("Access-Control-Allow-Origin") != "null" {
+				t.Fatal("opaque CORS contract lost")
+			}
+			if !strings.HasPrefix(w.Header().Get("Content-Security-Policy"), "sandbox") && method != "OPTIONS" {
+				t.Fatal("preview sandbox lost")
+			}
+			// Identical headers over the direct listener confer no relay authority.
+			w = httptest.NewRecorder()
+			a.gate.middleware(a.apiHandler(mux)).ServeHTTP(w, r)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("direct preview accepted relay headers: %d", w.Code)
 			}
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ST-283: a Claude worker started by spawn_pane without a model takes the
@@ -282,5 +283,166 @@ func TestWorkerSettingsWorkerModelIsPersonOnly(t *testing.T) {
 	}
 	if code := put(`{"workerModel":""}`, true); code != http.StatusOK || model() != "" {
 		t.Fatalf("person clear: status %d, model %q", code, model())
+	}
+}
+
+// ST-296: a cmd auto worker that resolves to Claude takes the worker-model
+// setting like any other Claude worker; one that resolves to Codex doesn't.
+func autoWorkerModelAPI(t *testing.T, provider, setting string) (*apiServer, *[]SpawnOpts) {
+	t.Helper()
+	a, calls := newQuotaWorkerAPI(t)
+	quotaWorkerAccounts = func(*apiServer, time.Time) []workerAccount {
+		return []workerAccount{{Provider: provider, Account: "main", Headroom: 90}}
+	}
+	setAutoWorkerSettings(a, func(s *workerSettings) { s.WorkerModel = setting })
+	return a, calls
+}
+
+func setAutoWorkerSettings(a *apiServer, edit func(*workerSettings)) {
+	q := a.workers()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	a.loadWorkerSettingsLocked(q)
+	edit(&q.settings)
+}
+
+func autoWorkerCall(t *testing.T, a *apiServer, extra map[string]any) map[string]any {
+	t.Helper()
+	args := map[string]any{"cmd": "auto", "workspace": "Work", "cwd": t.TempDir(), "wait_ready": false, "title": "test"}
+	for k, v := range extra {
+		args[k] = v
+	}
+	text, isErr := callMCPSpawnPane(t, a, "lead", args)
+	if isErr {
+		t.Fatal(text)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestMCPAutoWorkerModel(t *testing.T) {
+	for _, tt := range []struct {
+		name, provider, setting string
+		args                    map[string]any
+		wantCmd                 []string
+		wantModel, wantSource   any
+		wantNote                bool
+	}{
+		{name: "claude, setting set", provider: "claude", setting: "opus", wantCmd: []string{"claude", "--model", "opus"}, wantModel: "opus", wantSource: "worker_model_setting"},
+		{name: "claude, setting empty: as before", provider: "claude", wantCmd: []string{"claude"}, wantSource: "none", wantNote: true},
+		{name: "claude, caller names a model", provider: "claude", setting: "opus", args: map[string]any{"model": "sonnet", "effort": "high"}, wantCmd: []string{"claude", "--model", "sonnet", "--effort", "high"}, wantModel: "sonnet", wantSource: "caller"},
+		{name: "codex: setting ignored", provider: "codex", setting: "opus", wantCmd: []string{"codex"}, wantSource: "none", wantNote: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			a, calls := autoWorkerModelAPI(t, tt.provider, tt.setting)
+			out := autoWorkerCall(t, a, tt.args)
+			if len(*calls) != 1 || out["id"] == nil {
+				t.Fatalf("auto worker did not start: %v (spawned %d)", out, len(*calls))
+			}
+			if got := (*calls)[0].Cmd; !slices.Equal(got, tt.wantCmd) {
+				t.Fatalf("argv %#v, want %#v", got, tt.wantCmd)
+			}
+			if out["provider"] != tt.provider || out["model"] != tt.wantModel || out["model_source"] != tt.wantSource {
+				t.Errorf("result %v: want provider %v model %v source %v", out, tt.provider, tt.wantModel, tt.wantSource)
+			}
+			if _, has := out["model_note"]; has != tt.wantNote {
+				t.Errorf("model_note present %v, want %v (result %v)", has, tt.wantNote, out)
+			}
+			// The queue entry records what the worker got.
+			snap := a.workerQueueSnapshot()
+			if len(snap) != 1 || snap[0]["model"] != tt.wantModel || snap[0]["model_source"] != tt.wantSource {
+				t.Errorf("queue entry %v, want model %v source %v", snap, tt.wantModel, tt.wantSource)
+			}
+		})
+	}
+}
+
+// A queued auto worker reads the setting when it starts, not when it was
+// queued; until then its result and queue rows say the model is chosen at
+// start, or give the caller's model.
+func TestMCPAutoWorkerModelQueuedReadsSettingAtStart(t *testing.T) {
+	a, calls := autoWorkerModelAPI(t, "claude", "")
+	setAutoWorkerSettings(a, func(s *workerSettings) { s.MaxRunning = 1 })
+	first := autoWorkerCall(t, a, nil)
+	queued := autoWorkerCall(t, a, nil)
+	named := autoWorkerCall(t, a, map[string]any{"model": "haiku"})
+	if first["id"] == nil || queued["queued"] != true || named["queued"] != true || len(*calls) != 1 {
+		t.Fatalf("first %v queued %v named %v (spawned %d)", first, queued, named, len(*calls))
+	}
+	if queued["model"] != nil || queued["model_source"] != nil || queued["model_note"] != workerPendingModelNote {
+		t.Errorf("queued result %v: want only the chosen-at-start note", queued)
+	}
+	if named["model"] != "haiku" || named["model_source"] != "caller" || named["model_note"] != nil {
+		t.Errorf("queued named result %v: want caller's haiku", named)
+	}
+	rows := map[string]mcpPaneSummary{}
+	for _, s := range a.queuedWorkerSummaries() {
+		rows[s.ID] = s
+	}
+	if r := rows[queued["queue_id"].(string)]; r.Model != "" || r.ModelNote != workerPendingModelNote {
+		t.Errorf("queued list_panes row %+v", r)
+	}
+	if r := rows[named["queue_id"].(string)]; r.Model != "haiku" || r.ModelNote != "" {
+		t.Errorf("named list_panes row %+v", r)
+	}
+	// A cancelled request never started, so it claims no model.
+	cancelled := autoWorkerCall(t, a, map[string]any{"model": "sonnet"})
+	text, isErr := mcpResultText(t, a.cancelQueuedWorker(map[string]any{"queue_id": cancelled["queue_id"]}, "lead"))
+	if isErr || strings.Contains(text, "model") {
+		t.Errorf("cancelled result %s (error %v): want no model fields", text, isErr)
+	}
+
+	// The person picks a worker model while both wait. Each time the running
+	// worker goes away, the scheduler starts the next one (one at a time).
+	setAutoWorkerSettings(a, func(s *workerSettings) { s.WorkerModel = "opus" })
+	q := a.workers()
+	startNext := func(gone string, want []string) string {
+		t.Helper()
+		a.mgr.mu.Lock()
+		delete(a.mgr.panes, gone)
+		a.mgr.mu.Unlock()
+		q.mu.Lock()
+		for _, r := range q.requests {
+			if r.PaneID == gone {
+				r.Info.State = "closed"
+			}
+		}
+		n := len(*calls)
+		q.mu.Unlock()
+		a.tickWorkers(time.Now())
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			q.mu.Lock()
+			for _, r := range q.requests {
+				if r.Info.State == "running" && r.PaneID != "" && r.PaneID != gone {
+					id := r.PaneID
+					q.mu.Unlock()
+					if len(*calls) != n+1 || !slices.Equal((*calls)[n].Cmd, want) {
+						t.Fatalf("argv %#v, want %#v", (*calls)[n:], want)
+					}
+					return id
+				}
+			}
+			q.mu.Unlock()
+			if time.Now().After(deadline) {
+				t.Fatalf("queued worker did not start: %v", a.workerQueueSnapshot())
+			}
+		}
+	}
+	second := startNext(first["id"].(string), []string{"claude", "--model", "opus"})
+	startNext(second, []string{"claude", "--model", "haiku"})
+	for _, e := range a.workerQueueSnapshot() {
+		switch e["queue_id"] {
+		case queued["queue_id"]:
+			if e["model"] != "opus" || e["model_source"] != "worker_model_setting" || e["model_note"] != nil {
+				t.Errorf("started entry %v: want opus from the setting", e)
+			}
+		case named["queue_id"]:
+			if e["model"] != "haiku" || e["model_source"] != "caller" || e["model_note"] != nil {
+				t.Errorf("started named entry %v: want caller's haiku", e)
+			}
+		}
 	}
 }

@@ -775,11 +775,14 @@ func (a *apiServer) promptWriteCheck(id callerIdentity, p *Pane, b []byte, via s
 	if hold == nil && !own || isTerminalReplyOnly(b) {
 		return nil
 	}
+	// Codex's own update menu is the person's alone (ST-289): an agent's or
+	// a program's keys never answer it, whatever the grant.
+	program := id.Kind == callerPane || id.Kind == callerWorker || id.Kind == callerUnverified
 	return func() error {
 		if !promptTakesKeys(p) {
 			return nil
 		}
-		if own || hold() {
+		if own || hold() || program && paneShowsCodexUpdateMenu(p) {
 			notePromptHeld(id, p)
 			return errPromptHeld
 		}

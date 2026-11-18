@@ -14,7 +14,8 @@ import { sidebarSectionSlot } from '../../extensions';
 // the auto-approver's controls live on pane badges + the account footer.
 // Stale 'aria' entries in saved prefs are unknown keys and get dropped.
 // NOTE: 'todos' was retired in 2026-10 with the Todos feature; stale entries
-// are unknown keys too and get dropped the same way.
+// are unknown keys too and get dropped the same way. So was 'agents' (the
+// managed-agents cards, removed in 2026-10).
 export type MiddleKey =
   | 'owners'
   | 'files'
@@ -22,7 +23,6 @@ export type MiddleKey =
   | 'background'
   | 'credentials'
   | 'schedules'
-  | 'agents'
   | 'mcp';
 
 // Everyday-first: the sections a typical user touches daily lead; operator /
@@ -34,7 +34,6 @@ export const DEFAULT_MIDDLE_ORDER: MiddleKey[] = [
   'background',
   'credentials',
   'schedules',
-  'agents',
   'mcp',
 ];
 
@@ -46,11 +45,6 @@ export const DEFAULT_MIDDLE_ORDER: MiddleKey[] = [
 // 'schedules' left this list in v0.0.872: with the recipe shelf and the
 // "Run a Claude task" kind it is a day-one surface (schedule a morning digest
 // in two clicks), not a power-user panel.
-//
-// 'agents' was never added, for a sharper version of the same reason
-// (docs/DESIGN-agents-surface.md §1.3): a surface whose entire purpose is "you
-// can see what runs unattended" is useless if it starts hidden. Autonomy the
-// user has to go looking for is autonomy they don't know about.
 export const DEFAULT_HIDDEN: MiddleKey[] = ['credentials', 'mcp'];
 
 // Public beta installs (not team) also start with Files and Localhost ports
@@ -64,16 +58,16 @@ export function defaultHidden(team: boolean): MiddleKey[] {
   return team ? [...DEFAULT_HIDDEN] : [...PUBLIC_DEFAULT_HIDDEN];
 }
 
-// Sections only a confirmed team install shows (the workflow Task Owners list
-// and the managed-agents fleet). Public beta installs drop them from the live
-// sidebar, the right-click menu and the customizer alike.
-export const TEAM_ONLY_SECTIONS: readonly MiddleKey[] = ['owners', 'agents'];
+// Sections only a confirmed team install shows (the workflow Task Owners list).
+// Public beta installs drop them from the live sidebar, the right-click menu
+// and the customizer alike.
+export const TEAM_ONLY_SECTIONS: readonly MiddleKey[] = ['owners'];
 
 // Optional sections whose content requires the plan verdict as well as an
 // installed renderer. Keep unavailable sections out of the customizer too.
 export const TEAM_PLAN_SECTIONS: readonly MiddleKey[] = ['credentials'];
 
-// `team` is the operator verdict (task owners, agents); `teamPlan` is the team
+// `team` is the operator verdict (task owners); `teamPlan` is the team
 // verdict (credentials), which an operator always has too.
 export function withoutTeamOnly(
   keys: readonly MiddleKey[],
@@ -89,7 +83,7 @@ export function withoutTeamOnly(
 // Sections an optional feature renders (extensions.ts). Without a registered
 // renderer they are not offered anywhere: not in the live sidebar, its
 // right-click menu or the customizer.
-const SLOTTED_SECTIONS: readonly MiddleKey[] = ['credentials', 'agents'];
+const SLOTTED_SECTIONS: readonly MiddleKey[] = ['credentials'];
 
 export function sectionOffered(key: MiddleKey): boolean {
   return !SLOTTED_SECTIONS.includes(key) || !!sidebarSectionSlot(key);
@@ -103,7 +97,6 @@ export const MIDDLE_SECTION_LABELS: Record<MiddleKey, string> = {
   background: 'Detached sessions',
   credentials: 'Credentials',
   schedules: 'Automations',
-  agents: 'Agents',
   mcp: 'MCP servers',
 };
 

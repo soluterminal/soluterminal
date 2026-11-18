@@ -56,7 +56,7 @@ export function AlertsHandlerSetting() {
 
   return (
     <SettingsGroup title="Alerts">
-      <SettingsRow label={alertsHandlerLabel(state)} hint={alertsHandlerHint(state)}>
+      <SettingsRow label={alertsHandlerLabel(state)} searchKey="Alerts handled by another app" hint={alertsHandlerHint(state)}>
         <button type="button" className="settings-btn" disabled={pending} onClick={() => void takeBack()}>
           {TAKE_ALERTS_BACK}
         </button>

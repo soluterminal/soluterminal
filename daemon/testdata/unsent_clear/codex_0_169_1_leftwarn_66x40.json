@@ -1,0 +1,57 @@
+{
+  "agent": "codex",
+  "version": "0.169.1",
+  "cols": 66,
+  "rows": 40,
+  "steps": [
+    {
+      "name": "idle",
+      "bytes": 3299
+    },
+    {
+      "name": "running",
+      "bytes": 9009
+    },
+    {
+      "name": "queued",
+      "bytes": 14569
+    },
+    {
+      "name": "put_back_short",
+      "bytes": 15342
+    },
+    {
+      "name": "short_clear",
+      "bytes": 15529
+    }
+  ],
+  "command": [
+    "codex",
+    "--no-alt-screen",
+    "--no-daemon",
+    "-s",
+    "read-only",
+    "-a",
+    "on-request"
+  ],
+  "inputs": [
+    {
+      "step": "running",
+      "typed": "ST297 start a turn",
+      "then": "Enter; the model provider accepts the connection and never answers, so the turn keeps running"
+    },
+    {
+      "step": "queued",
+      "typed": "ST297 short queued",
+      "then": "Tab (queue)"
+    },
+    {
+      "step": "put_back_short",
+      "then": "Esc (interrupt; Codex puts the queued message back)"
+    },
+    {
+      "step": "short_clear",
+      "hex": "010b"
+    }
+  ]
+}

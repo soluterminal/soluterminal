@@ -198,7 +198,7 @@ export function systemStatusFixture(opts = {}) {
     engine: { available: true, queue: { cap: 4, running: 1, runnable: 1, capacityQueued: 0, dependencyBlocked: 0, overlapSerialized: 0, awaitingApproval: 1, quotaPaused: 0, landingWait: 0, resourceWait: 0, heavyCap: 2, heavyRunning: 1, resourceDeferrals: 0, memFloorMB: 2048, diskFloorMB: 8192, diskFreeMB: 65536, diskLow: false, utilization: .25 }, runningInvocations: 1, decide: 1, gcLastSweepAt: sampledAt },
     runtimes: [{ id: 'codex', provider: 'openai', status: 'healthy', installed: true, lastInvocation: null }],
     automation: { agents: { total: 3, paused: 1, running: 1, blocked: 0, errors24h: 0, nextRunAt: new Date(now + 900_000).toISOString() }, schedules: { enabled: 2, disabled: 1, running: 0, errors24h: 0, nextFireAt: new Date(now + 1_800_000).toISOString() }, builtins: [], autonomy: { globalPaused: false, pausedCount: 0 } },
-    surface: { addr: '127.0.0.1:8787', ports: { total: 2, paneOwned: 1 }, previews: { active: 0 }, cloud: { configured: true, hasCreds: true, credsInvalid: false, relayState: 'online' } },
+    surface: { addr: '127.0.0.1:8787', ports: { total: 2, paneOwned: 1 }, cloud: { configured: true, hasCreds: true, credsInvalid: false, relayState: 'online' } },
     release: { running: '0.0.1020', latest: '0.0.1020', available: false, applying: false, lastSuccessMs: now, lastError: '', shellCurrent: '0.0.1020', shellLatest: '0.0.1020', shellAvailable: false, readiness: null },
   };
   if (opts?.hostDisk) {

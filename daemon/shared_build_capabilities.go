@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -235,4 +236,38 @@ func capabilityUnsupported(reqs []envRequirement, detail string) []capabilityRes
 
 func (e *capabilityFault) Error() string {
 	return fmt.Sprintf("required build capability %q: %s (%s)", e.Result.Name, e.Result.Status, e.Result.Evidence)
+}
+
+func validatePreviewRelativePath(name, value string, required bool) error {
+	if value == "" {
+		if required {
+			return fmt.Errorf("%s is required", name)
+		}
+		return nil
+	}
+	if filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return fmt.Errorf("%s must be a clean relative path", name)
+	}
+	normalized := strings.ReplaceAll(value, `\`, "/")
+	if path.Clean(normalized) != normalized || strings.HasPrefix(normalized, "//") || (len(normalized) >= 2 && normalized[1] == ':') {
+		return fmt.Errorf("%s must not be absolute", name)
+	}
+	for _, segment := range strings.FieldsFunc(normalized, func(r rune) bool { return r == '/' }) {
+		if segment == ".." {
+			return fmt.Errorf("%s must not contain '..'", name)
+		}
+	}
+	return nil
+}
+
+// isBareExecutableName accepts only a name resolvable through PATH. A value
+// carrying a separator would be a filesystem lookup relative to the daemon's
+// working directory, not the worktree — declare those with `path` instead.
+func isBareExecutableName(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	return strings.IndexFunc(value, func(r rune) bool {
+		return r == '/' || r == '\\' || unicode.IsSpace(r) || unicode.IsControl(r)
+	}) < 0
 }

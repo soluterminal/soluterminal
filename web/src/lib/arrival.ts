@@ -12,6 +12,20 @@
 // for anything else.
 
 const STORAGE_KEY = 'solu.arrival';
+
+/**
+ * The website's counters' switches (website/src/js/site-count.js and
+ * download-count.js), honoured here too: with Do Not Track or Global Privacy
+ * Control the app keeps no link tag, sends none with a sign-up and counts no
+ * download; an automated browser (our tests and CI) isn't a visitor either.
+ * The privacy note says so.
+ */
+export function trackingRefused(win: Window | undefined = typeof window === 'undefined' ? undefined : window): boolean {
+  if (!win) return false;
+  const nav = win.navigator as Navigator & { globalPrivacyControl?: boolean };
+  const legacy = win as unknown as { doNotTrack?: string };
+  return nav.doNotTrack === '1' || legacy.doNotTrack === '1' || nav.globalPrivacyControl === true || nav.webdriver === true;
+}
 // The website's own rule (website/src/js/download-count.js): a short tag of
 // plain characters, so nothing odd reaches the account's metadata.
 const MAX_TAG_LENGTH = 40;
@@ -107,14 +121,18 @@ export function captureArrival(win: Window = window): Arrival {
   if (present.length === 0) return stored;
 
   const intent = parseIntent(params.get('intent'));
+  // The intent is how the page works (sign up or sign in) and is always kept;
+  // the tags are kept only when the browser allows it. Either way they leave
+  // the address bar below.
+  const refused = trackingRefused(win);
   const landing: FirstTouch = {};
   for (const key of TAG_KEYS) {
-    const tag = cleanTag(params.get(key));
+    const tag = refused ? null : cleanTag(params.get(key));
     if (tag) landing[key] = tag;
   }
   const next: Arrival = {
     intent: intent ?? stored.intent,
-    firstTouch: stored.firstTouch ?? (Object.keys(landing).length ? landing : null),
+    firstTouch: refused ? null : (stored.firstTouch ?? (Object.keys(landing).length ? landing : null)),
   };
   writeStored(next);
 
@@ -172,12 +190,13 @@ export function signupMetadata(): Record<string, unknown> {
   const data: Record<string, unknown> = {
     signup_surface: intent ? `web-${intent}` : 'web',
   };
-  if (firstTouch) data.first_touch = { ...firstTouch };
+  if (firstTouch && !trackingRefused()) data.first_touch = { ...firstTouch };
   return data;
 }
 
 /** The single tag the website's download counter records. */
 export function downloadCountTag(): string | null {
+  if (trackingRefused()) return null;
   const touch = readArrival().firstTouch;
   return touch?.utm_source ?? touch?.ref ?? null;
 }

@@ -161,7 +161,7 @@ func TestRegisteredWritesUseBrowserOriginGate(t *testing.T) {
 				for _, transport := range []string{"direct", "apiHandler", "relay"} {
 					// These are the named, actual-transport preview exceptions. Their
 					// real handlers and positive/negative rows are exercised below.
-					preview := strings.HasPrefix(path, "/api/proxy/") || strings.HasPrefix(path, "/api/preview-serve/")
+					preview := strings.HasPrefix(path, "/api/proxy/")
 					if transport == "relay" && preview {
 						continue
 					}

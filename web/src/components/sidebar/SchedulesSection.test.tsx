@@ -382,3 +382,61 @@ describe('SchedulesSection loading and load errors', () => {
     expect(rowFor('Older daemon').querySelector('.sched-next')).toHaveTextContent('waiting for pane');
   });
 });
+
+describe('SchedulesSection kept schedules from removed agents', () => {
+  const kept = schedule({
+    id: 'sched-kept',
+    name: 'workflow steward',
+    kind: 'task',
+    agentId: undefined,
+    ownedByAgentId: 'agt_steward',
+    cwd: '/tmp/project',
+    permission: 'plan',
+    prompt: 'steward the board',
+  });
+  beforeEach(() => {
+    useEntitlements.setState({ loaded: true, team: false, operator: false, account: false });
+    mocks.confirm.mockReset();
+  });
+  afterEach(() => {
+    cleanup();
+    useStore.setState({ schedules: [], panes: {} });
+  });
+
+  function renderKept(deleteSchedule = vi.fn().mockResolvedValue(undefined)) {
+    useStore.setState({ schedules: [kept, task], panes: {}, focusedPaneId: null, toast: vi.fn(), deleteSchedule });
+    render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+    return deleteSchedule;
+  }
+
+  it('marks the row, offers no switch, and leaves it out of the count', () => {
+    renderKept();
+    const row = rowFor(kept.name);
+    expect(within(row).getByText(/kept from a removed agent/)).toBeInTheDocument();
+    expect(within(row).getByText("doesn't run")).toBeInTheDocument();
+    expect(row.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(rowFor(task.name).querySelector('input[type="checkbox"]')).not.toBeNull();
+    expect(screen.getByText('1')).toBeInTheDocument();
+  });
+
+  it('offers only History and Delete, and says the prompt is saved first', async () => {
+    const del = renderKept();
+    fireEvent.click(within(rowFor(kept.name)).getByRole('button', { name: 'Automation actions' }));
+    const items = screen.getAllByRole('menuitem').map((b) => b.textContent);
+    expect(items).toEqual(['History…', 'Delete']);
+
+    mocks.confirm.mockResolvedValueOnce(true);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    await waitFor(() => expect(del).toHaveBeenCalledWith(kept.id));
+    expect(mocks.confirm.mock.calls[0][0].message).toContain('agents-export-kept.md');
+  });
+
+  it('deletes nothing when the person cancels', async () => {
+    const del = renderKept();
+    fireEvent.click(within(rowFor(kept.name)).getByRole('button', { name: 'Automation actions' }));
+    mocks.confirm.mockResolvedValueOnce(false);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    await waitFor(() => expect(mocks.confirm).toHaveBeenCalled());
+    expect(del).not.toHaveBeenCalled();
+  });
+});

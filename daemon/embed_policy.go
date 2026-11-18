@@ -113,7 +113,7 @@ func appDocumentHeaders(next http.Handler) http.Handler {
 		path := appPolicyPath(r.URL.Path)
 		// User-service responses keep their own proxy sandbox policies. They
 		// are not app documents, including on the router's preview listener.
-		if !strings.HasPrefix(path, "/api/proxy/") && !strings.HasPrefix(path, "/api/preview-serve/") {
+		if !strings.HasPrefix(path, "/api/proxy/") {
 			w.Header().Add("Content-Security-Policy", "frame-ancestors 'self' "+strings.Join(embedParents(), " "))
 		}
 		next.ServeHTTP(w, r)

@@ -228,16 +228,3 @@ func TestLoginShellCommandPathQuotesToolAndUsesLastCandidate(t *testing.T) {
 		t.Fatalf("loginShellCommandPath = %q, %v; want final candidate %q", got, err, realBin)
 	}
 }
-
-func TestPreviewBuildExit127IncludesToolchainResolutionHint(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell exit-code fixture is Unix-only")
-	}
-	original := previewToolchainArgv
-	t.Cleanup(func() { previewToolchainArgv = original })
-	previewToolchainArgv = func([]string) []string { return []string{"sh", "-c", "exit 127"} }
-	err := previewRunBuildArgv(context.Background(), t.TempDir(), []string{"npm", "run", "build"}, nil, "")
-	if err == nil || !previewBuildInfrastructureUnavailable(err) || !strings.Contains(err.Error(), "toolchain resolution:") {
-		t.Fatalf("exit-127 error=%v", err)
-	}
-}

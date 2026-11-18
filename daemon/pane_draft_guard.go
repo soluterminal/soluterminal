@@ -104,6 +104,9 @@ type heldDelivery struct {
 	// Set once it leaves the queue, under Pane.mu.
 	resolution string // delivered | discarded | sent | gone | expired | failed
 	err        error
+	// outcome is how a delivered or sent message left the input box
+	// (submitted, queued, left in the input box…), set with the resolution.
+	outcome deliveryOutcome
 }
 
 // heldResolvedKeep bounds the resolved held messages a pane remembers for
@@ -775,6 +778,19 @@ func (p *Pane) heldDeliveryStatus(id string) (string, error) {
 	return "", nil
 }
 
+// heldDeliveryOutcome is how a resolved held message left the input box,
+// "" while it waits or when it was never typed.
+func (p *Pane) heldDeliveryOutcome(id string) deliveryOutcome {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, h := range p.heldResolved {
+		if h.ID == id {
+			return h.outcome
+		}
+	}
+	return ""
+}
+
 // pendingHeldID is the id of sender's held message whose text is msg (sender
 // labels ignored), or "" when none waits: it was typed already, or never held.
 func (p *Pane) pendingHeldID(sender, msg string, senderKeys ...string) string {
@@ -896,6 +912,9 @@ func (p *Pane) deliverHeld(h *heldDelivery, typing bool) (deliveryOutcome, error
 	if err != nil {
 		resolution = "failed"
 	}
+	p.mu.Lock()
+	h.outcome = outcome
+	p.mu.Unlock()
 	if p.resolveHeld(h, resolution, err) && err == nil && h.delivered != nil {
 		h.delivered(outcome)
 	}

@@ -22,8 +22,8 @@
     "vendor:soluvoice:check": "python3 tools/repack-soluvoice.py --check"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.103.3",
-    "@tauri-apps/plugin-notification": "^2.3.3",
+    "@supabase/supabase-js": "^2.119.0",
+    "@tauri-apps/plugin-notification": "^2.8.1",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/addon-web-links": "^0.11.0",
@@ -32,18 +32,19 @@
     "react-dom": "^18.3.1",
     "react-resizable-panels": "^2.1.7",
     "soluvoice": "file:vendor/soluvoice-0.1.6.tgz",
-    "zustand": "^5.0.2"
+    "zustand": "^5.1.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^25.9.9",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^6.0.1",
+    "@vitejs/plugin-react": "^6.3.0",
     "jsdom": "^29.1.1",
-    "playwright": "1.59.1",
+    "playwright": "1.65.0",
     "typescript": "^5.6.3",
-    "vite": "^8.0.11",
+    "vite": "^8.3.8",
     "vitest": "^4.1.12"
   }
 }

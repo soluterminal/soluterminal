@@ -995,33 +995,63 @@ func (a *apiServer) archiveFinishedWorkers(now time.Time) {
 		if !enabled {
 			return
 		}
-		for _, id := range ids {
-			s.mu.Lock()
-			a.loadWorkerArchivesLocked(s)
-			if s.context != nil && s.context.Err() != nil {
-				s.mu.Unlock()
-				return
-			}
-			due := now.Sub(s.checked[id]) >= 30*time.Second
-			if due {
-				s.checked[id] = now
-			}
+		s.mu.Lock()
+		a.loadWorkerArchivesLocked(s)
+		if s.context != nil && s.context.Err() != nil {
 			s.mu.Unlock()
-			if !due {
-				continue
-			}
-			if p, ok := a.mgr.Get(id); ok {
-				a.tryArchiveWorker(p, now)
-			}
-			break
+			return
+		}
+		id, due := nextWorkerArchiveCheck(ids, s.checked, now)
+		if due {
+			s.checked[id] = now
+		}
+		s.mu.Unlock()
+		if !due {
+			return
+		}
+		if p, ok := a.mgr.Get(id); ok {
+			a.tryArchiveWorker(p, now)
 		}
 	}()
+}
+
+// workerArchiveCheckEvery is the least time between two archive checks of one
+// worker. The queue ticks every 5 s and checks one worker per tick.
+const workerArchiveCheckEvery = 30 * time.Second
+
+// nextWorkerArchiveCheck picks the due worker checked longest ago, a
+// never-checked one first, queue order breaking ties. Taking the first due
+// worker in queue order let a few held workers at the top, each due again
+// 30 s later, use every tick, so the workers below them were never checked
+// (ST-295).
+func nextWorkerArchiveCheck(ids []string, checked map[string]time.Time, now time.Time) (string, bool) {
+	pick, found := "", false
+	var oldest time.Time
+	for _, id := range ids {
+		at := checked[id]
+		if now.Sub(at) < workerArchiveCheckEvery {
+			continue
+		}
+		if !found || at.Before(oldest) {
+			pick, oldest, found = id, at, true
+		}
+	}
+	return pick, found
 }
 func (a *apiServer) tryArchiveWorker(p *Pane, now time.Time) {
 	snap := p.Snapshot()
 	// Only workers are archived: never a lead or the user's own pane.
 	if a.ws == nil || a.panes == nil || snap.Origin == nil || snap.Origin.Worker == nil || snap.Origin.Worker.State != "finished" || paneTeamKind(snap.Origin) != paneTeamWorker {
 		a.clearWorkerRetention(p.ID)
+		// The queue lists it as finished, so say why it is not looked at
+		// instead of showing no decision for it (ST-295).
+		switch {
+		case a.ws == nil || a.panes == nil:
+		case snap.Origin == nil || snap.Origin.Worker == nil || paneTeamKind(snap.Origin) != paneTeamWorker:
+			a.noteWorkerArchiveDecision(p.ID, "the pane is no longer a worker", now)
+		default:
+			a.noteWorkerArchiveDecision(p.ID, "the pane's own worker record is "+snap.Origin.Worker.State+", not finished", now)
+		}
 		return
 	}
 	// decision is why this check leaves the worker open ("archived" when it

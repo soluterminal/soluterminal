@@ -41,7 +41,7 @@ type Sel =
   | { kind: 'report'; scheduleId: string; runAt: string }
   // sent: this report was sent from the form a moment ago.
   | { kind: 'thread'; number: number; sent?: boolean }
-  | { kind: 'agentreport'; id: string; runId: string; logFile?: string; body?: string }
+  | { kind: 'agentreport'; id: string; runId: string; body?: string }
   | { kind: 'compose'; prefill?: FeedbackPrefill }
   | null;
 
@@ -67,7 +67,7 @@ function selFor(it: InboxItem): Sel {
     return { kind: 'report', scheduleId: it.report.schedule.id, runAt: it.report.run.at };
   }
   if (it.source === 'feedback' && it.number) return { kind: 'thread', number: it.number };
-  if (it.agentReport) return { kind: 'agentreport', id: it.agentReport.agentId, runId: it.agentReport.runId, logFile: it.agentReport.logFile, body: it.agentReport.body };
+  if (it.agentReport) return { kind: 'agentreport', id: it.agentReport.agentId, runId: it.agentReport.runId, body: it.agentReport.body };
   return null;
 }
 
@@ -284,35 +284,13 @@ const EVENT_LABEL: Record<string, string> = {
   'reply': 'You replied',
 };
 
-function AgentReportReadView({ agentId, logFile, body }: { agentId: string; logFile?: string; body?: string }) {
-  const toast = useStore((s) => s.toast);
-  const [text, setText] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    if (body || !logFile) return;
-    let alive = true;
-    setText(null);
-    setErr(null);
-    api.agentRunLog(agentId, logFile)
-      .then((value) => { if (alive) setText(value); })
-      .catch((cause) => {
-        if (!alive) return;
-        setErr((cause as Error).message || 'Report unavailable.');
-        toast('Agent report unavailable — its log may have rotated out.', { kind: 'info', ttlMs: 5000 });
-      });
-    return () => { alive = false; };
-  }, [agentId, logFile, body, toast]);
-  // A built-in agent alert (PR reviewer down, held fixes) carries its own
-  // text; there is no run log behind it.
+// A built-in agent alert (PR reviewer down, held fixes) carries its own text.
+// Managed agents, whose reports pointed at a run log, were removed.
+function AgentReportReadView({ body }: { body?: string }) {
   if (body) {
     return <div className="inbox-scroll"><div className="report-md report-md-reader">{renderReportMarkdown(body)}</div></div>;
   }
-  if (!logFile || err) {
-    return <div className="inbox-read-empty"><div className="inbox-empty-title">Report unavailable</div><p>{err ?? 'This run produced no readable log.'}</p></div>;
-  }
-  return <div className="inbox-scroll">{text === null
-    ? <div className="inbox-read-empty"><p>Loading report…</p></div>
-    : <div className="report-md report-md-reader">{renderReportMarkdown(text)}</div>}</div>;
+  return <div className="inbox-read-empty"><div className="inbox-empty-title">Report unavailable</div><p>This alert has no text.</p></div>;
 }
 
 function ThreadView({ number, status }: { number: number; status?: string }) {
@@ -620,7 +598,7 @@ function InboxWindow({ sel, setSel, target, clearTarget, onClose }: {
             {sel?.kind === 'thread' && (
               <ThreadView number={sel.number} status={items.find((i) => i.source === 'feedback' && i.number === sel.number)?.status} />
             )}
-            {sel?.kind === 'agentreport' && <AgentReportReadView key={`${sel.id}:${sel.runId}`} agentId={sel.id} logFile={sel.logFile} body={sel.body} />}
+            {sel?.kind === 'agentreport' && <AgentReportReadView key={`${sel.id}:${sel.runId}`} body={sel.body} />}
             {sel?.kind === 'compose' && (
               <div className="inbox-scroll is-flush">
                 <FeedbackComposer

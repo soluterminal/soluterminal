@@ -913,7 +913,6 @@ export interface WorkflowSettings {
 	hostDiskFloorPct?: number;
 	hostDiskHysteresisMB?: number;
 	browserHostReserveMB?: number;
-    previewCacheCapMB?: number;
 	adaptiveHeavy?: boolean;
 	environmentEscalateHours?: number;
   };
@@ -2051,12 +2050,11 @@ export interface SystemStatus {
   engine: { available: boolean; queue: WorkflowStatsQueue; runningInvocations: number; decide: number; gcLastSweepAt: string | null };
   runtimes: SystemRuntime[] | null;
   automation: {
-    agents: { total: number; paused: number; running: number; blocked: number; errors24h: number; nextRunAt: string | null };
     schedules: { enabled: number; disabled: number; running: number; errors24h: number; nextFireAt: string | null };
     builtins: Array<{ id: string; label: string; on: boolean; detail?: string; present?: boolean; running?: boolean }>;
     autonomy: { globalPaused: boolean; pausedCount: number };
   };
-  surface: { addr: string; ports: { total: number; paneOwned: number }; previews: { active: number }; cloud: { configured: boolean; hasCreds: boolean; credsInvalid: boolean; relayState: string } };
+  surface: { addr: string; ports: { total: number; paneOwned: number }; cloud: { configured: boolean; hasCreds: boolean; credsInvalid: boolean; relayState: string } };
   release: { running: string; latest: string; available: boolean; applying: boolean; lastSuccessMs: number; lastError: string; shellCurrent: string; shellLatest: string; shellAvailable: boolean; workflowDeferState?: 'draining' | 'backoff'; workflowNextRetryMs?: number; workflowInflight?: number; workflowDeferAttempts?: number; readiness: { state: string; unreleasedTotal: number; functionalCommitCount: number; oldestFunctionalUnreleasedAt?: string; lastReleaseVersion: string } | null; train?: { enabled: boolean; phase: string } };
 }
 export type WorkflowResourceKnob = 'maxConcurrentTasks' | 'maxHeavyOps' | 'maxSuites' | 'maxAgentRuns' | 'reservedBookkeepingRuns' | 'memFloorMB' | 'diskFloorMB' | 'hostDiskFloorMB' | 'hostDiskFloorPct' | 'hostDiskHysteresisMB' | 'browserHostReserveMB';
@@ -3334,310 +3332,12 @@ export interface AutonomyRow {
   authorityClass?: WorkflowReasonCodeFields['authorityClass'];
 }
 
-// --- Managed agents (GET /api/agents, daemon/agents_crud_api.go) -----------
-// The named objects the Agents section renders (docs/DESIGN-agents-surface.md
-// §9 S2). One authority ships today — "report-only" — and the card says so.
-
-export interface AgentTrigger {
-  kind: 'cron' | 'event';
-  cron?: string;
-  event?: string;
-  filter?: string;
-  debounceSec?: number;
-}
-
-export interface AgentRun {
-  at: string;
-  status: 'fired' | 'skipped' | 'error' | 'quota_paused' | 'credential_paused';
-  detail?: string;
-  logFile?: string;
-  summary?: string;
-  runId?: string;
-  triggerContext?: string;
-  runtime?: string;
-  provider?: string;
-  model?: string;
-  effort?: string;
-  routingSource?: AgentRoutingSource;
-  chainIndex?: number;
-  fallbackSource?: string;
-  fallbackReason?: string;
-  fallbackPolicy?: AgentFallbackPolicy;
-  account?: string;
-  credentialAccounts?: string[];
-  billingIdentity?: string;
-  billingSource?: string;
-  exitStatus?: string;
-  resetAt?: string;
-  routeAttempts?: AgentRouteAttempt[];
-}
-
-export type AgentFallbackPolicy = 'never' | 'quota_only' | 'availability';
-export type AgentRoutingSource = 'legacy' | 'template' | 'override';
-
-export interface AgentRuntimeBinding {
-  runtime: string;
-  model?: string;
-  effort?: string;
-}
-
-export interface AgentRuntimePolicy {
-  primary: AgentRuntimeBinding;
-  fallbacks?: AgentRuntimeBinding[];
-  fallbackPolicy: AgentFallbackPolicy;
-}
-
-export interface AgentRuntimePause {
-  kind: 'quota_paused' | 'credential_paused';
-  route: AgentRuntimeBinding;
-  detail: string;
-  resetAt?: string;
-  updatedAt: string;
-}
-
-export interface AgentRouteAttempt extends AgentRuntimeBinding {
-  provider?: string;
-  chainIndex: number;
-  status: string;
-  failureKind?: string;
-  detail?: string;
-  exitStatus?: string;
-  resetAt?: string;
-  account?: string;
-  quotaScope?: string;
-  billingIdentity?: string;
-  billingSource?: string;
-  credentialAccounts?: string[];
-}
-
-export interface AgentRuntimeCapabilities {
-  provider?: string;
-  billingMode?: string;
-  supportsMcp?: boolean;
-  supportsSandbox?: boolean;
-  supportsToolIsolation?: boolean;
-  supportsEffort?: boolean;
-  effortLevels?: string[];
-  supportsManagedAgents?: boolean;
-}
-
-export interface AgentRuntimeRoute extends AgentRuntimeBinding {
-  provider?: string;
-  capabilities: AgentRuntimeCapabilities;
-  ready: boolean;
-  readiness?: string;
-  billingIdentity?: string;
-  billingSource?: string;
-}
-
-// One row of the daemon's grant registry (docs/DESIGN-agents-surface.md A.2).
-// The UI never carries its own copy of these labels or consequence lines: the
-// card and the daemon's enforcement must read the same array, or a chip could
-// promise something the daemon does not do.
-export interface AgentGrantDef {
-  id: string;
-  label: string;
-  consequence: string;
-  tools: string[];
-  /** Engine-owned consent; it deliberately mints no agent tools. */
-  engine?: boolean;
-  caps?: {
-    fileTasks?: number;
-    resumesPerTask?: number;
-    retiresPerRun?: number;
-    resolvesPerRun?: number;
-    archivesPerRun?: number;
-    linkRefilesPerRun?: number;
-    proposalsPerRun?: number;
-  };
-}
-
-// --- Agent templates (GET /api/agents/templates, daemon/agent_templates.go) --
-// The five shipped templates (docs/DESIGN-agents-surface.md §4). Daemon-owned
-// so the picker's policy text and the text the RUN executes are the same
-// string; the client never carries its own copy of either.
-
-/** A grant a template will offer once the work behind it lands — rendered
- *  greyed and non-interactive with its note (§9 S4). It is deliberately NOT in
- *  the grant registry: there is no tool, so there is nothing a toggle could
- *  honestly turn on. */
-export interface AgentPendingGrant {
-  id: string;
-  label: string;
-  note: string;
-}
-
-/** One version's reviewable content. The Template tab diffs two of these when
- *  a template updates (§4.5). */
-export interface AgentTemplateSnapshot {
-  version: number;
-  policy: string;
-  defaultGrants: string[];
-  allowedGrants: string[];
-  routing?: AgentRuntimePolicy;
-}
-
-export interface AgentNotifyShape {
-  mode?: string;
-  quietHours?: { start?: string; end?: string; tz?: string };
-  needsYou?: boolean;
-}
-
-export interface AgentTemplate {
-  id: string;
-  version: number;
-  name: string;
-  emoji: string;
-  role: string;
-  policy: string;
-  defaultGrants: string[];
-  allowedGrants: string[];
-  pendingGrants: AgentPendingGrant[];
-  triggers: AgentTrigger[];
-  notify?: AgentNotifyShape;
-  timeoutMin?: number;
-  model?: string;
-  routing?: AgentRuntimePolicy;
-  /** Previous versions, so an agent's ADOPTED version still resolves after a
-   *  bump — §4.5's "never auto-migrate" needs the old text to still exist. */
-  history: AgentTemplateSnapshot[];
-}
-
-export interface AgentTemplatesPayload {
-  templates: AgentTemplate[];
-  /** agentReadTools() itself — the read list behind the review page's "Looks,
-   *  never touches" disclosure (§4.3 step 2). */
-  baseReadTools: string[];
-  readToolsByTemplate?: Record<string,string[]>;
-}
-
-/** The create/PATCH body, mirroring daemon AgentInput: every field optional so
- *  a PATCH can leave one alone. An omitted `grants` must never read as "clear
- *  the grants" — and it is exactly that property that makes "Adopt update"
- *  (which sends only adoptedVersion) structurally unable to widen authority. */
-export interface AgentInput {
-  name?: string;
-  templateId?: string;
-  adoptedVersion?: number;
-  dismissedVersion?: number;
-  forked?: boolean;
-  role?: string;
-  scope?: { repoPath?: string; repoPaths?: string[]; workspace?: string };
-  promptOverride?: string;
-  grants?: string[];
-  authority?: string;
-  triggers?: AgentTrigger[];
-  notify?: AgentNotifyShape;
-  timeoutMin?: number;
-  model?: string;
-  routingOverride?: AgentRuntimePolicy;
-  paused?: boolean;
-}
-
-export interface Agent {
-  id: string;
-  name: string;
-  templateId?: string;
-  adoptedVersion?: number;
-  /** The template version whose update banner the user dismissed with "Keep
-   *  current" (§4.5). The banner returns on the next bump. */
-  dismissedVersion?: number;
-  forked?: boolean;
-  role?: string;
-  scope: { repoPath?: string; repoPaths?: string[]; workspace?: string };
-  promptOverride?: string;
-  // THE array (§2.4): the card's chips and the run's capability token read the
-  // same field. Non-empty requires authority 'scoped'; each id resolves in the
-  // registry served by api.agentGrants().
-  grants: string[];
-  authority: string;
-  triggers: AgentTrigger[];
-  notify?: AgentNotifyShape;
-  timeoutMin?: number;
-  model?: string;
-  routingOverride?: AgentRuntimePolicy;
-  runtimePause?: AgentRuntimePause;
-  paused: boolean;
-  createdAt: string;
-  updatedAt: string;
-  lastRun?: string;
-  counters: { runs: number; actions: number; denied: number };
-  scheduleIds?: string[];
-  // The task-kind schedule this agent was imported FROM, for authority
-  // 'legacy-unrestricted' (§8.3 Phase 1). That schedule is still the trigger
-  // and still the run vehicle; this record is its card. Deleting the agent
-  // hands the schedule back to the Schedules pane — the migration's rollback.
-  sourceScheduleId?: string;
-  runs?: AgentRun[];
-  // Daemon-computed card fields.
-  nextRun?: string;
-  running?: boolean;
-  // The fail-closed state: this machine's Claude CLI cannot enforce the deny
-  // list, so every run is refused. Rendered as a banner — never as an agent
-  // that merely happens to be idle.
-  blocked?: boolean;
-  blockedReason?: string;
-  // Built on a workflow-engine template that was removed: it can never run
-  // again, so the card offers only Remove.
-  retired?: boolean;
-  globalPaused?: boolean;
-  effectiveReadTools?: string[];
-  effectiveRouting?: AgentRuntimePolicy;
-  routingSource?: AgentRoutingSource;
-  runtimeReady?: boolean;
-  runtimeReadiness?: string;
-  runtimeRoutes?: AgentRuntimeRoute[];
-  runtimeOptions?: AgentRuntimeRoute[];
-}
-
-// One row of the per-agent activity feed (docs/DESIGN-agents-surface.md §6.1).
-// The daemon merges the action ledger with the run history into one chronology,
-// so `kind` says which half of this shape carries the meaning. Artifacts are
-// the row's evidence — each one is a deep link the UI must offer.
-export interface AgentActivityRow {
-  at: string;
-  runId?: string;
-  kind: 'action' | 'run';
-  // Action rows.
-  action?: string;
-  grant?: string;
-  result?: string;
-  target?: { taskId?: string };
-  artifacts?: {
-    taskEventSeq?: number;
-    commitSha?: string;
-    releaseVersion?: string;
-    runLogFile?: string;
-  };
-  // Run rows.
-  status?: string;
-  detail?: string;
-  summary?: string;
-  logFile?: string;
-  triggerContext?: string;
-  runtime?: string;
-  provider?: string;
-  model?: string;
-  effort?: string;
-  routingSource?: AgentRoutingSource;
-  chainIndex?: number;
-  fallbackSource?: string;
-  fallbackReason?: string;
-  fallbackPolicy?: AgentFallbackPolicy;
-  account?: string;
-  credentialAccounts?: string[];
-  billingIdentity?: string;
-  billingSource?: string;
-  exitStatus?: string;
-  resetAt?: string;
-  routeAttempts?: AgentRouteAttempt[];
-}
+// --- Agent reports (GET /api/agents/reports): the built-in agent alerts ----
 
 export interface AgentReport {
   agentId: string;
   agentName: string;
   runId: string;
-  logFile?: string;
   at: string;
   title: string;
   preview?: string;
@@ -3647,21 +3347,6 @@ export interface AgentReport {
   // markdown instead of a run log.
   kind?: 'builtin';
   body?: string;
-}
-
-// The PATCH body for an agent. Every field optional and omitted-means-unchanged,
-// mirroring the daemon's AgentInput: sending a partial must never read as
-// "clear everything I left out".
-export interface AgentUpdateInput {
-  name?: string;
-  role?: string;
-  promptOverride?: string;
-  scope?: { repoPath?: string; repoPaths?: string[]; workspace?: string };
-  triggers?: AgentTrigger[];
-  notify?: AgentNotifyShape;
-  timeoutMin?: number;
-  model?: string;
-  paused?: boolean;
 }
 
 // The five row groups, in §1.4 order. A named union rather than
@@ -4134,18 +3819,6 @@ const coreApi = {
     return j<HostStoragePayload>(r);
   },
   hostStorageRefresh: (): Promise<HostStoragePayload> => apiFetch('/api/system/host-storage/refresh', { method: 'POST' }).then(j<HostStoragePayload>),
-  agentRunLog: (id: string, file: string) =>
-    apiFetch(`/api/agents/${id}/runlog?file=${encodeURIComponent(file)}`).then((r) => r.text()),
-  // "Make this an agent" (§8.3 Phase 1): give an existing task schedule a card
-  // WITHOUT changing how it runs. The schedule keeps firing through the same
-  // path; it just stops appearing in the Schedules pane, because the card now
-  // owns its pause, its Run now and its history. Deleting the agent undoes it.
-  importSchedule: (scheduleId: string) =>
-    apiFetch('/api/agents/import-schedule', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ scheduleId }),
-    }).then(j<Agent>),
 
   // GitHub App connection status (see GithubAppStatus). Old daemons lack the
   // endpoint — their SPA-fallback 200 normalizes to a 404, which callers must

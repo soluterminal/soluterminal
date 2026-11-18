@@ -24,6 +24,33 @@ const (
 	spawnReadyTimeout      = 45 * time.Second
 )
 
+// collabCallBudget bounds a whole ask_pane or wait_for_pane call, sending
+// included (ST-290). Claude Code and other MCP clients give up on a tool call
+// at about 60 s ("The operation timed out") and report nothing of what it
+// did, so a sender could not tell a message delivered late from one never
+// delivered. Calls return before that with their delivery and a hint to call
+// wait_for_pane. A traced Codex pane is the exception: SoluTerminal sets its
+// tool_timeout_sec to codexSoluToolTimeoutSec, so it may wait that long.
+var collabCallBudget = 50 * time.Second
+
+// collabDeadline is when a call that started at start must have returned.
+func (a *apiServer) collabDeadline(start time.Time, c paneCaller) time.Time {
+	if c.ID != "" {
+		if caller, ok := a.mgr.Get(c.ID); ok {
+			if agent, claude := paneAgentProvider(caller); agent && !claude {
+				return start.Add(time.Duration(codexSoluToolTimeoutSec)*time.Second - 10*time.Second)
+			}
+		}
+	}
+	return start.Add(collabCallBudget)
+}
+
+// collabWait is the wait a call may still spend: timeout_seconds (or def),
+// cut to what is left before its deadline.
+func collabWait(args map[string]any, def time.Duration, deadline time.Time) time.Duration {
+	return max(min(collabTimeout(args, def), time.Until(deadline)), 0)
+}
+
 // collabSleep, collabScreenText, collabPaneState and queuedAskTTL are
 // swapped by tests.
 var (
@@ -45,7 +72,10 @@ type collabResult struct {
 	Screen        string  `json:"screen,omitempty"`
 	WaitedSeconds float64 `json:"waited_seconds"`
 	Hint          string  `json:"hint,omitempty"`
-	// Delivery is "queued" when a working Codex queued ask_pane's message.
+	// Delivery says what happened to ask_pane's message: "delivered" (typed
+	// and submitted), "unconfirmed" (submitted, input box unreadable),
+	// "queued" (in a working agent's own queue), "held" (waiting on the pane)
+	// or "sending" (still being typed when the call had to return).
 	Delivery string `json:"delivery,omitempty"`
 	// HeldMessages: messages held on that pane, anyone's (no text).
 	HeldMessages *paneHeldSummary `json:"held_messages,omitempty"`
@@ -95,6 +125,49 @@ type paneTurnBaseline struct {
 	// Continued: wait_for_pane picking up a timed-out queued ask_pane; the
 	// work it waited on already started, so a settled screen can end it.
 	Continued bool
+	// Delivery is a continued ask's delivery for wait_for_pane: "" for one
+	// followed by its text (queued, held, or sent to a busy Claude), else
+	// "delivered" or "unconfirmed".
+	Delivery string
+	// SentAt is when a late send finished (continueSentAsk): once it is
+	// sentAskStarted old, the pane has had time to start its turn and a
+	// settled screen can end the wait.
+	SentAt time.Time
+	// Sending: ask_pane returned before its message was typed (another
+	// delivery held the pane, or the write stalled). wait_for_pane waits for
+	// the send to finish and continues from the baseline it leaves.
+	Sending *askSending
+}
+
+// askSending is a send ask_pane stopped waiting for. done closes once base
+// (the baseline after the send) or err is set.
+type askSending struct {
+	done chan struct{}
+	base paneTurnBaseline
+	// delivery is the result's delivery once sent; err is set when nothing
+	// was sent.
+	delivery string
+	err      string
+	// at is when the send finished.
+	at time.Time
+}
+
+// sentAskStarted: a late send that finished this long before wait_for_pane
+// picks it up has given the pane time to start its turn, so a settled
+// screen can end the wait, as for a continued queued ask. Tests shorten it.
+var sentAskStarted = 5 * time.Second
+
+// deliveryLabel is a collabResult delivery for a send outcome.
+func deliveryLabel(o deliveryOutcome) string {
+	switch o {
+	case deliverySubmitted:
+		return "delivered"
+	case deliveryUnconfirmed:
+		return "unconfirmed"
+	case deliveryQueued, deliveryHeld:
+		return string(o)
+	}
+	return ""
 }
 
 func (a *apiServer) paneTurnBaselineFor(p *Pane) paneTurnBaseline {
@@ -223,6 +296,9 @@ func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time
 		}
 		res.State = string(state)
 		res.WaitedSeconds = time.Since(start).Round(100 * time.Millisecond).Seconds()
+		if !sawWork && !base.SentAt.IsZero() && time.Since(base.SentAt) >= sentAskStarted {
+			sawWork = true
+		}
 		if p.Snapshot().Status == PaneExited || state == StateExited {
 			res.Status = "exited"
 			res.Screen = paneScreenText(p)
@@ -276,6 +352,9 @@ func (a *apiServer) waitForPaneTurn(p *Pane, base paneTurnBaseline, timeout time
 				res.Status = "needs_approval"
 				res.Screen = paneScreenText(p)
 				res.Hint = "The pane is waiting on an approval menu. Answer it with answer_prompt (or tell the user), then call wait_for_pane."
+				if from, to, ok := codexUpdateMenuVersions(collabScreenText(p)); ok {
+					res.Hint = codexUpdateMenuHint(from, to) + " Tell the user if they may not have seen it, then call wait_for_pane."
+				}
 				return res
 			}
 		default:
@@ -318,6 +397,7 @@ func (a *apiServer) mcpToolAskPane(args map[string]any, callerPane string) any {
 func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
 	a.collabInflight.Add(1)
 	defer a.collabInflight.Add(-1)
+	deadline := a.collabDeadline(time.Now(), c)
 	// A message never answers a prompt, whoever sends it. One or two letters
 	// are written as raw keys, and a dialog still drawn after its first
 	// answer (menuInputDrawn) passes the state check below: the write-time
@@ -345,6 +425,9 @@ func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
 	case StateExited:
 		return toolErr("pane " + paneID + " has exited")
 	case StateChoicePrompt:
+		if from, to, ok := codexUpdateMenuVersions(paneVisibleScreen(p)); ok {
+			return toolErr("pane " + paneID + ": " + codexUpdateMenuHint(from, to) + " Nothing was sent; tell the user, and send your message once the menu is answered.")
+		}
 		return toolErr("pane " + paneID + " is waiting on an approval menu; answer it with answer_prompt first, or tell the user")
 	}
 	agent, claude := paneAgentProvider(p)
@@ -360,11 +443,82 @@ func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
 		text += "\n"
 	}
 	base := a.paneTurnBaselineFor(p)
-	// Never steer: a working Codex that offers no queue key gets no Enter.
-	sent, outcome := a.mcpToolSendInputOutcomeAs(map[string]any{"pane_id": paneID, "text": text}, deliveryNoSteer, c)
-	if m, ok := sent.(map[string]any); ok && m["isError"] == true && outcome != deliveryHeld {
-		return sent
+	// The send can wait behind another delivery to the pane, or a stalled
+	// write; the call still returns by its deadline (ST-290).
+	sendDone := make(chan askSendResult, 1)
+	go func() {
+		// Never steer: a working Codex that offers no queue key gets no Enter.
+		sent, outcome := a.mcpToolSendInputOutcomeAs(map[string]any{"pane_id": paneID, "text": text}, deliveryNoSteer, c)
+		sendDone <- askSendResult{sent, sentOutcome(sent, outcome)}
+	}()
+	var r askSendResult
+	select {
+	case r = <-sendDone:
+	case <-time.After(time.Until(deadline)):
+		return a.askStillSending(p, c, base, sendDone, state, agent, claude, text)
 	}
+	if m, ok := r.sent.(map[string]any); ok && m["isError"] == true && r.outcome != deliveryHeld {
+		return r.sent
+	}
+	outcome := r.outcome
+	base = a.askBaselineAfterSend(p, c, base, outcome, state, agent, claude, text)
+	res := a.waitForPaneTurn(p, base, collabWait(args, askPaneDefaultTimeout, deadline), callerPane)
+	a.rememberOpenAsk(p.ID, c, base, outcome, res.Status)
+	if outcome != deliveryHeld {
+		res.Delivery = deliveryLabel(outcome) // a held one: noteHeldAsk
+	}
+	if outcome == deliveryQueued {
+		switch res.Status {
+		case "still_working":
+			res.Hint = "That agent was mid-turn, so your message is in its queue and goes in when the agent takes it. Call wait_for_pane to keep waiting for the reply; do not resend."
+		case "needs_approval":
+			res.Hint += " Your message is still in its queue; do not resend."
+		}
+	}
+	noteHeldAsk(p, base.HeldID, &res)
+	noteHeldOnPane(p, c, &res)
+	return collabJSON(res)
+}
+
+// rememberOpenAsk keeps the baseline of an ask that is still open after the
+// call, so the caller's wait_for_pane waits on this message's turn and never
+// takes an earlier turn as its reply: one followed by its text, and (ST-290)
+// one typed and submitted, which calls cut by their deadline now leave open.
+func (a *apiServer) rememberOpenAsk(pane string, c paneCaller, base paneTurnBaseline, outcome deliveryOutcome, status string) {
+	a.queuedAsks.drop(pane, c.bucket())
+	if !queuedAskOpen(status) {
+		return
+	}
+	if base.Queued == "" {
+		// Callers SoluTerminal cannot tell apart share one bucket: a typed
+		// ask's baseline would reach another caller's wait.
+		if c.bucket() == "" || outcome != deliverySubmitted && outcome != deliveryUnconfirmed {
+			return
+		}
+		base.Delivery = deliveryLabel(outcome)
+	}
+	a.queuedAsks.put(pane, c.bucket(), base)
+}
+
+type askSendResult struct {
+	sent    any
+	outcome deliveryOutcome
+}
+
+// sentOutcome is a send's outcome for ask_pane: a pane with no agent takes
+// the text and its Enter as written (no input box to confirm), so a write
+// that succeeded counts as delivered.
+func sentOutcome(sent any, outcome deliveryOutcome) deliveryOutcome {
+	if m, ok := sent.(map[string]any); outcome == "" && ok && m["isError"] != true {
+		return deliverySubmitted
+	}
+	return outcome
+}
+
+// askBaselineAfterSend completes ask_pane's baseline with what the send did:
+// a queued or held message is followed by its text (and held id), so only
+// its own turn answers it.
+func (a *apiServer) askBaselineAfterSend(p *Pane, c paneCaller, base paneTurnBaseline, outcome deliveryOutcome, state PaneRuntimeState, agent, claude bool, text string) paneTurnBaseline {
 	// A working Codex or Claude queues the message itself (pane_delivery.go);
 	// other panes refuse a busy pane in send_input. A message to a busy
 	// Claude is matched by its text even when its queue was not seen: Claude
@@ -377,7 +531,7 @@ func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
 	if outcome == deliveryHeld {
 		// Found right after the send; empty when it was typed meanwhile, and
 		// then the wait goes by Queued alone.
-		sender := a.paneMessageSenderAs(c, paneID)
+		sender := a.paneMessageSenderAs(c, p.ID)
 		if sender == "" {
 			sender = "SoluTerminal"
 		}
@@ -386,23 +540,51 @@ func (a *apiServer) mcpToolAskPaneAs(args map[string]any, c paneCaller) any {
 		base.Queued = heldText(base.Queued)
 		base.HeldID = p.pendingHeldID(sender, base.Queued, c.messageKey())
 	}
-	res := a.waitForPaneTurn(p, base, collabTimeout(args, askPaneDefaultTimeout), callerPane)
-	a.queuedAsks.drop(paneID, c.bucket())
-	if base.Queued != "" && queuedAskOpen(res.Status) {
-		a.queuedAsks.put(paneID, c.bucket(), base)
-	}
-	if outcome == deliveryQueued {
-		res.Delivery = string(deliveryQueued)
-		switch res.Status {
-		case "still_working":
-			res.Hint = "That agent was mid-turn, so your message is in its queue and goes in when the agent takes it. Call wait_for_pane to keep waiting for the reply; do not resend."
-		case "needs_approval":
-			res.Hint += " Your message is still in its queue; do not resend."
+	return base
+}
+
+const askSendingHint = "sending: your message is still being typed into that pane (it waits behind another delivery there, or the pane is slow to take input); it was not lost. Call wait_for_pane to follow it; do not resend."
+
+// askStillSending ends an ask_pane whose deadline came before its send
+// finished. The send goes on; the caller's wait_for_pane picks it up.
+func (a *apiServer) askStillSending(p *Pane, c paneCaller, base paneTurnBaseline, sendDone <-chan askSendResult, state PaneRuntimeState, agent, claude bool, text string) any {
+	sending := &askSending{done: make(chan struct{})}
+	base.Sending = sending
+	a.queuedAsks.put(p.ID, c.bucket(), base)
+	// The send outlives this call: it still counts as one in flight.
+	a.collabInflight.Add(1)
+	go func() {
+		defer a.collabInflight.Add(-1)
+		r := <-sendDone
+		if m, ok := r.sent.(map[string]any); ok && m["isError"] == true && r.outcome != deliveryHeld {
+			sending.err = collabToolText(m)
+		} else {
+			sending.base = a.askBaselineAfterSend(p, c, paneTurnBaseline{Since: base.Since, Path: base.Path, PromptAt: base.PromptAt}, r.outcome, state, agent, claude, text)
+			if r.outcome != deliveryHeld {
+				sending.delivery = deliveryLabel(r.outcome) // a held one: noteHeldAsk
+			}
 		}
-	}
-	noteHeldAsk(p, base.HeldID, &res)
+		sending.at = time.Now()
+		close(sending.done)
+	}()
+	res := collabResult{Pane: a.collabPaneLabel(p), PaneID: p.ID, Status: "still_working", State: string(collabPaneState(p)), Delivery: "sending", Hint: askSendingHint}
+	res.WaitedSeconds = time.Since(base.Since).Round(100 * time.Millisecond).Seconds()
 	noteHeldOnPane(p, c, &res)
 	return collabJSON(res)
+}
+
+// collabToolText is a tool result's text.
+func collabToolText(m map[string]any) string {
+	var b strings.Builder
+	content, _ := m["content"].([]any)
+	for _, part := range content {
+		if p, ok := part.(map[string]any); ok {
+			if text, ok := p["text"].(string); ok {
+				b.WriteString(text)
+			}
+		}
+	}
+	return b.String()
 }
 
 // noteHeldOnPane adds the pane's held messages to a wait result, and says so
@@ -422,10 +604,19 @@ func heldStuckHint(count int) string {
 // noteHeldAsk marks a wait result whose message is still held while the
 // person types in that pane.
 func noteHeldAsk(p *Pane, heldID string, res *collabResult) {
-	if heldID == "" || !queuedAskOpen(res.Status) {
+	if heldID == "" {
 		return
 	}
-	if status, _ := p.heldDeliveryStatus(heldID); status != string(deliveryHeld) {
+	status, _ := p.heldDeliveryStatus(heldID)
+	if status == "delivered" || status == "sent" {
+		// Typed since: say how it left the input box (nothing for text left
+		// there), never over an unsent result.
+		if res.Status != "unsent" {
+			res.Delivery = deliveryLabel(p.heldDeliveryOutcome(heldID))
+		}
+		return
+	}
+	if !queuedAskOpen(res.Status) || status != string(deliveryHeld) {
 		return
 	}
 	res.Delivery = string(deliveryHeld)
@@ -475,6 +666,7 @@ func (a *apiServer) mcpToolWaitForPane(args map[string]any, callerPane string) a
 func (a *apiServer) mcpToolWaitForPaneAs(args map[string]any, c paneCaller) any {
 	a.collabInflight.Add(1)
 	defer a.collabInflight.Add(-1)
+	deadline := a.collabDeadline(time.Now(), c)
 	callerPane := c.ID
 	ref, _ := args["pane_id"].(string)
 	paneID := a.resolvePaneRef(ref, callerPane)
@@ -491,9 +683,40 @@ func (a *apiServer) mcpToolWaitForPaneAs(args map[string]any, c paneCaller) any 
 	// Continue a queued ask_pane that timed out: only its own turn counts,
 	// and the wait ends for good once it is answered, put back, or expired.
 	base, queued := a.queuedAsks.get(paneID, c.bucket())
+	if sending := base.Sending; queued && sending != nil {
+		// ask_pane returned while its message was still being typed. The
+		// whole call, send wait included, keeps to timeout_seconds.
+		waitUntil := time.Now().Add(collabWait(args, waitPaneDefaultTimeout, deadline))
+		select {
+		case <-sending.done:
+		case <-time.After(time.Until(waitUntil)):
+			res := collabResult{Pane: a.collabPaneLabel(p), PaneID: p.ID, Status: "still_working", State: string(collabPaneState(p)), Delivery: "sending", Hint: askSendingHint}
+			res.WaitedSeconds = time.Since(base.Since).Round(100 * time.Millisecond).Seconds()
+			noteHeldOnPane(p, c, &res)
+			return collabJSON(res)
+		}
+		if sending.err != "" {
+			a.queuedAsks.drop(paneID, c.bucket())
+			res := collabResult{Pane: a.collabPaneLabel(p), PaneID: p.ID, Status: "unsent", State: string(collabPaneState(p)), Hint: "Your message was not sent: " + sending.err}
+			noteHeldOnPane(p, c, &res)
+			return collabJSON(res)
+		}
+		return a.continueSentAsk(p, c, sending, waitUntil)
+	}
+	if queued && base.Delivery != "" && time.Since(base.Since) >= queuedAskTTL {
+		// A typed ask nobody came back for: expired, like a queued one.
+		a.queuedAsks.drop(paneID, c.bucket())
+		base, queued = paneTurnBaseline{}, false
+	}
 	base.Continued = queued
-	res := a.waitForPaneTurn(p, base, collabTimeout(args, waitPaneDefaultTimeout), callerPane)
-	if queued {
+	res := a.waitForPaneTurn(p, base, collabWait(args, waitPaneDefaultTimeout, deadline), callerPane)
+	if queued && base.Delivery != "" {
+		// A typed message's own turn, continued.
+		res.Delivery = base.Delivery
+		if !queuedAskOpen(res.Status) {
+			a.queuedAsks.drop(paneID, c.bucket())
+		}
+	} else if queued {
 		res.Delivery = string(deliveryQueued)
 		switch {
 		case res.Status == "still_working":
@@ -509,6 +732,28 @@ func (a *apiServer) mcpToolWaitForPaneAs(args map[string]any, c paneCaller) any 
 	if res.Status == "replied" {
 		res.Status = "idle"
 	}
+	noteHeldOnPane(p, c, &res)
+	return collabJSON(res)
+}
+
+// continueSentAsk is wait_for_pane on an ask whose late send has finished:
+// it waits on that message's own turn, as ask_pane would have.
+func (a *apiServer) continueSentAsk(p *Pane, c paneCaller, sending *askSending, waitUntil time.Time) any {
+	base := sending.base
+	base.SentAt = sending.at
+	res := a.waitForPaneTurn(p, base, max(time.Until(waitUntil), 0), c.ID)
+	if base.Queued == "" {
+		base.Delivery = sending.delivery
+	}
+	a.queuedAsks.drop(p.ID, c.bucket())
+	if queuedAskOpen(res.Status) && (base.Queued != "" || base.Delivery != "") {
+		a.queuedAsks.put(p.ID, c.bucket(), base)
+	}
+	res.Delivery = sending.delivery
+	if res.Status == "replied" {
+		res.Status = "idle"
+	}
+	noteHeldAsk(p, base.HeldID, &res)
 	noteHeldOnPane(p, c, &res)
 	return collabJSON(res)
 }
@@ -556,7 +801,8 @@ func waitAgentReady(p *Pane, agent string, timeout time.Duration) (time.Duration
 	start := time.Now()
 	var readySince time.Time
 	for time.Since(start) < timeout {
-		if paneWaitingForFolderTrust(p) {
+		// A menu only the person answers: no point waiting it out.
+		if paneWaitingForFolderTrust(p) || paneShowsCodexUpdateMenu(p) {
 			return time.Since(start), false
 		}
 		if p.Snapshot().Status == PaneExited {
@@ -603,6 +849,11 @@ func (a *apiServer) spawnFollowUp(p *Pane, cmd []string, args map[string]any) ma
 		}
 		return out
 	}
+	if !ready {
+		if from, to, ok := codexUpdateMenuVersions(paneVisibleScreen(p)); ok {
+			return a.spawnBehindCodexUpdateMenu(p, prompt, from, to, out)
+		}
+	}
 	if strings.TrimSpace(prompt) == "" {
 		return out
 	}
@@ -622,5 +873,32 @@ func (a *apiServer) spawnFollowUp(p *Pane, cmd []string, args map[string]any) ma
 	}
 	out["prompt_sent"] = true
 	out["hint"] = "The prompt was sent. Call wait_for_pane to get the reply."
+	return out
+}
+
+// spawnBehindCodexUpdateMenu reports a new Codex pane held by its own update
+// menu (ST-289). The prompt is never typed into the menu, where it would
+// choose an option: it is held on the pane, which types it by itself once
+// the menu is answered and the input box shows. The person sees it there and
+// can also send it now or discard it.
+func (a *apiServer) spawnBehindCodexUpdateMenu(p *Pane, prompt, from, to string, out map[string]any) map[string]any {
+	out["status"] = "needs_user"
+	out["state"] = string(StateChoicePrompt)
+	out["menu"] = codexUpdateMenuName
+	out["hint"] = codexUpdateMenuHint(from, to)
+	body := strings.TrimRight(withoutInvisibleFormat(unescapeAriaInput(prompt)), "\r\n")
+	if strings.TrimSpace(body) == "" {
+		return out
+	}
+	out["prompt_sent"] = false
+	p.deliveryMu.Lock()
+	err := p.enqueueHeldDelivery(body, false, deliveryNoSteer, "SoluTerminal", nil, heldMenuReason)
+	p.deliveryMu.Unlock()
+	if err != nil {
+		out["hint"] = codexUpdateMenuHint(from, to) + " The initial prompt was not sent or kept (" + err.Error() + "). Once the menu is answered, use ask_pane to send it."
+		return out
+	}
+	out["delivery"] = string(deliveryHeld)
+	out["hint"] = codexUpdateMenuHint(from, to) + " Your prompt is held on the pane and goes in by itself once the menu is answered and the input box shows (the person can also send it now or discard it). Do not resend it. Tell the user the menu is waiting, then call wait_for_pane for the reply."
 	return out
 }

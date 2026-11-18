@@ -46,6 +46,3 @@ func TestHostSamplerIdlesWithoutAHostDisk(t *testing.T) {
 	}
 }
 
-func TestPreviewBootReconcileToleratesNoPreviews(t *testing.T) {
-	(&apiServer{}).reconcilePreviewsAtBoot(context.Background())
-}

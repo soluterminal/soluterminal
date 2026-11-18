@@ -245,9 +245,6 @@ type apiServer struct {
 	// handlers that would rotate the shared provider credentials refuse.
 	// Zero value (primary) keeps focused tests' servers unchanged.
 	sideDaemon bool
-	// Adopt-mode preview registry. Nil in older focused tests and when boot
-	// loading failed; every route still remains hidden unless SOLU_PREVIEWS=1.
-	previews *previewManager
 
 	// cloudMu guards every live cloud-creds field below — cloudBase,
 	// cloudToken, ccCloudBase, ccCloudToken, and the pusher pointer. They
@@ -549,13 +546,6 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/ports", a.listPorts)
 	mux.HandleFunc("POST /api/ports/probe", a.probePort)
-	mux.HandleFunc("POST /api/previews", a.createPreview)
-	mux.HandleFunc("GET /api/previews", a.listPreviews)
-	mux.HandleFunc("DELETE /api/previews/{previewId}", a.stopPreview)
-	mux.HandleFunc("POST /api/previews/{previewId}/link", a.previewLink)
-	mux.HandleFunc("POST /api/previews/{previewId}/rotate-link", a.previewLink)
-	mux.HandleFunc("POST /api/previews/{previewId}/relaunch", a.relaunchPreview)
-	mux.HandleFunc("/api/preview-serve/{previewId}/{path...}", a.servePreview)
 
 	mux.HandleFunc("GET /api/dirs", a.listDirs)
 	mux.HandleFunc("GET /api/panes/{id}/cwd", a.paneLiveCwd)

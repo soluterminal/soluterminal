@@ -307,9 +307,10 @@ func (p *Pane) computeStateWithHasCodex(hasCodex bool) PaneRuntimeState {
 		// ordinary polling scale badly with pane count.
 		if gridText, gridGeneration, ok := p.gridMenuTextWithGeneration(hasCodex); ok {
 			if isGridChoicePromptText(gridText, hasCodex) {
-				// Moving a trust-menu selector is input, but still needs the
-				// human until the menu disappears from the current screen.
-				if len(folderTrustPromptMatches(gridText)) > 0 {
+				// Moving a trust-menu or Codex update-menu selector is input,
+				// but still needs the human until the menu disappears from
+				// the current screen.
+				if len(folderTrustPromptMatches(gridText)) > 0 || len(codexUpdateMenuMatches(gridText)) > 0 {
 					return StateChoicePrompt
 				}
 				fp := approvalPromptFingerprint(gridText, hasCodex)
@@ -375,7 +376,7 @@ func (p *Pane) computeStateWithHasCodex(hasCodex bool) PaneRuntimeState {
 		// through instead of re-firing every poll.
 		if hasCodex || strings.Contains(s, "trust this folder") {
 			if screenText, ok := p.screenMenuText(hasCodex); ok {
-				if len(folderTrustPromptMatches(screenText)) > 0 {
+				if len(folderTrustPromptMatches(screenText)) > 0 || len(codexUpdateMenuMatches(screenText)) > 0 {
 					return StateChoicePrompt
 				}
 				sfp := approvalPromptFingerprint(screenText, hasCodex)
@@ -609,7 +610,7 @@ func fingerprintPromptMatches(s string, matches [][]int) uint64 {
 	if claudeStart < 0 {
 		claudeStart = 0
 	}
-	if len(matches) > 1 && matches[len(matches)-2][1] > claudeStart {
+	if len(matches) > 1 && matches[len(matches)-2][1] > claudeStart && matches[len(matches)-2][1] <= start {
 		claudeStart = matches[len(matches)-2][1]
 	}
 	if action := claudePermissionIdentity(s[claudeStart:start]); action != "" {
@@ -922,8 +923,27 @@ func choicePromptMatches(s string) [][]int {
 	matches := dropClaudeIdleFooterMatches(s, choicePromptRE.FindAllStringIndex(s, -1))
 	matches = dropIdleComposerMatches(s, matches)
 	matches = append(matches, folderTrustPromptMatches(s)...)
+	matches = append(matches, codexUpdateMenuMatches(s)...)
 	sort.Slice(matches, func(i, j int) bool { return matches[i][0] < matches[j][0] })
-	return matches
+	return mergeOverlappingMatches(matches)
+}
+
+// mergeOverlappingMatches joins sorted spans that overlap: a menu whole-menu
+// matcher (Codex's update menu) also contains choicePromptRE's focused "1."
+// row. Readers take each span as one menu, and the fingerprint's windows
+// assume a span ends before the next begins.
+func mergeOverlappingMatches(matches [][]int) [][]int {
+	out := matches[:0]
+	for _, m := range matches {
+		if n := len(out); n > 0 && m[0] < out[n-1][1] {
+			if m[1] > out[n-1][1] {
+				out[n-1] = []int{out[n-1][0], m[1]}
+			}
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // dropIdleComposerMatches vetoes a "❯ 1." / "› 1." match when the agent's
@@ -1368,10 +1388,18 @@ var (
 	// login there is no usage part ("gpt-5.1 default · /home/me/repo"). The
 	// model is whatever the person picked, and Codex shows its display name,
 	// which need not start with GPT ("Daybreak Red high"), so the shape does
-	// not name models (ST-287). The shape alone proves nothing, since text
-	// typed into the box can look the same: only codexFooterIndex says which
-	// line is the footer.
-	codexFooterShapeRE = regexp.MustCompile(`(?i)^\s*(?:Context\s+\d+%\s+used\s+·\s+\S|[^\s·›][^\n·]*\s+·\s+(?:[/~]|[a-z]:[\\/]|\\\\))`)
+	// not name models (ST-287). The footer is Codex's status line, which the
+	// person configures (`[tui] status_line`): any of its items in any order.
+	// Its context item reads "Context 100% left" as well as "… used", and a
+	// status line without the working directory is common ("Context 100% left
+	// · GPT-6-Astra medium", ST-297), so the context item counts wherever it
+	// is in the row, followed by another item, the warning chip or nothing.
+	// A status line with neither the context item nor the directory (the model
+	// alone) is not footer-shaped, and with no status line there is no footer
+	// row: those boxes run to the end of the screen and hold messages. The
+	// shape alone proves nothing, since text typed into the box can look the
+	// same: only codexFooterIndex says which line is the footer.
+	codexFooterShapeRE = regexp.MustCompile(`(?i)^\s*(?:(?:[^\s·›][^\n·]*\s+·\s+)*Context\s+\d+%\s+(?:used|left)(?:\s+·\s+\S|\s{2,}⚠|\s*$)|[^\s·›][^\n·]*\s+·\s+(?:[/~]|[a-z]:[\\/]|\\\\))`)
 	// codexFooterPathEndRE: a footer-shaped line that ends in its working
 	// directory, which Codex 0.169 wraps onto a second row when the hint row
 	// is hidden (codexFooterIndex).

@@ -1232,16 +1232,6 @@ func main() {
 	}
 	api.checkin = newInstallCheckin(*dataDir, version, api.checkinCloudBase, api.checkinSignedIn)
 	go api.checkin.run(ctx)
-	previewMgr, previewErr := newPreviewManager(*dataDir, *backendID, func() (string, string) {
-		return api.cloudCreds()
-	}, filepath.Join(*dataDir, "preview-cache"))
-	if previewErr != nil {
-		log.Printf("preview registry load failed: %v", previewErr)
-	}
-	api.previews = previewMgr
-
-	go previewMgr.run(ctx)
-
 	runBootSteps(bootLoops, boot)
 	// Poll-independent Codex identity sweep: the /api/panes poll performs this
 	// scan only while a client is connected, so a Codex session running with
@@ -1813,18 +1803,13 @@ func main() {
 	// whose start event the winner never had, and the orphaned event made
 	// that task fail to load.)
 
-	// Preview boot reconciliation (adopt expiry, orphan cloud revokes, task
-	// projection sync) runs only once this process owns the local port — the
-	// same rule as workflow drivers above: it revokes cloud rows and writes
-	// task events, which a losing twin must never do. Cloud creds may not be
-	// paired yet; unresolved revokes are retried by previewMgr.sweep.
-	{
-		go api.reconcilePreviewsAtBoot(ctx)
-		// Host disk upkeep the retired engine's janitor used to drive: the
-		// growth ledger, opt-in crash-dump rotation and the launcher policy.
-		if api.storage != nil {
-			go api.storage.runSampler(ctx, 5*time.Minute)
-		}
+	// Shareable previews were removed: stop any preview server the previous
+	// release left running (identity-checked). Only the port owner does it.
+	go stopRetiredPreviewProcesses(*dataDir)
+	// Host disk upkeep the retired engine's janitor used to drive: the
+	// growth ledger, opt-in crash-dump rotation and the launcher policy.
+	if api.storage != nil {
+		go api.storage.runSampler(ctx, 5*time.Minute)
 	}
 
 	// A preview origin of this daemon's own, for desktops without a router

@@ -108,6 +108,7 @@ const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   defineSection('workflows.resources', 'workflows', 'Resource limits', 'Agent run slots and memory and disk floors.', { advanced: true, aliases: ['limit', 'disk', 'memory'] }),
   defineSection('credentials.accounts', 'credentials', 'Provider accounts', 'Sign in, re-authenticate and review provider accounts.', { aliases: ['sign in', 'login', 'account', 're-auth'] }),
   defineSection('credentials.keys', 'credentials', 'Runtime API keys', 'Local runtime API keys and tokens.', { aliases: ['api key', 'token'] }),
+  defineSection('credentials.gateway', 'credentials', 'Model gateway', 'Which other apps may use these credentials.', { aliases: ['shinoque', 'gateway'] }),
   // Settings › Devices split into four tabs (2026-10-31); the three new tabs
   // are sections of the devices category so their links resolve exactly.
   // Screen-share safety (hide identities) became Presentation mode here (ST-86).
@@ -116,7 +117,7 @@ const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   defineSection('devices.privacy', 'devices', 'Privacy & security', 'Agent permissions, remote devices, encryption, agent integration and telemetry.', { aliases: ['approve', 'permissions', 'remote', 'encryption', 'privacy'] }),
   defineSection('devices.pairing', 'devices', 'Pairing & desktop', 'Desktop installer, phone pairing and startup.', { aliases: ['phone', 'pair', 'qr'] }),
   defineSection('devices.updates', 'devices', 'Updates', 'Automatic daemon and desktop updates.', { aliases: ['update', 'auto-update'] }),
-  defineSection('devices.diagnostics', 'devices', 'Diagnostics', 'Compatibility flags and privacy-safe local migration counters.'),
+  defineSection('devices.diagnostics', 'devices', 'Diagnostics', 'Compatibility flags, local migration counters and the background service.', { aliases: ['service', 'daemon'] }),
 ];
 
 type ControlSeed = [
@@ -178,6 +179,34 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['devices.updates', 'desktopRestarts', 'Desktop app restarts', [], 'app-restart'],
   ['devices.privacy', 'anonymousCheckin', 'Send an anonymous daily check-in', ['check-in', 'telemetry', 'privacy', 'analytics']],
   ['devices.privacy', 'agentIntegration', 'Let Claude Code and Codex use SoluTerminal', ['mcp', 'claude', 'codex', 'hooks', 'integration', 'uninstall']],
+  // ST-281: rows added since the registry was written, so search finds every
+  // visible setting (settingsSearchCoverage.test.ts keeps this list complete).
+  ['devices.account', 'accountStatus', 'Account', ['plan', 'sign out', 'signed in']],
+  ['devices.account', 'personalView', 'View as personal', ['personal', 'team view']],
+  ['devices.account', 'marketingConsent', 'Email me product updates (you can unsubscribe anytime)', ['email', 'newsletter', 'product updates']],
+  ['devices.notifications', 'voiceAutoSend', 'Send dictation automatically', ['dictation', 'voice', 'auto send']],
+  ['devices.notifications', 'voiceLanguage', 'Language', ['voice language', 'dictation language']],
+  ['devices.notifications', 'voiceKeepMic', 'Keep the microphone ready for 2 minutes after dictating (faster start; your system’s mic light stays on)', ['mic', 'microphone']],
+  ['devices.notifications', 'voiceReadyTick', 'Tick when the mic is listening', ['sound', 'tick', 'mic']],
+  ['devices.notifications', 'voiceLocal', 'Clean up dictation with my Claude plan', ['clean up', 'cleanup', 'claude plan']],
+  ['devices.notifications', 'voiceApiKey', 'Use my Anthropic API key (ANTHROPIC_API_KEY). Clean-up then goes to Anthropic under your key and is billed to it.', ['api key', 'anthropic', 'clean up']],
+  ['devices.notifications', 'voiceWords', 'Words to recognise', ['vocabulary', 'words', 'dictation']],
+  ['devices.privacy', 'agentAuthority', 'Let agents in panes approve for me', ['agent permissions', 'approve', 'auto approve', 'permissions']],
+  ['devices.privacy', 'humanProof', 'Require approved devices for actions that need you', ['human proof', 'approved devices', 'confirm']],
+  ['devices.privacy', 'thisBrowser', 'This browser', ['approve browser', 'browser']],
+  ['devices.privacy', 'remotePolicy', 'Who can use this computer remotely', ['remote', 'remote access', 'devices']],
+  ['devices.privacy', 'privateRelay', "Encrypt this browser's connection end to end", ['encryption', 'e2e', 'end to end']],
+  ['devices.privacy', 'verifyBrowser', 'Verify this browser', ['verify', 'browser']],
+  ['devices.privacy', 'alertsHandler', 'Alerts handled by another app', ['alerts', 'notifications', 'push']],
+  ['devices.privacy', 'usageStats', 'Share usage statistics', ['analytics', 'telemetry', 'usage']],
+  ['devices.privacy', 'crashReports', 'Send crash reports', ['crash', 'telemetry']],
+  ['devices.privacy', 'developerOverrides', 'Developer overrides', ['developer', 'overrides']],
+  ['devices.updates', 'pausedUpdates', 'Paused updates', ['pause', 'update']],
+  ['devices.diagnostics', 'restartService', 'Restart background service', ['restart', 'daemon', 'service']],
+  ['devices.diagnostics', 'displayFixes', 'Display fixes used', ['compatibility', 'display']],
+  ['credentials.gateway', 'shinoqueCredentials', 'Allow Shinoque to use these credentials', ['shinoque']],
+  ['workflows.modelsFallbacks', 'baseUrl', 'Base URL', ['endpoint', 'openai']],
+  ['workflows.modelsFallbacks', 'model', 'Model', ['local model']],
 ];
 
 const SETTINGS_CONTROLS: SettingsControlDef[] = CONTROL_SEEDS.map(([
@@ -242,6 +271,33 @@ export const LEGACY_TAB_TARGETS: Record<LegacySettingsTab, SettingsTarget> = {
   agent: { category: 'agents' },
   credentials: { category: 'credentials' },
 };
+
+/** The tab each category opens when no tab names its section. */
+export const SETTINGS_FALLBACK_TABS: Record<SettingsCategory, LegacySettingsTab> = {
+  appearance: 'appearance',
+  workspace: 'panes',
+  sessions: 'claude',
+  workflows: 'tasks',
+  agents: 'agent',
+  credentials: 'credentials',
+  team: 'team',
+  devices: 'devices',
+};
+
+/** The Settings tab a destination opens (the dialog's tab key). */
+export function settingsTabFor(target: Pick<SettingsTarget, 'category' | 'section'>): LegacySettingsTab {
+  const entries = Object.entries(LEGACY_TAB_TARGETS) as Array<[LegacySettingsTab, SettingsTarget]>;
+  if (target.section) {
+    const exact = entries.find(([, candidate]) => (
+      candidate.category === target.category && candidate.section === target.section
+    ));
+    if (exact) return exact[0];
+  }
+  const categoryOnly = entries.find(([, candidate]) => (
+    candidate.category === target.category && candidate.section === undefined
+  ));
+  return categoryOnly?.[0] ?? SETTINGS_FALLBACK_TABS[target.category];
+}
 
 export const LEGACY_SECTION_TARGETS: Record<string, SettingsTarget> = {
   // Preserve links to controls that moved with Privacy & security.
@@ -309,6 +365,8 @@ export interface SettingsSearchOptions {
   mobile: boolean;
   /** Pass `updateStatus?.shellAutoApplyPaused === true`, as DevicesTab does. */
   shellAutoApplyPaused?: boolean;
+  /** Most hits returned (30); a caller that filters the hits afterwards passes Infinity. */
+  limit?: number;
 }
 
 export function searchSettings(query: string, options: SettingsSearchOptions): SettingsSearchHit[] {
@@ -332,12 +390,14 @@ export function searchSettings(query: string, options: SettingsSearchOptions): S
       const label = (control?.label ?? section.title).toLocaleLowerCase();
       const controlAliases = (control?.aliases ?? []).map((alias) => alias.toLocaleLowerCase());
       const sectionAliases = (section.aliases ?? []).map((alias) => alias.toLocaleLowerCase());
+      // The category's label and description are left out: they name every
+      // topic in the category, and several of its sections now sit on their
+      // own tabs, so they matched rows that aren't about them (ST-281:
+      // "update" found every Account and Privacy row).
       const searchableDescription = [
         control?.description,
         section.description,
         section.title,
-        category.label,
-        category.description,
       ].filter(Boolean).join(' ').toLocaleLowerCase();
       let score = 0;
       let matched = true;
@@ -371,7 +431,7 @@ export function searchSettings(query: string, options: SettingsSearchOptions): S
     || sections.indexOf(left.section) - sections.indexOf(right.section)
     || Number(Boolean(left.control)) - Number(Boolean(right.control))
     || (left.control?.label ?? '').localeCompare(right.control?.label ?? '')
-  )).slice(0, 30);
+  )).slice(0, options.limit ?? 30);
 }
 
 export function formatSettingsHash(target: SettingsTarget): string {

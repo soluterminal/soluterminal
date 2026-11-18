@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,6 +234,69 @@ func allowCheckinForTest(t *testing.T) {
 	prev := checkinUsername
 	checkinUsername = func() string { return "someone" }
 	t.Cleanup(func() { checkinUsername = prev })
+	// The scratch-test-daemon rule: tests run with SOLU_SKIP_MCP_REGISTER=1
+	// and temp HOMEs, so present an ordinary install instead.
+	t.Setenv("SOLU_SKIP_MCP_REGISTER", "")
+	prevHome := checkinHomeDir
+	checkinHomeDir = func() (string, error) { return "/home/someone", nil }
+	t.Cleanup(func() { checkinHomeDir = prevHome })
+}
+
+func TestCheckinTestRun(t *testing.T) {
+	env := map[string]string{}
+	getenv := func(k string) string { return env[k] }
+	homeAt := func(h string) func() (string, error) { return func() (string, error) { return h, nil } }
+	temp := func() string { return "/var/scratch" }
+	for _, c := range []struct {
+		home string
+		want bool
+	}{
+		{"/home/benjamin", false},
+		{"/tmp", true},
+		{"/tmp/claude-1000/x/home", true},
+		{"/tmpfoo/home", false},
+		{"/var/scratch/home-1", true},
+		{"/var/scratchy", false},
+	} {
+		if got := checkinTestRun(getenv, homeAt(c.home), temp); got != c.want {
+			t.Errorf("home %q: test run %v, want %v", c.home, got, c.want)
+		}
+	}
+	env["SOLU_SKIP_MCP_REGISTER"] = "1"
+	if !checkinTestRun(getenv, homeAt("/home/benjamin"), temp) {
+		t.Error("SOLU_SKIP_MCP_REGISTER=1 must mark a test run")
+	}
+	env["SOLU_SKIP_MCP_REGISTER"] = "0"
+	if checkinTestRun(getenv, homeAt("/home/benjamin"), temp) {
+		t.Error("SOLU_SKIP_MCP_REGISTER=0 is not a test run")
+	}
+	failing := func() (string, error) { return "", errors.New("no home") }
+	if checkinTestRun(getenv, failing, temp) {
+		t.Error("an unreadable home folder alone is not a test run")
+	}
+}
+
+func TestCheckinTestRunSuppressesSendAndShowsEnvDisabled(t *testing.T) {
+	allowCheckinForTest(t)
+	sink, srv := newCheckinSink(t)
+	c := newInstallCheckin(t.TempDir(), "0.0.1200", func() string { return srv.URL }, nil)
+	t.Setenv("SOLU_SKIP_MCP_REGISTER", "1")
+	if sent, _ := c.sendOnce(context.Background()); sent || sink.count() != 0 {
+		t.Fatal("a SOLU_SKIP_MCP_REGISTER=1 daemon must not check in")
+	}
+	t.Setenv("SOLU_SKIP_MCP_REGISTER", "")
+	checkinHomeDir = func() (string, error) { return "/tmp/scratch-home", nil }
+	if sent, _ := c.sendOnce(context.Background()); sent || sink.count() != 0 {
+		t.Fatal("a daemon with its home under /tmp must not check in")
+	}
+	a := &apiServer{checkin: c}
+	if snap := a.checkinSettingsSnapshot(); snap.Enabled || !snap.EnvDisabled {
+		t.Fatalf("settings on a test run = %+v, want off by environment", snap)
+	}
+	checkinHomeDir = func() (string, error) { return "/home/someone", nil }
+	if sent, err := c.sendOnce(context.Background()); !sent || err != nil {
+		t.Fatalf("an ordinary install sends: sent=%v err=%v", sent, err)
+	}
 }
 
 func TestCheckinSkipsCIRunners(t *testing.T) {

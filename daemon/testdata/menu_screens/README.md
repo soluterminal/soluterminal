@@ -388,3 +388,66 @@ key ctrl-c
 settle 2
 save cleared
 ```
+
+Recorded 2026-11-17 for ST-289 (spawn_pane gave up behind Codex's own update
+menu, `codex_update_menu_test.go`), with the official npm builds of Codex
+0.168.0 and 0.169.0 (`@openai/codex@<v>-linux-x64`, integrity-checked by
+`npm pack`), in an `env -i` scratch HOME with `CODEX_MANAGED_BY_NPM=1` (as
+the npm launcher sets it), in a fresh git repo, `codex --no-alt-screen
+--no-daemon -s read-only -a on-request`. The scratch `config.toml` is the
+ST-287 one above with `check_for_update_on_startup = true`. Codex's update
+check was answered from its own cache, a scratch `version.json`
+(`{"latest_version":"0.169.0","last_checked_at":"<now>","dismissed_version":null}`,
+`0.170.0` for the 0.169 session), so nothing was fetched. Nothing was typed
+into the menu, and Esc skipped it: the menu's `1` would run
+`npm install -g @openai/codex`.
+
+- `codex_0168_update_100x40`, `codex_0168_update_60x40`: "Update available ·
+  0.168.0 → 0.169.0", as in tracker #71.
+- `codex_0169_update_100x40`: the same menu on 0.169.0.
+
+```
+settle 6
+save menu
+key down
+settle 2
+save menu_moved
+key esc
+settle 4
+save skipped
+```
+
+Recorded 2026-11-18 for ST-297 (tracker #72: on Codex 0.169.1, messages to a
+never-touched idle pane were held behind the placeholder,
+`codex_empty_box_test.go`, `codex_status_line_test.go`), with the official
+npm build of Codex 0.169.1 (`@openai/codex@0.169.1-linux-x64`,
+integrity-checked by `npm pack`), in an `env -i` scratch HOME, in a fresh git
+repo, `codex --no-alt-screen --no-daemon -s read-only -a on-request`. The
+scratch `config.toml` is the ST-287 one above, plus `model_context_window =
+272000`, so the context item is known before any turn as it is with an
+account, and a `[tui] status_line` for every session but the first:
+
+- `codex_01691_empty_100x40`: no `status_line`, Codex's default
+  (`gpt-5.1 default · <cwd>`), the same screens as 0.169.0.
+- `codex_01691_left_100x40`: `["context-remaining", "model-with-reasoning"]`,
+  the reporter's layout: `Context 100% left · gpt-5.1 default`, no working
+  directory, the hint row under it while the box is empty.
+- `codex_01691_leftwarn_60x40`: the same, narrow, with the warning chip
+  (the two unknown settings of the ST-287 `*_warning_*` sessions). With text
+  typed, the chip stays alone on the hint row, right-aligned.
+- `codex_01691_model_100x40`: `["model-with-reasoning"]`: `gpt-5.1 default`
+  alone. Not footer-shaped, so this box is never read as empty (held).
+- `codex_01691_nostatus_100x40`: `[]`: no footer row; the hint row carries
+  Codex's own `100% context left` gauge on the right, and keeps only the
+  gauge once text is typed. With no footer row, this box is never read as
+  empty (held).
+
+The scratch path's username was replaced at equal length. Step script: the
+ST-287 one above.
+
+Put-back recordings of the same build with the reporter's status line are in
+`../unsent_clear` (`codex_0_169_1_left_100x40`,
+`codex_0_169_1_leftwarn_66x40`; the `.json` lists the inputs): the scratch
+model provider is a local port that accepts connections and never answers,
+so a turn stays running without an account; a queued message (Tab) put back
+by Esc, then Ctrl+A Ctrl+K.

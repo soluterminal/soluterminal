@@ -148,8 +148,8 @@ func coreDumpGuardPolicy(override string, insideWSL func() bool) bool {
 // below does not change native-Linux or user-chosen debugging behavior.
 //
 // Guarded daemon-owned launch paths:
-//   - workflow browser/Playwright/preview/verify workers (workflow_screens.go,
-//     preview_spawn.go, workflow_verify.go)
+//   - workflow browser/Playwright/verify workers (workflow_screens.go,
+//     workflow_verify.go)
 //   - workflow agent runtime clients (workflow_runtime_{claude,codex,muse,gemini,
 //     deepseek_harness}.go, agents_run.go, schedules_agent.go)
 //   - the interactive/native-harness `solud agent` wrapper and every descendant

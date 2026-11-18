@@ -1,0 +1,9 @@
+{
+ "cols": 100,
+ "rows": 40,
+ "steps": [
+  {"name": "menu", "bytes": 1561},
+  {"name": "menu_moved", "bytes": 1785},
+  {"name": "skipped", "bytes": 5477}
+ ]
+}

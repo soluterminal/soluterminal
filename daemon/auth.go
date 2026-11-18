@@ -251,12 +251,11 @@ func browserRequestOriginMatches(r *http.Request) bool {
 
 func (a *authGate) browserOriginAllowed(r *http.Request) bool {
 	// Authenticated relay preview traffic retains its opaque-origin CORS
-	// and public-preview navigation contract. The actual transport, not a
-	// forwarding header, establishes this exception; target validation and
-	// document sandboxing still happen in the two preview handlers.
+	// contract. The actual transport, not a forwarding header, establishes
+	// this exception; target validation and document sandboxing still happen
+	// in the proxy handler.
 	path := r.URL.Path
-	relayPreview := relayTransport(r) && (path == "/api/proxy" || strings.HasPrefix(path, "/api/proxy/") ||
-		path == "/api/preview-serve" || strings.HasPrefix(path, "/api/preview-serve/"))
+	relayPreview := relayTransport(r) && (path == "/api/proxy" || strings.HasPrefix(path, "/api/proxy/"))
 	// The guarded desktop preview listener carries the backend bearer.
 	// The exception cannot reach an app API or a non-navigation request.
 	return relayPreview || originProtected(r) || (a.hasOwnerCredential(r) && r.Header.Get("X-Solu-Proxy-Auth") == "router" &&

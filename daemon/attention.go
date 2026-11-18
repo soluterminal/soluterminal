@@ -325,6 +325,11 @@ func (e *attentionEngine) Refresh(p *Pane) {
 	if state == StateChoicePrompt && paneWaitingForFolderTrust(p) {
 		f.HumanOnlyReason = folderTrustHint
 	}
+	if state == StateChoicePrompt && f.HumanOnlyReason == "" {
+		if from, to, ok := codexUpdateMenuVersions(paneVisibleScreen(p)); ok {
+			f.HumanOnlyReason = codexUpdateMenuHint(from, to)
+		}
+	}
 	f.AutoMode = snap.AutoMode
 	if snap.NeverAutoAnswer {
 		f.AutoMode = ""

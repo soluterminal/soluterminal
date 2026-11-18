@@ -78,6 +78,7 @@ const GROUPS: ShortcutGroup[] = [
       { keys: ['Ctrl', 'Shift', 'R'], label: 'Reload the app' },
       { actionId: 'help.toggle', label: 'Show these shortcuts (not while typing in a terminal — use the ? button at the top right instead)' },
       { keys: ['Esc'], label: 'Close dialogs / help' },
+      { keys: ['/', 'or', 'Ctrl', 'F'], label: 'In Settings: search settings (Enter opens the row; Esc clears the search)' },
     ],
   },
   {

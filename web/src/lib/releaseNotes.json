@@ -1,4 +1,13 @@
 {
+  "0.0.1246": [
+    "Settings has a search: press / or Ctrl+F in Settings to find a setting by name.",
+    "Codex: a new Codex pane no longer stalls behind Codex's own \"Update available\" menu. SoluTerminal leaves that choice to you and tells you the pane is waiting on it.",
+    "Fixed: messages from other agents to an idle Codex 0.169.1 pane were held instead of delivered.",
+    "Clear now refuses on a message put back into a Codex box that spans more than one line, instead of clearing only part of it.",
+    "An agent that asks another pane something now gets an answer within about 50 seconds, saying whether its message was delivered, instead of a timeout.",
+    "Security: the Windows, macOS and Linux desktop app now uses Tauri 2.12.6, which includes the upstream fix for GHSA-7gmj-67g7-phm9 (a Windows origin-confusion issue).",
+    "When a fix for a problem you reported ships, your report is closed and you're told automatically."
+  ],
   "0.0.1245": [
     "Fixed: with Codex 0.168 and newer, messages from other agents to an idle Codex pane could be held instead of delivered.",
     "If a held message gets stuck, Discard now asks before throwing it away, and the agent that sent it is no longer told you were typing.",

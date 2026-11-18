@@ -163,6 +163,12 @@
       "approvedBy": "Benjamin",
       "date": "2026-11-17",
       "note": "Benjamin approved the 4-line set (\"ok notes c048fe59\", typed in @release-lead's pane)."
+    },
+    "0.0.1246": {
+      "sha256": "b8d7a7d0efe138a1b235fcc2a1a3634b100b7a96e08edf54ca08cb09fb7d26fa",
+      "approvedBy": "Benjamin",
+      "date": "2026-11-18",
+      "note": "Benjamin approved the 7-line set (\"ok notes b8d7a7d0\", typed in @release-lead's pane)."
     }
   }
 }

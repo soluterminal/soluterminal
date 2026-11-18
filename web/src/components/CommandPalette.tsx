@@ -19,6 +19,8 @@ import { useHideIdentities } from '../lib/hideIdentities';
 import { confirmConvertPaneRole } from './usePaneContextMenu';
 import { restartPaneFlow } from '../lib/paneRestart';
 import { useSettings } from '../settings';
+import { CORE_SETTINGS_TABS } from './settings/settingsTabs';
+import { isProbablyMobileDevice } from '../lib/mobile';
 import { useCloud } from '../cloud';
 import { usePointerMoved } from './usePointerMoved';
 import { AGENT_NAMES, startAgent, type StartableAgent } from '../agentStart';
@@ -116,6 +118,9 @@ function labelRoot(r: string): string {
   if (r === '/') return '/';
   return r.replace(/^\/home\/[^/]+/, '~');
 }
+
+// Settings tabs the dialog leaves out on a phone (SettingsModal.tsx).
+const PHONE_HIDDEN_SETTINGS_TABS = new Set(['account', 'notifications', 'devices']);
 
 // Palette actions that open team-only surfaces (see entitlements.ts).
 const TEAM_ONLY_ACTIONS = new Set(['pane.role.orchestrator']);
@@ -318,8 +323,22 @@ export function CommandPalette({
         hint: 'Appearance, panes, devices and updates',
         category: 'Settings',
         keywords: 'preferences options config settings',
+        // "sett…" opens Settings itself ahead of its per-tab entries.
+        aliases: ['settings'],
         run: () => { onClose(); useSettings.getState().openSettings(); },
       },
+      // One entry per Settings tab (ST-281), as the dialog shows them:
+      // Services needs team features, and a phone has no Account,
+      // Notifications & voice or Devices & updates tab.
+      ...CORE_SETTINGS_TABS.filter((t) => (t.key !== 'tasks' || operatorFeaturesAllowed())
+        && !(isProbablyMobileDevice() && PHONE_HIDDEN_SETTINGS_TABS.has(t.key))).map((t): Action => ({
+        id: `settings.tab.${t.key}`,
+        label: `Settings: ${t.label}`,
+        hint: `Open Settings on ${t.label}`,
+        category: 'Settings',
+        keywords: `preferences options settings ${t.key} ${t.label.toLowerCase()}`,
+        run: () => { onClose(); useSettings.getState().openSettings(t.key); },
+      })),
       {
         id: 'view.theme',
         label: st.appThemeLight ? 'Switch to dark theme' : 'Switch to light theme',

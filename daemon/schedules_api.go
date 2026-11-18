@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -41,19 +43,18 @@ func (a *apiServer) makeScheduleDTO(s Schedule) scheduleDTO {
 	return dto
 }
 
-// listSchedules answers the Schedules pane. Two classes of row are omitted,
-// both because an agent card is their real surface:
+// listSchedules answers the Schedules pane. Managed agents were removed; of
+// the schedules they left behind:
 //
-//   - the hidden Kind=="agent-run" triggers backing managed agents
-//     (docs/DESIGN-agents-surface.md §5.2) — a duplicate row here would offer
-//     edits that the next agent save would overwrite;
-//   - schedules IMPORTED into an agent, OwnedByAgentID != "" (§8.3 Phase 1).
-//     These are the user's own hand-built schedules and they still exist,
-//     unchanged, in schedules.json — they still fire, still log, still count.
-//     Only the row moves.
+//   - a hidden Kind=="agent-run" trigger that is still here is omitted: it
+//     holds no prompt, does nothing and can't be changed;
+//   - a kept imported schedule (keptImportedSchedule: its prompt is not in
+//     agents-export.md) is listed so the person can see it and delete it
+//     (deleteKeptImportedSchedule). It never runs, and every other change
+//     to it is refused.
 //
-// ?includeAgentRuns=1 is the debugging escape hatch for both — there is
-// deliberately no such hatch over MCP.
+// ?includeAgentRuns=1 also lists the hidden triggers, for debugging. MCP's
+// list leaves out both kinds.
 func (a *apiServer) listSchedules(w http.ResponseWriter, r *http.Request) {
 	if a.scheds == nil {
 		writeJSON(w, 200, []scheduleDTO{})
@@ -62,7 +63,7 @@ func (a *apiServer) listSchedules(w http.ResponseWriter, r *http.Request) {
 	includeAgentRuns := r != nil && r.URL.Query().Get("includeAgentRuns") == "1"
 	out := []scheduleDTO{}
 	for _, s := range a.scheds.List() {
-		if (s.isAgentRun() || s.OwnedByAgentID != "") && !includeAgentRuns {
+		if !scheduleListed(s) && !includeAgentRuns {
 			continue
 		}
 		out = append(out, a.makeScheduleDTO(s))
@@ -71,7 +72,7 @@ func (a *apiServer) listSchedules(w http.ResponseWriter, r *http.Request) {
 }
 
 // getSchedule answers one row, on the same visibility terms as the list: a
-// hidden agent trigger or an imported schedule is "not found" here too. It is
+// hidden agent trigger is "not found" here too. It is
 // what a client fetches when a `schedules-changed` event names one schedule.
 func (a *apiServer) getSchedule(w http.ResponseWriter, r *http.Request) {
 	if a.scheds == nil {
@@ -79,7 +80,7 @@ func (a *apiServer) getSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s, ok := a.scheds.Get(r.PathValue("id"))
-	if !ok || s.isAgentRun() || s.OwnedByAgentID != "" {
+	if !ok || !scheduleListed(s) {
 		http.Error(w, "schedule not found", 404)
 		return
 	}
@@ -97,15 +98,15 @@ func (a *apiServer) agentRunScheduleRefused(w http.ResponseWriter, id string) bo
 	if !ok || !sched.isAgentRun() {
 		return false
 	}
-	http.Error(w, "this schedule belongs to an agent — use POST /api/agents/"+sched.AgentID+"/pause", 400)
+	http.Error(w, "this schedule belonged to a managed agent, which SoluTerminal no longer has; it no longer runs. The removed agents are recorded in "+agentsExportDisplayPath(a.dataDir)+".", 400)
 	return true
 }
 
 // ownedScheduleRefused is agentRunScheduleRefused for IMPORTED schedules
-// (§8.3). The row is hidden but reachable by id, and a mutation through this
-// door would change what the agent card describes without the card ever
-// knowing — so it is refused, with both the card's controls and the rollback
-// named in the message.
+// (§8.3). Managed agents were removed; an imported schedule still here is one
+// the removal kept because agents-export.md does not record its prompt. It
+// is listed but never runs: every mutation is refused except the person's
+// delete (deleteKeptImportedSchedule), which records it first.
 //
 // Only the HUMAN endpoints call it. The daemon's own paths — SetPaused's
 // SetEnabled, the cron runner's fire, ClearOwnedBy — go through the store
@@ -118,10 +119,23 @@ func (a *apiServer) ownedScheduleRefused(w http.ResponseWriter, id string) bool 
 	if !ok || sched.OwnedByAgentID == "" {
 		return false
 	}
-	http.Error(w, "this schedule is managed by agent "+sched.OwnedByAgentID+
-		" — pause, run or delete it from the agent card (rollback: DELETE /api/agents/"+
-		sched.OwnedByAgentID+")", 400)
+	http.Error(w, "this schedule was imported into a managed agent ("+sched.OwnedByAgentID+
+		"), which SoluTerminal no longer has. It no longer runs, and it is kept because its prompt is not in "+
+		agentsExportDisplayPath(a.dataDir)+". You can delete it in the Automations list; its prompt is saved to "+
+		dataFileDisplayPath(a.dataDir, agentsExportKeptFile)+" first.", 400)
 	return true
+}
+
+// keptDeleteMu serialises deleteKeptImportedSchedule.
+var keptDeleteMu sync.Mutex
+
+// isKeptImportedSchedule reports whether id names a kept imported schedule.
+func (a *apiServer) isKeptImportedSchedule(id string) bool {
+	if a.scheds == nil {
+		return false
+	}
+	s, ok := a.scheds.Get(id)
+	return ok && keptImportedSchedule(s)
 }
 
 // scheduleMutationRefused is the pair of guards every human-surface schedule
@@ -176,6 +190,9 @@ func (a *apiServer) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if a.deleteKeptImportedSchedule(w, id) {
+		return
+	}
 	if a.scheduleMutationRefused(w, id) {
 		return
 	}
@@ -184,6 +201,45 @@ func (a *apiServer) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(204)
+}
+
+// deleteKeptImportedSchedule lets the person delete an imported schedule that
+// the managed-agents removal kept (its prompt is not in agents-export.md). The
+// schedule, prompt included, is appended to agents-export-kept.md first; if
+// that fails, nothing is deleted. Its run logs stay on disk. The caller has
+// already passed requireHuman; enable and edit stay refused. It reports
+// whether it answered the request.
+func (a *apiServer) deleteKeptImportedSchedule(w http.ResponseWriter, id string) bool {
+	if a.scheds == nil {
+		return false
+	}
+	// One kept delete at a time, re-checked under the lock, so two
+	// concurrent deletes of one schedule append its record once. (A retry
+	// after the schedule list failed to save appends it again; the file is
+	// append-only, so a repeat entry is harmless.)
+	keptDeleteMu.Lock()
+	defer keptDeleteMu.Unlock()
+	sched, ok := a.scheds.Get(id)
+	if !ok || !keptImportedSchedule(sched) {
+		return false
+	}
+	if err := appendKeptScheduleRecord(a.dataDir, sched, time.Now()); err != nil {
+		log.Printf("schedules: kept imported schedule %s not deleted: could not record it first: %v", id, err)
+		http.Error(w, "this schedule was not deleted: its prompt could not be saved to "+
+			dataFileDisplayPath(a.dataDir, agentsExportKeptFile)+" first", 500)
+		return true
+	}
+	deleted, err := deleteKeptImportedSchedule(a.scheds, id)
+	switch {
+	case err != nil:
+		http.Error(w, "this schedule's prompt is saved, but the schedule list could not be saved: "+err.Error(), 500)
+	case !deleted:
+		http.Error(w, "schedule not found", 404)
+	default:
+		log.Printf("schedules: deleted kept imported schedule %s (from removed agent %s); recorded in %s", id, sched.OwnedByAgentID, agentsExportKeptFile)
+		w.WriteHeader(204)
+	}
+	return true
 }
 
 func (a *apiServer) enableSchedule(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +266,10 @@ func (a *apiServer) enableSchedule(w http.ResponseWriter, r *http.Request) {
 // would clear an unread mark for a report nobody opened.
 func (a *apiServer) markScheduleRead(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if a.scheduleMutationRefused(w, id) {
+	// A kept imported schedule is listed and its old reports reach the
+	// Inbox, so reading them must clear them; marking read changes nothing
+	// about what runs.
+	if !a.isKeptImportedSchedule(id) && a.scheduleMutationRefused(w, id) {
 		return
 	}
 	var body struct {

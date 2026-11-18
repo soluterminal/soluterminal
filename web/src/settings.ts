@@ -4,7 +4,9 @@ import { recordSettingsEvent } from './lib/settingsTelemetry';
 import {
   LEGACY_SECTION_TARGETS,
   LEGACY_TAB_TARGETS,
+  SETTINGS_FALLBACK_TABS as FALLBACK_TABS,
   settingsCategories,
+  settingsTabFor,
   resolveSettingsTarget,
   sectionById,
   type LegacySettingsTab,
@@ -35,16 +37,6 @@ export const SETTINGS_SECTION_IDS: Record<SettingsSection, string> = {
   'tasks.modelsFallbacks': 'settings-section-models-fallbacks',
 };
 
-const FALLBACK_TABS: Record<SettingsCategory, SettingsTab> = {
-  appearance: 'appearance',
-  workspace: 'panes',
-  sessions: 'claude',
-  workflows: 'tasks',
-  agents: 'agent',
-  credentials: 'credentials',
-  team: 'team',
-  devices: 'devices',
-};
 
 // The last-viewed tab is its category plus, for tabs that share a category
 // (Account, Notifications & voice, Privacy & security and Devices & updates;
@@ -93,19 +85,7 @@ function sameTarget(left: SettingsTarget, right: SettingsTarget): boolean {
     && left.search === right.search;
 }
 
-function legacyTabFor(target: SettingsTarget): SettingsTab {
-  const entries = Object.entries(LEGACY_TAB_TARGETS) as Array<[SettingsTab, SettingsTarget]>;
-  if (target.section) {
-    const exact = entries.find(([, candidate]) => (
-      candidate.category === target.category && candidate.section === target.section
-    ));
-    if (exact) return exact[0];
-  }
-  const categoryOnly = entries.find(([, candidate]) => (
-    candidate.category === target.category && candidate.section === undefined
-  ));
-  return categoryOnly?.[0] ?? FALLBACK_TABS[target.category];
-}
+const legacyTabFor = settingsTabFor;
 
 function legacySectionFor(target: SettingsTarget): SettingsSection | null {
   const match = (Object.entries(LEGACY_SECTION_TARGETS) as Array<[SettingsSection, SettingsTarget]>).find(

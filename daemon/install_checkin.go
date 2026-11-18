@@ -29,8 +29,10 @@ import (
 // (<dataDir>/checkin_install_id) is minted here
 // and never tied to an account, machine or IP. The user can turn it off in
 // Settings (PUT /api/settings/checkin, local-only) or with
-// SOLU_DISABLE_CHECKIN=1 in ~/.solu/env. Development builds (version "dev")
-// and daemons on a CI or test runner (checkinOnCIRunner) never send.
+// SOLU_DISABLE_CHECKIN=1 in ~/.solu/env. Development builds (version "dev"),
+// daemons on a CI or test runner (checkinOnCIRunner) and scratch test daemons
+// (checkinTestRun: SOLU_SKIP_MCP_REGISTER=1 or a home under /tmp or the
+// system temp folder) never send.
 
 const (
 	checkinInstallIDFile = "checkin_install_id"
@@ -101,13 +103,50 @@ func newInstallCheckin(dataDir, version string, base func() string, signedIn fun
 }
 
 // checkinEnvDisabled: SOLU_DISABLE_CHECKIN is set, or the daemon runs on a
-// CI or test runner, which is never a real install (ST-95).
+// CI or test runner, which is never a real install (ST-95), or it is a
+// scratch test daemon (checkinTestRun).
 func checkinEnvDisabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(checkinDisabledEnv))) {
+	if checkinTruthy(os.Getenv(checkinDisabledEnv)) {
+		return true
+	}
+	return checkinOnCIRunner(os.Getenv, checkinUsername) || checkinTestRun(os.Getenv, checkinHomeDir, os.TempDir)
+}
+
+func checkinTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "yes", "on":
 		return true
 	}
-	return checkinOnCIRunner(os.Getenv, checkinUsername)
+	return false
+}
+
+// checkinHomeDir is a test seam.
+var checkinHomeDir = os.UserHomeDir
+
+// checkinTestRun reports a scratch test daemon, which is never a real install
+// (dashboard-accuracy audit): one started with SOLU_SKIP_MCP_REGISTER=1 (every
+// side-port, verify and test recipe sets it, so it can't touch the real
+// ~/.claude.json), or one whose home folder is under /tmp or the system temp
+// folder (test HOMEs). A real install has neither.
+func checkinTestRun(getenv func(string) string, home func() (string, error), tempDir func() string) bool {
+	if checkinTruthy(getenv("SOLU_SKIP_MCP_REGISTER")) {
+		return true
+	}
+	h, err := home()
+	if err != nil || strings.TrimSpace(h) == "" {
+		return false
+	}
+	h = filepath.Clean(h)
+	for _, root := range []string{"/tmp", tempDir()} {
+		if root = strings.TrimSpace(root); root == "" {
+			continue
+		}
+		root = filepath.Clean(root)
+		if h == root || strings.HasPrefix(h, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkinUsername is a test seam.

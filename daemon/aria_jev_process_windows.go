@@ -88,6 +88,6 @@ func jevWindowsProcessStart(created, exited windows.Filetime) (string, uint64, e
 	if order == 0 || exited.HighDateTime != 0 || exited.LowDateTime != 0 {
 		return "", 0, errJevProcessUnavailable
 	}
-	// Keep the same creation-time string convention as previewProcessStartIdentity.
+	// "windows:<creation time in ns>" is the process start identity convention.
 	return fmt.Sprintf("windows:%d", created.Nanoseconds()), order, nil
 }

@@ -313,7 +313,6 @@ type systemAutomationGroupDTO struct {
 }
 
 type systemAutomationDTO struct {
-	Agents    systemAutomationGroupDTO `json:"agents"`
 	Schedules systemAutomationGroupDTO `json:"schedules"`
 	// Builtins lists the built-in controllers of an autonomy overview, when
 	// the build has one (empty otherwise).
@@ -330,9 +329,6 @@ type systemSurfaceDTO struct {
 		Total     int `json:"total"`
 		PaneOwned int `json:"paneOwned"`
 	} `json:"ports"`
-	Previews struct {
-		Active int `json:"active"`
-	} `json:"previews"`
 	Cloud cloudStatus `json:"cloud"`
 }
 
@@ -633,9 +629,6 @@ func (a *apiServer) systemSurface() systemSurfaceDTO {
 				out.Ports.PaneOwned++
 			}
 		}
-	}
-	if a.previews != nil {
-		out.Previews.Active = len(a.previews.List())
 	}
 	if a.cloudSup != nil {
 		out.Cloud = a.cloudSup.status()

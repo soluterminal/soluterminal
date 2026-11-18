@@ -1,0 +1,126 @@
+{
+  "agent": "codex",
+  "version": "0.169.0",
+  "cols": 66,
+  "rows": 40,
+  "steps": [
+    {
+      "name": "idle",
+      "bytes": 3410
+    },
+    {
+      "name": "put_back_short",
+      "bytes": 18602
+    },
+    {
+      "name": "short_clear",
+      "bytes": 18789
+    },
+    {
+      "name": "put_back_wrapped",
+      "bytes": 34452
+    },
+    {
+      "name": "wrapped_after_keys",
+      "bytes": 34966
+    },
+    {
+      "name": "put_back_two",
+      "bytes": 54507
+    },
+    {
+      "name": "two_after_keys",
+      "bytes": 54618
+    },
+    {
+      "name": "two_cleared",
+      "bytes": 55273
+    },
+    {
+      "name": "put_back_edited",
+      "bytes": 67256
+    },
+    {
+      "name": "edited_clear",
+      "bytes": 67463
+    },
+    {
+      "name": "put_back_edited_multiline",
+      "bytes": 83054
+    },
+    {
+      "name": "edited_multiline_after_keys",
+      "bytes": 83122
+    },
+    {
+      "name": "end",
+      "bytes": 83679
+    }
+  ],
+  "command": [
+    "codex",
+    "--no-alt-screen",
+    "--no-daemon",
+    "-s",
+    "read-only",
+    "-a",
+    "on-request"
+  ],
+  "inputs": [
+    {
+      "step": "put_back_short",
+      "typed": "ST291 start a turn",
+      "then": "Enter; while the turn runs, typed ST291 short queued, Tab (queue), Esc (interrupt; Codex puts the queued message back)"
+    },
+    {
+      "step": "short_clear",
+      "hex": "010b"
+    },
+    {
+      "step": "put_back_wrapped",
+      "typed": "ST291 start again",
+      "then": "Enter; queued ST291 alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau. with Tab, then Esc"
+    },
+    {
+      "step": "wrapped_after_keys",
+      "hex": "010b"
+    },
+    {
+      "step": "put_back_two",
+      "typed": "ST291 third turn",
+      "then": "Enter; queued ST291 first queued and ST291 second queued with Tab each, then Esc"
+    },
+    {
+      "step": "two_after_keys",
+      "hex": "010b"
+    },
+    {
+      "step": "two_cleared",
+      "one_write_hex_byte": "7f",
+      "count": 200
+    },
+    {
+      "step": "put_back_edited",
+      "typed": "ST291 fourth turn",
+      "then": "Enter; queued ST291 edit me with Tab, Esc, then typed ' person edit'"
+    },
+    {
+      "step": "edited_clear",
+      "hex": "010b"
+    },
+    {
+      "step": "put_back_edited_multiline",
+      "typed": "ST291 fifth turn",
+      "then": "Enter; queued ST291 line one with Tab, Esc, then Shift+Enter (1b5b31333b3275) and typed person line two"
+    },
+    {
+      "step": "edited_multiline_after_keys",
+      "hex": "010b"
+    },
+    {
+      "step": "end",
+      "one_write_hex_byte": "7f",
+      "count": 200
+    }
+  ]
+}

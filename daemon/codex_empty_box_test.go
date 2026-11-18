@@ -26,6 +26,11 @@ func TestCodexEmptyBoxAcrossVersions(t *testing.T) {
 		"codex_0167_empty_100x40", "codex_0167_warning_60x40",
 		"codex_0168_empty_100x40", "codex_0168_warning_60x40", "codex_0168_daybreak_100x40",
 		"codex_0169_empty_100x40", "codex_0169_warning_60x40", "codex_0169_daybreak_100x40",
+		// ST-297 (tracker #72): 0.169.1 with the default status line, then
+		// the reporter's configured one: no working directory and the
+		// context item as "Context 100% left", wide and narrow with the
+		// warning chip.
+		"codex_01691_empty_100x40", "codex_01691_left_100x40", "codex_01691_leftwarn_60x40",
 	} {
 		t.Run(session, func(t *testing.T) {
 			s, raw := loadMenuScreenSession(t, session)
@@ -97,6 +102,13 @@ func TestCodexFooterIndexBlock(t *testing.T) {
 		{"non-GPT model", []string{box, "", "  Context 12% used · Daybreak Red high · C:\\Users\\me\\repo"}, 2},
 		{"non-GPT model, no login", []string{box, "", "  Daybreak Red high · C:\\Users\\me\\repo"}, 2},
 		{"UNC directory", []string{box, "", "  gpt-5.1 default · \\\\server\\share\\repo"}, 2},
+		// ST-297: the status line is the person's (`[tui] status_line`).
+		{"context left, no directory", []string{box, "", "  Context 100% left · gpt-5.1 default", "  ← for agents · ? for shortcuts"}, 2},
+		{"context left, no directory, typed", []string{"› hello", "", "  Context 100% left · gpt-5.1 default"}, 2},
+		{"0.166 context left with the warning chip", []string{box, "", "  Context 96% left · GPT-6-Astra medium      ⚠ 2 warnings · f2 to view"}, 2},
+		{"context item last", []string{box, "", "  GPT-6-Astra medium · Context 50% left"}, 2},
+		{"context item alone", []string{box, "", "  Context 100% left"}, 2},
+		{"context item alone with the warning chip on its row", []string{box, "", "  Context 96% left      ⚠ 2 warnings · f2 to view"}, 2},
 		// Not a footer block.
 		{"text last", []string{"› hello", "  world"}, -1},
 		{"shell prompt under an old footer", []string{box, "", "  gpt-5.1 default · /home/me/repo", "me@pc:~/repo$"}, -1},
@@ -108,10 +120,59 @@ func TestCodexFooterIndexBlock(t *testing.T) {
 		{"continuation with a separator", []string{"› hello", "  gpt-5.1 default · /home/me/projects/a-", "  name · more"}, -1},
 		{"continuation not indented as the footer", []string{"› hello", "  gpt-5.1 default · /home/me/projects/a-", "name/repo"}, -1},
 		{"words under a footer-shaped draft line", []string{"› fix", "  gpt-5.1 default · /home/me/repo", "  and then the rest of my note"}, -1},
+		// A status line without the context item or the directory, or none
+		// at all, is not told apart from lines of a draft, idle or not:
+		// the box runs to the end of the screen (held, never empty).
+		{"model alone above the key hints", []string{box, "", "  GPT-6-Astra medium", "  ← for agents · ? for shortcuts"}, -1},
+		{"git branch and project above the key hints and chip", []string{box, "", "  main · soluterminal", "  ← for agents · ? for shortcuts   ⚠ 1 warning · f2 to view"}, -1},
+		{"no status line", []string{box, "", "  ← for agents · ? for shortcuts                       100% context left"}, -1},
+		{"model alone, typed", []string{"› hello", "", "  GPT-6-Astra medium"}, -1},
+		{"no status line, typed: the gauge alone", []string{"› hello", "", "                                   100% context left"}, -1},
+		{"running turn: a queue hint on any key, with the gauge", []string{"› hello", "", "  alt+q to queue message                 98% context left"}, -1},
+		{"model alone under the chip, typed", []string{"› hello", "", "  GPT-6-Astra medium", "                 ⚠ 1 warning · f2 to view"}, -1},
+		{"key hints under a draft line with no separator", []string{"› hello", "  my second line", "  ← for agents · ? for shortcuts"}, -1},
+		{"hint row typed after a blank line", []string{"›", "", "  ? for shortcuts"}, -1},
+		{"key hints under a status-shaped row below a draft", []string{"› hello", "", "  GPT-6-Astra medium", "  ← for agents · ? for shortcuts"}, -1},
+		{"no status line, typed, with the warning chip", []string{"› hello", "", "                       ⚠ 1 warning · f2 to view"}, -1},
+		{"key hints and gauge under a draft", []string{"› hello", "", "  ← for agents · ? for shortcuts                       100% context left"}, -1},
+		{"key hints under the box's second draft line", []string{"›", "  my line", "", "  GPT-6-Astra medium", "  ← for agents · ? for shortcuts"}, -1},
+		{"key hints under the box row's continuation at another indent", []string{box, "", "    indented note", "  ← for agents · ? for shortcuts"}, -1},
+		{"context left in the middle of a sentence", []string{"› hello", "  the Context 5% left is wrong"}, -1},
 		{"0.169 wrapped Windows directory with a space", []string{"› hello", "  Context 3% used · Daybreak Red high · C:\\Users\\Jo", "  Smith\\repo"}, 1},
 	} {
 		if got := codexFooterIndex(tc.lines); got != tc.want {
 			t.Errorf("%s: codexFooterIndex=%d, want %d\n%s", tc.name, got, tc.want, strings.Join(tc.lines, "\n"))
 		}
+	}
+}
+
+// ST-297: Codex status lines the footer shape does not cover, the model alone
+// and none at all (real 0.169.1 recordings). Their rows are not told apart
+// from lines of a draft, so the box is never read as empty: agent messages
+// wait for the person, at the idle box as with text typed, and are never
+// typed into a draft. Reading these idle boxes as empty needs evidence the
+// text cannot fake, such as the cursor row.
+func TestCodexUnreadStatusLinesNeverReadEmpty(t *testing.T) {
+	for _, session := range []string{"codex_01691_model_100x40", "codex_01691_nostatus_100x40"} {
+		t.Run(session, func(t *testing.T) {
+			s, raw := loadMenuScreenSession(t, session)
+			p := recordedPane(t, s, agentCodex)
+			none := func() (int, int64) { return 0, 0 }
+			fed := 0
+			for _, st := range s.Steps {
+				feedRecorded(p, raw[fed:st.Bytes])
+				fed = st.Bytes
+				screen, blanked, ok := paneScreenFaintBlanked(p)
+				if !ok {
+					t.Fatal("no screen")
+				}
+				if draft, known := composerDraft(typedComposerScreen(screen, blanked, true), true); known && draft == "" {
+					t.Errorf("%s: box read as empty\n%s", st.Name, screen)
+				}
+				if reason := p.draftGuardReason(true, false, time.Now(), none); reason != heldBoxTextReason {
+					t.Errorf("%s: reason=%q, want held\n%s", st.Name, reason, screen)
+				}
+			}
+		})
 	}
 }

@@ -47,18 +47,17 @@ describe('SidebarCustomizer', () => {
   it('offers a feature-rendered section only when a module registers it', () => {
     setExtensionsForTests([]);
     const { unmount } = render(<SidebarCustomizer />);
-    expect(screen.queryByRole('checkbox', { name: MIDDLE_SECTION_LABELS.agents })).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: MIDDLE_SECTION_LABELS.credentials })).toBeNull();
     unmount();
-    setExtensionsForTests([{ sidebarSections: { agents: () => null } }]);
+    setExtensionsForTests([{ sidebarSections: { credentials: () => null } }]);
     render(<SidebarCustomizer />);
-    expect(screen.getByRole('checkbox', { name: MIDDLE_SECTION_LABELS.agents })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: MIDDLE_SECTION_LABELS.credentials })).toBeInTheDocument();
   });
 
-  it('leaves Task Owners and Agents out for a public install', () => {
+  it('leaves Task Owners out for a public install', () => {
     useEntitlements.setState({ loaded: true, team: false, operator: false });
     render(<SidebarCustomizer />);
     expect(screen.queryByRole('checkbox', { name: MIDDLE_SECTION_LABELS.owners })).toBeNull();
-    expect(screen.queryByRole('checkbox', { name: MIDDLE_SECTION_LABELS.agents })).toBeNull();
     // Files and Localhost ports start hidden for a public install, and can be
     // switched back on here. Todos was removed and is not offered at all.
     expect(screen.getByRole('checkbox', { name: MIDDLE_SECTION_LABELS.files })).not.toBeChecked();

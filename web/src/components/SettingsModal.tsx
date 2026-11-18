@@ -1,5 +1,5 @@
 
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSettings, type SettingsTab } from '../settings';
 import { useStore } from '../store';
 import { useOperatorFeatures } from '../entitlements';
@@ -16,6 +16,8 @@ import { NotificationsVoiceTab, useNotificationsVoiceVisible } from './settings/
 import { PrivacySecurityTab } from './settings/PrivacySecurityTab';
 import { PhoneEncryptionSetting, privateRelayCandidateInView } from './settings/RemoteDevicesSetting';
 import { ServicesTab } from './settings/ServicesTab';
+import { CORE_SETTINGS_TABS } from './settings/settingsTabs';
+import { SettingsSearchBox, landOnSetting, useSettingsSearch, type SettingsSearchResult } from './settings/SettingsSearch';
 import { ErrorBoundary } from './ErrorBoundary';
 
 // THE Settings dialog — every settings surface lives here as a tab on the
@@ -27,16 +29,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 // Voice and Alerts stay as small anchored topbar popovers — quick toggles,
 // not settings pages. HotkeyHelp stays a reference overlay.
 
-const TABS: { key: SettingsTab; label: string }[] = [
-  { key: 'appearance', label: 'Appearance' },
-  { key: 'panes', label: 'Terminal & panes' },
-  { key: 'sidebar', label: 'Sidebar' },
-  { key: 'account', label: 'Account' },
-  { key: 'notifications', label: 'Notifications & voice' },
-  { key: 'privacy', label: 'Privacy & security' },
-  { key: 'devices', label: 'Devices & updates' },
-  { key: 'tasks', label: 'Services' },
-];
+const TABS = CORE_SETTINGS_TABS;
 
 // Team-only service settings.
 // Feature modules add their own tabs (extensions.ts).
@@ -57,19 +50,40 @@ export function SettingsModal() {
   const featureTabs = slotList('settingsTabs');
   const featureVisible = featureTabs.map((t) => t.useVisible());
 
+  const query = useSettings((s) => s.query);
+  const setQuery = useSettings((s) => s.setQuery);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [pendingLand, setPendingLand] = useState<{ label?: string } | null>(null);
+
   const { cardRef, cardStyle, dragHandleProps } = useDraggableDialog(open);
   useFocusTrap(cardRef, open, dialogOpen);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setQuery('');
+      return;
+    }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
+      if (e.key === 'Escape') {
+        close();
+        return;
+      }
+      // "/" (outside a text field) or Ctrl/Cmd+F focuses search (ST-281).
+      const el = document.activeElement as HTMLElement | null;
+      const typing = !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+      const slash = e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !typing;
+      const find = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f';
+      if (slash || find) {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, close]);
+  }, [open, close, setQuery]);
 
-  if (!open) return null;
   // Account, Notifications & voice and Devices & updates hold desktop rows
   // (sign-in, voice, installer, phone pairing, updates) that don't apply on a
   // phone, so a phone sees only Privacy & security, holding just this
@@ -112,6 +126,24 @@ export function SettingsModal() {
   // switch it used to hold now lives in Privacy & security.
   const wanted = tab === 'claude' ? 'panes' : tab === 'devices' && isMobile ? 'privacy' : tab;
   const activeTab = tabs.some((t) => t.key === wanted) ? wanted : tabs[0].key;
+  // Search hides what Devices & updates hides (DevicesTab.tsx).
+  const shellAutoApplyPaused = useStore((s) => s.updateStatus?.shellAutoApplyPaused === true);
+  const results = useSettingsSearch(query, tabs, isMobile, shellAutoApplyPaused);
+
+  // Land on the chosen row once its tab has rendered.
+  useEffect(() => {
+    if (!pendingLand) return;
+    landOnSetting(bodyRef.current, pendingLand.label);
+    setPendingLand(null);
+  }, [pendingLand, activeTab]);
+
+  const choose = (result: SettingsSearchResult) => {
+    setQuery('');
+    useSettings.getState().openSettings(result.target);
+    setPendingLand({ label: result.landOn });
+  };
+
+  if (!open) return null;
 
   return (
     <div className="dialog-backdrop" onMouseDown={close}>
@@ -127,6 +159,7 @@ export function SettingsModal() {
           <h2 className="dialog-title">Settings</h2>
           <button onClick={close} title="Close (Esc)" aria-label="Close">×</button>
         </div>
+        <SettingsSearchBox ref={searchRef} query={query} onQuery={setQuery} results={results} onChoose={choose} />
         <div className="settings-layout">
           <nav className="settings-nav" role="tablist" aria-orientation="vertical">
             {tabs.map((t) => (
@@ -136,13 +169,13 @@ export function SettingsModal() {
                 role="tab"
                 aria-selected={activeTab === t.key}
                 className={`settings-nav-item${activeTab === t.key ? ' active' : ''}`}
-                onClick={() => setTab(t.key)}
+                onClick={() => { setQuery(''); setTab(t.key); }}
               >
                 {t.label}
               </button>
             ))}
           </nav>
-          <div className="settings-body" role="tabpanel">
+          <div className="settings-body" role="tabpanel" ref={bodyRef}>
             <ErrorBoundary key={activeTab} label="settings" title="This settings section failed to load">
               {activeTab === 'appearance' && <AppearanceTab />}
               {activeTab === 'panes' && <PanesTab />}

@@ -295,12 +295,17 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
         )}
 
         <div className="report-reader-body">
-          {!run && (
+          {!run && (schedule.kind === 'task' && schedule.ownedByAgentId ? (
+            <div className="report-reader-empty">
+              No reports: this automation was kept from a managed agent that SoluTerminal no
+              longer has, and it doesn&apos;t run.
+            </div>
+          ) : (
             <div className="report-reader-empty">
               No reports yet: this automation hasn&apos;t run. Open the row&apos;s ⋯ menu and
               pick &quot;Run now&quot; to get the first one.
             </div>
-          )}
+          ))}
           {run && run.status !== 'fired' && (
             <div className="report-reader-callout" style={{ borderColor: runVisualColor(scheduleRunVisual(run.status)) }}>
               {run.status === 'error' ? 'This run failed' : 'This run was skipped'}

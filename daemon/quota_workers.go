@@ -167,7 +167,39 @@ type workerRequest struct {
 	Error                           string
 	release                         func()
 	QuotaRetryAt                    time.Time
+	// The model the worker started with and where it came from, copied from
+	// its spawn result (ST-296); empty until it starts.
+	Model, ModelSource, ModelNote string
 }
+
+// workerModelFields is what a worker request says about its model (ST-296),
+// in spawn_pane's field names: what it got once started; while it waits to
+// start, the caller's model, else a note that it is chosen at start, when a
+// Claude worker reads the worker-model setting as it stands then. Nothing for
+// a request that closed before starting, or one adopted from a pane after a
+// restart (list_panes reads that pane's argv). Call with q.mu held.
+func (r *workerRequest) workerModelFields() map[string]string {
+	if r.ModelSource != "" {
+		out := map[string]string{"model_source": r.ModelSource}
+		if r.Model != "" {
+			out["model"] = r.Model
+		}
+		if r.ModelNote != "" {
+			out["model_note"] = r.ModelNote
+		}
+		return out
+	}
+	if r.PaneID != "" || (r.Info.State != "queued" && r.Info.State != "running") {
+		return nil
+	}
+	if m := strings.TrimSpace(mcpArgString(r.Args, "model")); m != "" {
+		return map[string]string{"model": m, "model_source": spawnModelFromCaller}
+	}
+	return map[string]string{"model_note": workerPendingModelNote}
+}
+
+const workerPendingModelNote = "chosen when the worker starts: a Claude worker takes the worker model setting as it stands then (none set: Claude Code's own default), a Codex worker uses Codex's own default"
+
 type workerQueue struct {
 	mu              sync.Mutex
 	settings        workerSettings
@@ -245,6 +277,9 @@ func workerResult(r *workerRequest, position int) any {
 	}
 	if r.PaneID != "" {
 		out["id"] = r.PaneID
+	}
+	for k, v := range r.workerModelFields() {
+		out[k] = v
 	}
 	if r.Info.Provider != "" {
 		out["provider"], out["account"], out["reason"] = r.Info.Provider, r.Info.Account, r.Info.Reason
@@ -496,6 +531,9 @@ func (a *apiServer) startAutoWorker(r *workerRequest) any {
 	r.PaneID, _ = out["id"].(string)
 	r.Info.StartStatus, _ = out["status"].(string)
 	r.Info.StartHint, _ = out["hint"].(string)
+	r.Model, _ = out["model"].(string)
+	r.ModelSource, _ = out["model_source"].(string)
+	r.ModelNote, _ = out["model_note"].(string)
 	info := r.Info
 	q.mu.Unlock()
 	if p, ok := a.mgr.Get(r.PaneID); ok {
@@ -771,7 +809,8 @@ func (a *apiServer) queuedWorkerSummaries() []mcpPaneSummary {
 		}
 		w := *visibleWorkerInfo(&r.Info)
 		o := &PaneOrigin{Source: paneOriginAgent, ByPaneID: r.Caller, LeadPaneID: r.Lead, Workspace: r.Workspace, Purpose: spawnPurpose(mcpArgString(r.Args, "purpose"), mcpArgString(r.Args, "prompt")), At: r.Created.UnixMilli(), Worker: &w}
-		out = append(out, mcpPaneSummary{ID: r.Info.ID, Title: mcpArgString(r.Args, "title"), Status: r.Info.State, Kind: "terminal", Cwd: mcpArgString(r.Args, "cwd"), Workspace: r.Workspace, Origin: o, Worker: &w, QueuePosition: q.positionLocked(r), WorkerError: r.Error})
+		m := r.workerModelFields()
+		out = append(out, mcpPaneSummary{ID: r.Info.ID, Title: mcpArgString(r.Args, "title"), Status: r.Info.State, Kind: "terminal", Cwd: mcpArgString(r.Args, "cwd"), Workspace: r.Workspace, Origin: o, Worker: &w, QueuePosition: q.positionLocked(r), WorkerError: r.Error, Model: m["model"], ModelNote: m["model_note"]})
 	}
 	return out
 }
@@ -790,6 +829,9 @@ func (a *apiServer) workerQueueSnapshot() []map[string]any {
 		entry := map[string]any{"queue_id": w.ID, "id": r.PaneID, "worker": visibleWorkerInfo(&w), "callerPaneId": r.Caller, "leadPaneId": r.Lead, "workspace": r.Workspace, "position": q.positionLocked(r), "error": r.Error}
 		if d, ok := decisions[r.PaneID]; ok && r.PaneID != "" {
 			entry["archiveDecision"] = d
+		}
+		for k, v := range r.workerModelFields() {
+			entry[k] = v
 		}
 		out = append(out, entry)
 	}

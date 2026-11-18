@@ -7,6 +7,7 @@ import {
   readArrival,
   setArrivalIntent,
   signupMetadata,
+  trackingRefused,
 } from './arrival';
 import { resolveSiteInstaller, siteDownloadPage } from './siteInstaller';
 
@@ -71,6 +72,39 @@ describe('arrival parameters', () => {
     // A tab that stored the old value before this release reads it as start.
     sessionStorage.setItem('solu.arrival', JSON.stringify({ intent: 'download', firstTouch: null }));
     expect(arrivalIntent()).toBe('start');
+  });
+
+  describe.each([
+    ['Do Not Track', () => Object.defineProperty(window.navigator, 'doNotTrack', { configurable: true, get: () => '1' })],
+    ['Global Privacy Control', () => Object.defineProperty(window.navigator, 'globalPrivacyControl', { configurable: true, get: () => true })],
+    ['an automated browser', () => Object.defineProperty(window.navigator, 'webdriver', { configurable: true, get: () => true })],
+  ])('with %s', (_name, refuse) => {
+    afterEach(() => {
+      for (const key of ['doNotTrack', 'globalPrivacyControl', 'webdriver']) delete (window.navigator as unknown as Record<string, unknown>)[key];
+    });
+
+    it('keeps the intent but no tags, strips them from the URL, and sends none with a sign-up', () => {
+      refuse();
+      expect(trackingRefused()).toBe(true);
+      const arrival = arriveAt('/?intent=start&ref=hn&utm_source=newsletter&b=win');
+      expect(arrival).toEqual({ intent: 'start', firstTouch: null });
+      expect(window.location.search).toBe('?b=win');
+      expect(JSON.parse(sessionStorage.getItem('solu.arrival') ?? 'null')).toEqual({ intent: 'start', firstTouch: null });
+      expect(signupMetadata()).toEqual({ signup_surface: 'web-start' });
+      expect(downloadCountTag()).toBeNull();
+    });
+
+    it('ignores tags kept earlier in the tab', () => {
+      arriveAt('/?intent=start&utm_source=newsletter');
+      expect(downloadCountTag()).toBe('newsletter');
+      refuse();
+      expect(signupMetadata()).toEqual({ signup_surface: 'web-start' });
+      expect(downloadCountTag()).toBeNull();
+    });
+  });
+
+  it('allows tracking when the browser sends no such signal', () => {
+    expect(trackingRefused()).toBe(false);
   });
 
   it('builds the sign-up metadata and the download-count tag', () => {

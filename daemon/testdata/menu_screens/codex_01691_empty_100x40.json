@@ -1,0 +1,18 @@
+{
+ "cols": 100,
+ "rows": 40,
+ "steps": [
+  {
+   "name": "idle",
+   "bytes": 3270
+  },
+  {
+   "name": "typed",
+   "bytes": 3610
+  },
+  {
+   "name": "cleared",
+   "bytes": 4054
+  }
+ ]
+}

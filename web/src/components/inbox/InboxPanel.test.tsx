@@ -189,7 +189,6 @@ describe('InboxHost / feed', () => {
   // A built-in agent alert carries its own markdown: it opens without a run
   // log, and its links point at the held issues.
   it('a PR-reviewer or held-fixes alert opens its own text in the reading pane', async () => {
-    const runLog = vi.spyOn(api, 'agentRunLog');
     const alert: AgentReport = {
       agentId: 'builtin:fix-agent', agentName: 'Fix agent', runId: 'held-abc',
       at: new Date(Date.now() - 60_000).toISOString(),
@@ -206,7 +205,6 @@ describe('InboxHost / feed', () => {
       fireEvent.click(screen.getByText('Fix agent'));
       const link = await screen.findByRole('link', { name: '#29' });
       expect(link.getAttribute('href')).toBe('https://github.com/o/fb/issues/29');
-      expect(runLog).not.toHaveBeenCalled();
     } finally {
       setExtensionsForTests(null);
     }
@@ -280,16 +278,36 @@ describe('InboxHost / notification targets', () => {
   it('an agent target opens and acknowledges that agent\'s pending decision', async () => {
     const report: AgentReport = {
       agentId: 'agt_1', agentName: 'Repo Medic', runId: 'run_9',
-      at: new Date().toISOString(), title: 'Needs you — approve', preview: 'approve the fix', logFile: 'r9.md',
+      at: new Date().toISOString(), title: 'Needs you — approve', preview: 'approve the fix',
+      body: '# Medic\n\nApprove the fix please.',
     };
     const acknowledge = vi.fn().mockResolvedValue(undefined);
     setExtensionsForTests([{ inboxReports: { useReports: () => [report], acknowledge, acknowledgeAll: vi.fn() } }]);
-    vi.spyOn(api, 'agentRunLog').mockResolvedValue('# Medic\n\nApprove the fix please.');
     try {
       render(<InboxHost />);
       act(() => openInboxAt({ agent: 'agt_1' }));
       expect(await screen.findByText(/Approve the fix please/)).toBeInTheDocument();
       expect(acknowledge).toHaveBeenCalledWith(report);
+    } finally {
+      setExtensionsForTests(null);
+    }
+  });
+});
+
+describe('InboxHost / agent alert without text', () => {
+  // Managed agents (whose reports pointed at a run log) were removed: an
+  // alert without its own text says so instead of fetching a removed route.
+  it('shows Report unavailable', async () => {
+    const report: AgentReport = {
+      agentId: 'builtin:pr-agent', agentName: 'PR reviewer', runId: 'r1',
+      at: new Date().toISOString(), title: 'PR reviewer is down', preview: 'no text',
+    };
+    setExtensionsForTests([{ inboxReports: { useReports: () => [report], acknowledge: vi.fn().mockResolvedValue(undefined), acknowledgeAll: vi.fn() } }]);
+    try {
+      render(<InboxHost />);
+      act(() => openInboxAt({ agent: 'builtin:pr-agent' }));
+      expect(await screen.findByText('Report unavailable')).toBeInTheDocument();
+      expect(screen.getByText('This alert has no text.')).toBeInTheDocument();
     } finally {
       setExtensionsForTests(null);
     }

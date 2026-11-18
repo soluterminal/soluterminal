@@ -21,11 +21,10 @@ type resourceSettings struct {
 	// its next overdue check.
 	OverdueGrantSec *int `json:"overdueGrantSec,omitempty"`
 	// MaxAgentRuns and ReservedBookkeepingRuns govern the shared ScheduleStore
-	// managed-agent/task-schedule pool, not the workflow engine. They inherit
+	// task-schedule pool, not the workflow engine. They inherit
 	// SOLU_AGENT_MAX_RUNS and SOLU_AGENT_RESERVED_RUNS respectively.
 	MaxAgentRuns            *int `json:"maxAgentRuns,omitempty"`
 	ReservedBookkeepingRuns *int `json:"reservedBookkeepingRuns,omitempty"`
-	PreviewCacheCapMB       *int `json:"previewCacheCapMB,omitempty"`
 	// MemFloorMB/DiskFloorMB keep the documented env semantics, where an
 	// explicit 0 disables that gate rather than meaning "unset".
 	MemFloorMB  *int `json:"memFloorMB,omitempty"`
@@ -85,10 +84,6 @@ func cloneWfResourceSettings(in *resourceSettings) *resourceSettings {
 	if in.ReservedBookkeepingRuns != nil {
 		v := *in.ReservedBookkeepingRuns
 		out.ReservedBookkeepingRuns = &v
-	}
-	if in.PreviewCacheCapMB != nil {
-		v := *in.PreviewCacheCapMB
-		out.PreviewCacheCapMB = &v
 	}
 	if in.MemFloorMB != nil {
 		v := *in.MemFloorMB

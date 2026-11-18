@@ -380,6 +380,33 @@ describe('hosted app get-started card', () => {
     expect(rpc).toHaveBeenNthCalledWith(2, 'record_soluterminal_download', { p_source: 'newsletter' });
   });
 
+  it('counts no hosted download when the browser sends Do Not Track, GPC or is automated', async () => {
+    for (const refuse of [
+      () => Object.defineProperty(window.navigator, 'doNotTrack', { configurable: true, get: () => '1' }),
+      () => Object.defineProperty(window.navigator, 'globalPrivacyControl', { configurable: true, get: () => true }),
+      () => Object.defineProperty(window.navigator, 'webdriver', { configurable: true, get: () => true }),
+    ]) {
+      visitor(WINDOWS_UA, 'Win32');
+      entitlements(false);
+      refuse();
+      window.history.replaceState(null, '', '/?intent=start&utm_source=newsletter');
+      captureArrival();
+      const rpc = vi.fn().mockResolvedValue({ error: null });
+      seed();
+      useCloud.setState({ supabase: { rpc } as never });
+      const { unmount } = renderGate();
+      const link = screen.getByRole('link', { name: 'Download for Windows' });
+      link.addEventListener('click', (e) => e.preventDefault());
+      fireEvent.click(link);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(rpc).not.toHaveBeenCalledWith('record_soluterminal_download', expect.anything());
+      unmount();
+      vi.restoreAllMocks();
+      for (const key of ['doNotTrack', 'globalPrivacyControl', 'webdriver']) delete (window.navigator as unknown as Record<string, unknown>)[key];
+      sessionStorage.clear();
+    }
+  });
+
   it('keeps the plain machine list for a returning user without the intent', () => {
     visitor(WINDOWS_UA, 'Win32');
     entitlements(false);

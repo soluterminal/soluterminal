@@ -549,10 +549,10 @@ export interface Schedule {
   // (daemon/schedules_task.go). Task schedules have no paneId.
   kind?: 'prompt' | 'agent' | 'task';
   agentId?: string;
-  // Set when this schedule has been imported into a managed agent
-  // (docs/DESIGN-agents-surface.md §8.3). Such rows are omitted from
-  // GET /api/schedules entirely — the agent card is their surface — so this
-  // only ever arrives through the ?includeAgentRuns=1 debugging view.
+  // Set on a task schedule that was imported into a managed agent. Managed
+  // agents were removed; such a schedule is listed only when the removal kept
+  // it (its prompt is not in agents-export.md). It never runs, and the person
+  // can only read its history or delete it.
   ownedByAgentId?: string;
   // Creator provenance stamped by the daemon on MCP create_schedule — WHO
   // filed the schedule. Distinct from `paneId` below, which for prompt-kind

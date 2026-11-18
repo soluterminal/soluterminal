@@ -527,7 +527,9 @@ func mcpCoreTools() []mcpTool {
 				"nothing is typed: the message waits on the pane (delivery \"held\") and goes in " +
 				"once their input box is empty and they stop typing; keep waiting, do not resend. " +
 				"Sender labels say unverified when the caller cannot be traced to a pane. All unverified senders share five held messages per target; the total queue limit is twenty. held_messages (count, senders, stuck; never text) reports what waits on that pane. " +
-				"While the person has paused agent messaging (list_panes agent_messaging_paused), the message is held on that pane with that reason until they resume; do not resend.",
+				"While the person has paused agent messaging (list_panes agent_messaging_paused), the message is held on that pane with that reason until they resume; do not resend. " +
+				"The call returns within 50 seconds, sending included (a Codex pane's own client allows its full wait), so clients never cut it off: " +
+				"delivery says what happened to the message (delivered, unconfirmed, queued, held, or sending while it is still being typed); on still_working, call wait_for_pane.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -541,7 +543,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"timeout_seconds": {
 						"type": "number",
-						"description": "How long to wait for the reply. Default 240, max 900."
+						"description": "How long to wait for the reply. Default 240, max 900; cut to 50 seconds per call except from a Codex pane."
 					}
 				},
 				"required": ["pane_id", "text"],
@@ -553,7 +555,8 @@ func mcpCoreTools() []mcpTool {
 			Description: "Wait until another pane's agent finishes what it is doing, then return its " +
 				"latest reply (JSON: pane, status, state, reply). status is idle, needs_approval, " +
 				"still_working (timed out; call again) or exited. Use after spawn_pane with a prompt, " +
-				"after ask_pane returned still_working, or after send_input. held_messages (count, senders, stuck; never text) reports what waits on that pane.",
+				"after ask_pane returned still_working, or after send_input. After ask_pane it waits on that message's own turn and repeats its delivery. " +
+				"Returns within 50 seconds (a Codex pane: its full wait). held_messages (count, senders, stuck; never text) reports what waits on that pane.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -563,7 +566,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"timeout_seconds": {
 						"type": "number",
-						"description": "How long to wait. Default 120, max 900."
+						"description": "How long to wait. Default 120, max 900; cut to 50 seconds per call except from a Codex pane."
 					}
 				},
 				"required": ["pane_id"],
@@ -610,7 +613,8 @@ func mcpCoreTools() []mcpTool {
 				"it can ONLY pick an option the pane is already showing, never free-type. For a " +
 				"terminal pane in choice-prompt state, `option` is the menu number (\"1\", \"2\", …); " +
 				"the number must be one currently on the menu. Refused if the pane is not actually on a prompt (it will " +
-				"not act on a running/idle pane or a prose \"should I continue?\" question). Get " +
+				"not act on a running/idle pane or a prose \"should I continue?\" question), and always refused on " +
+				"Codex's own update menu (Update now runs a global npm install: the person answers it). Get " +
 				"the state first with list_panes (pass pane_id), and the menu text with " +
 				"read_pane_tail mode \"screen\" (its default for an agent pane is the last reply, " +
 				"not the menu). " +
@@ -644,6 +648,8 @@ func mcpCoreTools() []mcpTool {
 				"For an agent (cmd \"claude\" or \"codex\") it waits until the agent shows its input " +
 				"box (up to ~45 s). If folder trust is waiting, it returns status needs_user immediately, " +
 				"leaves the prompt unsent, and asks the user to trust the folder; afterward use ask_pane to send the original prompt. " +
+				"If Codex shows its own update menu, it returns status needs_user with menu codex_update at once and holds `prompt` on " +
+				"the pane (delivery held), never typing it into the menu; it goes in by itself once the person answers the menu. " +
 				"Otherwise it sends `prompt` as the first message when set; call wait_for_pane for the reply. " +
 				"cmd auto selects a provider that meets needs and the account with the most usable quota headroom (prefer breaks ties), queues beyond the per-lead cap, and returns provider, account, reason, reviewer and reviewer_account. Queued results include queue_id and position; cancel with cancel_queued_worker. Urgent may use one extra slot. " +
 				"Set role to orchestrator to start Claude or Codex with " +
@@ -667,7 +673,7 @@ func mcpCoreTools() []mcpTool {
 					},
 					"model": {
 						"type": "string",
-						"description": "Optional model for a claude or codex pane, passed as the agent's own model flag (e.g. \"opus\" or \"sonnet\" for Claude, a Codex model id for Codex). A model named here always wins. If omitted for a claude WORKER (no lead), the pane gets the worker model the person set in Settings (Terminal & panes › Workers), if any; if omitted otherwise (a lead, codex, or no worker model set), no flag is passed and the agent uses its own default (for Claude Code, the model key in ~/.claude/settings.json, which any /model pick rewrites). The result's model and model_source (caller, worker_model_setting or none) say what the pane got."
+						"description": "Optional model for a claude or codex pane, passed as the agent's own model flag (e.g. \"opus\" or \"sonnet\" for Claude, a Codex model id for Codex). A model named here always wins. If omitted for a claude WORKER (no lead; also a cmd auto worker that resolves to claude, which reads the setting when it actually starts, not when it was queued), the pane gets the worker model the person set in Settings (Terminal & panes › Workers), if any; if omitted otherwise (a lead, codex, or no worker model set), no flag is passed and the agent uses its own default (for Claude Code, the model key in ~/.claude/settings.json, which any /model pick rewrites). The result's model and model_source (caller, worker_model_setting or none) say what the pane got; a queued auto worker's result gives the caller's model, or a model_note that it is chosen at start."
 					},
 					"effort": {
 						"type": "string",
@@ -1829,6 +1835,17 @@ func (a *apiServer) mcpToolSendInputOutcomeAs(args map[string]any, mode delivery
 	}
 	write := func(b []byte) (int, error) {
 		check := putBack
+		if !isTerminalReplyOnly(b) {
+			// Codex's own update menu is the person's alone (ST-289), also
+			// for a caller admitted to answer prompts before it appeared:
+			// checked under the writer lock, with the write.
+			check = bothChecks(func() error {
+				if paneShowsCodexUpdateMenu(p) {
+					return errPromptHeld
+				}
+				return nil
+			}, check)
+		}
 		if c.heldAtPrompt && !isTerminalReplyOnly(b) {
 			// The prompt gate again at write time, under the writer lock:
 			// a menu that appeared since, or is still drawn after its first
@@ -1838,7 +1855,7 @@ func (a *apiServer) mcpToolSendInputOutcomeAs(args map[string]any, mode delivery
 					return errPromptHeld
 				}
 				return nil
-			}, putBack)
+			}, check)
 		}
 		return p.writeWithFleetAdmissionPolicy(b, recordPrompt, false, &policy, time.Now().Add(ariaJevTimeout), check)
 	}
@@ -1949,10 +1966,12 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 	} else if role == paneRoleOrchestrator && worker == nil {
 		leadRole = paneRoleOrchestrator
 	}
-	// The model flag (ST-283): the caller's model, else for a Claude worker
-	// the person's worker-model setting as it stands now, else none.
+	// The model flag (ST-283, ST-296): the caller's model, else for a Claude
+	// worker the person's worker-model setting as it stands now, else none.
+	// An auto worker (worker != nil) is a worker and can't be a lead; it gets
+	// here only when it starts, so a queued one reads the setting at start.
 	baseCmd := cmd
-	spawnModel, spawnModelSource := spawnPaneModel(baseCmd, modelArg, leadRole == "" && worker == nil, a.workerModelSetting())
+	spawnModel, spawnModelSource := spawnPaneModel(baseCmd, modelArg, leadRole == "", a.workerModelSetting())
 	cmd, err := spawnAgentModelArgv(baseCmd, spawnModel, effortArg)
 	if err != nil {
 		if spawnModelSource == spawnModelFromSetting {
@@ -2876,13 +2895,13 @@ func mcpRefuseAgentRunSchedule(store *ScheduleStore, id string) error {
 		return nil
 	}
 	if sched.OwnedByAgentID != "" {
-		return errors.New("that schedule is managed by agent " + sched.OwnedByAgentID +
-			" and is controlled from its card, not this tool")
+		return errors.New("that schedule was imported into a managed agent (" + sched.OwnedByAgentID +
+			"), which SoluTerminal no longer has; it no longer runs, and only the person can delete it, from the app's Automations list")
 	}
 	if !sched.isAgentRun() {
 		return nil
 	}
-	return errors.New("that schedule belongs to an agent and is managed through the agents API, not this tool")
+	return errors.New("that schedule belonged to a managed agent, which SoluTerminal no longer has; it no longer runs")
 }
 func toolOK(msg string) map[string]any {
 	return map[string]any{

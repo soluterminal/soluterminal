@@ -45,6 +45,14 @@ function endConditionHint(s: Schedule): string | null {
   return null;
 }
 
+
+// A task schedule a removed managed agent had imported, kept because its
+// prompt is not in agents-export.md. It never runs; the person can only read
+// its history or delete it (the daemon saves its prompt first).
+function keptFromRemovedAgent(s: Schedule): boolean {
+  return s.kind === 'task' && !!s.ownedByAgentId;
+}
+
 export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps) {
   const schedules = useStore((s) => s.schedules);
   const loaded = useStore((s) => s.schedulesLoaded);
@@ -135,6 +143,19 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
   }
 
   async function handleDelete(s: Schedule) {
+    if (keptFromRemovedAgent(s)) {
+      if (!(await confirmDialog({
+        message: `Delete "${s.name}"?\n\nIt was part of a managed agent that SoluTerminal no longer has, and it doesn't run. Its prompt is saved to agents-export-kept.md in SoluTerminal's data folder first; its run history stays on disk.`,
+        confirmLabel: 'Delete',
+        danger: true,
+      }))) return;
+      try {
+        await deleteSchedule(s.id);
+      } catch (e) {
+        toast(`Delete failed: ${(e as Error).message}`, { kind: 'error', icon: '⚠' });
+      }
+      return;
+    }
     if (!(await confirmDialog({
       // Deleting removes the automation and its run files; it does not stop a
       // run that has already started.
@@ -196,23 +217,25 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
   // recent run errored — silent when healthy, mirroring the agents-cockpit
   // chip doctrine. Paused schedules don't count (their error is stale news).
   const hasFailingSchedule = schedules.some(
-    (s) => s.enabled && s.runs?.[0]?.status === 'error',
+    (s) => s.enabled && !keptFromRemovedAgent(s) && s.runs?.[0]?.status === 'error',
   );
   // Enabled schedules only: a paused schedule's last report can never be
   // replaced by a newer one, so counting it kept the chip from reaching 0.
   // Its row still shows its own unread dot.
-  const unreadCount = schedules.filter((s) => s.enabled && scheduleUnread(s)).length;
+  const unreadCount = schedules.filter((s) => s.enabled && !keptFromRemovedAgent(s) && scheduleUnread(s)).length;
   // Finished automations sit below the live ones and stay out of the header
   // count: the count answers "how many things run here on their own".
   const finished = schedules.filter((s) => scheduleFinished(s));
   const live = schedules.filter((s) => !scheduleFinished(s));
+  // Kept schedules from removed agents are listed but never run.
+  const liveCount = live.filter((s) => !keptFromRemovedAgent(s)).length;
 
   return (
     <div className="sidebar-section">
       <SectionHeader
         icon={<IconClock size={14} />}
         title="Automations"
-        count={live.length || undefined}
+        count={liveCount || undefined}
         collapsed={collapsed}
         onToggle={onToggle}
         extra={
@@ -281,6 +304,7 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
         const lastRunGoing = !done && scheduleSpent(s);
         const isAgent = s.kind === 'agent';
         const isTask = s.kind === 'task';
+        const kept = keptFromRemovedAgent(s);
         const isPrompt = !isAgent && !isTask;
         const target = isPrompt && s.paneId ? panes[s.paneId] : undefined;
         const shortCwd = (s.cwd || '').replace(/^\/home\/[^/]+/, '~');
@@ -297,7 +321,9 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
         const targetMissing = isPrompt && !target;
         const lastRun = s.runs?.[0];
         const snoozeActive = !!(s.snoozeUntil && new Date(s.snoozeUntil).getTime() > Date.now());
-        const nextLabel = doneLabel
+        const nextLabel = kept
+          ? "doesn't run"
+          : doneLabel
           ?? (lastRunGoing
             ? 'running…'
             : !s.enabled
@@ -339,6 +365,7 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
         const agentPaused = isAgent && paused;
         const recentChanges = (s.changes ?? []).slice(0, 3).map(describeChange);
         const tip = [
+          kept ? `Kept from a managed agent (${s.ownedByAgentId}) that SoluTerminal no longer has. It doesn't run; you can read its history or delete it, and its prompt is saved first.` : null,
           triggerLine,
           endLine,
           isAgent
@@ -372,7 +399,7 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
               </div>
             )}
             <div
-              className={`sched-row ${s.enabled ? '' : 'disabled'} ${done ? 'finished' : ''} ${targetMissing ? 'target-missing' : ''}`}
+              className={`sched-row ${s.enabled && !kept ? '' : 'disabled'} ${done ? 'finished' : ''} ${targetMissing ? 'target-missing' : ''}`}
               title={tip}
               role="button"
               tabIndex={0}
@@ -393,7 +420,7 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                 setCtxMenu({ x: e.clientX, y: e.clientY, id: s.id });
               }}
             >
-              {done || lastRunGoing ? (
+              {done || lastRunGoing || kept ? (
                 // Nothing to switch back on: a spent one-time is refused, and
                 // the others would stop again at once. The box keeps its space.
                 <span className="sched-toggle sched-toggle-none" aria-hidden="true" />
@@ -414,7 +441,12 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                     <span className="sched-unread-dot" title="New report — click to read" aria-label="New report" />
                   )}
                   {s.name}
-                  {doneLabel ? (
+                  {kept ? (
+                    <span
+                      className="sched-paused-tag"
+                      title="Part of a managed agent that SoluTerminal no longer has. It doesn't run; delete it from the ⋯ menu (its prompt is saved first)."
+                    > · kept from a removed agent</span>
+                  ) : doneLabel ? (
                     <span
                       className="sched-paused-tag"
                       title="Finished — it has nothing left to run. Edit it to set a new time, or clear it."
@@ -457,7 +489,7 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                     <span className="sched-target">{targetIcon}{targetLabel.length > 18 ? targetLabel.slice(0, 16) + '…' : targetLabel}</span>
                   )}
                   <span className="sched-sep">·</span>
-                  <span className={`sched-next ${s.enabled ? '' : 'dim'}`}>{nextLabel}</span>
+                  <span className={`sched-next ${s.enabled && !kept ? '' : 'dim'}`}>{nextLabel}</span>
                   <span className="sched-sep">·</span>
                   <span
                     className={`sched-count ${s.fireCount > 0 ? '' : 'dim'}`}
@@ -509,6 +541,28 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
         if (!s) return null;
         const snoozeActive = !!(s.snoozeUntil && new Date(s.snoozeUntil).getTime() > Date.now());
         const canSnooze = !s.runAt && s.enabled && !snoozeActive;
+        if (keptFromRemovedAgent(s)) {
+          return (
+            <div
+              ref={ctxMenuRef}
+              className="pane-ctx-menu"
+              role="menu"
+              style={{ position: 'fixed', left: ctxMenuPos.left, top: ctxMenuPos.top, zIndex: 'var(--z-menu)' }}
+            >
+              <button
+                role="menuitem"
+                onClick={() => { setCtxMenu(null); setHistoryId(s.id); }}
+              >History…</button>
+              <div className="pane-ctx-menu-sep" />
+              <button
+                role="menuitem"
+                className="danger"
+                title="Saves its prompt to agents-export-kept.md, then deletes it"
+                onClick={() => { setCtxMenu(null); void handleDelete(s); }}
+              >Delete</button>
+            </div>
+          );
+        }
         return (
           <div
             ref={ctxMenuRef}

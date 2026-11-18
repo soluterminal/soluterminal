@@ -1,5 +1,5 @@
 import { useCloud } from '../cloud';
-import { downloadCountTag } from './arrival';
+import { downloadCountTag, trackingRefused } from './arrival';
 
 // PostgREST's answer when no function matches the arguments: the counter
 // doesn't take p_path yet (the column is added by a separate migration).
@@ -12,6 +12,8 @@ const NO_MATCHING_FUNCTION = 'PGRST202';
 export function countSiteDownload(): void {
   const { supabase, isLocal } = useCloud.getState();
   if (!supabase || isLocal) return;
+  // Do Not Track, Global Privacy Control and automated browsers: not counted.
+  if (trackingRefused()) return;
   const source = downloadCountTag();
   try {
     void Promise.resolve(

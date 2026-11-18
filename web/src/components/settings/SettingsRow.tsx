@@ -23,6 +23,7 @@ export function SettingsRow({
   hint,
   title,
   id,
+  searchKey,
   children,
 }: {
   label: string;
@@ -30,10 +31,12 @@ export function SettingsRow({
   title?: string;
   /** Scroll target — the Crew panel's Change links jump to a role's editor row. */
   id?: string;
+  /** The registry label Settings search lands on, when the shown label varies. */
+  searchKey?: string;
   children: ReactNode;
 }) {
   return (
-    <div className="settings-row" id={id} title={title}>
+    <div className="settings-row" id={id} title={title} data-setting={searchKey ?? label}>
       <span className="settings-row-label">{label}</span>
       <div className="settings-row-control">{children}</div>
       {hint && <p className="settings-row-hint">{hint}</p>}
@@ -57,7 +60,7 @@ export function SettingsCheck({
   disabled?: boolean;
 }) {
   return (
-    <div className="settings-row settings-row-check" title={title}>
+    <div className="settings-row settings-row-check" title={title} data-setting={label}>
       <label className="settings-check">
         <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
         {label}

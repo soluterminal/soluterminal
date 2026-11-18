@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -399,41 +398,6 @@ func TestWfRunCaptureCmdSuppressesCoreDumps(t *testing.T) {
 	soft, hard := coreLimitLine(t, stdout.String())
 	if soft != "1" || hard != procLimitValue(before.Max) {
 		t.Fatalf("capture limits soft=%q hard=%q, want soft=1 hard=%q", soft, hard, procLimitValue(before.Max))
-	}
-	requireLimitUnchanged(t, before)
-}
-
-func TestPreviewSpawnSuppressesCoreDumps(t *testing.T) {
-	before := coreDumpGuardPreconditions(t)
-	port, err := previewAllocatePort()
-	if err != nil {
-		t.Fatal(err)
-	}
-	spawned, err := previewSpawnWithOptions(context.Background(), t.TempDir(), []string{os.Args[0], "-test.run=^TestCoreDumpGuardPreviewHelper$"}, map[string]string{"CORE_GUARD_PREVIEW": "1"}, port, t.TempDir(), "", "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := previewStopTree(spawned); err != nil {
-			t.Errorf("stop preview: %v", err)
-		}
-	}()
-	response, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/limits", port))
-	if err != nil {
-		t.Fatalf("GET preview limits: %v", err)
-	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatalf("read preview limits: %v", err)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("GET preview limits status=%d body=%q", response.StatusCode, raw)
-	}
-	requireGuardedTree(t, string(raw), before)
-	soft, hard := coreLimitLine(t, string(raw))
-	if soft != "1" || hard != procLimitValue(before.Max) {
-		t.Fatalf("preview limits soft=%q hard=%q, want soft=1 hard=%q", soft, hard, procLimitValue(before.Max))
 	}
 	requireLimitUnchanged(t, before)
 }
@@ -893,33 +857,5 @@ func TestCoreDumpGuardPreflightClosesPipes(t *testing.T) {
 		if _, err := r.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("output pipe not closed: %v", err)
 		}
-	}
-}
-
-func TestCoreDumpGuardPreviewHelper(t *testing.T) {
-	if os.Getenv("CORE_GUARD_PREVIEW") != "1" {
-		return
-	}
-	server := &http.Server{Addr: "127.0.0.1:" + os.Getenv("PORT"), Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/limits" {
-			_, _ = io.WriteString(w, "ready")
-			return
-		}
-		raw, err := os.ReadFile("/proc/self/limits")
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		// Direct Start is deliberate in this fixture: prove inheritance into a
-		// grandchild rather than applying another guard at the test boundary.
-		child, err := exec.Command("sh", "-c", "cat /proc/self/limits").Output()
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		_, _ = w.Write(append(raw, child...))
-	})}
-	if err := server.ListenAndServe(); err != nil {
-		t.Fatal(err)
 	}
 }

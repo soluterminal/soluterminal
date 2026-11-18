@@ -83,8 +83,9 @@ const (
 )
 
 // spawnPaneModel picks the model flag for a spawn_pane agent pane (ST-283). A
-// model the caller names always wins. Otherwise a Claude worker (no lead, not
-// an auto worker) takes the person's worker-model setting, so it no longer
+// model the caller names always wins. Otherwise a Claude worker (no lead,
+// including a cmd auto worker that resolved to Claude, ST-296) takes the
+// person's worker-model setting, so it no longer
 // inherits whatever /model pick last rewrote the `model` key in Claude Code's
 // own settings.json. Otherwise none: the agent picks its own default, exactly
 // as before the setting existed. Leads, Codex and other commands never take

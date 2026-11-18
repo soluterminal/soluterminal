@@ -409,6 +409,9 @@ func autoApprovalDeclineReason(s string, hasCodex bool) string {
 	if len(folderTrustPromptMatches(s)) > 0 {
 		return "folder trust needs the user"
 	}
+	if len(codexUpdateMenuMatches(s)) > 0 {
+		return "the Codex update menu needs the user"
+	}
 	choices := choicePromptMatches(s)
 
 	// Codex command/edit modal rendered without its focused option row. Only

@@ -524,51 +524,6 @@ func (p *Pusher) FireSchedule(schedID, schedName, kind, detail string) {
 	p.deliver(body, key, kind)
 }
 
-// FireAgent pushes a managed-agent notification
-// (docs/DESIGN-agents-surface.md §6.3). kind is "agent-error" — ALWAYS sent,
-// whatever the agent's notification mode and whatever its quiet hours say, on
-// the same reasoning FireSchedule's error kind carries — or "agent-report", a
-// routine run report the CALLER has already policy-gated
-// (ManagedAgentStore.publishRunNotification). This function deliberately knows nothing
-// about modes: a policy decided in two places is a policy that disagrees with
-// itself.
-//
-// Rides the same per-(key,kind) cooldown map as FireSchedule under an "agent:"
-// key prefix, so a flapping every-minute agent cannot buzz the phone more than
-// once per window, and its error and report kinds hold independent budgets.
-func (p *Pusher) FireAgent(agentID, agentName, kind, detail string) {
-	_ = p.FireAgentResult(agentID, agentName, kind, detail)
-}
-
-// FireAgentResult is the synchronous form used by the durable needs-you
-// ledger. Its delivery timestamp advances only after the relay accepts the
-// notification, preserving at-least-once behavior across network failures.
-func (p *Pusher) FireAgentResult(agentID, agentName, kind, detail string) bool {
-	if p == nil {
-		return false
-	}
-	key := "agent:" + agentID
-	if p.recentlyFired(key, kind) {
-		return false
-	}
-	if p.metrics != nil {
-		p.metrics.PushFireTotal.Add(1)
-	}
-	body, _ := json.Marshal(map[string]string{
-		"paneId":  key, // rides the paneId slot for client-side tag coalescing
-		"state":   kind,
-		"title":   agentName,
-		"summary": detail,
-	})
-	delivered := p.deliver(body, key, kind)
-	if !delivered {
-		p.mu.Lock()
-		delete(p.lastFired, rateKey{paneID: key, kind: kind})
-		p.mu.Unlock()
-	}
-	return delivered
-}
-
 // FireWorkflow pushes an actionable workflow lifecycle notification. The
 // caller supplies the user-facing heading and latest stage detail. Reuses the
 // standard per-(key,kind) cooldown so repeated durable transitions cannot
