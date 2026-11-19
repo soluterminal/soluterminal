@@ -366,7 +366,6 @@ export function buildAmbientAppObjectResponses(healthVersion, now = Date.parse('
     // re-read on every event-stream (re)connect.
     '/api/pane-confirmations': { pending: [] },
     '/api/agents/status': {
-      fixAgent: null,
       prAgent: null,
       cloud: null,
       generatedAt: null,
@@ -459,6 +458,7 @@ export function createServer(dist, state = {}) {
     if (req.method === 'GET' && url.pathname === '/api/workspaces') return json(res, state.workspaces ?? []);
     if (req.method === 'GET' && url.pathname === '/api/ports') return json(res, []);
     if (req.method === 'GET' && url.pathname === '/api/schedules') return json(res, state.schedules ?? []);
+    if (req.method === 'GET' && url.pathname === '/api/schedules/pause-all') return json(res, state.automationsPause ?? { paused: false });
     if (req.method === 'GET' && url.pathname === '/api/file') {
       const fixture = state.fileFixtures?.[url.searchParams.get('path')];
       if (fixture) return json(res, fixture);

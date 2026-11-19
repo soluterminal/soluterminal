@@ -31,6 +31,9 @@ type hostStorageService struct {
 	hostDiskDeferMax     time.Duration
 	lowMu                sync.Mutex
 	hostDiskLow          bool
+	// afterSample runs after each sample on the sampler's own ticker (the
+	// pane recorder's hourly deletion sweep rides it).
+	afterSample func()
 }
 
 func (s *hostStorageService) resourceOverrides() resourceSettings {
@@ -150,15 +153,25 @@ func (s *hostStorageService) sampleHost(ctx context.Context) {
 	}
 	s.dispatchHostMaintenanceOnSample(ctx, p)
 	s.publishLauncherPolicy(p)
+	if s.afterSample != nil {
+		s.afterSample()
+	}
 }
 
 // runSampler samples the host disk now and then every `every`, inside WSL
 // only (elsewhere there is no host disk to watch).
 func (s *hostStorageService) runSampler(ctx context.Context, every time.Duration) {
-	if s == nil || s.hostStorage == nil {
+	if s == nil || (s.hostStorage == nil && s.afterSample == nil) {
 		return
 	}
-	s.sampleHost(ctx)
+	tick := func() {
+		if s.hostStorage != nil {
+			s.sampleHost(ctx)
+		} else {
+			s.afterSample()
+		}
+	}
+	tick()
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -166,7 +179,7 @@ func (s *hostStorageService) runSampler(ctx context.Context, every time.Duration
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.sampleHost(ctx)
+			tick()
 		}
 	}
 }

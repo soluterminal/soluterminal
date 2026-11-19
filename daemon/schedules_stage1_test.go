@@ -1166,6 +1166,7 @@ func TestRunsMissedAfterAWaitingRunAreStillCounted(t *testing.T) {
 	it.LastArmedAt = nil
 	since := time.Now().Add(-20 * time.Minute)
 	it.WaitingSince = &since
+	it.LastSlotAt = &since // the timetable fired it then, too
 	_ = first.saveUnlocked()
 	first.mu.Unlock()
 	first.Stop()

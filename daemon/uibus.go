@@ -68,8 +68,11 @@ type uiEvent struct {
 	codexAutoSelfEmit bool
 	Path              string `json:"path,omitempty"`
 	URL               string `json:"url,omitempty"`
-	Port              *Port  `json:"port,omitempty"`
-	Text              string `json:"text,omitempty"`
+	// Recording is the pane's recording state on "pane-recording" events
+	// (pane_recorder_pane.go); never content.
+	Recording *paneRecordingDTO `json:"recording,omitempty"`
+	Port      *Port             `json:"port,omitempty"`
+	Text      string            `json:"text,omitempty"`
 	// SkipRecent (toast events only): show the toast transiently but do NOT
 	// persist it in the Alerts "Recent" notification log. Set for agent/task
 	// run-results, which already surface in the Inbox — logging them to Recent

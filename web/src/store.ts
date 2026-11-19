@@ -482,7 +482,13 @@ function shellAutoApplyAllowedHere(): boolean {
 // only the local daemon can fetch and verify the team installer; it stages it
 // and a courier installs it with no window once the app exits. Elsewhere the
 // app's own updater does the same from the public releases.
-type SilentShellOutcome = ShellUpdateNativeResult & { interactiveLaunched?: boolean; paused?: boolean; appNotFound?: boolean };
+type SilentShellOutcome = ShellUpdateNativeResult & {
+  interactiveLaunched?: boolean;
+  paused?: boolean;
+  // The daemon's reason for a pause, e.g. an automation's run in flight.
+  pausedReason?: string;
+  appNotFound?: boolean;
+};
 
 async function applyShellUpdateSilently(status: UpdateStatus | null): Promise<SilentShellOutcome> {
   if (!shellUpdateNeedsDaemon(status)) return applyShellUpdateSilentNative(false);
@@ -502,7 +508,9 @@ async function applyShellUpdateSilently(status: UpdateStatus | null): Promise<Si
     const code = apiErrorCode(error);
     // Paused by the operator between the last status read and now: a state,
     // not a failure.
-    if (code === 'shell_silent_paused') return { ok: false, paused: true };
+    if (code === 'shell_silent_paused') {
+      return { ok: false, paused: true, ...(typeof body.reason === 'string' ? { pausedReason: body.reason } : {}) };
+    }
     // The courier found no desktop app to wait for; nothing was installed.
     if (code === 'shell_silent_app_not_found') {
       return { ok: false, appNotFound: true, error: typeof body.message === 'string' ? body.message : undefined };
@@ -588,6 +596,11 @@ export function shellAutoApplyWaitReason(now = Date.now()): ShellAutoApplyWait |
   if (state.updateSettings?.shellAutoApply !== 'when-idle') return null;
   if (!status?.shellLatest || status.shellApplying || status.applying || state.shellAutoRestart) return null;
   const version = status.shellLatest;
+  // An automation's run holds the restart off for a while (ST-299; the daemon
+  // bounds the wait): it restarts by itself once the run ends.
+  if (status.shellAutoApplyPaused === false && status.shellWaitingForAutomation) {
+    return { kind: 'waiting', reason: 'waiting for an automation to finish' };
+  }
   if (!shellAutoApplyEnabled(status)) {
     // Only an operator's pause is news. The channel's own default (public,
     // where automatic restarts are not on yet and the setting is hidden) says
@@ -1062,6 +1075,9 @@ export interface State extends ToastDialogSlice, FeatureSlices {
     attention: NonNullable<import('./types').PaneInfo['attention']>,
     reason?: string,
   ) => void;
+  // The daemon's recording state for one pane, from the "pane-recording" UI
+  // event or a recording route's reply. The 3s poll stays source-of-truth.
+  applyPaneRecording: (paneId: string, recording: import('./types').PaneRecording | undefined) => void;
 
   // Zoom state — when set, PaneGrid renders ONLY this pane at full size
   // while the underlying layout tree is unchanged. Ephemeral (not
@@ -1922,6 +1938,16 @@ function sameStringArray(a: string[], b: string[]): boolean {
   return true;
 }
 
+// The recording mark's inputs. Byte counts change on every poll while
+// recording and show nowhere, so they don't make a pane "changed".
+export function sameRecording(a: import('./types').PaneRecording | undefined, b: import('./types').PaneRecording | undefined): boolean {
+  const on = (r?: import('./types').PaneRecording) => r?.on === true;
+  return on(a) === on(b)
+    && (a?.startedAt ?? 0) === (b?.startedAt ?? 0)
+    && (a?.stoppedReason ?? '') === (b?.stoppedReason ?? '')
+    && (a?.stoppedAt ?? 0) === (b?.stoppedAt ?? 0);
+}
+
 function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
   return a.id === b.id
     && a.cwd === b.cwd
@@ -1982,6 +2008,7 @@ function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
     && a.backend === b.backend
     && a.neverAutoAnswer === b.neverAutoAnswer
     && a.autoMode === b.autoMode
+    && sameRecording(a.recording, b.recording)
     && a.announceDelegation === b.announceDelegation
     && a.announceDelegationEvents === b.announceDelegationEvents
     && (a.contextPack ?? '') === (b.contextPack ?? '')
@@ -3865,6 +3892,16 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     });
   },
 
+  applyPaneRecording: (paneId, recording) => {
+    set((s) => {
+      const pane = s.panes[paneId];
+      if (!pane) return {};
+      const next = recording && (recording.on || recording.stoppedReason) ? recording : undefined;
+      if (sameRecording(pane.recording, next)) return {};
+      return { panes: { ...s.panes, [paneId]: { ...pane, recording: next } } };
+    });
+  },
+
   applyPaneAttentionFromSSE: (paneId, attention, reason) => {
     set((s) => {
       const pane = s.panes[paneId];
@@ -5243,6 +5280,21 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
       // back the count from before this call, so earlier failures still count.
       if (previous && previous.version === version) writeShellAttemptStamp(previous);
       else clearShellAttemptStamp(version);
+      // An automation's run holds it for now (ST-299): a wait, not the
+      // install's paused setting.
+      const automationWait = /^an automation is running\b/.test(outcome.pausedReason ?? '');
+      if (automationWait) {
+        if (opts?.userInitiated) {
+          get().toast(`The desktop update waits: ${outcome.pausedReason}.`, { kind: 'info', icon: '↑', ttlMs: 8000 });
+        }
+        set((current) => ({
+          updateStatus: current.updateStatus
+            ? { ...current.updateStatus, shellApplying: false, shellWaitingForAutomation: outcome.pausedReason }
+            : current.updateStatus,
+        }));
+        void get().refreshUpdateStatus();
+        return;
+      }
       if (opts?.userInitiated) {
         get().toast('Automatic desktop restarts are paused for this install. Use Update now to install the desktop update.', {
           kind: 'info', icon: '↑', ttlMs: 8000,

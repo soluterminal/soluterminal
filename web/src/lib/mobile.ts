@@ -1,16 +1,18 @@
 import { isEmbedded } from '../embed';
 const DEFAULT_MOBILE_BREAKPOINT_PX = 800;
 
+/** The SoluTerminal desktop window (Tauri). Browser hosts such as SoluBrowse
+ *  also inject Tauri globals into external pages; only our own shell marker,
+ *  outside an embed, identifies it. It is never a phone, even when narrow. */
+export function isDesktopShellWindow(): boolean {
+  if (typeof window === 'undefined') return false;
+  const w = window as unknown as { __SOLU_TAURI__?: unknown };
+  return !!w.__SOLU_TAURI__ && !isEmbedded();
+}
+
 export function isMobileViewport(breakpoint = DEFAULT_MOBILE_BREAKPOINT_PX): boolean {
   if (typeof window === 'undefined') return false;
-  const w = window as unknown as {
-    __SOLU_TAURI__?: unknown;
-  };
-  // Browser hosts such as SoluBrowse also inject Tauri globals into external
-  // pages. Only our own shell marker identifies a desktop SoluTerminal window.
-  if (w.__SOLU_TAURI__ && !isEmbedded()) {
-    return false;
-  }
+  if (isDesktopShellWindow()) return false;
 
   const width = window.visualViewport?.width ?? window.innerWidth;
   const height = window.visualViewport?.height ?? window.innerHeight;
@@ -83,6 +85,10 @@ export function syncVisualViewportCssVars(): void {
 // Re-enable with ?textareapin=1 (or remove the localStorage key).
 export function syncTextareaPinPref(): void {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  // The pin is for phones; a narrow desktop window (600-799px) also matches
+  // the mobile media query but needs the textarea at the caret for its IME
+  // candidate bar (feedback #73).
+  document.body.classList.toggle('desktop-shell', isDesktopShellWindow());
   try {
     const q = new URLSearchParams(window.location.search).get('textareapin');
     if (q === '0') localStorage.setItem('solu.textareaPin', '0');

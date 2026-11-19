@@ -154,6 +154,11 @@ type Schedule struct {
 	// Anchors the boot-time missed-fire count so time spent deliberately
 	// paused is never reported as "missed while the app was off".
 	LastArmedAt *time.Time `json:"lastArmedAt,omitempty"`
+	// LastSlotAt is when the timetable last fired this automation, whatever
+	// came of it (a run, a skip, "previous run still going"): missed slots
+	// are counted from it, not from a run's start, which falls behind when a
+	// run overruns its next slot.
+	LastSlotAt *time.Time `json:"lastSlotAt,omitempty"`
 	// LastReadAt is the newest run timestamp the user has SEEN in the
 	// reports reader. Daemon-side so read state follows the user across
 	// devices — reading the digest on the phone clears the unread dot on
@@ -186,12 +191,33 @@ const missedFireCountCap = 500
 // the daemon was down. Returns 0 for unparseable crons (the load sweep
 // disables those separately) and clamps at missedFireCountCap.
 func countMissedFires(sched *Schedule, now time.Time) int {
+	return countMissedFiresAfter(sched, now, time.Time{})
+}
+
+// countMissedFiresAfter is countMissedFires with one more anchor: the start
+// of a run that was in flight when the app stopped (sweepTaskInflight). That
+// run is its slot's run, recorded when it is handled, so its slot is not
+// missed; only the slots after it are.
+func countMissedFiresAfter(sched *Schedule, now, inFlight time.Time) int {
+	n, _ := missedSlots(sched, now, inFlight)
+	return n
+}
+
+// missedSlots counts the timetable slots since the automation last did
+// anything (as countMissedFires), and returns the newest of them.
+func missedSlots(sched *Schedule, now, inFlight time.Time) (int, time.Time) {
 	anchor := sched.CreatedAt
+	if inFlight.After(anchor) {
+		anchor = inFlight
+	}
 	if sched.LastFiredAt != nil && sched.LastFiredAt.After(anchor) {
 		anchor = *sched.LastFiredAt
 	}
 	if sched.LastArmedAt != nil && sched.LastArmedAt.After(anchor) {
 		anchor = *sched.LastArmedAt
+	}
+	if sched.LastSlotAt != nil && sched.LastSlotAt.After(anchor) {
+		anchor = *sched.LastSlotAt
 	}
 	if len(sched.Runs) > 0 && sched.Runs[0].At.After(anchor) {
 		anchor = sched.Runs[0].At
@@ -202,14 +228,15 @@ func countMissedFires(sched *Schedule, now time.Time) int {
 		anchor = *sched.WaitingSince
 	}
 	if anchor.IsZero() || !anchor.Before(now) {
-		return 0
+		return 0, time.Time{}
 	}
 	expr, err := cronParser.Parse(sched.Cron)
 	if err != nil {
-		return 0
+		return 0, time.Time{}
 	}
 	missed := 0
 	cursor := anchor
+	var last time.Time
 	for missed < missedFireCountCap {
 		next := expr.Next(cursor)
 		if next.IsZero() || !next.Before(now) {
@@ -217,8 +244,25 @@ func countMissedFires(sched *Schedule, now time.Time) int {
 		}
 		missed++
 		cursor = next
+		last = next
 	}
-	return missed
+	// Past the cap there are more slots than were walked: the newest of
+	// them is found from just before now (lateGrace back), so how late the
+	// current run is is never measured against a stale slot.
+	if missed >= missedFireCountCap {
+		cursor = now.Add(-lateGrace)
+		if cursor.Before(last) {
+			cursor = last
+		}
+		for {
+			next := expr.Next(cursor)
+			if next.IsZero() || !next.Before(now) {
+				break
+			}
+			cursor, last = next, next
+		}
+	}
+	return missed, last
 }
 
 // isTask reports whether this schedule runs a fresh headless Claude session.
@@ -251,9 +295,31 @@ const (
 func (s *Schedule) isAgentRun() bool { return s.Kind == agentKindSchedule }
 
 type ScheduleRun struct {
+	// ID names the run in the automation's history (schedules_history.go).
+	ID     string    `json:"id,omitempty"`
 	At     time.Time `json:"at"`
 	Status string    `json:"status"` // "fired" | "skipped" | "error"
 	Detail string    `json:"detail,omitempty"`
+	// Outcome is what the run came to: "worked", "nothing" (a task found
+	// nothing to do), "failed" or "skipped". Status stays for older clients.
+	Outcome string `json:"outcome,omitempty"`
+	// Trigger is what started the run: "scheduled", "run-now", "retry"
+	// (a prompt that waited for its pane) or "catch-up".
+	Trigger string `json:"trigger,omitempty"`
+	// Cause is why a run failed or was skipped, as a stable code
+	// (runCause*, schedules_history.go); Detail has the words.
+	Cause string `json:"cause,omitempty"`
+	// EndedAt and DurationMs: when a run that was tried ended, and how long
+	// it took from At. Unset for a run that was not tried.
+	EndedAt    *time.Time `json:"endedAt,omitempty"`
+	DurationMs int64      `json:"durationMs,omitempty"`
+	// Account is the account a task run used ("" when the build cannot
+	// tell); Model the model it asked for ("" = the agent's default).
+	Account string `json:"account,omitempty"`
+	Model   string `json:"model,omitempty"`
+	// Usage is what a task run used: tokens and Claude's cost estimate, as
+	// its result reported them. Nil when nothing was reported.
+	Usage *ScheduleRunUsage `json:"usage,omitempty"`
 	// PaneID is the pane a prompt-kind run delivered into — lets the run
 	// history offer "go to pane". Empty for agent runs and early failures.
 	PaneID string `json:"paneId,omitempty"`
@@ -269,6 +335,17 @@ type ScheduleRun struct {
 	// tellPerson asks recordRun to push this skip to the phone (a prompt
 	// given up after waiting for its pane). Never saved.
 	tellPerson bool
+	// recovery marks a task run that has recovery files (an events file
+	// and an in-flight record): if its record does not reach disk, its push
+	// and chat report wait for the start that records it again. replayed
+	// marks one recorded by that start: its history line is not written
+	// again if the earlier attempt wrote it. deferTo/deferSeq move a
+	// one-time task's run past a spent usage limit in the same save as the
+	// record. Never saved.
+	recovery bool
+	replayed bool
+	deferTo  time.Time
+	deferSeq uint64
 	// byRunNow marks a prompt run the person started with Run now. One that
 	// is skipped (nothing typed) leaves a one-time reminder as it was, and
 	// sends no phone push: the person is there and was told (recordRun).
@@ -288,9 +365,28 @@ var cronParser = cron.NewParser(
 // ScheduleStore owns all schedules: persistence, the cron scheduler
 // goroutine, and the fire wiring. Lives for the daemon's lifetime.
 type ScheduleStore struct {
-	mu    sync.Mutex
-	path  string
-	items map[string]*Schedule
+	mu   sync.Mutex
+	path string
+	// history is every run and change, by day (schedules_history.go).
+	history *scheduleHistory
+	// recoveredSince is, at start only, the start of the latest run each
+	// automation had in flight when the app stopped (sweepTaskInflight).
+	recoveredSince map[string]time.Time
+	// runStarted is when each automation's run in flight started (a task or
+	// a built-in agent's), for counting missed slots after it.
+	runStarted map[string]time.Time
+	// allPaused is the "Pause all automations" switch (automations_pause.go).
+	allPaused automationsPause
+	// liveRuns are the runs in flight the person can watch and stop
+	// (schedules_live.go).
+	liveRuns map[string]*liveRun
+	// asleepNames are the automations that missed runs on this wake, for one
+	// notice (recordMissedAsleep).
+	asleepNames []string
+	asleepTimer *time.Timer
+	// accountOf names the account a provider's runs use now.
+	accountOf func(provider string) string
+	items     map[string]*Schedule
 	// Preserve unsupported records, including fields unknown to this build.
 	opaqueSchedules map[string]json.RawMessage
 	order           []string // insertion order for stable listing
@@ -529,6 +625,7 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 	}
 	s := &ScheduleStore{
 		path:            filepath.Join(dataDir, "schedules.json"),
+		history:         newScheduleHistory(dataDir),
 		items:           map[string]*Schedule{},
 		entryIDs:        map[string]cron.EntryID{},
 		entryTimers:     map[string]*time.Timer{},
@@ -546,6 +643,11 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	s.loadAllPaused()
+	// Task runs SoluTerminal stopped during, first: one that ended is
+	// recorded (a one-time is then done, not "missed"); one still going
+	// holds its run slot until it ends.
+	followers := s.sweepTaskInflight()
 	now := time.Now()
 	var catchUpIDs, waitingIDs []string
 	dirty := false
@@ -569,6 +671,19 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 				continue // no timer: the wait is what runs it
 			}
 		}
+		// A one-time task whose run is still going from before the restart
+		// (sweepTaskInflight): that run is its run; recording it ends it.
+		if sched.oneTime() && s.taskRunning[id] {
+			continue
+		}
+		// All automations were paused when the app stopped: a run that came
+		// due meanwhile is held, owed to the resume, not recorded as missed.
+		if s.allPaused.Paused && !s.taskRunning[id] &&
+			(sched.oneTime() && sched.RunAt.Before(now) || !sched.oneTime() && countMissedFires(sched, now) > 0) {
+			s.holdForPauseLocked(sched)
+			dirty = true
+			continue
+		}
 		// One-time schedules whose moment passed while the daemon was
 		// off are recorded as missed and auto-disabled — mirrors the
 		// cron "don't catch up" policy.
@@ -576,11 +691,8 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 			log.Printf("scheduler: one-time %q (%s) missed while daemon was down (runAt=%s)", sched.Name, sched.ID, sched.RunAt.Format(time.RFC3339))
 			sched.Enabled = false
 			dirty = true
-			sched.Runs = append([]ScheduleRun{{At: now, Status: "skipped", Detail: "missed while daemon was down"}}, sched.Runs...)
+			s.prependRunLocked(sched, ScheduleRun{At: now, Status: "skipped", Cause: runCauseMissedAppOff, Detail: "missed while daemon was down"})
 			sched.SkipCount++
-			if len(sched.Runs) > maxRunHistory {
-				sched.Runs = sched.Runs[:maxRunHistory]
-			}
 			continue
 		}
 		// Recurring schedules whose Until already passed are also
@@ -599,19 +711,19 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 		// (last fire, last recorded run, creation) so a restart right
 		// after this sweep doesn't re-count the same gap.
 		if !sched.oneTime() {
-			if missed := countMissedFires(sched, now); missed > 0 {
+			// A run in flight when the app stopped is its slot's run, not a
+			// missed one, and it stands in for the catch-up run.
+			inFlight, hadRun := s.recoveredSince[id]
+			if missed := countMissedFiresAfter(sched, now, inFlight); missed > 0 {
 				detail := fmt.Sprintf("%d run%s missed while the app was off", missed, plural(missed))
 				if missed >= missedFireCountCap {
 					detail = fmt.Sprintf("%d+ runs missed while the app was off", missedFireCountCap)
 				}
-				if sched.CatchUp && sched.isTask() {
+				if sched.CatchUp && sched.isTask() && !hadRun {
 					detail += " — catching up with one run"
 					catchUpIDs = append(catchUpIDs, sched.ID)
 				}
-				sched.Runs = append([]ScheduleRun{{At: now, Status: "skipped", Detail: detail}}, sched.Runs...)
-				if len(sched.Runs) > maxRunHistory {
-					sched.Runs = sched.Runs[:maxRunHistory]
-				}
+				s.prependRunLocked(sched, ScheduleRun{At: now, Status: "skipped", Cause: runCauseMissedAppOff, Detail: detail})
 				sched.SkipCount += missed
 				dirty = true
 				log.Printf("scheduler: recurring %q (%s): %s", sched.Name, sched.ID, detail)
@@ -622,7 +734,7 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 			// sees a problem in the UI instead of a silent no-op.
 			log.Printf("scheduler: disabling %q (%s): %v", sched.Name, sched.ID, err)
 			sched.Enabled = false
-			sched.noteChange(scheduleChangeDisabled, scheduleActorDaemon, "its timing could not be read", now)
+			s.noteChangeLocked(sched, scheduleChangeDisabled, scheduleActorDaemon, "its timing could not be read", now)
 			dirty = true
 		}
 	}
@@ -674,9 +786,34 @@ func NewScheduleStore(dataDir string, mgr *Manager, bus *uiBus) (*ScheduleStore,
 					continue
 				}
 				log.Printf("scheduler: catch-up run for %s", id)
-				s.fire(id)
+				s.fireAs(id, fireCatchUp)
 			}
 		}()
+	}
+	// Holds a pause left behind when it ended mid-release (a stop between
+	// the switch and the rows): released once the store is wired.
+	leftHeld := false
+	for _, sc := range s.items {
+		if sc.PausedReason == allPausedReason {
+			leftHeld = true
+			break
+		}
+	}
+	if !s.allPaused.Paused && leftHeld {
+		delay := catchUpDelay
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+			s.releaseHeldAfterPause()
+		}()
+	}
+	// Runs still going from before the restart are followed only now, with
+	// the store set up.
+	for _, follow := range followers {
+		go follow()
 	}
 
 	return s, nil
@@ -693,6 +830,12 @@ func (s *ScheduleStore) Stop() {
 	if s.preFireCancel != nil {
 		s.preFireCancel()
 	}
+	s.mu.Lock()
+	if s.asleepTimer != nil {
+		s.asleepTimer.Stop() // no notice from a stopped store
+		s.asleepTimer, s.asleepNames = nil, nil
+	}
+	s.mu.Unlock()
 	ctx := s.cron.Stop() // returns context.Context that cancels once running jobs finish
 	<-ctx.Done()
 }
@@ -945,7 +1088,26 @@ func (s *ScheduleStore) Create(in ScheduleInput) (*Schedule, error) {
 // Only the MCP tool has a caller pane to name, so only it passes a non-nil
 // origin; nothing about validation or firing changes either way.
 func (s *ScheduleStore) CreateWithOrigin(in ScheduleInput, createdBy *ScheduleOrigin) (*Schedule, error) {
+	actor := scheduleActorDaemon
+	if createdBy != nil && createdBy.Source == scheduleSourceMCP {
+		actor = ScheduleActor{By: createdBy.PaneTitle, PaneID: createdBy.PaneID, Source: scheduleSourceMCP}
+		if actor.By == "" {
+			actor.By = createdBy.PaneID
+		}
+		if actor.By == "" {
+			actor.By = "an agent (pane not traced)"
+		}
+	}
+	return s.CreateAs(in, createdBy, actor)
+}
+
+// CreateAs is CreateWithOrigin with who created it named for the history
+// (the person, from the app; an agent's pane; SoluTerminal itself).
+func (s *ScheduleStore) CreateAs(in ScheduleInput, createdBy *ScheduleOrigin, actor ScheduleActor) (*Schedule, error) {
 	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	if err := intervalGuard(in, actor, nil); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(in.Kind) == "task" {
@@ -981,6 +1143,10 @@ func (s *ScheduleStore) CreateWithOrigin(in ScheduleInput, createdBy *ScheduleOr
 		CreatedAt:   time.Now(),
 	}
 	s.mu.Lock()
+	if err := s.countGuardLocked(in, actor, createdBy); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	s.items[sched.ID] = sched
 	s.order = append(s.order, sched.ID)
 	if enabled {
@@ -992,6 +1158,10 @@ func (s *ScheduleStore) CreateWithOrigin(in ScheduleInput, createdBy *ScheduleOr
 	if err := s.saveUnlocked(); err != nil {
 		s.mu.Unlock()
 		return nil, err
+	}
+	if s.history != nil {
+		s.history.markStarted(sched.ID)
+		s.noteHistoryChangeLocked(sched, scheduleChangeCreated, actor, sched.CreatedAt)
 	}
 	metrics := s.metrics
 	s.mu.Unlock()
@@ -1157,6 +1327,17 @@ func (s *ScheduleStore) UpdateBy(id string, in ScheduleInput, actor ScheduleActo
 		s.mu.Unlock()
 		return nil, errScheduleUnavailable
 	}
+	if err := intervalGuard(in, actor, sched); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	// A built-in agent's schedule turned into a prompt or task now counts.
+	if !guarded(sched.Kind) && guarded(in.Kind) {
+		if err := s.countGuardLocked(in, actor, sched.CreatedBy); err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+	}
 	if _, still := s.paneWaits[id]; waitingOneTime && !still {
 		// It ran (or was given up) between the check above and here: its
 		// time is simply past now.
@@ -1168,6 +1349,12 @@ func (s *ScheduleStore) UpdateBy(id string, in ScheduleInput, actor ScheduleActo
 		enabled = *in.Enabled
 	}
 	s.bumpEditUnlocked(id)
+	if strings.TrimSpace(in.Cron) != strings.TrimSpace(sched.Cron) && sched.Enabled {
+		// A new timetable starts now: slots of the new timing before this
+		// edit were never missed (missedSlots anchors on LastArmedAt).
+		now := time.Now()
+		sched.LastArmedAt = &now
+	}
 	sched.Name = scheduleName(in)
 	sched.Cron = strings.TrimSpace(in.Cron)
 	sched.RunAt = in.RunAt
@@ -1204,8 +1391,10 @@ func (s *ScheduleStore) UpdateBy(id string, in ScheduleInput, actor ScheduleActo
 			return nil, err
 		}
 	}
+	now := time.Now()
+	s.noteHistoryChangeLocked(sched, scheduleChangeEdited, actor, now)
 	if enabled != wasEnabled {
-		sched.noteChange(scheduleChangeFor(enabled), actor, "", time.Now())
+		s.noteChangeLocked(sched, scheduleChangeFor(enabled), actor, "", now)
 	}
 	if err := s.saveUnlocked(); err != nil {
 		s.mu.Unlock()
@@ -1250,6 +1439,9 @@ func (s *ScheduleStore) DeleteBy(id string, actor ScheduleActor) error {
 	if isTask {
 		_ = os.RemoveAll(s.taskRunDir(id))
 	}
+	// Its history goes with it; the deletion itself stays in the
+	// deleted-schedules file.
+	s.history.remove(id)
 	s.notifyChanged()
 	return nil
 }
@@ -1304,7 +1496,7 @@ func (s *ScheduleStore) SetEnabledBy(id string, enabled bool, actor ScheduleActo
 	}
 	// Turning off a schedule the stop on agent messaging holds keeps it off:
 	// the hold is dropped, so resume will not run or re-arm it.
-	if !enabled && sched.PausedReason == agentMessagingScheduleReason {
+	if !enabled && (sched.PausedReason == agentMessagingScheduleReason || sched.PausedReason == allPausedReason) {
 		sched.PausedReason = ""
 		s.bumpEditUnlocked(id)
 		err := s.saveUnlocked()
@@ -1343,7 +1535,7 @@ func (s *ScheduleStore) SetEnabledBy(id string, enabled bool, actor ScheduleActo
 			return nil, err
 		}
 	}
-	sched.noteChange(scheduleChangeFor(enabled), actor, "", time.Now())
+	s.noteChangeLocked(sched, scheduleChangeFor(enabled), actor, "", time.Now())
 	if err := s.saveUnlocked(); err != nil {
 		s.mu.Unlock()
 		return nil, err

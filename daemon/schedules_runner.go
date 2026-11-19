@@ -240,7 +240,23 @@ const (
 	// due and admitted already, so the until and snooze gates are not asked
 	// again (asking would spend a snooze meant for the next run).
 	fireRetry
+	// fireCatchUp: the one run at start for a task that missed runs while
+	// the app was off (CatchUp). Gated like a scheduled run.
+	fireCatchUp
 )
+
+// trigger names the mode in a run's record.
+func (m fireMode) trigger() string {
+	switch m {
+	case firePerson:
+		return runTriggerRunNow
+	case fireRetry:
+		return runTriggerRetry
+	case fireCatchUp:
+		return runTriggerCatchUp
+	}
+	return runTriggerScheduled
+}
 
 func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 	s.mu.Lock()
@@ -274,7 +290,7 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 		s.unscheduleUnlocked(id)
 		sched.Enabled = false
 		s.mu.Unlock()
-		s.recordRun(id, ScheduleRun{At: time.Now(), Status: "skipped", Detail: "past until — auto-disabled"})
+		s.recordRun(id, ScheduleRun{At: time.Now(), Status: "skipped", Trigger: mode.trigger(), Cause: runCauseEnded, Detail: "past until — auto-disabled"})
 		return
 	}
 	// Snooze gate: consume the marker and skip exactly this fire.
@@ -284,7 +300,29 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 		sched.SnoozeUntil = nil
 		_ = s.saveUnlocked()
 		s.mu.Unlock()
-		s.recordRun(id, ScheduleRun{At: time.Now(), Status: "skipped", Detail: "snoozed"})
+		s.recordRun(id, ScheduleRun{At: time.Now(), Status: "skipped", Trigger: mode.trigger(), Cause: runCauseSnoozed, Detail: "snoozed"})
+		return
+	}
+	// All automations are paused (automations_pause.go): the run is held,
+	// not run and not lost; the resume runs it once. The person's Run now
+	// still runs.
+	if mode == fireRetry && s.allPaused.Paused {
+		// A prompt waiting for its pane keeps waiting, its pane's identity
+		// checks intact; nothing is typed while paused.
+		s.mu.Unlock()
+		return
+	}
+	if mode != firePerson && s.allPaused.Paused && s.paneWaits[id] != nil {
+		// Already waiting for its pane: the wait counts this slot and keeps
+		// its pane check; nothing is typed while paused.
+		s.mu.Unlock()
+		return
+	}
+	if mode != firePerson && s.allPaused.Paused {
+		s.holdForPauseLocked(sched)
+		_ = s.saveUnlocked()
+		s.mu.Unlock()
+		s.notifyScheduleChanged(id)
 		return
 	}
 	// The person's stop on agent messaging: a schedule an agent filed is
@@ -300,6 +338,103 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 		s.mu.Unlock()
 		s.notifyScheduleChanged(id)
 		return
+	}
+	// Missed while the computer was asleep (ST-299 item 15): the timetable's
+	// timer stops while the machine sleeps, and on waking it fires once, late.
+	// A run more than lateGrace past its slot is not run late: it is
+	// recorded as missed, with the slots before it, and the person gets one
+	// notice for all the automations that missed runs (a task with catch-up
+	// on runs once instead). A run just a little late runs, and only the
+	// slots before it are recorded as missed.
+	// A run still in flight from an earlier slot: that slot is not a missed
+	// one. Slots after the run started are counted from its start; this
+	// slot is then recorded by the run gate below as "previous run still
+	// going", unless it is past lateGrace (then it is among the missed).
+	inFlight := s.taskRunning[id] || sched.Kind == "agent" && s.agentRunning[sched.AgentID]
+	// A prompt waiting for its pane counts the slots that come due meanwhile
+	// itself (paneWait.later): they are not missed. Nor are a hidden
+	// managed-agent trigger's (no row to name).
+	skipAsleep := s.paneWaits[id] != nil || sched.isAgentRun()
+	if mode == fireScheduled && !sched.oneTime() && inFlight && !skipAsleep {
+		if started, ok := s.runStarted[id]; ok {
+			now := time.Now()
+			if n, last := missedSlots(sched, now, started); n > 0 {
+				tooLate := now.Sub(last) > lateGrace
+				earlier := n - 1
+				if tooLate {
+					earlier = n
+				}
+				if earlier > 0 {
+					name := noticeNameOf(sched)
+					s.mu.Unlock()
+					s.recordMissedAsleep(id, name, missedAsleepDetail(earlier, n)+" (a run was still going)", earlier, now)
+					if tooLate {
+						return
+					}
+					s.mu.Lock()
+					if sched, ok = s.items[id]; !ok || !scheduleAvailable(sched) || !sched.Enabled || s.editSeq[id] != due.seq {
+						s.mu.Unlock()
+						return
+					}
+					if s.allPaused.Paused {
+						// Paused meanwhile: the run is held, not lost.
+						s.holdForPauseLocked(sched)
+						_ = s.saveUnlocked()
+						s.mu.Unlock()
+						s.notifyScheduleChanged(id)
+						return
+					}
+				}
+			}
+		}
+	}
+	if mode == fireScheduled && !sched.oneTime() && !inFlight && !skipAsleep {
+		now := time.Now()
+		if n, last := missedSlots(sched, now, time.Time{}); n > 0 {
+			tooLate := now.Sub(last) > lateGrace
+			earlier := n - 1
+			if tooLate {
+				earlier = n
+			}
+			if earlier > 0 {
+				catchUp := tooLate && sched.CatchUp && sched.isTask()
+				name := noticeNameOf(sched)
+				s.mu.Unlock()
+				detail := missedAsleepDetail(earlier, n)
+				if catchUp {
+					detail += " — catching up with one run"
+				}
+				s.recordMissedAsleep(id, name, detail, earlier, now)
+				if tooLate && !catchUp {
+					return
+				}
+				// The lock was let go: a pause or an edit that landed
+				// meanwhile ends this run, as it would a wait for a pane.
+				s.mu.Lock()
+				if sched, ok = s.items[id]; !ok || !scheduleAvailable(sched) || !sched.Enabled || s.editSeq[id] != due.seq {
+					s.mu.Unlock()
+					return
+				}
+				if s.allPaused.Paused {
+					// Paused meanwhile: the run is held, not lost.
+					s.holdForPauseLocked(sched)
+					_ = s.saveUnlocked()
+					s.mu.Unlock()
+					s.notifyScheduleChanged(id)
+					return
+				}
+			}
+			// Decided on the automation as it is now.
+			if tooLate && sched.CatchUp && sched.isTask() {
+				mode = fireCatchUp
+			}
+		}
+	}
+	// This slot is handled now, whatever comes of it: the next fire counts
+	// missed slots from here (missedSlots).
+	if (mode == fireScheduled || mode == fireCatchUp) && !sched.oneTime() {
+		now := time.Now()
+		sched.LastSlotAt = &now
 	}
 	// Snapshot the fields we need so we can release the lock before
 	// doing I/O (the PTY write / the agent or task spawn).
@@ -322,15 +457,15 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 		return
 	}
 	if isKind && kind.fire != nil {
-		kind.fire(s, id, kindSched, apply)
+		kind.fire(s, id, kindSched, apply, mode.trigger())
 		return
 	}
 	if isTask {
-		s.fireTask(id, cwd, prompt, permission, model, timeoutMin)
+		s.fireTaskAs(mode.trigger(), id, cwd, prompt, permission, model, timeoutMin)
 		return
 	}
 
-	run := ScheduleRun{At: time.Now(), PaneID: paneID, byRunNow: mode == firePerson}
+	run := ScheduleRun{At: time.Now(), PaneID: paneID, Trigger: mode.trigger(), byRunNow: mode == firePerson}
 	ident, waited, ok := s.beginPromptRun(id, paneID, run, mode, due)
 	if !ok {
 		return
@@ -351,6 +486,7 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 	hold := func(why paneWaitReason) {
 		if mode == firePerson {
 			run.Status = "skipped"
+			run.Cause = why.cause()
 			run.Detail = why.row
 			s.recordRun(id, run)
 			return
@@ -361,8 +497,9 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 	// skip records a run that will not be tried again. One that had waited
 	// for its pane is announced: the person was told nothing while it
 	// waited, so a quiet skip now would lose the run without a word.
-	skip := func(detail string) {
+	skip := func(cause, detail string) {
 		run.Status = "skipped"
+		run.Cause = cause
 		run.Detail = detail
 		run.tellPerson = waited && mode != firePerson
 		s.recordRun(id, run)
@@ -373,6 +510,7 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 
 	if s.mgr == nil {
 		run.Status = "error"
+		run.Cause = runCauseInternal
 		run.Detail = "pane manager unavailable"
 		s.recordRun(id, run)
 		return
@@ -385,6 +523,7 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 		// the row then says why it stopped.
 		s.pauseForReason(id, targetPaneGoneReason)
 		run.Status = "error"
+		run.Cause = runCausePaneGone
 		run.Detail = "target pane no longer exists — paused. Pick a pane and turn it back on to resume."
 		s.recordRun(id, run)
 		return
@@ -403,10 +542,19 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 		hold(waitMenu)
 		return
 	default:
-		skip(fmt.Sprintf("pane not ready (state=%s)", state))
+		skip(runCausePaneNotReady, fmt.Sprintf("pane not ready (state=%s)", state))
 		return
 	}
 
+	// A Stop, a pause or an edit that landed since this run came due ends
+	// it here, before anything is typed (a retry admitted just before the
+	// person pressed Stop).
+	s.mu.Lock()
+	stale := s.editSeq[id] != due.seq
+	s.mu.Unlock()
+	if stale {
+		return
+	}
 	// Terminal TUIs need body and Enter split across two PTY frames; that
 	// discipline lives in submitLineToPane (pty_submit.go).
 	body := strings.TrimRight(prompt, "\r\n")
@@ -431,17 +579,20 @@ func (s *ScheduleStore) fireAs(id string, mode fireMode) {
 	case errors.Is(err, errPutBackInBox):
 		// Not ready: the person sends or clears the message in its input
 		// box first (its chip shows it).
-		skip(fmt.Sprintf("pane not ready (%v)", err))
+		skip(runCausePaneTyping, fmt.Sprintf("pane not ready (%v)", err))
 		return
 	}
 	if err != nil {
 		run.Status = "error"
+		run.Cause = runCauseRunFailed
 		run.Detail = err.Error()
+		endRun(&run, time.Now())
 		s.recordRun(id, run)
 		return
 	}
 
 	delivered = true
+	endRun(&run, time.Now())
 	run.Status = "fired"
 	run.Detail = "delivered to " + displayTitle(pane)
 	s.recordRun(id, run)
@@ -493,6 +644,17 @@ const paneWaitGaveUp = "not sent: "
 // automation's row and a skipped Run now, gaveUp for the give-up record
 // ("not sent: <gaveUp> for 60 min").
 type paneWaitReason struct{ row, gaveUp string }
+
+// cause is the wait's reason as a run cause code.
+func (w paneWaitReason) cause() string {
+	switch w {
+	case waitMenu:
+		return runCausePaneMenu
+	case waitTyped, waitDraft, waitUnsent:
+		return runCausePaneTyping
+	}
+	return runCausePaneBusy
+}
 
 var (
 	waitBusy  = paneWaitReason{"the pane is busy", "the pane stayed busy"}
@@ -635,8 +797,9 @@ func (s *ScheduleStore) beginPromptRun(id, paneID string, run ScheduleRun, mode 
 			ident = paneWaitIdentity(p)
 		}
 	}
-	skipped := func(detail string) {
+	skipped := func(cause, detail string) {
 		run.Status = "skipped"
+		run.Cause = cause
 		run.Detail = detail
 		s.recordRun(id, run)
 	}
@@ -653,7 +816,7 @@ func (s *ScheduleStore) beginPromptRun(id, paneID string, run ScheduleRun, mode 
 		if mode != fireRetry {
 			// The next poll retries a retry; a timetable run or a Run now
 			// is told why nothing more was typed.
-			skipped("another run of this automation is being sent to the pane")
+			skipped(runCauseAlreadyRunning, "another run of this automation is being sent to the pane")
 		}
 		return "", waiting, false
 	}
@@ -671,7 +834,7 @@ func (s *ScheduleStore) beginPromptRun(id, paneID string, run ScheduleRun, mode 
 		// one for it.
 		s.mu.Unlock()
 		if mode == firePerson {
-			skipped("another automation is being sent to the pane")
+			skipped(runCausePaneBusy, "another automation is being sent to the pane")
 			return "", waiting, false
 		}
 		s.waitForPane(id, paneID, run, waitQueue, mode, due, ident)
@@ -694,6 +857,7 @@ func (s *ScheduleStore) beginPromptRun(id, paneID string, run ScheduleRun, mode 
 		s.endPromptRun(id, paneID)
 		s.endPaneWait(id)
 		run.Status = "skipped"
+		run.Cause = runCausePaneNotReady
 		run.Detail = paneWaitGaveUp + "the pane was restarted as a different agent while the prompt waited"
 		run.tellPerson = true
 		s.recordRun(id, run)
@@ -706,7 +870,7 @@ func (s *ScheduleStore) beginPromptRun(id, paneID string, run ScheduleRun, mode 
 	}
 	s.endPromptRun(id, paneID)
 	if mode == firePerson {
-		skipped(why.row)
+		skipped(why.cause(), why.row)
 		return "", waiting, false
 	}
 	s.waitForPane(id, paneID, run, why, mode, due, ident)
@@ -837,7 +1001,7 @@ func (s *ScheduleStore) resumePaneWaits(ids []string) {
 			name, paneID := noticeNameOf(sched), sched.PaneID
 			s.dropPaneWaitLocked(id)
 			s.mu.Unlock()
-			run := ScheduleRun{At: now, PaneID: paneID, Status: "skipped", tellPerson: true,
+			run := ScheduleRun{At: now, PaneID: paneID, Status: "skipped", Trigger: runTriggerRetry, Cause: runCausePaneBusy, tellPerson: true,
 				Detail: paneWaitGaveUp + "SoluTerminal restarted while the prompt waited for its pane"}
 			s.recordRun(id, run) // saves; a one-time is turned off
 			s.toastGaveUp(name, run.Detail)
@@ -937,6 +1101,7 @@ func (s *ScheduleStore) waitForPane(id, paneID string, run ScheduleRun, why pane
 
 	run.At = now // when it was given up
 	run.Status = "skipped"
+	run.Cause = why.cause()
 	run.Detail = paneWaitGaveUp + why.gaveUp + " for " + fmtWaited(now.Sub(w.since))
 	if w.later > 0 {
 		run.Detail += fmt.Sprintf(" (%d runs)", w.later+1)
@@ -1080,7 +1245,7 @@ func (s *ScheduleStore) pauseForReason(id, reason string) {
 	s.unscheduleUnlocked(id)
 	sched.Enabled = false
 	sched.PausedReason = reason
-	sched.noteChange(scheduleChangeDisabled, scheduleActorDaemon, reason, time.Now())
+	s.noteChangeLocked(sched, scheduleChangeDisabled, scheduleActorDaemon, reason, time.Now())
 	_ = s.saveUnlocked()
 }
 
@@ -1131,11 +1296,21 @@ func isFireReadyState(state PaneRuntimeState, status PaneStatus) bool {
 }
 
 func (s *ScheduleStore) recordRun(id string, run ScheduleRun) {
+	_ = s.recordRunSaved(id, run)
+}
+
+// errRunNotRecorded: the automation is gone (or not this build's), so the
+// run has nowhere to go.
+var errRunNotRecorded = errors.New("the automation is gone")
+
+// recordRunSaved is recordRun, and says whether the record reached disk: a
+// task run's recovery files are removed only then (schedules_task_stream.go).
+func (s *ScheduleStore) recordRunSaved(id string, run ScheduleRun) error {
 	s.mu.Lock()
 	sched, ok := s.items[id]
 	if !ok || !scheduleAvailable(sched) {
 		s.mu.Unlock()
-		return
+		return errRunNotRecorded
 	}
 	// Snapshot the push decision inputs while we hold the lock; the POST
 	// itself happens off-lock (and off this goroutine) below.
@@ -1169,11 +1344,8 @@ func (s *ScheduleStore) recordRun(id string, run ScheduleRun) {
 		ref := *sched.DeliverChat
 		deliverChat = &ref
 	}
-	// Prepend (newest first), cap length.
-	sched.Runs = append([]ScheduleRun{run}, sched.Runs...)
-	if len(sched.Runs) > maxRunHistory {
-		sched.Runs = sched.Runs[:maxRunHistory]
-	}
+	// Prepend (newest first), cap length; and the history line.
+	run = s.prependRunLocked(sched, run)
 	// Lifetime counters — survive beyond the 20-run cap.
 	switch run.Status {
 	case "fired":
@@ -1195,6 +1367,16 @@ func (s *ScheduleStore) recordRun(id string, run ScheduleRun) {
 	runNowSkip := run.byRunNow && run.Status == "skipped"
 	if sched.oneTime() && runNowSkip {
 		// Left as it was.
+	} else if sched.oneTime() && !run.deferTo.IsZero() && sched.Enabled && sched.FireCount == 0 && s.editSeq[id] == run.deferSeq {
+		// A task run that met a spent usage limit: its one chance moves to
+		// just after the reset, in the same save as the run's record, so
+		// no stop in between can spend it.
+		s.unscheduleUnlocked(id)
+		at := run.deferTo.Add(time.Minute)
+		sched.RunAt = &at
+		if err := s.scheduleUnlocked(sched); err != nil {
+			sched.Enabled = false
+		}
 	} else if sched.oneTime() {
 		s.unscheduleUnlocked(id)
 		sched.Enabled = false
@@ -1202,9 +1384,16 @@ func (s *ScheduleStore) recordRun(id string, run ScheduleRun) {
 		s.unscheduleUnlocked(id)
 		sched.Enabled = false
 	}
-	_ = s.saveUnlocked()
+	saveErr := s.saveUnlocked()
 	s.mu.Unlock()
 	s.notifyScheduleChanged(id)
+	if saveErr != nil && run.recovery {
+		// A task run whose record did not reach disk stays recoverable
+		// (its files are kept), and the next start records it again: its
+		// push and its chat report go then, once.
+		log.Printf("scheduler: run %s of %s not saved (%v): its push and chat report wait for the next start", run.ID, id, saveErr)
+		return saveErr
+	}
 	metrics.IncLabelled("solud_schedule_runs_total", map[string]string{"kind": kind, "status": run.Status})
 
 	// Off the lock, on purpose: the mirror calls into the ManagedAgentStore, which
@@ -1229,11 +1418,12 @@ func (s *ScheduleStore) recordRun(id string, run ScheduleRun) {
 		switch {
 		case runNowSkip:
 			// The person is at the screen and was told there.
-		case run.Status == "error" || (run.Status == "skipped" && (wasOneTime || run.tellPerson)):
+		case run.Status == "error" || run.Outcome == runOutcomeFailed || (run.Status == "skipped" && (wasOneTime || run.tellPerson)):
 			// A failed task run's Summary says why ("failed: <last error
 			// line>"); lead with it and keep the detail for exit and time.
+			// A run whose report says it could not finish is a failure too.
 			body := run.Detail
-			if run.Status == "error" && run.Summary != "" {
+			if run.Outcome == runOutcomeFailed && run.Summary != "" {
 				body = run.Summary + " (" + run.Detail + ")"
 			}
 			go pusher.FireSchedule(id, name, "schedule-error", body)
@@ -1262,6 +1452,7 @@ func (s *ScheduleStore) recordRun(id string, run ScheduleRun) {
 			}
 		}
 	}
+	return saveErr
 }
 
 // stampRunDetail appends a note to an existing run record (matched by
@@ -1276,6 +1467,9 @@ func (s *ScheduleStore) stampRunDetail(id string, at time.Time, note string) {
 					sched.Runs[i].Detail += " · "
 				}
 				sched.Runs[i].Detail += note
+				if s.history != nil && sched.Runs[i].ID != "" {
+					s.history.append(id, scheduleHistoryEntry{Type: historyEntryNote, RunID: sched.Runs[i].ID, Note: note})
+				}
 				break
 			}
 		}

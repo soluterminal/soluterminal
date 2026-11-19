@@ -1,4 +1,5 @@
 import type { RefObject } from 'react';
+import { paneRecordable } from '../lib/paneRecording';
 import type { PaneInfo } from '../types';
 import { AUTO_MODES, autoModeMenuLabel } from '../lib/autoMode';
 import { useClampedMenuPosition } from './useClampedMenuPosition';
@@ -67,6 +68,8 @@ interface PaneContextMenuProps {
   // Absent ⇒ hidden.
   onResumePane?: () => void;
   onClosePane: () => void;
+  // Output recording (lib/paneRecording.ts); omitted where it can't apply.
+  onRecording?: (action: 'start' | 'stop' | 'delete') => void;
   // Terminal selection actions (shown only when text is selected): paste the
   // selection into another pane's input (no Enter), or search every pane's
   // scrollback for it.
@@ -118,6 +121,7 @@ export function PaneContextMenu({
   onSearchSelection,
   onLastTurnDiff,
   onReviewChanges,
+  onRecording,
 }: PaneContextMenuProps) {
   const currentAutoMode = (pane.autoMode ?? '') as PaneAutoMode;
   const paneAgent = agentFromCommand(pane.cmd);
@@ -244,6 +248,21 @@ export function PaneContextMenu({
           {pane.contextPack && onDetachContextPack && (
             <button role="menuitem" onClick={onDetachContextPack}>Detach</button>
           )}
+        </>
+      )}
+      {onRecording && (pane.recording?.on || paneRecordable(pane)) && (
+        <>
+          <div className="pane-ctx-menu-sep" />
+          <div className="pane-ctx-menu-label">Recording{pane.recording?.on ? ' — on' : ''}</div>
+          {pane.recording?.on ? (
+            <button role="menuitem" onClick={() => onRecording('stop')}>Stop recording</button>
+          ) : (
+            <button role="menuitem" onClick={() => onRecording('start')}
+              title="Saves this pane's output to a file on this computer only, deleted after 7 days, never sent to the cloud">
+              Start recording output…
+            </button>
+          )}
+          <button role="menuitem" className="danger" onClick={() => onRecording('delete')}>Delete this pane's recordings…</button>
         </>
       )}
       <div className="pane-ctx-menu-sep" />

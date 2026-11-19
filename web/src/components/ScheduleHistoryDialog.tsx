@@ -7,6 +7,8 @@ import { relativeTime } from './sidebar/time';
 import { renderReportMarkdown } from '../lib/reportMarkdown';
 import { RunStatusGlyph, runVisualColor, scheduleRunVisual } from './shared/runStatus';
 import { describeChange } from '../lib/scheduleChanges';
+import { ScheduleRunHistory } from './ScheduleRunHistory';
+import { ScheduleLiveRun } from './ScheduleLiveRun';
 
 // Runs & reports for one schedule — opened by clicking the schedule row
 // (and from the row's right-click menu, and by tapping a notification).
@@ -154,11 +156,32 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
   // report, with Retry; cleared when a retry starts.
   const [logErrors, setLogErrors] = useState<Record<string, string>>({});
   const [showMeta, setShowMeta] = useState(false);
+  // The reader shows a report, or the automation's history (every run and
+  // change, by day). A run opened from the history that is older than the
+  // newest runs the row keeps is pinned: its report shows, paging is off.
+  const [view, setView] = useState<'report' | 'history'>('report');
+  // Once opened, the history stays mounted (hidden behind a report), so going
+  // back keeps its filter, its loaded pages and where it was scrolled to.
+  const [historyOpened, setHistoryOpened] = useState(false);
+  useEffect(() => {
+    if (view === 'history') setHistoryOpened(true);
+  }, [view]);
+  const [pinned, setPinned] = useState<ScheduleRun | null>(null);
   const fetching = useRef<Set<string>>(new Set());
 
   const idx = cursor ? runs.findIndex((r) => r.at === cursor) : 0;
-  const run: ScheduleRun | undefined = runs[idx === -1 ? 0 : idx];
+  const run: ScheduleRun | undefined = pinned ?? runs[idx === -1 ? 0 : idx];
   const pos = idx === -1 ? 0 : idx;
+
+  function openFromHistory(target: ScheduleRun) {
+    if (runs.some((r) => r.at === target.at)) {
+      setPinned(null);
+      setCursor(target.at);
+    } else {
+      setPinned(target);
+    }
+    setView('report');
+  }
 
   function loadReport(target: ScheduleRun) {
     if (!target.logFile || fetching.current.has(target.at)) return;
@@ -266,6 +289,12 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
             )}
             <button
               className="reader-btn"
+              title={view === 'history' ? 'Back to the report' : 'Every run and change, by day'}
+              aria-pressed={view === 'history'}
+              onClick={() => setView((v) => (v === 'history' ? 'report' : 'history'))}
+            >History</button>
+            <button
+              className="reader-btn"
               title="Run details — mode, directory, prompt, lifetime counts"
               aria-label="Run details"
               onClick={() => setShowMeta((v) => !v)}
@@ -294,6 +323,15 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
           </div>
         )}
 
+        {(view === 'history' || historyOpened) && (
+          <div className="report-reader-body" style={{ display: view === 'history' ? 'flex' : 'none', flexDirection: 'column' }}>
+            <ScheduleRunHistory schedule={schedule} onClose={onClose} onOpenReport={openFromHistory} />
+          </div>
+        )}
+
+        <ScheduleLiveRun schedule={schedule} />
+
+        {view === 'report' && (<>
         <div className="report-reader-body">
           {!run && (schedule.kind === 'task' && schedule.ownedByAgentId ? (
             <div className="report-reader-empty">
@@ -332,7 +370,7 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
           )}
         </div>
 
-        {(runs.length > 1 || !!body) && (
+        {(runs.length > 1 || !!body || !!pinned) && (
           <div className="report-reader-nav">
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               {!!body && !!schedule.cwd && (
@@ -344,7 +382,10 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
                 >{spawning ? 'Opening…' : 'Act on this ↗'}</button>
               )}
             </div>
-            {runs.length > 1 && (
+            {pinned && (
+              <button className="reader-btn" onClick={() => setPinned(null)}>Back to the newest runs</button>
+            )}
+            {!pinned && runs.length > 1 && (
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <button
                   className="reader-btn"
@@ -363,80 +404,20 @@ export function TaskReportView({ schedule, onClose, initialRunAt, embedded }: {
             )}
           </div>
         )}
+        </>)}
     </>
   );
 }
 
 // -------------------------------------------------------------- run list --
 
-type RunLog =
-  | { state: 'loading' }
-  | { state: 'ready'; text: string }
-  | { state: 'error'; message: string };
-
 function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () => void }) {
-  const panes = useStore((s) => s.panes);
-  const revealPane = useStore((s) => s.revealPane);
-  const toast = useStore((s) => s.toast);
-  // Per-run expanded log: run.at → its text, still loading, or why the load
-  // failed (kept on the row with Retry).
-  const [logs, setLogs] = useState<Record<string, RunLog>>({});
-  // One auto-expand per schedule per open — never re-fight a user who
-  // collapsed the log, and re-arm if the dialog is retargeted.
-  const autoExpandedFor = useRef<string | null>(null);
-
-  const runs = schedule.runs || [];
-
-  useEffect(() => {
-    if (autoExpandedFor.current === schedule.id) return;
-    autoExpandedFor.current = schedule.id;
-    const newest = runs.find((r) => r.logFile);
-    if (newest) void toggleLog(newest);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schedule.id]);
-
-  async function loadLog(run: ScheduleRun) {
-    if (!run.logFile) return;
-    setLogs((m) => ({ ...m, [run.at]: { state: 'loading' } }));
-    try {
-      const text = await api.scheduleRunLog(schedule.id, run.logFile);
-      // Only if the row is still open: the person may have hidden it meanwhile.
-      setLogs((m) => (run.at in m ? { ...m, [run.at]: { state: 'ready', text } } : m));
-    } catch (e) {
-      setLogs((m) => (run.at in m
-        ? { ...m, [run.at]: { state: 'error', message: (e as Error).message || 'unknown error' } }
-        : m));
-    }
-  }
-
-  async function toggleLog(run: ScheduleRun) {
-    if (!run.logFile) return;
-    if (logs[run.at] !== undefined) {
-      setLogs((m) => {
-        const next = { ...m };
-        delete next[run.at];
-        return next;
-      });
-      return;
-    }
-    await loadLog(run);
-  }
-
-  async function copyLog(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast('Log copied', { kind: 'success' });
-    } catch {
-      toast('Copy failed — select the text instead', { kind: 'warn', icon: '⚠' });
-    }
-  }
-
   return createPortal(
     <div className="dialog-backdrop" onMouseDown={onClose}>
       <div
         className="dialog"
         onMouseDown={(e) => e.stopPropagation()}
-        style={{ width: 560, maxWidth: '92vw' }}
+        style={{ width: 560, maxWidth: '92vw', display: 'flex', flexDirection: 'column', maxHeight: '86vh' }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <h2 style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -452,85 +433,13 @@ function RunListDialog({ schedule, onClose }: { schedule: Schedule; onClose: () 
 
         <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 2 }}>
           Ran {schedule.fireCount}× · skipped {schedule.skipCount} · errors {schedule.errorCount}
-          {runs.length > 0 && ` · showing the last ${runs.length}`}
         </div>
 
-        <ScheduleChangesList schedule={schedule} />
-
-        {runs.length === 0 && (
-          <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 10 }}>
-            No runs yet: this automation hasn&apos;t run.
-          </div>
-        )}
-
-        {/* flex:1 + minHeight:0 — if the user resizes the dialog taller,
-            the reading area absorbs the space (a fixed-height report box
-            inside a stretched dialog reads as a broken empty card). */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 8, flex: '1 1 auto', minHeight: 0, overflow: 'auto' }}>
-          {runs.map((run) => {
-            const paneAlive = !!(run.paneId && panes[run.paneId]);
-            const expanded = logs[run.at];
-            return (
-              <div key={run.at} style={{ borderBottom: '1px solid var(--border, #333)', padding: '5px 0' }}>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12 }}>
-                  <span style={{ width: 14, textAlign: 'center' }}>
-                    <RunStatusGlyph visual={scheduleRunVisual(run.status)} size={13} />
-                  </span>
-                  <span
-                    style={{ whiteSpace: 'nowrap' }}
-                    title={new Date(run.at).toLocaleString()}
-                  >{relativeTime(new Date(run.at).getTime())}</span>
-                  <span style={{ color: 'var(--fg-dim)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={run.detail}>
-                    {run.detail || run.status}
-                  </span>
-                  {expanded?.state === 'ready' && !!expanded.text && (
-                    <button
-                      style={{ fontSize: 10, padding: '1px 8px' }}
-                      title="Copy the full log to the clipboard"
-                      onClick={() => void copyLog(expanded.text)}
-                    >copy</button>
-                  )}
-                  {run.logFile && (
-                    <button
-                      style={{ fontSize: 10, padding: '1px 8px' }}
-                      onClick={() => void toggleLog(run)}
-                    >{expanded !== undefined ? 'hide' : 'view log'}</button>
-                  )}
-                  {run.paneId && (
-                    <button
-                      style={{ fontSize: 10, padding: '1px 8px' }}
-                      disabled={!paneAlive}
-                      title={paneAlive ? 'Focus the pane this run delivered into' : 'Pane no longer exists'}
-                      onClick={() => { void revealPane(run.paneId!); onClose(); }}
-                    >go to pane</button>
-                  )}
-                </div>
-                {expanded?.state === 'error' && (
-                  <div role="alert" style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 4 }}>
-                    Couldn&apos;t load this log: {expanded.message}{' '}
-                    <button
-                      style={{ fontSize: 10, padding: '1px 8px' }}
-                      onClick={() => void loadLog(run)}
-                    >Retry</button>
-                  </div>
-                )}
-                {expanded !== undefined && expanded.state !== 'error' && (
-                  <pre style={{
-                    fontSize: 10,
-                    fontFamily: "'SF Mono','Menlo',monospace",
-                    background: 'var(--bg-dim, rgba(127,127,127,0.08))',
-                    padding: 8,
-                    marginTop: 4,
-                    maxHeight: 260,
-                    overflow: 'auto',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                  }}>{expanded.state === 'loading' ? 'Loading the log…' : expanded.text}</pre>
-                )}
-              </div>
-            );
-          })}
-        </div>
+        {/* Every run and change, by day, a page at a time (the history
+            replaced the newest-20 list). flex:1 + minHeight:0: a taller
+            dialog gives the list the space. */}
+        <ScheduleLiveRun schedule={schedule} />
+        <ScheduleRunHistory schedule={schedule} onClose={onClose} autoExpandNewestLog />
       </div>
     </div>,
     document.body,

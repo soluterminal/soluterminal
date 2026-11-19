@@ -11,6 +11,7 @@ import { api } from '../api';
 import { PaneAgentStaleDot } from './PaneAgentStaleDot';
 import { PaneCredentialBadge, paneAccountStatus } from './PaneCredentialBadge';
 import { PaneAutoModeChip } from './PaneAutoModeChip';
+import { PaneRecordingMark } from './PaneRecordingMark';
 
 // AutoApprovingChip surfaces the daemon's auto-pending attention signal
 // where the user's eye already is: the pane header. Two phases share it:
@@ -262,6 +263,9 @@ export function PaneHeaderBadges({ pane, paneIndex, showAutoMode = true, section
 
 
       </>}
+      {/* The recording mark never folds into +N: it shows on every header,
+          narrow, unfocused, maximized or in the background. */}
+      {(!section || section === 'attention') && <PaneRecordingMark pane={pane} place="header" />}
       {section === 'attention' && accountWarning && <PaneCredentialBadge pane={pane} />}
       {(!section || section === 'attention') && <PaneAgentStaleDot pane={pane} />}
       {(!section || section === 'details') && <>

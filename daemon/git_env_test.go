@@ -309,7 +309,7 @@ func TestHardenedGitNeverRunsRepositoryPrograms(t *testing.T) {
 	if _, err := turnGit(ctx, repo, nil, nil, "log", "-1", "--oneline"); err != nil {
 		t.Errorf("turnGit log: %v", err)
 	}
-	if _, err := hardenedGitStatus(repo, true, 5); err != nil {
+	if _, err := hardenedGitStatus(repo, true, 5, ""); err != nil {
 		t.Errorf("git_status tool: %v", err)
 	}
 	if _, why := workerGitInspect(ctx, repo, false); why != "uncommitted work" {
@@ -479,7 +479,7 @@ func TestGitUserExcludesFileScope(t *testing.T) {
 	if env := hardenedGitCommand(context.Background(), repo, "status").Env; !slices.Contains(env, "GIT_CONFIG_GLOBAL="+config.globalConfig) {
 		t.Errorf("hardened git env = %q, want the safe.directory-only global config", env)
 	}
-	out, err := hardenedGitStatus(repo, false, 1)
+	out, err := hardenedGitStatus(repo, false, 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}

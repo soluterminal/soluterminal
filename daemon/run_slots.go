@@ -40,7 +40,7 @@ func defaultAgentRunCaps() agentRunCaps {
 // len(held) <= caps.MaxRuns.Value + caps.Reserved.Value <= agentRunsHardCeiling.
 func admitRunSlot(held, reserved map[string]bool, key string, bookkeeping bool, caps agentRunCaps, noun string) (ok bool, detail string) {
 	if held[key] {
-		return false, "previous run still going"
+		return false, runSlotStillGoing
 	}
 	if bookkeeping && len(reserved) < caps.Reserved.Value {
 		held[key] = true
@@ -63,3 +63,7 @@ func releaseRunSlot(held, reserved map[string]bool, key string) {
 	delete(held, key)
 	delete(reserved, key)
 }
+
+// runSlotStillGoing is admitRunSlot's refusal when the same automation's
+// previous run has not ended.
+const runSlotStillGoing = "previous run still going"

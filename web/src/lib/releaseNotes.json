@@ -1,4 +1,16 @@
 {
+  "0.0.1247": [
+    "Automations: click an automation to see its runs by day, with each run's outcome and, for a task, how long it took, the model and Claude's cost estimate. Tick \"Failed only\" to see just the failed runs.",
+    "A failed automation run now says why in plain words and offers one button to fix it, such as Pick another pane when its pane was closed.",
+    "A task automation whose report says it could not finish is now recorded as failed, not as done.",
+    "Run now on a task automation shows Claude's replies as they come, and Stop ends the run.",
+    "A pause button in the Automations list holds every automation until you resume. Each one that came due meanwhile runs once when you resume.",
+    "Automations can run at most once every 5 minutes, and one computer can keep up to 100 of them.",
+    "Runs missed while your computer was asleep are noted in the automation's history instead of all running late.",
+    "If SoluTerminal restarts or updates while a task automation is running, the run is no longer lost: it carries on, and SoluTerminal records its result afterwards.",
+    "An app update now waits for a running automation to finish, for at most 30 minutes.",
+    "Fixed: in the desktop app, the Chinese or Japanese input candidate bar could open at the window's top-left corner instead of at the pane's cursor."
+  ],
   "0.0.1246": [
     "Settings has a search: press / or Ctrl+F in Settings to find a setting by name.",
     "Codex: a new Codex pane no longer stalls behind Codex's own \"Update available\" menu. SoluTerminal leaves that choice to you and tells you the pane is waiting on it.",

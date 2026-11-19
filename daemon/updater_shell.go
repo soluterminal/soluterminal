@@ -114,6 +114,14 @@ func (u *Updater) applyShell(ctx context.Context, dataDir string, forceDowngrade
 	if silent && forceDowngrade {
 		return "", errors.New("a silent installer update never forces a downgrade")
 	}
+	// The unattended installer restarts the app and its daemon: it waits for
+	// an automation's run in flight (asked directly, whatever else is busy),
+	// before the download and again just before the installer starts.
+	if silent {
+		if name, busy := u.automationRunningNow(); busy {
+			return "", &silentShellPausedError{reason: automationRunningReason(name)}
+		}
+	}
 	u.mu.Lock()
 	if u.shellApplying {
 		u.mu.Unlock()
@@ -263,6 +271,15 @@ func (u *Updater) applyShell(ctx context.Context, dataDir string, forceDowngrade
 		return "", u.finishShellLaunchFailed(displayPath, launchErr, lg)
 	}
 
+	if silent {
+		if name, busy := u.automationRunningNow(); busy {
+			// The verified installer stays staged for the next try.
+			u.mu.Lock()
+			u.status.ShellLaunch = nil
+			u.mu.Unlock()
+			return "", &silentShellPausedError{reason: automationRunningReason(name)}
+		}
+	}
 	u.mu.Lock()
 	if u.channel != shellChannel {
 		u.status.ShellLaunch = nil

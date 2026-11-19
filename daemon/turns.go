@@ -189,7 +189,7 @@ func newTurnTracker(dataDir string, mgr *Manager) *turnTracker {
 		providerLifecycle: true,
 		lifecycleCutoffMs: time.Now().UnixMilli(),
 		dir:               filepath.Join(dataDir, "turns"),
-		snap:              gitTurnSnapshotter{},
+		snap:              gitTurnSnapshotter{dataDir: dataDir},
 		now:               time.Now,
 		state:             map[string]*paneTurnState{},
 	}
@@ -670,7 +670,11 @@ func (a turnPaneAdapter) lastActivityMs() int64 { return atomic.LoadInt64(&a.p.L
 
 // ---- git snapshotter ----
 
-type gitTurnSnapshotter struct{}
+type gitTurnSnapshotter struct {
+	// dataDir's recordings/ is never snapshotted (pane recordings are raw
+	// terminal output); empty means the default data dir.
+	dataDir string
+}
 
 var errTurnSparse = errors.New("sparse checkout — turn snapshots disabled")
 
@@ -928,7 +932,7 @@ func readTurnIndex(ctx context.Context, repo string) (map[string]turnIndexEntry,
 // files are hashed raw with `hash-object --no-filters`; the tree is assembled
 // in a temporary index via --index-info. The user's index, branch and refs
 // are never written.
-func (gitTurnSnapshotter) snapshot(ctx context.Context, dir string) (turnSnapshot, error) {
+func (g gitTurnSnapshotter) snapshot(ctx context.Context, dir string) (turnSnapshot, error) {
 	var s turnSnapshot
 	repo, err := turnResolveRepo(ctx, dir)
 	if err != nil {
@@ -1067,11 +1071,17 @@ func (gitTurnSnapshotter) snapshot(ctx context.Context, dir string) (turnSnapsho
 		return nil
 	}
 
+	recPrefixes := recordingsRelPrefixes(s.repo, g.dataDir)
 	for rel, e := range index {
 		if err := ctx.Err(); err != nil {
 			return s, err
 		}
 		e := e
+		if underRelPrefix(rel, recPrefixes) {
+			s.skipped++
+			s.secretSkipped++
+			continue
+		}
 		if e.mode == "160000" { // submodule: keep the recorded commit
 			s.trackedUnread++
 			items = append(items, item{e.mode, e.sha, rel})
@@ -1094,7 +1104,7 @@ func (gitTurnSnapshotter) snapshot(ctx context.Context, dir string) (turnSnapsho
 			continue
 		}
 		abs := filepath.Join(s.repo, rel)
-		if secretPathRefusal(abs) != "" {
+		if secretPathRefusal(abs) != "" || underRelPrefix(rel, recPrefixes) {
 			s.skipped++
 			s.secretSkipped++
 			continue

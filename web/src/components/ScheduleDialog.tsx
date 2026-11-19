@@ -26,7 +26,7 @@ import { SCHEDULE_PERMISSION_CHOICES, schedulePermissionChoice } from '../lib/sc
 // Add / edit modal for Automations ("schedules" in the code and the daemon's
 // API). An automation is a trigger plus one of these job kinds:
 //   • Prompt — inject text into a target pane's PTY on fire.
-//   • Agent — run a built-in local agent (fix agent, PR babysitter) as
+//   • Agent — run a built-in local agent (PR babysitter, feedback agents) as
 //     a child process on fire. Only offered when the daemon reports an
 //     installed agent (operator machines) — everyone else never sees
 //     the toggle.

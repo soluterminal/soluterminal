@@ -181,6 +181,7 @@ func (p *Pane) SetIdentity(i *PaneIdentity) {
 	p.mu.Lock()
 	p.Identity = i
 	p.mu.Unlock()
+	p.recheckRecordingHandle(identityHandle(i))
 }
 
 // updatePaneIdentity applies a change (nil keeps a field, "" clears it),

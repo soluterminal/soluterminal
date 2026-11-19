@@ -920,7 +920,13 @@ impl LocalDaemonRoute {
 #[cfg(any(windows, test))]
 fn shell_auto_apply_refusal(status: &serde_json::Value) -> Option<String> {
     match status.get("shellAutoApplyPaused") {
-        Some(serde_json::Value::Bool(false)) => None,
+        // An automation's run in flight holds the restart off (the daemon
+        // bounds the wait).
+        Some(serde_json::Value::Bool(false)) => status
+            .get("shellWaitingForAutomation")
+            .and_then(serde_json::Value::as_str)
+            .filter(|reason| !reason.is_empty())
+            .map(|reason| format!("{reason}; nothing was installed")),
         Some(serde_json::Value::Bool(true)) => {
             let reason = status
                 .get("shellAutoApplyPausedReason")
@@ -1669,6 +1675,12 @@ mod tests {
     fn silent_update_runs_only_when_the_daemon_says_not_paused() {
         use serde_json::json;
         assert_eq!(shell_auto_apply_refusal(&json!({"shellAutoApplyPaused": false})), None);
+        let waiting = shell_auto_apply_refusal(&json!({
+            "shellAutoApplyPaused": false,
+            "shellWaitingForAutomation": "an automation is running (nightly); the desktop update waits for it to finish",
+        }))
+        .expect("an automation's run holds the restart off");
+        assert!(waiting.contains("nightly"), "{waiting}");
         let paused = shell_auto_apply_refusal(&json!({
             "shellAutoApplyPaused": true,
             "shellAutoApplyPausedReason": "automatic desktop restarts are not enabled for this channel yet",

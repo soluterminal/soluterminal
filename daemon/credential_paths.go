@@ -73,6 +73,10 @@ func credentialOwnedPath(path, dataDir, home string) bool {
 			switch strings.ToLower(parts[0]) {
 			case "harness-accounts", "harness-launchers", "harness-state", "codex", "codex-live", "muse", "glm", "api-keys":
 				return true
+			case recordingsDirName:
+				// Pane recordings (pane_recorder.go): raw terminal output that
+				// no file surface may read, list or write, locally or remotely.
+				return true
 			case "workflow":
 				// Only the Claude lane credentials live here; task worktrees, task
 				// state and health files under workflow/ must stay readable (diffs,

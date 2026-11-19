@@ -34,6 +34,7 @@ export function ImeTraceOverlay() {
     if (ev.inputType !== undefined) parts.push(`type=${ev.inputType}`);
     if (ev.isComposing !== undefined) parts.push(`composing=${ev.isComposing ? 1 : 0}`);
     if (ev.taValue !== undefined) parts.push(`ta=${JSON.stringify(ev.taValue)}`);
+    if (ev.anchor !== undefined) parts.push(`at=${ev.anchor}`);
     return parts.join(' ');
   };
 

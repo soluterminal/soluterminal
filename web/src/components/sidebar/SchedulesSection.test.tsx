@@ -440,3 +440,49 @@ describe('SchedulesSection kept schedules from removed agents', () => {
     expect(del).not.toHaveBeenCalled();
   });
 });
+
+describe('SchedulesSection limits (ST-299)', () => {
+  afterEach(() => {
+    useStore.setState({ schedules: [], panes: {} });
+  });
+
+  it('marks an automation from before the limits that runs more often than allowed', () => {
+    useStore.setState({
+      schedules: [schedule({ id: 'fast', name: 'Every minute', kind: 'task', agentId: undefined, cron: '* * * * *', cwd: '/p', permission: 'plan', tooFrequent: true })],
+      panes: {},
+    });
+    render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+    expect(within(rowFor('Every minute')).getByText(/runs more often than allowed/)).toBeInTheDocument();
+  });
+});
+
+describe('SchedulesSection pause all (ST-299)', () => {
+  afterEach(() => {
+    useStore.setState({ schedules: [], panes: {} });
+    vi.restoreAllMocks();
+  });
+
+  it('pauses all automations from the header, and the banner resumes them', async () => {
+    vi.spyOn(api, 'getPauseAll').mockResolvedValue({ paused: false });
+    const set = vi.spyOn(api, 'setPauseAll')
+      .mockResolvedValueOnce({ paused: true, since: new Date().toISOString(), by: 'person' })
+      .mockResolvedValueOnce({ paused: false });
+    useStore.setState({ schedules: [schedule({ id: 'a', name: 'Digest', kind: 'task', agentId: undefined, cwd: '/p', permission: 'plan' })], panes: {}, toast: vi.fn() });
+    render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause all automations' }));
+    await waitFor(() => expect(set).toHaveBeenCalledWith(true));
+    expect(await screen.findByText(/All automations are paused/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+    await waitFor(() => expect(set).toHaveBeenCalledWith(false));
+  });
+
+  it('marks a held automation', () => {
+    vi.spyOn(api, 'getPauseAll').mockResolvedValue({ paused: true });
+    useStore.setState({
+      schedules: [schedule({ id: 'h', name: 'Held one', kind: 'task', agentId: undefined, cwd: '/p', permission: 'plan', enabled: false, pausedReason: 'all automations are paused; runs once when they resume' })],
+      panes: {},
+    });
+    render(<SchedulesSection collapsed={false} onToggle={() => {}} />);
+    expect(within(rowFor('Held one')).getByText(/· held/)).toBeInTheDocument();
+  });
+});

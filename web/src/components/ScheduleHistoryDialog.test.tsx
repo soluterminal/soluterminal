@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../store';
 import { api } from '../api';
 import { ScheduleHistoryDialog, ScheduleHistoryDeepLink } from './ScheduleHistoryDialog';
@@ -35,6 +35,12 @@ const TASK_LOG = [
   'Nothing merged. CI green. Issue #12 needs your call.',
 ].join('\n');
 
+// The history's first page never arrives here: these tests read the newest
+// runs the row holds (ScheduleRunHistory.test.tsx covers the history).
+beforeEach(() => {
+  vi.spyOn(api, 'scheduleHistory').mockReturnValue(new Promise(() => {}));
+});
+
 afterEach(() => {
   useStore.setState({ schedules: [] });
   vi.restoreAllMocks();
@@ -62,6 +68,23 @@ describe('TaskReportReader', () => {
     fireEvent.click(screen.getByLabelText('Run details'));
     expect(screen.getByText(/permission=plan · cwd=/)).toBeInTheDocument();
     expect(screen.getByText(/Lifetime: ran 2×/)).toBeInTheDocument();
+  });
+
+  it('History: a report opened from it, then History again, keeps the history as it was', async () => {
+    vi.spyOn(api, 'scheduleRunLog').mockResolvedValue(TASK_LOG);
+    const historySpy = vi.mocked(api.scheduleHistory);
+    render(<ScheduleHistoryDialog schedule={sched()} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'History' }));
+    await screen.findAllByRole('button', { name: 'report' });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Failed only' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Failed only' }));
+    const calls = historySpy.mock.calls.length;
+    const reports = await screen.findAllByRole('button', { name: 'report' });
+    fireEvent.click(reports[reports.length - 1]);
+    await waitFor(() => expect(screen.getByText('2 of 2')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'History' }));
+    expect(screen.getByRole('checkbox', { name: 'Failed only' })).not.toBeChecked();
+    expect(historySpy.mock.calls.length).toBe(calls); // not mounted again, not fetched again
   });
 
   it('pages to older runs and fetches their reports lazily', async () => {

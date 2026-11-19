@@ -122,7 +122,7 @@ func buildWorkingDiff(parent context.Context, dir, abs string, isFile, staged, o
 	if staged {
 		rev = []string{"--cached"} // HEAD vs index: git reads no worktree file
 	} else {
-		snap, err := gitTurnSnapshotter{}.snapshot(ctx, repoRoot)
+		snap, err := gitTurnSnapshotter{dataDir: dataDir}.snapshot(ctx, repoRoot)
 		if errors.Is(err, errTurnSparse) {
 			return gitDiffResp{}, 409, fmt.Errorf("the unstaged diff isn't available for sparse-checkout repositories — use Staged")
 		}

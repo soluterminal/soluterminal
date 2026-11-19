@@ -90,7 +90,16 @@ const (
 	// unattended update waits, without the collaboration grace, until the
 	// person resumes or discards them (agent_messaging_pause.go).
 	updateBusyCauseMessagingPaused = "agent-messaging-paused"
+	// updateBusyCauseAutomation: an automation's run is in flight (a task
+	// or a built-in agent), or a scheduled prompt is being typed into its
+	// pane (ST-299). Waited for up to updateAutomationGrace; a run that
+	// outlasts it is followed after the swap (schedules_task_stream.go).
+	updateBusyCauseAutomation = "automation"
 )
+
+// updateAutomationGrace bounds how long an unattended update waits for an
+// automation's run: the default task time limit. A var for tests.
+var updateAutomationGrace = 30 * time.Minute
 
 type updateBusyError struct {
 	cause      string
@@ -146,8 +155,9 @@ func (u *Updater) checkBusyAt(now time.Time) *updateBusyError {
 	}
 	busy := u.busyCheck()
 	// Focus still owns an in-process turn loop. Its temporary gate is not
-	// subject to the bounded collaboration grace.
-	if busy != nil && busy.cause != updateBusyCauseCollaboration {
+	// subject to the bounded collaboration grace. An automation's run has
+	// its own, longer grace.
+	if busy != nil && busy.cause != updateBusyCauseCollaboration && busy.cause != updateBusyCauseAutomation {
 		return busy
 	}
 	u.mu.Lock()
@@ -155,8 +165,13 @@ func (u *Updater) checkBusyAt(now time.Time) *updateBusyError {
 	if busy == nil {
 		u.busySince = time.Time{}
 		u.busyLastObserved = time.Time{}
+		u.busyCause = ""
 		return nil
 	}
+	if u.busyCause != "" && busy.cause != u.busyCause {
+		u.busySince = time.Time{} // another cause: its own grace
+	}
+	u.busyCause = busy.cause
 	// Apply and Rollback hold this reservation through download and swap.
 	// Preserve their grace across a slow download, even with no status sampler.
 	attemptActive := u.restartGate != nil && u.restartGate.Load()
@@ -164,7 +179,11 @@ func (u *Updater) checkBusyAt(now time.Time) *updateBusyError {
 		u.busySince = now
 	}
 	u.busyLastObserved = now
-	if now.Sub(u.busySince) >= updateBusyGrace {
+	grace := updateBusyGrace
+	if busy.cause == updateBusyCauseAutomation {
+		grace = updateAutomationGrace
+	}
+	if now.Sub(u.busySince) >= grace {
 		return nil
 	}
 	return busy

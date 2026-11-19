@@ -1,5 +1,5 @@
 import type { ClosedPane } from './lib/closedPanes';
-import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, OrchestratorHostsInfo, PaneIdentity, PaneInfo, PaneOrigin, PaneRole, Port, RecoverySettings, ReleaseCheck, RunNowOutcome, Schedule, ScheduleAgent, ScheduleInput, TurnRecord, BrowsedSession, UpdateSettings, UpdateSettingsPut, Workspace, WorkspaceSummary } from './types';
+import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, OrchestratorHostsInfo, PaneIdentity, PaneInfo, PaneOrigin, PaneRecording, PaneRole, Port, RecoverySettings, ReleaseCheck, AutomationsPause, RunNowOutcome, Schedule, ScheduleAgent, ScheduleHistoryPage, ScheduleInput, ScheduleLive, TurnRecord, BrowsedSession, UpdateSettings, UpdateSettingsPut, Workspace, WorkspaceSummary } from './types';
 import { isRouterMode, isDesktopRouterMode } from './dualBackend';
 import { setEnterGapConfig } from './ptySubmit';
 import { openTicketedEventSource, type EventStream } from './lib/ticketedEventSource';
@@ -3011,8 +3011,8 @@ export interface FeedbackPreview {
 }
 
 // ── Agents cockpit (operator-only) ───────────────────────────────────────────
-// GET /api/agents/status — on-demand daemon fetch-through of the fix agent's
-// local status.json + the cloud's GitHub pipeline summary (see
+// GET /api/agents/status — on-demand daemon fetch-through of the PR
+// reviewer's local status.json + the cloud's GitHub pipeline summary (see
 // daemon/agents_api.go + cloud/agents.go). Non-operators get the empty shape
 // ({operator:false}); old daemons lack the endpoint (agentsStatus normalizes
 // their SPA-fallback 200 to a 404) — callers must treat both as "hidden",
@@ -3033,43 +3033,8 @@ export interface AgentsWorkflowRun {
   url: string;
 }
 
-// Issue/PR pair the fix agent gave up on (repair-stopped; `fix-stuck` label).
-export interface AgentsStuckIssue {
-  issue: number;
-  title?: string;
-  pr?: number;
-  ageS?: number;
-  url?: string;
-}
-
-// One open fix/issue-* PR. `commits > 1` means CI-repair commits landed that
-// the adversarial reviewer never saw (the repair loop never re-reviews).
-export interface AgentsQueueRow {
-  pr: number;
-  issue: number;
-  // "fix-agent" today; the P3 babysitter adds new values — UI must not assume.
-  source: string;
-  title: string;
-  state: 'draft' | 'ready';
-  ci: 'green' | 'red' | 'pending';
-  verdictSource: 'marker' | 'prose' | 'ambiguous' | 'none';
-  // Omitted by the cloud (not null) when verdictSource is 'ambiguous'/'none'.
-  verdict?: {
-    recommendation: string;
-    ready: boolean;
-    confidence: string;
-    concerns: string[];
-  } | null;
-  adds: number;
-  dels: number;
-  files: number;
-  commits: number;
-  waitingSince: string;
-  url: string;
-}
-
 // Cloud GET /api/agents/summary payload, relayed verbatim inside the daemon
-// response. Each of workflows/counts/queue is independently nullable with a
+// response. Each of workflows/counts is independently nullable with a
 // sibling *Error reason so a token-scope gap renders as explicit "unknown",
 // never as a green-looking empty section. Non-operator responses carry only
 // {operator:false} (empty-shape convention) — every other field may be absent.
@@ -3089,7 +3054,6 @@ export interface CloudAgentsSummary {
     needsTriage: number;
     triaged: number;
     rootCaused: number;
-    fixDrafted: number;
     // Null when nothing is currently triaged.
     triagedOldestAgeS: number | null;
     // Investigation-eligible backlog (type:bug, not needs-info) — ideas sit
@@ -3100,10 +3064,8 @@ export interface CloudAgentsSummary {
     countsTruncated: boolean;
   } | null;
   countsError?: string | null;
-  stuck?: AgentsStuckIssue[] | null;
-  queue?: AgentsQueueRow[] | null;
-  queueTruncated?: boolean;
-  queueError?: string | null;
+  // The retired fix agent's PR queue and stuck issues (queue, stuck,
+  // queueTruncated, queueError) are no longer sent or read.
   // PR-babysitter reviews across ALL watched repos with LIVE CI + stale flag —
   // the phase-2 "merge-ready across every reviewed PR" surface (vs the local
   // status.json's last-run ~3). Absent on clouds without AGENTS_PR_REPOS.
@@ -3128,48 +3090,6 @@ export interface AgentsPRReview {
   state: 'draft' | 'ready';
   stale: boolean;
   mergeReady: boolean;
-}
-
-// Local fix-agent state read from ~/.solu/fix-agent/status.json (+ lock/
-// disabled files). Display only — never an input to any privileged decision.
-export interface AgentsFixAgent {
-  present: boolean;
-  running: boolean;
-  disabled: boolean;
-  result?: 'ok' | 'warn' | 'fail' | 'disabled' | null;
-  finishedAt?: string | null;
-  ageS?: number | null;
-  nextRunAt?: string | null;
-  stale?: boolean;
-  stuck?: { issue: number; pr?: number; reason?: string }[] | null;
-  // The last run's own error line; the daemon scrubs and clamps it. Absent on
-  // older daemons and when the run recorded no error.
-  lastError?: string | null;
-  // The agent's own schedule, read fresh on every request (never from the
-  // daemon's 90-second cache). null = the agent has no schedule; absent = an
-  // older daemon, where the chip falls back to its fixed 35-minute rule.
-  schedule?: AgentsAgentSchedule | null;
-}
-
-// A built-in agent's schedule as the status chip needs it: on or off, since
-// when, and when it counts as down.
-export interface AgentsAgentSchedule {
-  id: string;
-  enabled: boolean;
-  cron?: string;
-  // Who switched it off and when (the schedule's own change record). Absent
-  // while it is on, and for one switched off before changes were recorded.
-  // Typed inline: the shared type-import line at the top of this file is
-  // edited by many branches, and one more name on it conflicts with each.
-  pausedChange?: import('./types').ScheduleChange | null;
-  // Why the daemon paused it; absent when a person switched it off.
-  pausedReason?: string;
-  // The moment after which the agent has missed two runs of this timetable
-  // without completing one. Absent while the schedule is off.
-  downAt?: string | null;
-  // When the schedule was last turned on. Absent while it is off, on older
-  // daemons, and for one that has been on since before this was recorded.
-  armedAt?: string | null;
 }
 
 // One PR the babysitter handled in its LAST run. `url` is rebuilt by the
@@ -3217,7 +3137,8 @@ export interface AgentsPrHeartbeat {
 }
 
 export interface AgentsStatus {
-  fixAgent: AgentsFixAgent | null;
+  // The retired fix agent's leg (fixAgent) is gone; an older daemon may still
+  // send it, and nothing reads it.
   // Local PR-babysitter leg; absent on daemons older than v0.0.833.
   prAgent?: AgentsPrAgent | null;
   // Cloud summary, or null when unpaired/403/unreachable.
@@ -3282,7 +3203,6 @@ export interface AgentsBootstrap {
 export interface AgentsBootstrapApplyInput {
   agent: string;
   env?: Record<string, string>;
-  repos?: { app: string; slug: string }[];
   schedule?: boolean;
 }
 
@@ -3370,6 +3290,9 @@ export interface AutonomyPayload {
   // Rows whose own store refused the pause/resume write. Present only on the
   // pause/resume responses.
   pauseErrors?: string[];
+  // The "Pause all automations" switch (ST-299); source 'autonomy' when
+  // Pause all autonomy made it (its Resume lifts it).
+  automationsPause?: { paused: boolean; since?: string; by?: string; source?: string };
 }
 
 export type AutonomyWaitClass = 'veto' | 'hard_human_decision' | 'budget_quota' | 'merge_conflict' | 'controller_paused' | 'policy_mismatch' | 'automation_gap';
@@ -3924,6 +3847,26 @@ const coreApi = {
     apiFetch(`/api/panes/${id}/review`, { method: 'DELETE' }).then((r) => {
       if (!r.ok) throw new Error(`Could not clear the result (${r.status})`);
     }),
+
+  // Pane output recording (daemon/pane_recorder_api.go). Switching on,
+  // dismissing a stop notice and deleting are the person's at this computer
+  // only; the daemon refuses agents and the relay. Off is anyone's.
+  setPaneRecording: (id: string, on: boolean, scope?: RoutingScope) =>
+    workflowFetch(scope, `/api/panes/${id}/recording`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ on }),
+    }).then(j<PaneRecording>),
+
+  dismissPaneRecordingNotice: (id: string, scope?: RoutingScope) =>
+    workflowFetch(scope, `/api/panes/${id}/recording`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dismiss: true }),
+    }).then(j<PaneRecording>),
+
+  deletePaneRecordings: (id: string, scope?: RoutingScope) =>
+    workflowFetch(scope, `/api/panes/${id}/recordings`, { method: 'DELETE' }).then(j<{ deleted: number }>),
 
   setPaneAutoMode: (id: string, autoMode: '' | 'always' | 'cautious', scope?: RoutingScope) =>
     workflowFetch(scope, `/api/panes/${id}/auto-mode`, {
@@ -4849,6 +4792,36 @@ const coreApi = {
     apiFetch(
       `/api/schedules/preview?cron=${encodeURIComponent(cron)}&count=${count}`,
     ).then(j<{ fires: string[]; tzName?: string; tzOffsetMinutes?: number }>),
+
+  // One page of an automation's history, newest first (runs and changes).
+  // `before` is the previous page's `next`; failedOnly returns failed runs.
+  scheduleHistory: (id: string, opts: { before?: string; limit?: number; failedOnly?: boolean } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.before) q.set('before', opts.before);
+    if (opts.limit) q.set('limit', String(opts.limit));
+    if (opts.failedOnly) q.set('outcome', 'failed');
+    const qs = q.toString();
+    return apiFetch(`/api/schedules/${encodeURIComponent(id)}/history${qs ? `?${qs}` : ''}`).then(j<ScheduleHistoryPage>);
+  },
+
+  // "Pause all automations": read, and set (the person's, both ways).
+  getPauseAll: () => apiFetch('/api/schedules/pause-all').then(j<AutomationsPause>),
+  setPauseAll: (paused: boolean) =>
+    apiFetch('/api/schedules/pause-all', { method: 'POST', body: JSON.stringify({ paused }), headers: { 'Content-Type': 'application/json' } }).then(j<AutomationsPause>),
+
+  // The run in flight, as far as it has got (polled while one runs).
+  scheduleLive: (id: string) =>
+    apiFetch(`/api/schedules/${encodeURIComponent(id)}/live`).then(j<ScheduleLive>),
+
+  // Stop the run in flight the person sees (runId), or a prompt's wait for
+  // its pane (no runId). A run that began since is never stopped (409).
+  stopSchedule: (id: string, target: { runId?: string; waitId?: string }) => {
+    const q = new URLSearchParams();
+    if (target.runId) q.set('run', target.runId);
+    if (target.waitId) q.set('wait', target.waitId);
+    const qs = q.toString();
+    return apiFetch(`/api/schedules/${encodeURIComponent(id)}/stop${qs ? `?${qs}` : ''}`, { method: 'POST' }).then(j<{ outcome: string }>);
+  },
 
   // Captured output of one agent-kind schedule run (see ScheduleRun.logFile).
   scheduleRunLog: (id: string, file: string) =>

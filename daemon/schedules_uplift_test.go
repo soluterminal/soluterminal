@@ -4,11 +4,13 @@ package main
 // per-run agent logs + the runlog endpoint, and schedule push notifications.
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -135,24 +137,63 @@ func TestLoadRecordsMissedRecurringRuns(t *testing.T) {
 func TestWriteRunLogPrunes(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "runs")
-	start := time.Now().Add(-time.Hour)
-	var last string
-	for i := 0; i < maxRunLogs+3; i++ {
-		last = writeRunLog(dir, start.Add(time.Duration(i)*time.Minute), []byte("log"))
-		if last == "" {
+	now := time.Now()
+	write := func(at time.Time) string {
+		name := writeRunLog(dir, at, []byte("log"))
+		if name == "" {
 			t.Fatal("writeRunLog returned empty name")
 		}
+		return name
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
+	count := func() int {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(entries)
 	}
-	if len(entries) != maxRunLogs {
-		t.Errorf("runs dir has %d files, want %d", len(entries), maxRunLogs)
+	// Five old logs, then runLogKeepNewest+3 recent ones: every recent log
+	// stays (before stage 2 only the newest 10 did), every old one goes.
+	var old []string
+	for i := 0; i < 5; i++ {
+		old = append(old, write(now.Add(-runLogRetention-time.Duration(i+1)*time.Hour)))
 	}
-	// The newest file must have survived the prune.
+	if got := count(); got != 5 {
+		t.Fatalf("old logs kept while under the newest %d: got %d files, want 5", runLogKeepNewest, got)
+	}
+	var last string
+	for i := 0; i < runLogKeepNewest+3; i++ {
+		last = write(now.Add(-time.Hour + time.Duration(i)*time.Minute))
+	}
+	if got, want := count(), runLogKeepNewest+3; got != want {
+		t.Errorf("runs dir has %d files, want %d (recent logs only)", got, want)
+	}
+	for _, name := range old {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			t.Errorf("log %s older than %s kept", name, runLogRetention)
+		}
+	}
 	if _, err := os.Stat(filepath.Join(dir, last)); err != nil {
 		t.Errorf("newest log pruned: %v", err)
+	}
+}
+
+func TestPruneRunLogsKeepsNewestUnderTheSizeCap(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	for i := 0; i < runLogKeepNewest+5; i++ {
+		name := filepath.Join(dir, "run-"+strconv.FormatInt(now.Add(time.Duration(i)*time.Minute).UnixMilli(), 10)+".log")
+		if err := os.WriteFile(name, bytes.Repeat([]byte("x"), 1000), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := runLogMaxBytes
+	runLogMaxBytes = 3000
+	t.Cleanup(func() { runLogMaxBytes = old })
+	pruneRunLogs(dir, now)
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != runLogKeepNewest {
+		t.Errorf("after the size cap: %d files, want the newest %d", len(entries), runLogKeepNewest)
 	}
 }
 

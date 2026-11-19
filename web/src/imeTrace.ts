@@ -15,6 +15,7 @@ export interface ImeTraceEvent {
   isComposing?: boolean; // beforeinput only
   taValue?: string; // helper-textarea .value (compositionend)
   sent?: string; // the bytes xterm.onData actually emitted to the PTY
+  anchor?: string; // helper-textarea rect at compositionstart ("x,y wxh", desktop)
 }
 
 const MAX_EVENTS = 500;

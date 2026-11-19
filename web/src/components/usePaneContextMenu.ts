@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { deletePaneRecordings, startPaneRecording, stopPaneRecording } from '../lib/paneRecording';
 import { api, currentRoutingScope, type RoutingScope } from '../api';
 import { useStore } from '../store';
 import { confirmDialog, promptDialog, selectDialog } from '../lib/dialog';
@@ -207,6 +208,24 @@ export function usePaneContextMenu({
         if (!actionGuard()) return;
       setCtxMenu(null);
         void updatePane(()=>api.setPaneFlag(pane.id,false,'',scope));
+      },
+      // Output recording: start asks first; delete confirms (lib/paneRecording).
+      recording: (action: 'start' | 'stop' | 'delete') => {
+        if (!actionGuard()) return;
+      setCtxMenu(null);
+        // As setAutoMode: the view and scope captured at the click must still
+        // hold after the dialog, and it must still be the same running pane.
+        const originScope = scope ?? currentRoutingScope();
+        const generation = useStore.getState().navigationGeneration;
+        const viewValid = captureGuard?.() ?? (() => actionGuard() && originScope.key === currentRoutingScope().key
+          && generation === useStore.getState().navigationGeneration);
+        const valid = () => {
+          const now = useStore.getState().panes[pane.id];
+          return viewValid() && !!now && now.pid === pane.pid && now.status === pane.status;
+        };
+        if (action === 'start') void startPaneRecording(pane, originScope, valid);
+        else if (action === 'stop') void stopPaneRecording(pane, originScope);
+        else void deletePaneRecordings(pane, originScope, valid);
       },
       flagForAttention: () => {
         if (!actionGuard()) return;

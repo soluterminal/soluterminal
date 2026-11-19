@@ -1158,7 +1158,7 @@ export default function App() {
     es.onmessage = (ev) => {
       if(!eventActive())return;
       try {
-        const msg = JSON.parse(ev.data) as { type: string; path?: string; url?: string; text?: string; paneId?: string; paneTitle?: string; ts?: number; tool?: string; hint?: string; fromState?: string; toState?: string; durationMs?: number; agentMidTurn?: boolean; prompts?: string[]; degraded?: boolean; attention?: string; attentionReason?: string; reason?: string; deviceId?: string; skipRecent?: boolean; workspace?: string; show?: boolean };
+        const msg = JSON.parse(ev.data) as { type: string; path?: string; url?: string; text?: string; paneId?: string; paneTitle?: string; ts?: number; tool?: string; hint?: string; fromState?: string; toState?: string; durationMs?: number; agentMidTurn?: boolean; prompts?: string[]; degraded?: boolean; attention?: string; attentionReason?: string; reason?: string; deviceId?: string; skipRecent?: boolean; workspace?: string; show?: boolean; recording?: import('./types').PaneRecording };
         const st = useStore.getState();
         // Every daemon-published event also feeds the Activity log. We
         // push unconditionally so the ring buffer reflects the full
@@ -1292,6 +1292,11 @@ export default function App() {
             icon: glyph.icon,
             logToRecent: !msg.skipRecent,
           });
+        } else if (msg.type === 'pane-recording' && msg.paneId) {
+          // The pane's recording switched on or off, or stopped with a
+          // notice: every viewer's REC mark follows the daemon at once; the
+          // 3s poll heals a missed event.
+          st.applyPaneRecording(msg.paneId, msg.recording);
         } else if (msg.type === 'pane-prompt' && msg.paneId && Array.isArray(msg.prompts)) {
           // Daemon committed a prompt to this pane's history (typed,
           // voice inject, ARIA, schedule — any transport). The event

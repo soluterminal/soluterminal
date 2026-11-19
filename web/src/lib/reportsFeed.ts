@@ -25,9 +25,10 @@ export interface ReportFeedItem {
 // task report to open with "## Needs you" only when something NEW needs the
 // user (otherwise "Nothing new needs you."), and
 // the summary is the report's opening lines, so the contract is machine-
-// checkable here without fetching a single log. Errors always need you.
+// checkable here without fetching a single log. Errors always need you, and
+// so does a run whose report says it could not finish (outcome 'failed').
 export function runNeedsYou(run: ScheduleRun): boolean {
-  if (run.status === 'error') return true;
+  if (run.status === 'error' || run.outcome === 'failed') return true;
   return /^##\s*needs you\b/i.test((run.summary || '').trimStart());
 }
 

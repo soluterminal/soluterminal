@@ -355,7 +355,7 @@ func (a *Aria) toolGitStatus(root string, includeDiffStat bool, maxCommits int) 
 	if maxCommits > 20 {
 		maxCommits = 20
 	}
-	out, err := hardenedGitStatus(abs, includeDiffStat, maxCommits)
+	out, err := hardenedGitStatus(abs, includeDiffStat, maxCommits, a.dataDir)
 	if err != nil {
 		return "error: " + err.Error()
 	}
@@ -372,7 +372,7 @@ func (a *Aria) toolGitStatus(root string, includeDiffStat bool, maxCommits int) 
 // index with a daemon-built snapshot of the working tree (turns.go — files
 // read by the daemon itself, never by git); untracked files come from a plain
 // directory listing. All git calls go through the hardened turnGit runner.
-func hardenedGitStatus(dir string, includeDiffStat bool, maxCommits int) (map[string]any, error) {
+func hardenedGitStatus(dir string, includeDiffStat bool, maxCommits int, dataDir string) (map[string]any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), turnSnapshotTimeout)
 	defer cancel()
 	release, err := acquireDiffEndpointSlot(ctx)
@@ -389,6 +389,15 @@ func hardenedGitStatus(dir string, includeDiffStat bool, maxCommits int) (map[st
 	}
 
 	branch := "## " + gitStatusBranchLine(ctx, repoRoot)
+	// Pane recordings under a data dir kept in this worktree are never
+	// listed, compared or counted.
+	recPrefixes := recordingsRelPrefixes(repoRoot, dataDir)
+	var recExclude []string
+	for _, p := range recPrefixes {
+		if p != "." {
+			recExclude = append(recExclude, ":(top,literal,exclude)"+p)
+		}
+	}
 	nameStatus := func(rev ...string) map[string]string {
 		args := append([]string{"diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--submodule=short", "--name-status", "-z"}, rev...)
 		raw, err := turnGit(ctx, repoRoot, nil, nil, args...)
@@ -398,6 +407,9 @@ func hardenedGitStatus(dir string, includeDiffStat bool, maxCommits int) (map[st
 		}
 		f := strings.Split(strings.TrimRight(raw, "\x00"), "\x00")
 		for i := 0; i+1 < len(f); i += 2 {
+			if underRelPrefix(f[i+1], recPrefixes) {
+				continue
+			}
 			m[f[i+1]] = f[i][:1]
 		}
 		return m
@@ -413,7 +425,7 @@ func hardenedGitStatus(dir string, includeDiffStat bool, maxCommits int) (map[st
 	}
 	unstaged := map[string]string{}
 	var snapTree, unknown string
-	if snap, err := (gitTurnSnapshotter{}).snapshot(ctx, repoRoot); err != nil {
+	if snap, err := (gitTurnSnapshotter{dataDir: dataDir}).snapshot(ctx, repoRoot); err != nil {
 		unknown = "working-tree changes could not be read: " + err.Error()
 	} else {
 		if snap.trackedUnread > 0 {
@@ -451,7 +463,7 @@ func hardenedGitStatus(dir string, includeDiffStat bool, maxCommits int) (map[st
 	}
 	if raw, err := turnGit(ctx, repoRoot, nil, nil, "ls-files", "--others", "--exclude-standard", "--directory", "--no-empty-directory", "-z"); err == nil {
 		for _, p := range strings.Split(strings.TrimRight(raw, "\x00"), "\x00") {
-			if p != "" {
+			if p != "" && !underRelPrefix(p, recPrefixes) {
 				lines = append(lines, "?? "+p)
 			}
 		}
@@ -468,6 +480,16 @@ func hardenedGitStatus(dir string, includeDiffStat bool, maxCommits int) (map[st
 	if includeDiffStat {
 		stat := func(rev ...string) []string {
 			args := append([]string{"diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--submodule=short", "--stat"}, rev...)
+			if len(recExclude) > 0 {
+				hasSep := false
+				for _, a := range rev {
+					hasSep = hasSep || a == "--"
+				}
+				if !hasSep {
+					args = append(args, "--")
+				}
+				args = append(args, recExclude...)
+			}
 			raw, _ := turnGit(ctx, repoRoot, nil, nil, args...)
 			return splitNonEmptyLines(raw)
 		}

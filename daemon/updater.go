@@ -271,7 +271,12 @@ type UpdateStatus struct {
 	// when it says nothing) has the unattended installer restart off. The web
 	// then never arms its countdown and shows the ordinary installer banner;
 	// apply-shell?silent=1 is refused. Clicked updates are unaffected.
-	ShellAutoApplyPaused       bool   `json:"shellAutoApplyPaused"`
+	ShellAutoApplyPaused bool `json:"shellAutoApplyPaused"`
+	// ShellWaitingForAutomation says the unattended desktop installer waits
+	// for an automation's run (ST-299), up to updateAutomationGrace: the web
+	// and the native updater hold off meanwhile. Not a pause: the setting and
+	// its operator-pause wording are untouched.
+	ShellWaitingForAutomation  string `json:"shellWaitingForAutomation,omitempty"`
 	ShellAutoApplyPausedReason string `json:"shellAutoApplyPausedReason,omitempty"`
 
 	// UpdateChannel is the build this install follows: "public" or "team"
@@ -355,6 +360,12 @@ type Updater struct {
 	// retries this server gate; only the temporary Focus cause is unbounded.
 	// Set once at boot; nil means no gate in minimal setups and tests.
 	busyCheck func() *updateBusyError
+	// automationRunning names an automation's run in flight (ST-299): the
+	// unattended desktop installer waits for it (bounded), and the status
+	// reports the wait (ShellWaitingForAutomation), for the native updater too.
+	automationRunning func() (string, bool)
+	// automationWaitSince is when the installer began waiting for automations.
+	automationWaitSince time.Time
 	// restartLossCounts samples volatile state immediately before a swap.
 	// Wired once at boot; nil in minimal setups.
 	restartLossCounts func() (held, receipts int, asks int64)
@@ -362,6 +373,10 @@ type Updater struct {
 	// are guarded by mu; sampling gaps between attempts start a fresh grace.
 	busySince        time.Time
 	busyLastObserved time.Time
+	// busyCause is the cause the current episode's grace belongs to: a
+	// different cause starts its own grace (an automation's long one is
+	// never inherited by a collaboration hold, nor the reverse).
+	busyCause string
 
 	// inflightCount, when set, reports open workflow model invocations. Apply()
 	// uses it to drain model workers before a non-forced binary swap. nil = no
@@ -1096,13 +1111,48 @@ func (u *Updater) populateRollbackStatusLocked(now time.Time) {
 // (see recomputeShellLocked) so the installer badge reflects a just-installed
 // shell between 30s Check() ticks.
 func (u *Updater) Status() *UpdateStatus {
+	// Asked before u.mu (the schedule store has its own lock).
+	autoName, autoBusy := u.automationRunningNow()
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	// Refresh the installer badge from the on-disk shell version so the cached
 	// status reflects a just-installed shell between 30s Check() ticks (see
 	// recomputeShellLocked). Cheap local file read; safe to run on every poll.
 	u.recomputeShellLocked()
-	return u.statusCopy()
+	st := u.statusCopy()
+	if autoBusy {
+		st.ShellWaitingForAutomation = automationRunningReason(autoName)
+	}
+	return st
+}
+
+// automationRunningNow asks the schedule store whether an automation runs,
+// for the desktop installer: true while one does, for at most
+// updateAutomationGrace of continuous running (as the daemon's own update),
+// so a busy schedule cannot hold desktop updates off for ever.
+func (u *Updater) automationRunningNow() (string, bool) {
+	if u.automationRunning == nil {
+		return "", false
+	}
+	name, running := u.automationRunning()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if !running {
+		u.automationWaitSince = time.Time{}
+		return "", false
+	}
+	now := time.Now()
+	if u.automationWaitSince.IsZero() {
+		u.automationWaitSince = now
+	}
+	if now.Sub(u.automationWaitSince) >= updateAutomationGrace {
+		return "", false
+	}
+	return name, true
+}
+
+func automationRunningReason(name string) string {
+	return "an automation is running (" + name + "); the desktop update waits for it to finish"
 }
 
 // LatestManifestSource returns the exact private-source commit from the last

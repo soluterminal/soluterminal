@@ -494,7 +494,7 @@ describe('e2e smoke server fixtures', () => {
       ['/api/muse/accounts', { accounts: [], liveAuthPresent: false }],
       ['/api/muse/team', { available: false }],
       ['/api/feedback/inbox', { events: [] }],
-      ['/api/agents/status', { fixAgent: null, cloud: null }],
+      ['/api/agents/status', { prAgent: null, cloud: null }],
       ['/api/enter-gap', { claudeMs: 400, defaultMs: 100 }],
       ['/api/workflow/runtimes/health', {
         runtimes: expect.any(Array),

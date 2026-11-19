@@ -280,6 +280,10 @@ export interface PaneInfo {
   // prompts it judges low-risk; otherwise it leaves the question for
   // the user. Per-hour cap + global pause still apply to both.
   autoMode?: '' | 'always' | 'cautious';
+  // The pane's output recording (daemon/pane_recorder_pane.go), from daemon
+  // state only: every viewer shows the REC mark from this, never from a local
+  // guess. Absent = off with nothing to show. Never carries content.
+  recording?: PaneRecording;
   // Daemon-computed "who needs to act" signal (daemon/attention.go). This is
   // what every alert surface keys on — NOT the raw `state`:
   //   'none'         — nothing is waiting on anyone.
@@ -524,6 +528,29 @@ export interface ScheduleRun {
   paneId?: string;   // prompt runs: the pane the prompt was delivered into
   logFile?: string;  // agent/task runs: captured-output file for /api/schedules/{id}/runlog
   summary?: string;  // task runs: the report's opening lines (also the push body)
+  // Automations stage 2 (absent from older daemons):
+  id?: string;
+  // 'nothing': a task found nothing to do. 'failed' can come with status
+  // 'fired': the task ran to its end, but its report says it could not finish.
+  outcome?: 'worked' | 'nothing' | 'failed' | 'skipped';
+  trigger?: 'scheduled' | 'run-now' | 'retry' | 'catch-up';
+  cause?: string;    // a stable code for a failure or skip (daemon runCause*)
+  endedAt?: string;
+  durationMs?: number;
+  account?: string;  // task runs: the account it used, when the build can tell
+  // Task runs: the model that did the work, as Claude reported it; else the
+  // one the automation asked for ('' = the default).
+  model?: string;
+  usage?: ScheduleRunUsage; // task runs: as Claude's result reported it
+}
+
+export interface ScheduleRunUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  costUsd?: number; // Claude's own estimate; not a bill on a subscription
+  turns?: number;
 }
 
 // What POST /api/schedules/{id}/fire (Run now) did, at once. 'started': the
@@ -567,6 +594,10 @@ export interface Schedule {
   // pane").
   waitingForPane?: boolean;
   waitingReason?: string;
+  // server-computed: an automation from before the limits that runs more
+  // often than one may be set now (every 5 minutes). It keeps running; a new
+  // timing must respect the limit.
+  tooFrequent?: boolean;
   // kind='task' fields. permission is a preset name, never a raw claude flag.
   cwd?: string;
   permission?: SchedulePermission;
@@ -607,11 +638,50 @@ export interface Schedule {
 // "SoluTerminal" for a change the daemon made itself (with `reason`).
 export interface ScheduleChange {
   at: string;
-  action: 'enabled' | 'disabled' | 'deleted';
+  // created and edited come only in the history (GET …/history).
+  action: 'enabled' | 'disabled' | 'deleted' | 'created' | 'edited';
   by: string;
   paneId?: string;
   source: 'ui' | 'mcp' | 'daemon';
   reason?: string;
+}
+
+// One line of an automation's history (GET /api/schedules/{id}/history):
+// a run, or a change made to it. `at` is when the line was written; a run's
+// own `run.at` is when it started.
+export interface ScheduleHistoryEntry {
+  type: 'run' | 'change';
+  at: string;
+  run?: ScheduleRun;
+  change?: ScheduleChange;
+}
+
+// An automation's run in flight (GET /api/schedules/{id}/live): the
+// assistant's text so far (never a tool's output), or a prompt's wait.
+export interface ScheduleLive {
+  running: boolean;
+  runId?: string;
+  startedAt?: string;
+  model?: string;
+  text?: string;
+  clipped?: boolean;
+  waiting?: string;
+  waitId?: string; // which wait, for Stop
+}
+
+// The "Pause all automations" switch (GET/POST /api/schedules/pause-all).
+// source "autonomy": set by Pause all autonomy (its resume lifts it).
+export interface AutomationsPause {
+  paused: boolean;
+  since?: string;
+  by?: string;
+  source?: string;
+}
+
+// A page of history, newest first; `next` fetches the page after it.
+export interface ScheduleHistoryPage {
+  entries: ScheduleHistoryEntry[];
+  next?: string;
 }
 
 export interface ScheduleInput {
@@ -1050,6 +1120,8 @@ export interface UpdateStatus {
   // public) has the unattended installer restart off. The countdown never
   // arms and the ordinary installer banner shows; clicks are unaffected.
   shellAutoApplyPaused?: boolean;
+  // The desktop installer waits for an automation's run (ST-299).
+  shellWaitingForAutomation?: string;
   shellAutoApplyPausedReason?: string;
 }
 
@@ -1287,4 +1359,20 @@ export interface Entitlements {
   voice?: boolean;
   smartApprovals?: boolean;
   source?: string;
+}
+
+// A pane's output-recording state as the daemon reports it on /api/panes and
+// the "pane-recording" UI event.
+export interface PaneRecording {
+  on: boolean;
+  startedAt?: number;
+  bytesRecorded?: number;
+  bytesWritten?: number;
+  bytesDropped?: number;
+  bytesReplaced?: number;
+  // Set when a recording stopped for a reason the person should see (disk
+  // cap, refused folder or pane, the 8-hour limit, a failed write), until
+  // they dismiss it.
+  stoppedReason?: string;
+  stoppedAt?: number;
 }

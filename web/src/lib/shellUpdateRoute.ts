@@ -26,8 +26,10 @@ export function daemonOnThisComputer(): boolean {
 // The unattended installer restart is allowed only when the daemon says so
 // explicitly (daemon/updater_control.go: on for team, off for public unless a
 // control file turns it on). A status without the field counts as paused.
+// While an automation runs (shellWaitingForAutomation, ST-299) the installer
+// waits: no attempt is made, so none is spent.
 export function shellAutoApplyEnabled(status: UpdateStatus | null | undefined): boolean {
-  return status?.shellAutoApplyPaused === false;
+  return status?.shellAutoApplyPaused === false && !status?.shellWaitingForAutomation;
 }
 
 export function shellUpdateNeedsDaemon(status: UpdateStatus | null | undefined): boolean {

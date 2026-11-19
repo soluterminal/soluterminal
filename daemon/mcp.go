@@ -1010,7 +1010,9 @@ func mcpCoreTools() []mcpTool {
 				"user explicitly wants the text to land in a pane they are watching. Pass exactly " +
 				"one trigger: `cron` for a recurring job (standard 5-field cron, local timezone) " +
 				"or `run_at` for a one-time fire (RFC3339 timestamp, must be in the future). " +
-				"`until` and `max_fires` are recurring-only end conditions.",
+				"`until` and `max_fires` are recurring-only end conditions. Limits: an automation " +
+				"you create runs at most every 15 minutes, and one pane may create at most 20 " +
+				"(100 in total on this computer); past either, nothing is created.",
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {

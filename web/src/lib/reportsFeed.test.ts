@@ -107,6 +107,9 @@ describe('runNeedsYou', () => {
     expect(runNeedsYou(run({ summary: 'Nothing needs you today.\n\n## CI' }))).toBe(false);
     expect(runNeedsYou(run({ summary: '## Needs your attention later' }))).toBe(false);
     expect(runNeedsYou(run({ status: 'error', summary: undefined }))).toBe(true);
+    // Ran to its end, but the report says it could not finish.
+    expect(runNeedsYou(run({ outcome: 'failed', summary: 'failed: no network' }))).toBe(true);
+    expect(runNeedsYou(run({ outcome: 'nothing', summary: 'Nothing to do.' }))).toBe(false);
     expect(runNeedsYou(run({ summary: undefined }))).toBe(false);
   });
 });

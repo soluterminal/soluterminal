@@ -13,6 +13,8 @@ const ACTION_WORDS: Record<ScheduleChange['action'], string> = {
   enabled: 'Turned on',
   disabled: 'Paused',
   deleted: 'Deleted',
+  created: 'Created',
+  edited: 'Edited',
 };
 
 function changeTime(at: string): string {

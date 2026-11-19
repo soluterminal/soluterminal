@@ -20,8 +20,9 @@ import '@xterm/xterm/css/xterm.css';
 import { api } from '../api';
 import { openWebSocket, privateRelaySocketsFor } from '../lib/signedStreams';
 import { debugLog, lifecycleLog } from '../debug';
-import { recordIme } from '../imeTrace';
+import { isImeTraceEnabled, recordIme } from '../imeTrace';
 import { isMobileViewport } from '../lib/mobile';
+import { attachImeAnchor } from '../lib/imeAnchor';
 import { resolveTerminalTheme, useStore } from '../store';
 import { DRAG_MIME, computeZone, type DropZone } from '../lib/paneDnd';
 import { collectPaneIds, layoutHasLeaf } from '../lib/layout';
@@ -2870,6 +2871,17 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
     const trackCompositionEnd = () => { compositionLease?.(); compositionLease = null; };
     term.textarea?.addEventListener('compositionstart', trackCompositionStart);
     term.textarea?.addEventListener('compositionend', trackCompositionEnd);
+    // Desktop IME: put the helper textarea on the caret before a composition
+    // starts, so the candidate bar opens there and not at the window's
+    // corner (feedback #73). Phones pin the textarea instead (styles.css).
+    const detachImeAnchor = attachImeAnchor(term, {
+      enabled: () => !isMobileViewport(),
+      onCompositionStart: (ta) => {
+        if (!isImeTraceEnabled()) return;
+        const r = ta.getBoundingClientRect();
+        recordIme({ t: performance.now(), kind: 'c-anchor', anchor: `${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}` });
+      },
+    });
     let teardownComposition: (() => void) | null = null;
     if (isPhoneWidth && term.textarea) {
       const ta = term.textarea;
@@ -3381,6 +3393,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
       trackCompositionEnd();
       term.textarea?.removeEventListener('compositionstart', trackCompositionStart);
       term.textarea?.removeEventListener('compositionend', trackCompositionEnd);
+      detachImeAnchor();
       fontRefitRef.current = null;
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('blur', onWindowBlur);
@@ -3627,6 +3640,7 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           onToggleAnnounceDelegation={(isClaudePane || isCodexPane) && operatorFeaturesAllowed() ? ctxMenuActions.toggleAnnounceDelegation : undefined}
           onEditFlagMemo={ctxMenuActions.editFlagMemo}
           onUnflag={ctxMenuActions.unflag}
+          onRecording={ctxMenuActions.recording}
           onFlagForAttention={ctxMenuActions.flagForAttention}
           onRename={ctxMenuActions.rename}
           onCopySessionId={ctxMenuActions.copySessionId}

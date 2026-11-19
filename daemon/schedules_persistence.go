@@ -77,11 +77,8 @@ func (s *ScheduleStore) load() error {
 		// instead of handing it to an unrelated provider CLI.
 		if sched.Enabled && providers.HasRetiredDeepSeekReference(sched.Model) {
 			sched.Enabled = false
-			sched.noteChange(scheduleChangeDisabled, scheduleActorDaemon, "its model was retired", time.Now())
-			sched.Runs = append([]ScheduleRun{{Status: "error", Detail: "disabled: retired DeepSeek model"}}, sched.Runs...)
-			if len(sched.Runs) > maxRunHistory {
-				sched.Runs = sched.Runs[:maxRunHistory]
-			}
+			s.noteChangeLocked(sched, scheduleChangeDisabled, scheduleActorDaemon, "its model was retired", time.Now())
+			s.prependRunLocked(sched, ScheduleRun{Status: "error", Cause: runCauseBadSetting, Detail: "disabled: retired DeepSeek model"})
 			sched.ErrorCount++
 			migrated = true
 		}

@@ -4,55 +4,56 @@ import { expect, test } from './fixtures';
 // The two operator footer chips say what is wrong and why, and each leads to
 // one fix: the agents panel offers a single action, and the service CPU chip
 // opens System, where the background service can be restarted.
-test('the fix agent chip says why it is down and the panel offers one fix', async ({ page }, info) => {
+//
+// The fix agent was retired (ST-300): the payload below still carries its
+// leg, switched off and failing as an older daemon sends it, and neither the
+// chip nor the panel may mention it.
+test('the PR reviewer chip says it is down and the panel opens its log', async ({ page }, info) => {
   const startedAt = Date.now();
-  await page.clock.install();
   await page.route('**/api/agents/status**', (route) => route.fulfill({ json: {
     fixAgent: {
-      present: true, running: false, disabled: false, result: 'ok',
-      finishedAt: new Date(startedAt - 51.5 * 60_000).toISOString(), ageS: null,
-      nextRunAt: null, stale: false, stuck: [],
+      present: true, running: false, disabled: true, result: 'fail',
+      finishedAt: new Date(startedAt - 5 * 86_400_000).toISOString(), ageS: null,
+      nextRunAt: null, stale: true, stuck: [{ issue: 42, reason: 'exhausted' }],
+      schedule: { id: 'sch_fix', enabled: false },
     },
-    prAgent: null,
+    prAgent: {
+      present: true, running: false, disabled: false, result: 'ok',
+      finishedAt: new Date(startedAt - 47 * 60_000).toISOString(),
+      heartbeat: {
+        state: 'down', downSince: new Date(startedAt - 47 * 60_000).toISOString(),
+        detail: 'error: agent not installed on this machine', scheduleId: 'sch_pr',
+      },
+    },
     cloud: null,
     generatedAt: new Date().toISOString(),
     fetchedAt: new Date().toISOString(),
   } }));
   await page.route('**/api/schedules', (route) => route.fulfill({ json: [{
-    id: 'sch_fix', name: 'Fix agent', kind: 'agent', agentId: 'fix-agent', cron: '*/15 * * * *',
+    id: 'sch_pr', name: 'PR babysitter', kind: 'agent', agentId: 'pr-agent', cron: '2,12,22,32,42,52 * * * *',
     enabled: true, createdAt: '2026-11-01T00:00:00Z', nextFire: null,
     fireCount: 4, skipCount: 0, errorCount: 1,
     runs: [{ at: new Date(startedAt - 60_000).toISOString(), status: 'error', detail: 'agent not installed on this machine' }],
   }] }));
-  await page.route('**/api/agents/bootstrap', (route) => route.fulfill({ json: {
-    supported: true, embeddedCode: true,
-    checks: { git: true, gh: true, bwrap: true, node: true, claudeSubscription: 'max' },
-    agents: [{
-      id: 'fix-agent', title: 'Fix agent', present: false, codeSource: 'missing',
-      envReady: false, envKeys: [], scheduled: true, scheduleId: 'sch_fix', apply: true,
-      env: [{ key: 'FEEDBACK_GITHUB_TOKEN', label: 'Feedback repo token', secret: true, required: true }],
-    }],
-  } }));
 
   await page.goto('/');
   await expect(page.locator('.statusbar')).toBeVisible();
-  // Down is confirmed by a second poll, one minute after the first.
-  await page.clock.fastForward(61_000);
   const chip = page.locator('.statusbar-agents.down');
-  await expect(chip).toHaveText(/^Fix agent stopped: no run for 5\d min$/);
-  await expect(chip).toHaveAttribute('aria-label', /Last attempt failed: agent not installed on this machine · click for the fix$/);
+  await expect(chip).toHaveText('PR reviewer down');
+  await expect(chip).toHaveAttribute('aria-label', /PRs to main are not getting solu\/review\. Last run error: agent not installed on this machine\./);
+  await expect(page.locator('.statusbar')).not.toContainText(/fix agent/i);
 
   await chip.click();
   const panel = page.getByRole('dialog', { name: 'Agents status' });
-  await expect(panel.locator('.ap-why')).toHaveText('Last attempt failed: agent not installed on this machine');
+  await expect(panel.locator('.vp-verdict')).toContainText("PR reviewer down for 4");
+  await expect(panel).not.toContainText(/fix agent/i);
   const action = panel.locator('.ap-verdict-action');
   await expect(action).toHaveCount(1);
-  await expect(action).toHaveText('Repair setup');
-  await page.screenshot({ path: info.outputPath('agents-panel-down.png') });
+  await expect(action).toHaveText('Open pr-agent log');
+  await page.screenshot({ path: info.outputPath('agents-panel-reviewer-down.png') });
 
   await action.click();
-  await expect(panel.getByText('Feedback repo token')).toBeVisible();
-  await page.screenshot({ path: info.outputPath('agents-panel-repair.png') });
+  await expect(panel).toBeHidden();
 });
 
 test('the service CPU chip opens System, where the background service restarts', async ({ page }, info) => {

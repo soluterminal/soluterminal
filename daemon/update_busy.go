@@ -46,5 +46,12 @@ func (a *apiServer) updateBusy() *updateBusyError {
 			return &updateBusyError{cause: updateBusyCauseCollaboration, reason: "a pane has a held delivery (pane " + p.ID + ")", paneID: p.ID}
 		}
 	}
+	// Last, after the collaboration checks: a fresh ask_pane keeps its own
+	// grace even while an automation runs.
+	if a.scheds != nil {
+		if name, ok := a.scheds.RunInFlight(); ok {
+			return &updateBusyError{cause: updateBusyCauseAutomation, reason: "an automation is running (" + name + "); the update waits for it to finish, up to 30 minutes"}
+		}
+	}
 	return nil
 }

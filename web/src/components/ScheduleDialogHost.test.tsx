@@ -9,7 +9,7 @@ function pane(id: string, cwd: string) {
   return { id, cmd: ['bash'], cwd, liveCwd: cwd, status: 'running', title: id } as never;
 }
 
-function openFromEvent(detail?: { paneId?: string; fromPaneMenu?: boolean }) {
+function openFromEvent(detail?: { paneId?: string; fromPaneMenu?: boolean; editId?: string }) {
   act(() => {
     window.dispatchEvent(new CustomEvent('solu:open-schedule-dialog', { detail }));
   });
@@ -66,5 +66,23 @@ describe('ScheduleDialogHost', () => {
     openFromEvent();
     fireEvent.click(screen.getByText(/Start from scratch/));
     expect(await screen.findByLabelText('Working directory')).toHaveValue('/home/me/two');
+  });
+  // A failed run's "Pick another pane" / "Pick a folder" opens the automation
+  // itself for editing.
+  it('opens an existing automation for editing by id', async () => {
+    useStore.setState({
+      schedules: [{
+        id: 's9', name: 'Nightly check', kind: 'prompt', cron: '0 2 * * *', paneId: 'p2', prompt: 'check the build',
+        enabled: false, createdAt: '2026-11-01T00:00:00Z', fireCount: 0, skipCount: 0, errorCount: 0,
+      } as never],
+    });
+    render(<ScheduleDialogHost />);
+    openFromEvent({ editId: 's9' });
+    expect(await screen.findByDisplayValue('Nightly check')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('check the build')).toBeInTheDocument();
+    // An id that is not there opens nothing.
+    openFromEvent({ editId: 'nope' });
+    expect(screen.getByDisplayValue('Nightly check')).toBeInTheDocument();
+    useStore.setState({ schedules: [] });
   });
 });

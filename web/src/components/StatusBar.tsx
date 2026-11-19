@@ -32,6 +32,7 @@ import type { ReleaseTrainStatus } from '../api';
 import { PLAIN_SYSTEM_AREA, cloudPairingFix, pairingFixPlace } from './system/systemPlain';
 import { usePresentationMode } from '../lib/hideIdentities';
 import { workspacePaneIds } from '../lib/workspaceView';
+import { RecordingStatusChip } from './PaneRecordingMark';
 
 const HEALTH_SHOW_OFFLINE_AFTER_MS = 30000;
 
@@ -504,6 +505,7 @@ export function StatusBar() {
       <div className="statusbar-right">
         {/* Panes count; the popover carries the pane list + exited cleanup. */}
         <PanesChip />
+        <RecordingStatusChip />
         {/* The person's stop on agent-to-agent messaging — public, renders
             its own leading separator, hidden with fewer than two panes
             unless paused. */}

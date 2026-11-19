@@ -8003,8 +8003,11 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
      position buys nothing. -9999em is xterm's own resting position, so input +
      focus still work. Gated so it can be disabled instantly — see
      syncTextareaPinPref (?textareapin=0 / body.no-textarea-pin). Desktop is
-     untouched (this whole block is inside the mobile media query). */
-  body:not(.no-textarea-pin) .pane-body .xterm-helper-textarea {
+     untouched (this whole block is inside the mobile media query, and the
+     desktop app's window, which can be 600-799px wide, is body.desktop-shell:
+     pinned there, a Windows IME opens its candidate bar at the window's
+     corner, feedback #73). */
+  body:not(.no-textarea-pin):not(.desktop-shell) .pane-body .xterm-helper-textarea {
     left: -9999em !important;
     /* bottom, NOT top: park it at the bottom of the grid — already in view
        where you type. At top:0 it sits off the top of a bottom-scrolled
@@ -11974,14 +11977,11 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
   background: var(--bg-elev);
   color: var(--fg);
 }
-/* Paused = intentional (kill switch), never an incident — a distinct, quieter
-   gray than the healthy resting dim. */
-.statusbar-agents.paused { color: color-mix(in srgb, var(--fg-dim) 70%, transparent); }
 /* Stale/unknown: dim with a hollow-reading glyph. */
 .statusbar-agents.stale .statusbar-agents-glyph { opacity: 0.55; }
 .statusbar-agents.stuck { color: var(--warn); }
 .statusbar-agents.down { color: var(--danger); }
-/* N-to-review: the one state built to be salient — accent tint like the
+/* N-to-merge: the one state built to be salient — accent tint like the
    update chip. */
 .statusbar-agents.review {
   color: var(--accent);
@@ -12015,8 +12015,7 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
 .ap-dim { color: var(--fg-dim); }
 
 /* Merge-readiness pill — a small inline tag next to a PR/review. ok = the
-   review found nothing blocking (or, on fix-agent queue rows, a true
-   CI-green merge-ready call); warn = changes requested. */
+   review found nothing blocking; warn = changes requested. */
 .ap-merge-pill {
   display: inline-block;
   margin-left: 6px;
@@ -12037,41 +12036,8 @@ body.bottombar-picker-open .mobile-bottombar { z-index: 55; }
   color: var(--warn);
   font-size: 11px;
 }
-/* Why the agents are down, under the verdict, and the one action that fixes
-   it. The reason is UNTRUSTED text (the agent's own error line): it wraps and
-   never widens the panel. */
-.ap-why {
-  margin-top: 2px;
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
+/* The verdict's one action (the PR reviewer's log while it is down). */
 .ap-verdict-action { margin-top: 8px; }
-.ap-verdict-action:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-/* Zone B queue rows. Titles are UNTRUSTED text — single line + ellipsis. */
-.ap-pr { margin-top: 6px; }
-.ap-pr:first-of-type { margin-top: 2px; }
-.ap-pr-title {
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ap-pr-meta {
-  font-size: 11px;
-  color: var(--fg-dim);
-  font-variant-numeric: tabular-nums;
-}
-.ap-pr-foot {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--fg-dim);
-  font-variant-numeric: tabular-nums;
-}
 .ap-more { margin-top: 4px; font-size: 11px; }
 .ap-working { margin-top: 6px; font-size: 11px; color: var(--fg-dim); }
 /* Zone C agent rows: name left, detail right (vp-row shape at 12px). */
@@ -13026,3 +12992,59 @@ span.tree-chevron { cursor: inherit; }
 .make-leads-list .make-leads-pane { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; font-size: 12px; color: var(--fg); cursor: pointer; }
 .make-leads-pane span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .make-leads-role { width: 100%; min-width: 0; }
+
+/* Pane output recording mark (components/PaneRecordingMark.tsx): a red dot
+   and REC on the pane header, the sidebar row and the status bar count. */
+.pane-rec-mark,
+.statusbar-recording {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: 'SF Mono','Menlo',monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, transparent);
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 14px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  user-select: none;
+}
+.pane-rec-mark.is-row { margin-left: 4px; }
+.statusbar-recording { font-size: 11px; margin: 0 6px; }
+.pane-rec-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  flex-shrink: 0;
+}
+.pane-rec-stopped {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--danger);
+  border: 1px dashed color-mix(in srgb, var(--danger) 60%, transparent);
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 14px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.pane-rec-stopped.is-row { margin-left: 4px; }
+/* A long reason never squeezes the title: the full text is in the tooltip. */
+.pane-rec-stopped.is-header { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.pane-rec-dismiss {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 0 0 2px;
+  font-size: 12px;
+  line-height: 1;
+}

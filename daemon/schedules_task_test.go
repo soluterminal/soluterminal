@@ -330,7 +330,7 @@ func TestTaskRunCapturesLog(t *testing.T) {
 		t.Errorf("log missing child output: %q", got)
 	}
 	// The permission preset must reach claude as its mapped flag...
-	if !strings.Contains(got, "--permission-mode plan --output-format text") {
+	if !strings.Contains(got, "--permission-mode plan --output-format stream-json --verbose") {
 		t.Errorf("permission flag missing from argv: %q", got)
 	}
 	// ...and the prompt must arrive on STDIN, never as an argv element.
@@ -1343,7 +1343,7 @@ func TestTaskRunCheckPresetArgv(t *testing.T) {
 	for _, want := range []string{
 		"-p --permission-mode dontAsk --allowedTools Bash(npm outdated),",
 		"Bash(npm test),",
-		"--disallowedTools Edit,Write,NotebookEdit,mcp__* --setting-sources  --output-format text",
+		"--disallowedTools Edit,Write,NotebookEdit,mcp__* --setting-sources  --output-format stream-json --verbose",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("argv missing %q:\n%s", want, got)

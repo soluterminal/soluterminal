@@ -979,6 +979,9 @@ func main() {
 	// Terminal turns survive a daemon swap. Protect volatile collaboration
 	// state and, until removal lands, in-process Focus turns.
 	updater.busyCheck = api.updateBusy
+	if scheds != nil {
+		updater.automationRunning = scheds.RunInFlight
+	}
 	updater.restartLossCounts = func() (int, int, int64) {
 		held, receipts := api.serviceLossCounts()
 		return held, receipts, api.collabInflight.Load()
@@ -1025,6 +1028,9 @@ func main() {
 		}
 	}
 	api.storage = newHostStorageService(*dataDir, api.resources)
+	// Recordings older than recordingMaxAge go at start and hourly, whether
+	// or not anything is recording; the sweep creates nothing.
+	api.storage.afterSample = func() { mgr.recordingHub().sweepIfDue() }
 	coordLog.setDir(*dataDir)
 	api.originAliases = newPaneOriginAliases(*dataDir)
 

@@ -3,7 +3,9 @@ import { useStore } from '../../store';
 import type { Schedule } from '../../types';
 import { ScheduleDialog } from '../ScheduleDialog';
 import { SectionHeader } from './SectionHeader';
-import { IconClock, IconPlus, IconDiamond, IconSparkle, IconAlertTriangle } from '../ui/icons';
+import { IconClock, IconPlus, IconDiamond, IconSparkle, IconAlertTriangle, IconPause } from '../ui/icons';
+import { api } from '../../api';
+import type { AutomationsPause } from '../../types';
 import { relativeTime } from './time';
 import { confirmDialog } from '../../lib/dialog';
 import { describeCron, formatNextFire } from '../../lib/cron';
@@ -129,10 +131,33 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
     return () => clearInterval(h);
   }, []);
 
+  // "Pause all automations" (ST-299): read on open and whenever the list
+  // changes (a pause holds rows, a resume re-arms them).
+  const [pause, setPause] = useState<AutomationsPause | null>(null);
+  useEffect(() => {
+    // Nothing to pause or hold without automations (and an older daemon
+    // without the route is not asked).
+    if (schedules.length === 0) return;
+    let gone = false;
+    api.getPauseAll().then((p) => { if (!gone) setPause(p); }).catch(() => {});
+    return () => { gone = true; };
+  }, [schedules]);
+  async function setAllPaused(paused: boolean) {
+    try {
+      setPause(await api.setPauseAll(paused));
+      toast(paused ? 'All automations paused' : 'Automations resumed', { kind: 'success' });
+    } catch (e) {
+      toast(`Couldn't ${paused ? 'pause' : 'resume'} automations: ${(e as Error).message}`, { kind: 'warn', icon: '⚠' });
+    }
+  }
+
   async function handleFire(id: string) {
     const s = schedules.find((x) => x.id === id);
     try {
       await fireSchedule(id);
+      // A task runs for a while: open its reader, which shows the run live
+      // with Stop (ST-299 item 12).
+      if (s?.kind === 'task') setHistoryId(id);
     } catch (e) {
       toast(`Run failed: ${(e as Error).message}`, {
         kind: 'error',
@@ -257,6 +282,14 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                 title="An automation's last run failed — open its history for details"
               />
             )}
+            {schedules.length > 0 && !pause?.paused && (
+              <button
+                className="iconbtn"
+                onClick={(e) => { e.stopPropagation(); void setAllPaused(true); }}
+                title="Pause all automations: none runs until you resume (runs that come due are held, and run once each on resume)"
+                aria-label="Pause all automations"
+              ><IconPause size={14} /></button>
+            )}
             <button
               className="iconbtn"
               onClick={(e) => { e.stopPropagation(); openNewDialog(); }}
@@ -266,6 +299,18 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
           </>
         }
       />
+      {!collapsed && pause?.paused && (
+        <div role="status" className="sched-paused-banner" style={{ fontSize: 11, padding: '4px 0', display: 'flex', alignItems: 'baseline', gap: 6 }}>
+          <span style={{ flex: 1 }}>
+            All automations are paused{pause.source === 'autonomy' ? ' (Pause all autonomy)' : ''}{pause.since ? ` since ${new Date(pause.since).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}. Runs that come due are held and run once each when you resume.
+          </span>
+          <button
+            className="linklike"
+            onClick={() => void setAllPaused(false)}
+            style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline' }}
+          >Resume</button>
+        </div>
+      )}
       {/* An empty list means "none" only once a load has succeeded. Before
           that it is still loading, or the load failed; say which. */}
       {!collapsed && loadError && (
@@ -451,7 +496,12 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                       className="sched-paused-tag"
                       title="Finished — it has nothing left to run. Edit it to set a new time, or clear it."
                     > · {doneLabel}</span>
-                  ) : !s.enabled && !lastRunGoing && (s.pausedReason ? (
+                  ) : !s.enabled && !lastRunGoing && (s.pausedReason?.startsWith('all automations are paused') ? (
+                    <span
+                      className="sched-paused-tag"
+                      title="Held: all automations are paused. It runs once when they resume."
+                    > · held</span>
+                  ) : s.pausedReason ? (
                     <span
                       className="sched-paused-tag"
                       title={`Paused automatically: ${s.pausedReason}. Edit it to pick another pane, then turn it back on.`}
@@ -468,6 +518,12 @@ export function SchedulesSection({ collapsed, onToggle }: SchedulesSectionProps)
                     > · paused</span>
                   ))}
                   {targetMissing && <span className="sched-warn" title="The pane this automation types into is closed. Edit it to pick another pane."> <IconAlertTriangle size={11} style={{ verticalAlign: '-1px' }} /></span>}
+                  {s.tooFrequent && (
+                    <span
+                      className="sched-paused-tag"
+                      title="This automation runs more often than one can be set now (every 5 minutes at most). It keeps running as it is; a new timing must respect the limit."
+                    > · runs more often than allowed</span>
+                  )}
                 </div>
                 <div className="sched-sub">
                   <span className="sched-cadence">{cadenceLabel(s)}</span>

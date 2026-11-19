@@ -39,6 +39,18 @@ func recordedCodexScreen(t *testing.T, session, step string) func(*Pane) (string
 	return func(*Pane) (string, string, bool) { return paneScreenFaintBlanked(rp) }
 }
 
+// useDraftGuardScreen makes the draft guard read read until the test ends.
+// The held-message drain started by the test polls draftGuardScreen until its
+// queue empties, so its pane's drain is stopped (stopHeldDrain) before the
+// previous reader is put back: cleanups run last-registered first.
+func useDraftGuardScreen(t *testing.T, p *Pane, read func(*Pane) (string, string, bool)) {
+	t.Helper()
+	prev := draftGuardScreen
+	draftGuardScreen = read
+	t.Cleanup(func() { draftGuardScreen = prev })
+	t.Cleanup(func() { stopHeldDrain(t, p) })
+}
+
 // Send now on a held message types it into the idle box the person sees as
 // empty.
 func TestHeldSendNowTypesIntoAnIdleCodex01691Box(t *testing.T) {
@@ -47,9 +59,7 @@ func TestHeldSendNowTypesIntoAnIdleCodex01691Box(t *testing.T) {
 			p, frames, screen := newDraftGuardPane(t, "st297-send-now")
 			a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus()}
 			read := recordedCodexScreen(t, session, "idle")
-			prev := draftGuardScreen
-			draftGuardScreen = read
-			t.Cleanup(func() { draftGuardScreen = prev })
+			useDraftGuardScreen(t, p, read)
 			plain, _, _ := read(p)
 			screen.Store(plain)
 			none := func() (int, int64) { return 0, 0 }
@@ -91,9 +101,7 @@ func TestHeldSendNowRefusesACodex01691Draft(t *testing.T) {
 			p, frames, screen := newDraftGuardPane(t, "st297-send-draft")
 			a := &apiServer{mgr: testManagerWithPane(p), uiBus: newUIBus()}
 			read := recordedCodexScreen(t, session, "typed")
-			prev := draftGuardScreen
-			draftGuardScreen = read
-			t.Cleanup(func() { draftGuardScreen = prev })
+			useDraftGuardScreen(t, p, read)
 			plain, _, _ := read(p)
 			screen.Store(plain)
 			if got := <-agentDelivery(p, codexProbeMessage, "@lead"); got != deliveryHeld {

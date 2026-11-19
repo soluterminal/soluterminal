@@ -5,6 +5,7 @@ import { useStore } from '../../store';
 import { paneLeadRole, paneTeamKind } from '../../lib/paneTeam';
 import { paneRowLabel } from '../../lib/paneRowLabel';
 import { paneNeedsYouLabel } from '../../lib/paneStatus';
+import { PaneRecordingMark } from '../PaneRecordingMark';
 
 /** Indent per tree level; it stops growing past MAX_INDENT_LEVELS so a deep
  *  chain cannot push titles out of a narrow sidebar (the guides still show it). */
@@ -108,6 +109,7 @@ export function WorkspacePaneRows({ nodes, workspaceKey, collapsed, toggle, setB
               {label.handle ? <span className="pane-tree-handle">{label.handle}</span> : title}
             </span>
             {leadRole && <span className="pane-tree-role-chip" title={`Lead · ${leadRole}. Never closed automatically.`}>{leadRole}</span>}
+            <PaneRecordingMark pane={pane} place="row" />
           </span>
           {/* Below the handle in a narrow sidebar, after it in a wide one
               (styles.css); a folded branch's counts end this line so they
@@ -126,7 +128,7 @@ export function WorkspacePaneRows({ nodes, workspaceKey, collapsed, toggle, setB
           </span>}
           {/* The dot shows the state; words are for screen readers (aria-describedby). */}
           <span id={statusId} className="pane-tree-status sr-only">
-            {[needsYouLabel || status, ...counts, node.startedBy ? `started by ${node.startedBy}` : ''].filter(Boolean).join(' · ')}
+            {[needsYouLabel || status, pane.recording?.on ? 'recording' : '', ...counts, node.startedBy ? `started by ${node.startedBy}` : ''].filter(Boolean).join(' · ')}
           </span>
         </span>
         <button type="button" className={`iconbtn pane-tree-close${finishedWorker ? ' is-pinned' : ''}`} tabIndex={-1} aria-label={`Close ${label.text}`} title="Close pane"

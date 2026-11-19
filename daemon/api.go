@@ -528,6 +528,9 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/panes/{id}/identity", a.setPaneIdentity)
 	mux.HandleFunc("POST /api/panes/{id}/name/suggest", a.handleSuggestPaneName)
 	mux.HandleFunc("POST /api/panes/{id}/auto-mode", a.setPaneAutoMode)
+	mux.HandleFunc("GET /api/panes/{id}/recording", a.paneRecordingStatus)
+	mux.HandleFunc("POST /api/panes/{id}/recording", a.setPaneRecording)
+	mux.HandleFunc("DELETE /api/panes/{id}/recordings", a.deletePaneRecordings)
 	mux.HandleFunc("POST /api/panes/{id}/never-auto-answer", a.setPaneNeverAutoAnswer)
 	mux.HandleFunc("POST /api/panes/{id}/announce-delegation", a.setPaneAnnounceDelegation)
 	mux.HandleFunc("POST /api/panes/{id}/flag", a.setPaneFlag)
@@ -674,6 +677,7 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/schedules/{id}/snooze", a.snoozeSchedule)
 	mux.HandleFunc("POST /api/schedules/{id}/read", a.markScheduleRead)
 	mux.HandleFunc("GET /api/schedules/{id}/runlog", a.scheduleRunLog)
+	mux.HandleFunc("GET /api/schedules/{id}/history", a.scheduleHistory)
 
 	// Inject raw bytes into a pane's PTY. Powers "Fire now" in the
 	// Schedules UI and is a general-purpose primitive for any future
@@ -1161,6 +1165,9 @@ func (a *apiServer) liveShellVersion() string {
 // snapshot of the pane's fields plus computed process/UI state flags.
 type paneDTO struct {
 	PaneSnapshot
+	// Recording is the pane's output-recording state for every client's
+	// recording mark (pane_recorder_pane.go). Never persisted, never content.
+	Recording *paneRecordingDTO  `json:"recording,omitempty"`
 	CodexAuth *codexPaneAuthInfo `json:"codexAuth,omitempty"`
 	State     PaneRuntimeState   `json:"state"`
 	// AnnounceDelegation is the EFFECTIVE delegation-announcement setting —
@@ -1517,6 +1524,7 @@ func makePaneDTOWithProcessSnapshot(p *Pane, aria *Aria, att *attentionEngine, p
 		HasDeepseek:  proc.hasDeepseek,
 		LiveCwd:      proc.liveCwd,
 		Turn:         turnSummaryFor(p.ID),
+		Recording:    p.Recording(),
 	}
 	d.Credential = p.projectLiveCredential(paneCredentialProjection(d.Credential, p.credentialSelectionCallback(), p.credentialTeamSelectionCallback()))
 	if d.Status == PaneRunning {

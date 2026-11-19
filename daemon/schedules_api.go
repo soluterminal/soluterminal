@@ -29,6 +29,10 @@ type scheduleDTO struct {
 	WaitingReason  string `json:"waitingReason,omitempty"`
 	// RunNow is set only on the answer to POST /api/schedules/{id}/fire.
 	RunNow *runNowOutcome `json:"runNow,omitempty"`
+	// TooFrequent: an automation from before the guards that runs more often
+	// than one may be set now (schedules_guards.go). It keeps running; a
+	// change to its timing must respect the limit.
+	TooFrequent bool `json:"tooFrequent,omitempty"`
 }
 
 func (a *apiServer) makeScheduleDTO(s Schedule) scheduleDTO {
@@ -40,6 +44,7 @@ func (a *apiServer) makeScheduleDTO(s Schedule) scheduleDTO {
 	}
 	dto.AgentRunning = a.scheds.scheduleRunning(s)
 	dto.WaitingReason, dto.WaitingForPane = a.scheds.paneWaitReason(s.ID)
+	dto.TooFrequent = tooFrequent(s)
 	return dto
 }
 
@@ -157,7 +162,7 @@ func (a *apiServer) createSchedule(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in, defaultJSONBodyBytes) {
 		return
 	}
-	sched, err := a.scheds.Create(in)
+	sched, err := a.scheds.CreateAs(in, nil, scheduleActorPerson)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -504,6 +509,50 @@ func (a *apiServer) scheduleRunLog(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write(data)
+}
+
+// scheduleHistory serves one page of an automation's history, newest first:
+// its runs and the changes made to it. ?before= takes the previous page's
+// next cursor, ?limit= a page size (at most historyPageMax), and
+// ?outcome=failed only its failed runs. The same readers as the automation
+// itself and its run logs; the history holds no prompt text.
+func (a *apiServer) scheduleHistory(w http.ResponseWriter, r *http.Request) {
+	if a.scheds == nil {
+		http.Error(w, "schedule not found", 404)
+		return
+	}
+	sched, ok := a.scheds.Get(r.PathValue("id"))
+	if !ok || !scheduleListed(sched) {
+		http.Error(w, "schedule not found", 404)
+		return
+	}
+	q := historyQuery{Before: r.URL.Query().Get("before")}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			http.Error(w, "limit must be a positive number", 400)
+			return
+		}
+		q.Limit = n
+	}
+	switch r.URL.Query().Get("outcome") {
+	case "":
+	case runOutcomeFailed:
+		q.FailedOnly = true
+	default:
+		http.Error(w, "outcome may only be \"failed\"", 400)
+		return
+	}
+	page, err := a.scheds.History(sched.ID, q)
+	switch {
+	case errors.Is(err, errHistoryCursor):
+		http.Error(w, err.Error(), 400)
+		return
+	case err != nil:
+		http.Error(w, "schedule not found", 404)
+		return
+	}
+	writeJSON(w, 200, page)
 }
 
 // Kept as a compile-time check that the ScheduleStore pointer is

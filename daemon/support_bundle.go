@@ -55,6 +55,7 @@ var supportBundleOmitted = []string{
 	"Credential stores and claim tokens",
 	"Browser cookies and session tokens",
 	"Full terminal scrollback (only a bounded tail of one pane you pick can be included)",
+	"Pane recordings (they are never read by the support bundle)",
 	"Environment variables and .env files",
 	"Workflow/task prompts and agent transcripts",
 	"Screenshots and all other images",

@@ -27,7 +27,9 @@ package main
 //     is NOT offered at all.
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -228,7 +230,12 @@ func (s *ScheduleStore) ownedRunHooks(schedID string) (string, func(string) (boo
 // schedule the user can still see. An imported schedule's pause walls are asked
 // about here because this path never passes runAgent.
 func (s *ScheduleStore) fireTask(schedID, cwd, prompt, permission, model string, timeoutMin int) {
-	s.fireTaskGated(schedID, cwd, prompt, permission, model, timeoutMin, true)
+	s.fireTaskGated(schedID, cwd, prompt, permission, model, timeoutMin, true, runTriggerScheduled)
+}
+
+// fireTaskAs is fireTask with what started the run named for its record.
+func (s *ScheduleStore) fireTaskAs(trigger, schedID, cwd, prompt, permission, model string, timeoutMin int) {
+	s.fireTaskGated(schedID, cwd, prompt, permission, model, timeoutMin, true, trigger)
 }
 
 // fireTaskPreGated is the imported-agent door (runAgent's legacy branch,
@@ -242,13 +249,14 @@ func (s *ScheduleStore) fireTask(schedID, cwd, prompt, permission, model string,
 // Everything past the gate is identical between the two doors; this is only
 // about WHO already decided.
 func (s *ScheduleStore) fireTaskPreGated(schedID, cwd, prompt, permission, model string, timeoutMin int) {
-	s.fireTaskGated(schedID, cwd, prompt, permission, model, timeoutMin, false)
+	s.fireTaskGated(schedID, cwd, prompt, permission, model, timeoutMin, false, runTriggerScheduled)
 }
 
-func (s *ScheduleStore) fireTaskGated(schedID, cwd, prompt, permission, model string, timeoutMin int, askOwner bool) {
-	run := ScheduleRun{At: time.Now()}
+func (s *ScheduleStore) fireTaskGated(schedID, cwd, prompt, permission, model string, timeoutMin int, askOwner bool, trigger string) {
+	run := ScheduleRun{At: time.Now(), Trigger: trigger, Model: model}
 	if providers.HasRetiredDeepSeekReference(model) {
 		run.Status = "error"
+		run.Cause = runCauseBadSetting
 		run.Detail = "retired DeepSeek model is not dispatchable"
 		s.recordRun(schedID, run)
 		return
@@ -273,6 +281,7 @@ func (s *ScheduleStore) fireTaskGated(schedID, cwd, prompt, permission, model st
 			}
 			if skip {
 				run.Status = "skipped"
+				run.Cause = runCauseKillSwitch
 				run.Detail = detail
 				s.recordRun(schedID, run)
 				return
@@ -281,12 +290,14 @@ func (s *ScheduleStore) fireTaskGated(schedID, cwd, prompt, permission, model st
 	}
 	if !validScheduleTaskPermission(permission) {
 		run.Status = "error"
+		run.Cause = runCauseBadSetting
 		run.Detail = "unknown permission preset: " + permission
 		s.recordRun(schedID, run)
 		return
 	}
 	if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
 		run.Status = "error"
+		run.Cause = runCauseFolderGone
 		run.Detail = "working directory is gone: " + cwd
 		s.recordRun(schedID, run)
 		return
@@ -294,6 +305,7 @@ func (s *ScheduleStore) fireTaskGated(schedID, cwd, prompt, permission, model st
 	bin, err := resolveClaudeBin()
 	if err != nil {
 		run.Status = "error"
+		run.Cause = runCauseClaudeMissing
 		run.Detail = err.Error()
 		s.recordRun(schedID, run)
 		return
@@ -311,28 +323,54 @@ func (s *ScheduleStore) fireTaskGated(schedID, cwd, prompt, permission, model st
 			return
 		}
 		run.Status = "skipped"
+		run.Cause = runCauseUsageLimit
 		run.Detail = usageLimitSkipDetail(until)
 		s.recordRun(schedID, run)
 		return
 	}
 
 	s.mu.Lock()
+	// A pause that landed since fireAs checked (preflight can take a while):
+	// the run is held, not started.
+	// (An imported agent card's door, askOwner false, already decided: its
+	// manual run is the person's, as Run now is.)
+	if s.allPaused.Paused && trigger != runTriggerRunNow && askOwner {
+		if sched, ok := s.items[schedID]; ok {
+			s.holdForPauseLocked(sched)
+			_ = s.saveUnlocked()
+		}
+		s.mu.Unlock()
+		s.notifyScheduleChanged(schedID)
+		return
+	}
 	ok, detail := admitRunSlot(s.taskRunning, s.taskReserved, schedID, false, s.runCapsUnlocked(), "task")
 	s.mu.Unlock()
 	if !ok {
 		run.Status = "skipped"
+		run.Cause = runCauseTooManyRuns
+		if detail == runSlotStillGoing {
+			run.Cause = runCauseAlreadyRunning
+		}
 		run.Detail = detail
 		s.recordRun(schedID, run)
 		return
 	}
 	s.notifyScheduleChanged(schedID) // sidebar flips to "running…" immediately
 
-	go s.runTaskProcess(schedID, bin, cwd, prompt, permission, model, timeoutMin)
+	meta := taskRunMeta{trigger: trigger, account: s.runAccount("claude")}
+	go s.runTaskProcess(meta, schedID, bin, cwd, prompt, permission, model, timeoutMin)
+}
+
+// taskRunMeta is what a task run's record names besides its result: what
+// started it and the account it used.
+type taskRunMeta struct {
+	trigger string
+	account string
 }
 
 // runTaskProcess resolves the timeout from the schedule's TimeoutMin and
 // releases the single-flight slot when done.
-func (s *ScheduleStore) runTaskProcess(schedID, bin, cwd, prompt, permission, model string, timeoutMin int) {
+func (s *ScheduleStore) runTaskProcess(meta taskRunMeta, schedID, bin, cwd, prompt, permission, model string, timeoutMin int) {
 	defer func() {
 		s.mu.Lock()
 		releaseRunSlot(s.taskRunning, s.taskReserved, schedID)
@@ -347,7 +385,7 @@ func (s *ScheduleStore) runTaskProcess(schedID, bin, cwd, prompt, permission, mo
 			timeout = taskRunTimeoutMax
 		}
 	}
-	s.runTaskProcessWithTimeout(schedID, bin, cwd, prompt, permission, model, timeout)
+	s.runTaskProcessAs(meta, schedID, bin, cwd, prompt, permission, model, timeout)
 }
 
 // runTaskProcessWithTimeout is the spawn+wait body. Split from runTaskProcess
@@ -356,9 +394,15 @@ func (s *ScheduleStore) runTaskProcess(schedID, bin, cwd, prompt, permission, mo
 // through the retry wait so the row keeps showing "running…" and no second
 // run can start meanwhile (schedules_limits.go).
 func (s *ScheduleStore) runTaskProcessWithTimeout(schedID, bin, cwd, prompt, permission, model string, timeout time.Duration) {
+	s.runTaskProcessAs(taskRunMeta{trigger: runTriggerScheduled}, schedID, bin, cwd, prompt, permission, model, timeout)
+}
+
+// runTaskProcessAs is runTaskProcessWithTimeout with the run's trigger and
+// account for its record.
+func (s *ScheduleStore) runTaskProcessAs(meta taskRunMeta, schedID, bin, cwd, prompt, permission, model string, timeout time.Duration) {
 	launch, _ := s.Get(schedID)
-	run, out, trace := s.runTaskAttempt(schedID, bin, cwd, prompt, permission, model, timeout)
-	if run.Status == "error" && classifyTaskFailure(out) == taskFailTransient {
+	run, out, trace, files := s.runTaskAttempt(meta, schedID, bin, cwd, prompt, permission, model, timeout)
+	if run.Status == "error" && run.Cause != runCauseStopped && classifyTaskFailure(out) == taskFailTransient {
 		switch {
 		case !trace.safeToRetry():
 			// The attempt may already have acted (posted, pushed, sent):
@@ -369,7 +413,8 @@ func (s *ScheduleStore) runTaskProcessWithTimeout(schedID, bin, cwd, prompt, per
 			log.Printf("scheduler: task %s hit a temporary error before any tool use; retrying once in %s", schedID, taskRetryDelay)
 			if s.waitTaskRetry(schedID, launch) {
 				first := strings.TrimPrefix(run.Summary, "failed: ")
-				run, out, _ = s.runTaskAttempt(schedID, bin, cwd, prompt, permission, model, timeout)
+				files.remove() // the first attempt's log stays; the retry's run is the record
+				run, out, _, files = s.runTaskAttempt(meta, schedID, bin, cwd, prompt, permission, model, timeout)
 				run.Detail += " · retried once after a temporary error"
 				if first != "" {
 					run.Detail += " (" + first + ")"
@@ -377,31 +422,13 @@ func (s *ScheduleStore) runTaskProcessWithTimeout(schedID, bin, cwd, prompt, per
 			}
 		}
 	}
-	var limitUntil time.Time
-	switch {
-	case run.Status == "fired":
-		s.clearUsageLimit()
-	case run.Status == "error" && classifyTaskFailure(out) == taskFailQuota:
-		limitUntil = taskLimitResetAt(out, time.Now())
-		s.noteUsageLimit(limitUntil)
-		run.Detail += " · usage limit reached; task runs resume after " + fmtResume(limitUntil)
-	}
-	// Only re-arm a one-time task that is still on: if the user paused it
-	// while it ran, that pause stands.
-	stillOn, seq, _ := s.editStamp(schedID)
-	s.recordRun(schedID, run)
-	// A one-time task's single chance must not be spent on the limit: move
-	// it to just after the reset (recordRun disabled it a moment ago). A
-	// pause or edit landing at any point after the stamp makes this a no-op.
-	if !limitUntil.IsZero() && stillOn {
-		s.deferOneTime(schedID, limitUntil, seq)
-	}
+	s.recordTaskResult(schedID, run, out, files)
 	log.Printf("scheduler: task %s finished status=%s detailLen=%d", schedID, run.Status, len(run.Detail))
 
 	if s.uiBus != nil {
 		s.uiBus.publish(uiEvent{Type: "schedule-fired", Text: schedID})
 		icon := "🤖"
-		if run.Status == "error" {
+		if run.Status == "error" || run.Outcome == runOutcomeFailed {
 			icon = "⚠️"
 		}
 		if sched, ok := s.Get(schedID); ok {
@@ -414,13 +441,14 @@ func (s *ScheduleStore) runTaskProcessWithTimeout(schedID, bin, cwd, prompt, per
 
 // runTaskAttempt spawns one headless run and returns its record (not yet
 // recorded) and captured output.
-func (s *ScheduleStore) runTaskAttempt(schedID, bin, cwd, prompt, permission, model string, timeout time.Duration) (ScheduleRun, []byte, taskAttemptTrace) {
-	run := ScheduleRun{At: time.Now()}
+func (s *ScheduleStore) runTaskAttempt(meta taskRunMeta, schedID, bin, cwd, prompt, permission, model string, timeout time.Duration) (ScheduleRun, []byte, taskAttemptTrace, taskRunFiles) {
+	run := ScheduleRun{At: time.Now(), Trigger: meta.trigger, Account: meta.account, Model: model}
 	markers, settings := s.prepareTaskMarkers(schedID)
 
 	// Headless, non-interactive. --permission-mode is preset-derived (never
-	// client-supplied). Plain text output: the log IS the deliverable a human
-	// reads later, so stream-json's frame soup would be a downgrade here.
+	// client-supplied). stream-json (with --verbose, which it needs under
+	// -p) carries the model, the result and the tokens and cost; the daemon
+	// renders the readable log from it (schedules_task_stream.go).
 	//
 	// The prompt goes on STDIN, not as `-p <prompt>`. Claude's `-p/--print`
 	// takes an OPTIONAL value, so its parser refuses a value beginning with a
@@ -428,7 +456,7 @@ func (s *ScheduleStore) runTaskAttempt(schedID, bin, cwd, prompt, permission, mo
 	// "error: unknown option". Verified against the installed claude CLI.
 	// Stdin sidesteps argv parsing entirely and is the canonical headless form.
 	args := append([]string{"-p"}, scheduleTaskPermissionArgs(permission)...)
-	args = append(args, "--output-format", "text")
+	args = append(args, "--output-format", "stream-json", "--verbose")
 	if model != "" {
 		args = append(args, "--model", model)
 	}
@@ -438,8 +466,9 @@ func (s *ScheduleStore) runTaskAttempt(schedID, bin, cwd, prompt, permission, mo
 	args, cleanupConfig, err := claudeConfigFileArgs(bin, args)
 	if err != nil {
 		run.Status = "error"
+		run.Cause = runCauseStartFailed
 		run.Detail = "launch configuration failed: " + err.Error()
-		return run, nil, readTaskMarkers(markers)
+		return run, nil, readTaskMarkers(markers), taskRunFiles{}
 	}
 	defer cleanupConfig()
 	cmd := exec.Command(bin, args...)
@@ -450,27 +479,15 @@ func (s *ScheduleStore) runTaskAttempt(schedID, bin, cwd, prompt, permission, mo
 	}
 	var prevRun *ScheduleRun
 	prevRead := false
-	if sched, ok := s.Get(schedID); ok {
+	sched, known := s.Get(schedID)
+	if known {
 		prevRun = lastReportRun(sched.Runs)
 		prevRead = taskReportSeen(sched, prevRun)
 	}
-	cmd.Stdin = strings.NewReader(taskPromptStdin(prompt, prevRun, prevRead))
+	stdin := taskPromptStdin(prompt, prevRun, prevRead)
 	applyDetached(cmd) // own session: survives a daemon restart, killable as a tree
-	out := &boundedBuf{limit: taskLogLimit}
-	cmd.Stdout = out
-	cmd.Stderr = out
 
 	start := time.Now()
-	if err := startWithoutCoreDumps(cmd); err != nil {
-		run.Status = "error"
-		run.Detail = "spawn failed: " + err.Error()
-		return run, nil, readTaskMarkers(markers)
-	}
-	log.Printf("scheduler: task %s started (perm=%s pid=%d cwd=%s)", schedID, permission, cmd.Process.Pid, cwd)
-	kill := time.AfterFunc(timeout, func() { _ = killChildTree(cmd.Process) })
-	werr := waitOwnedCommand(cmd)
-	timedOut := !kill.Stop()
-
 	// The header is the ONE difference an import makes to a run log
 	// (docs/DESIGN-agents-surface.md §9 S8 AC): an owned schedule's header
 	// gains an `· agent=agt_…` segment naming the card the run also lands on.
@@ -479,36 +496,143 @@ func (s *ScheduleStore) runTaskAttempt(schedID, bin, cwd, prompt, permission, mo
 	// rests on.
 	header := fmt.Sprintf("# scheduled task · permission=%s · cwd=%s · started=%s\n# prompt: %s\n\n",
 		permission, cwd, start.Format(time.RFC3339), prompt)
-	if sched, ok := s.Get(schedID); ok && sched.OwnedByAgentID != "" {
+	if known && sched.OwnedByAgentID != "" {
 		header = fmt.Sprintf("# scheduled task · permission=%s · cwd=%s · agent=%s · started=%s\n# prompt: %s\n\n",
 			permission, cwd, sched.OwnedByAgentID, start.Format(time.RFC3339), prompt)
 	}
-	run.LogFile = writeRunLog(s.taskRunDir(schedID), start, append([]byte(header), out.buf...))
-
-	dur := time.Since(start).Round(time.Second)
-	switch {
-	case timedOut:
+	// The run writes into its own file, not a pipe: its output outlives this
+	// daemon (an update, a restart), and the next start reads it.
+	dir := s.taskRunDir(schedID)
+	files := taskRunFiles{dir: dir, stamp: start.UnixMilli()}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		run.Status = "error"
-		run.Detail = fmt.Sprintf("timed out after %s — killed", timeout)
-		run.Summary = "failed: task timed out"
-	case werr == nil:
-		run.Status = "fired"
-		run.Detail = fmt.Sprintf("%s · finished in %s", permission, dur)
-		run.Summary = taskOutputPreview(out.buf)
-	default:
-		run.Status = "error"
-		code := -1
-		if ee, ok := werr.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		}
-		run.Detail = fmt.Sprintf("stopped with exit code %d after %s", code, dur)
-		if line := lastErrorLine(out.buf); line != "" {
-			run.Summary = "failed: " + line
-		} else {
-			run.Summary = "failed"
-		}
+		run.Cause = runCauseStartFailed
+		run.Detail = "run folder could not be made: " + err.Error()
+		return run, nil, readTaskMarkers(markers), taskRunFiles{}
 	}
-	return run, out.buf, readTaskMarkers(markers)
+	events, err := os.OpenFile(files.events(), os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
+	if err != nil {
+		run.Status = "error"
+		run.Cause = runCauseStartFailed
+		run.Detail = "run output file could not be made: " + err.Error()
+		return run, nil, readTaskMarkers(markers), taskRunFiles{}
+	}
+	cmd.Stdout = events
+	cmd.Stderr = events
+	// The prompt goes in through a pipe, and only once the run's record,
+	// with its process, is on disk: Claude reads its whole prompt before it
+	// does anything, so a run that starts is a run a restart can find. A
+	// daemon that stops before then closes the pipe on an empty prompt, and
+	// that run does nothing.
+	promptR, promptW, err := os.Pipe()
+	if err != nil {
+		_ = events.Close()
+		files.remove()
+		run.Status = "error"
+		run.Cause = runCauseStartFailed
+		run.Detail = "run input could not be made: " + err.Error()
+		return run, nil, readTaskMarkers(markers), taskRunFiles{}
+	}
+	cmd.Stdin = promptR
+	run.At = start
+	if run.ID == "" {
+		run.ID = newRunID(start)
+	}
+	rec := taskInflight{
+		SchedID: schedID, RunID: run.ID, Started: start,
+		TimeoutMs: timeout.Milliseconds(), Permission: permission, Cwd: cwd,
+		Model: run.Model, Trigger: run.Trigger, Account: run.Account, Header: header,
+	}
+	// The record is on disk before the run starts, and again with its
+	// process once it has: a run is never started that a restart could not
+	// find. (A stop in the instant between the two leaves a record with no
+	// process: the next start records the run from its events file.)
+	startFailed := func(detail string) (ScheduleRun, []byte, taskAttemptTrace, taskRunFiles) {
+		_ = events.Close()
+		_ = promptR.Close()
+		_ = promptW.Close()
+		files.remove()
+		run.Status = "error"
+		run.Cause = runCauseStartFailed
+		run.Detail = detail
+		return run, nil, readTaskMarkers(markers), taskRunFiles{}
+	}
+	if err := writeTaskInflight(files, rec); err != nil {
+		return startFailed("the run could not be recorded before it started: " + err.Error())
+	}
+	if err := startWithoutCoreDumps(cmd); err != nil {
+		return startFailed("spawn failed: " + err.Error())
+	}
+	_ = events.Close() // the run holds its own copies
+	_ = promptR.Close()
+	rec.PID = cmd.Process.Pid
+	if _, ticks, ok := readProcCPUTicks(cmd.Process.Pid); ok {
+		rec.StartTicks = ticks
+	}
+	if err := writeTaskInflight(files, rec); err != nil {
+		// Unrecorded, it could outlive a restart unseen: stop it before it
+		// has its prompt.
+		_ = promptW.Close()
+		_ = killChildTree(cmd.Process)
+		_ = waitOwnedCommand(cmd)
+		files.remove()
+		run.Status = "error"
+		run.Cause = runCauseStartFailed
+		run.Detail = "the run could not be recorded once started, so it was stopped: " + err.Error()
+		return run, nil, readTaskMarkers(markers), taskRunFiles{}
+	}
+	// Recorded: hand over the prompt. Off this goroutine, as a long prompt
+	// fills the pipe until Claude reads it.
+	go func() {
+		_, _ = io.WriteString(promptW, stdin)
+		_ = promptW.Close()
+	}()
+	log.Printf("scheduler: task %s started (perm=%s pid=%d cwd=%s)", schedID, permission, cmd.Process.Pid, cwd)
+
+	st := newTaskStream(files.events())
+	s.noteRunStarted(schedID, start)
+	defer s.noteRunEnded(schedID)
+	live := &liveRun{runID: run.ID, started: start, stream: st, stop: stopProcessTree(cmd.Process)}
+	s.setLive(schedID, live)
+	kill := time.AfterFunc(timeout, func() { _ = killChildTree(cmd.Process) })
+	tailDone := make(chan struct{})
+	tailExited := make(chan struct{})
+	overflow := false // the tail's; read after tailExited
+	go func() {
+		defer close(tailExited)
+		t := time.NewTicker(taskStreamPoll)
+		defer t.Stop()
+		for {
+			select {
+			case <-tailDone:
+				return
+			case <-t.C:
+				if st.poll() > taskEventsLimit && !overflow {
+					overflow = true
+					_ = killChildTree(cmd.Process)
+				}
+			}
+		}
+	}()
+	werr := waitOwnedCommand(cmd)
+	timedOut := !kill.Stop()
+	close(tailDone)
+	<-tailExited
+	st.finish()
+	stopped := s.endLive(schedID, live)
+	// Past the limit between the last poll and its end counts too.
+	overflow = overflow || files.eventsOver()
+
+	endRun(&run, time.Now())
+	out := classifyTaskRun(&run, st, true, werr, timedOut, permission, timeout)
+	if overflow && !timedOut {
+		markTaskOverflow(&run)
+	}
+	if stopped && !timedOut {
+		markStopped(&run)
+	}
+	run.LogFile = writeRunLog(dir, start, append([]byte(header), out...))
+	return run, out, readTaskMarkers(markers), files
 }
 
 // taskRunningFor reports whether a task schedule has a run in flight (the DTO's
@@ -543,7 +667,46 @@ const taskReportHint = "\n\n(Format your reply as a markdown report. Open with a
 	" \"## Needs you\" section only for a decision or action the user must take" +
 	" that is new since your last report; do not repeat earlier asks there." +
 	" Otherwise open with the line \"Nothing new needs you.\" Short ##" +
-	" sections after that; tables and checklists welcome.)"
+	" sections after that; tables and checklists welcome." +
+	" If you could not do the task, open instead with the line" +
+	" \"" + taskReportFailedLead + " <the reason in one line>\"." +
+	" If there was nothing to do, reply with only the line \"" + taskReportNothingLine + "\")"
+
+// The two report openings that set a run's outcome (taskReportVerdict). A
+// report is only ever read by the person, so a wrong opening mislabels the
+// run in its history and nothing else.
+const (
+	taskReportFailedLead  = "Could not finish:"
+	taskReportNothingLine = "Nothing to do."
+)
+
+// firstReportLine is a report's first non-empty line, without markdown
+// emphasis or heading marks.
+func firstReportLine(out []byte) string {
+	for _, l := range strings.Split(string(out), "\n") {
+		l = strings.TrimSpace(l)
+		l = strings.TrimSpace(strings.TrimLeft(l, "#>*_ "))
+		l = strings.TrimSpace(strings.TrimRight(l, "*_ "))
+		if l != "" {
+			return l
+		}
+	}
+	return ""
+}
+
+// taskReportVerdict reads a finished task's outcome from how its report
+// opens: runOutcomeFailed for "Could not finish: …", runOutcomeNothing for a
+// report that is only "Nothing to do.", "" otherwise.
+func taskReportVerdict(out []byte) string {
+	first := firstReportLine(out)
+	switch {
+	case strings.HasPrefix(strings.ToLower(first), strings.ToLower(taskReportFailedLead)):
+		return runOutcomeFailed
+	case strings.EqualFold(first, taskReportNothingLine) && !strings.Contains(strings.TrimSpace(string(out)), "\n"):
+		return runOutcomeNothing
+	}
+	return ""
+}
 
 // lastReportRun is the newest successful run with a report lede, or nil.
 func lastReportRun(runs []ScheduleRun) *ScheduleRun {
@@ -636,4 +799,41 @@ func lastErrorLine(out []byte) string {
 		}
 	}
 	return ""
+}
+
+// recordTaskResult records a finished task run, the same way whether this
+// daemon saw it end or found it after a restart: a spent usage limit holds
+// task runs (and moves a one-time task past the reset), a temporary error is
+// named, and the run's recovery files go once the record is on disk.
+func (s *ScheduleStore) recordTaskResult(schedID string, run ScheduleRun, out []byte, files taskRunFiles) {
+	var limitUntil time.Time
+	switch {
+	case run.Status == "fired":
+		s.clearUsageLimit()
+	case run.Status == "error" && run.Cause != runCauseStopped && classifyTaskFailure(out) == taskFailQuota:
+		limitUntil = taskLimitResetAt(out, time.Now())
+		s.noteUsageLimit(limitUntil)
+		run.Cause = runCauseUsageLimit
+		run.Detail += " · usage limit reached; task runs resume after " + fmtResume(limitUntil)
+	case run.Status == "error" && run.Cause == runCauseRunFailed && classifyTaskFailure(out) == taskFailTransient:
+		run.Cause = runCauseTemporary
+	}
+	// Only re-arm a one-time task that is still on: if the user paused it
+	// while it ran, that pause stands. The move past the reset is saved
+	// with the run's record (recordRunSaved), so no stop between the two
+	// can spend the task's one chance.
+	if stillOn, seq, _ := s.editStamp(schedID); stillOn && !limitUntil.IsZero() {
+		run.deferTo, run.deferSeq = limitUntil, seq
+	}
+	run.recovery = files.dir != ""
+	err := s.recordRunSaved(schedID, run)
+	// The events file and in-flight record go only once the record is on
+	// disk (or has nowhere to go): until then a restart finds them and
+	// records the run, once (recordTaskRunAfterRestart skips a run id the
+	// automation already has).
+	if err == nil || errors.Is(err, errRunNotRecorded) {
+		files.remove()
+	} else {
+		log.Printf("scheduler: task %s run %s not saved (%v); kept for the next start", schedID, run.ID, err)
+	}
 }

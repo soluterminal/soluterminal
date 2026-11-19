@@ -124,6 +124,9 @@ const (
 // Everything else (Title, Status, ExitCode, Cols, Rows) must be accessed
 // under p.mu — use Snapshot() to serialize or persist.
 type Pane struct {
+	// Output recording (pane_recorder_pane.go): in memory only, never
+	// persisted, so a daemon restart leaves every pane unrecorded.
+	recording               paneRecording
 	quotaWorkerCleanupOwned bool // process-local; restored workers rebind ownership
 	workerArchiving         atomic.Bool
 	// Delivery receipts are ephemeral and immutable after publication under mu.
@@ -1052,6 +1055,10 @@ type Manager struct {
 	panes      map[string]*Pane
 	dataDir    string
 	onPaneExit func(*Pane)
+	// recordings is the pane recorder's folder, cap and sweep (lazy; see
+	// recordingHub()).
+	recordingsMu sync.Mutex
+	recordings   *recordingHub
 	// onPaneRemoved fires after Kill takes a pane out of the manager (set
 	// with SetOnPaneRemoved; main.go drops agents' open requests about it).
 	onPaneRemoved func(id string)
@@ -1513,6 +1520,9 @@ func (p *Pane) readLoop(m *Manager) {
 				p.trackModes(payload)
 				if t == FrameData {
 					p.stampLiveFrameActivity()
+					// Only live output is recorded: never FrameReplay,
+					// synthetic paint or bytes the daemon draws itself.
+					p.recordOutput(payload)
 				}
 				p.fanoutPayloadLocked(payload)
 				hasAutoGrid := p.gridEmu != nil
@@ -1954,6 +1964,11 @@ func (p *Pane) markExited(code *int) {
 		(strings.TrimSpace(p.HarnessSessionID) != "" ||
 			conversationIDForAgent(p.Agent, p.ClaudeSessionID, p.CodexThreadID, p.MuseSessionID) != "")
 	p.mu.Unlock()
+	// After the status change, so a recording switched on meanwhile sees it
+	// (StartRecording rechecks the status after publishing its recorder).
+	if p.stopRecording(recordingStopClosed, false) {
+		log.Printf("recording: pane %s switch-off by the daemon: %s", p.ID, recordingStopClosed)
+	}
 
 	// close subscribers
 	p.subsMu.Lock()

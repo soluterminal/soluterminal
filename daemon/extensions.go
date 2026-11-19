@@ -356,7 +356,7 @@ type scheduleKind struct {
 	// back to the prompt's first line).
 	title func(in ScheduleInput) string
 	// fire runs one occurrence.
-	fire func(s *ScheduleStore, schedID string, sched Schedule, apply bool)
+	fire func(s *ScheduleStore, schedID string, sched Schedule, apply bool, trigger string)
 	// running reports a daemon-started run of the schedule in flight.
 	running func(s *ScheduleStore, sched Schedule) bool
 	// runDir is where the kind keeps its run logs.

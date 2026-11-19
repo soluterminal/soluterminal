@@ -52,6 +52,7 @@ func (p *Pane) Resize(cols, rows uint16) error {
 	}
 
 	p.subsMu.Lock()
+	p.recordResize(cols, rows)
 	// Ghost-cell clear on alt-screen resize, with two audiences:
 	//
 	//   - The OWNER's xterm runs fit.fit() locally, which resizes its own
@@ -159,6 +160,7 @@ func (p *Pane) adoptAgentDims(cols, rows uint16) {
 		return
 	}
 	p.subsMu.Lock()
+	p.recordResize(cols, rows)
 	if vtPaintEnabled && p.vt != nil {
 		p.vt.Resize(int(cols), int(rows))
 	}

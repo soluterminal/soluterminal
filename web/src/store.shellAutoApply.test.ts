@@ -338,6 +338,33 @@ describe('desktop shell auto-apply', () => {
       // A click that met a pause says so.
       expect(useStore.getState().toasts.map((t) => t.message).join(' ')).toMatch(/Automatic desktop restarts are paused/);
     });
+
+    it("an automation's run holds the restart off as a wait, not a pause (ST-299)", async () => {
+      const reason = 'an automation is running (nightly); the desktop update waits for it to finish';
+      useStore.setState({ updateStatus: update({ shellWaitingForAutomation: reason }) });
+      await becomeQuiet();
+      useStore.getState().maybeAutoApplyShellUpdate();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useStore.getState().shellAutoRestart).toBeNull();
+      expect(shellAutoApplyWaitReason()).toEqual({ kind: 'waiting', reason: 'waiting for an automation to finish' });
+
+      // The run started between the status read and the click: the daemon
+      // refuses, and the click says why, without marking the install paused.
+      useCloud.setState({ mode: 'cloud', isLocal: true });
+      const team = () => update({ updateChannel: 'team', shellAvailable: true });
+      useStore.setState({ updateStatus: team() });
+      vi.spyOn(api, 'getUpdateStatus').mockImplementation(async () => team());
+      vi.spyOn(api, 'applyShellUpdate').mockRejectedValue(
+        new ApiError(409, 'paused', { code: 'shell_silent_paused', paused: true, reason }),
+      );
+      await becomeQuiet();
+      await arm();
+      await useStore.getState().restartShellNowForUpdate();
+      expect(native.exit).not.toHaveBeenCalled();
+      expect(useStore.getState().updateStatus?.shellAutoApplyPaused).not.toBe(true);
+      expect(shellAutoApplyNeedsManual(version)).toBe(false);
+      expect(useStore.getState().toasts.map((t) => t.message).join(' ')).toMatch(/waits: an automation is running \(nightly\)/);
+    });
   });
 
   describe('team channel', () => {
