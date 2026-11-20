@@ -22,7 +22,8 @@
 //      this cache, so without a bump the old 2×2 grid lingers for a load.
 // v31: a tapped feedback notification reaches an already-open window.
 // v32: a push tap opens /?machine=<id>&pane=<id>, not the relay path /m/<id>/.
-const SW_VERSION = 'solu-sw-v32';
+// v33: renders the cloud's name-free "team-login" owner alert (ST-314).
+const SW_VERSION = 'solu-sw-v33';
 const APP_SHELL_CACHE = 'solu-shell-' + SW_VERSION;
 const NAVIGATION_NETWORK_TIMEOUT_MS = 10000;
 
@@ -317,6 +318,12 @@ self.addEventListener('push', (event) => {
     // No pane/workspace grammar — this isn't pane activity.
     title = `Feedback: ${rawTitle || 'your report'}`;
     body = summary || 'Your report has an update';
+  } else if (payload.state === 'team-login') {
+    // Owner alert from the cloud (team_creds_owner_alert.go): a team member's
+    // shared login stopped working. Name-free by design (lock screens, push
+    // services); the app's Credentials panel shows who and which login.
+    title = rawTitle || 'Team login needs repair';
+    body = summary || 'A team login stopped working. Open Credentials > Repair.';
   } else if (payload.state === 'choice-prompt') {
     title = location;
     body = `Approval needed${approvalDetail}${machineLine}`;

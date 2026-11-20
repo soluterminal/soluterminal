@@ -77,6 +77,10 @@ func EnterGap(hasClaude bool) time.Duration {
 	return enterGapBracketedPaste
 }
 
+// submitEnterGapWait is the pause between a submitted line and its Enter.
+// A test replaces it to open a menu at exactly that moment.
+var submitEnterGapWait = time.Sleep
+
 // submitLineToPane types ONE line into a pane and submits it, the way every
 // daemon-authored injection already does by hand (the prompt-schedule fire,
 // ARIA's mention delivery, the send_input tool). Returns the bytes written.
@@ -132,7 +136,7 @@ func submitLineToPane(p *Pane, body string, hasClaude bool) (int, error) {
 	if err != nil {
 		return wrote, errors.New("write failed: " + err.Error())
 	}
-	time.Sleep(EnterGap(hasClaude))
+	submitEnterGapWait(EnterGap(hasClaude))
 	// Enter only if nothing was typed since the paste (it would submit the
 	// person's keystrokes with it; the paste itself is one revision) and no
 	// menu opened over it.

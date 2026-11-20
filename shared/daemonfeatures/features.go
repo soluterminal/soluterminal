@@ -20,6 +20,10 @@ import (
 const (
 	// UIPrefs: this daemon persists sidebar/UI choices across app origins.
 	UIPrefs = "ui-prefs.v1"
+	// PaneRecording: this daemon serves /api/panes/{id}/recording and
+	// /api/panes/{id}/recordings (ST-315: a newer UI must not offer it to an
+	// older daemon, which answers 404).
+	PaneRecording = "pane-recording.v1"
 )
 
 // MaxFeatures bounds how many names one handshake may carry.

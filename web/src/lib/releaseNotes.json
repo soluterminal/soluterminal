@@ -1,4 +1,7 @@
 {
+  "0.0.1248": [
+    "If the desktop app is newer than the background service it talks to, for example right after an update, a notice now says the service update is pending and shows both versions."
+  ],
   "0.0.1247": [
     "Automations: click an automation to see its runs by day, with each run's outcome and, for a task, how long it took, the model and Claude's cost estimate. Tick \"Failed only\" to see just the failed runs.",
     "A failed automation run now says why in plain words and offers one button to fix it, such as Pick another pane when its pane was closed.",

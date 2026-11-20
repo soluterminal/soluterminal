@@ -1,3 +1,4 @@
+import { DaemonBehindNotice } from './components/DaemonBehindNotice';
 import { restartBackgroundService } from './lib/backgroundService';
 import './loadExtensions';
 import { isTemporaryWorkspaceView, workspaceViewLayout } from './lib/workspaceView';
@@ -2239,6 +2240,7 @@ export default function App() {
         {showEmbedChrome('phonePairing') && <PhoneAccessBanner />}
         {showEmbedChrome('shellUpdate') && <ShellUpdateBanner />}
         <UpdateBanner />
+        <DaemonBehindNotice />
       </div>
       <Topbar
         onOpenHelp={() => setHelpOpen(true)}

@@ -70,6 +70,8 @@ interface PaneContextMenuProps {
   onClosePane: () => void;
   // Output recording (lib/paneRecording.ts); omitted where it can't apply.
   onRecording?: (action: 'start' | 'stop' | 'delete') => void;
+  /** ST-315: the daemon in this pane's scope serves recording (usePaneContextMenu asks it). Stop shows while one is on regardless. */
+  recordingServed?: boolean;
   // Terminal selection actions (shown only when text is selected): paste the
   // selection into another pane's input (no Enter), or search every pane's
   // scrollback for it.
@@ -122,6 +124,7 @@ export function PaneContextMenu({
   onLastTurnDiff,
   onReviewChanges,
   onRecording,
+  recordingServed = false,
 }: PaneContextMenuProps) {
   const currentAutoMode = (pane.autoMode ?? '') as PaneAutoMode;
   const paneAgent = agentFromCommand(pane.cmd);
@@ -250,7 +253,7 @@ export function PaneContextMenu({
           )}
         </>
       )}
-      {onRecording && (pane.recording?.on || paneRecordable(pane)) && (
+      {onRecording && (pane.recording?.on || (recordingServed && paneRecordable(pane))) && (
         <>
           <div className="pane-ctx-menu-sep" />
           <div className="pane-ctx-menu-label">Recording{pane.recording?.on ? ' — on' : ''}</div>

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -451,7 +452,10 @@ func TestSilentCourierUnderPowerShell(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		app := startCopy(t, dir, appName, "2")
+		// The app outlives any PowerShell start-up and is closed only once the
+		// courier reports it has seen it: a fixed lifetime raced pwsh's cold
+		// start on a loaded runner, and the courier then found no app at all.
+		app := startCopy(t, dir, appName, "60")
 		// An unrelated long-running program in the same session: never waited
 		// on, never started again.
 		other := startCopy(t, dir, otherName, "60")
@@ -472,12 +476,29 @@ func TestSilentCourierUnderPowerShell(t *testing.T) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
+		var out bytes.Buffer
+		courier := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-File", scriptPath)
+		courier.Stdout, courier.Stderr = &out, &out
+		if err := courier.Start(); err != nil {
+			t.Fatal(err)
+		}
+		// Close the app as the user would, once the courier is waiting on it.
+		// With no app matched the courier has already given up; leave it.
+		switch _, err := waitForSilentCourier(logPath, "t1", 50*time.Second); {
+		case err == nil:
+			_ = app.Process.Kill()
+		case !errors.Is(err, errSilentAppNotFound):
+			_ = courier.Wait()
+			t.Fatalf("courier did not report: %v; output:\n%s", err, out.String())
+		}
+		// Timed from here, so pwsh's own start-up never counts: what is left
+		// is the courier noticing the app closed and finishing.
 		start := time.Now()
-		out, _ := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-File", scriptPath).CombinedOutput()
+		_ = courier.Wait()
 		took = time.Since(start)
 		log = silentCourierEntries(logPath, "t1")
 		if len(log) == 0 {
-			t.Fatalf("courier wrote nothing; output:\n%s", out)
+			t.Fatalf("courier wrote nothing; output:\n%s", out.String())
 		}
 		if err := other.Process.Signal(syscall.Signal(0)); err != nil {
 			t.Fatalf("the unrelated program is gone: %v", err)
@@ -513,7 +534,7 @@ func TestSilentCourierUnderPowerShell(t *testing.T) {
 			if event, _ := silentCourierFinal(filepath.Join(dir, "launch.log"), "t1"); event != "installer-done" {
 				t.Fatalf("final %q", event)
 			}
-			// It waited for the 2 s app, not the 60 s unrelated program.
+			// It waited for the app, closed once seen, not the 60 s unrelated program.
 			if took > 15*time.Second {
 				t.Fatalf("courier took %s: it waited on the unrelated program", took)
 			}

@@ -127,7 +127,7 @@ func (p *Pane) recheckRecordingHandle(handle string) {
 // process tree.
 func liveRecordingFacts(p *Pane) recordingPaneFacts {
 	p.mu.Lock()
-	f := recordingPaneFacts{Handle: identityHandle(p.Identity), Agent: p.Agent, Cwd: p.Cwd}
+	f := recordingPaneFacts{Handle: identityHandle(p.Identity), Agent: recordingPaneAgent(p.Agent, p.Cmd), Cwd: p.Cwd}
 	pid := p.Pid
 	p.mu.Unlock()
 	if pid <= 0 {
@@ -137,12 +137,36 @@ func liveRecordingFacts(p *Pane) recordingPaneFacts {
 	pids := tree.descendantPids(pid)
 	f.LiveCwds, f.CwdUnknown = recordingLiveCwds(append([]int{pid}, pids...))
 	for _, child := range pids {
-		if child != pid && readComm(child) == strings.ToLower(f.Agent) {
+		if f.Agent != "" && child != pid && readComm(child) == f.Agent {
 			f.AgentRunning = true
 			break
 		}
 	}
 	return f
+}
+
+// recordingPaneAgent is the agent a pane was started as, read the way the
+// app's effectivePaneAgent reads it. A Claude pane is stored with Agent ""
+// (the legacy zero value, healPaneIdentity), so a "" pane is Claude only when
+// its own launch command runs claude: bare, or as the 'claude' token of the
+// login-shell wrapper (cmdRunsClaude, as the app's agentFromCommand). A plain
+// shell where someone typed claude stays "", and (f)3 still refuses it.
+func recordingPaneAgent(agent string, cmd []string) string {
+	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case agentClaude:
+		return agentClaude
+	case agentCodex:
+		return agentCodex
+	case agentMuse:
+		return agentMuse
+	}
+	if cmdRunsClaude(cmd) {
+		return agentClaude
+	}
+	if cmdRunsCodex(cmd) {
+		return agentCodex
+	}
+	return ""
 }
 
 // recordingLiveCwds reads the current folder of every process in the pane.

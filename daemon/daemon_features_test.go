@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+
 	"net/http/httptest"
 	"slices"
+	"soluterminal-shared/daemonfeatures"
 	"testing"
 	"time"
 )
@@ -31,5 +33,12 @@ func TestDaemonFeatureRegistration(t *testing.T) {
 	registerDaemonFeature("example.v1")
 	if !slices.Equal(daemonFeatures, []string{"example.v1"}) {
 		t.Fatalf("registration = %v", daemonFeatures)
+	}
+}
+
+// ST-315: the UI shows pane recording only when the daemon says it serves it.
+func TestHealthAdvertisesPaneRecording(t *testing.T) {
+	if !slices.Contains(daemonFeatures, daemonfeatures.PaneRecording) {
+		t.Fatalf("daemonFeatures %v lacks %s", daemonFeatures, daemonfeatures.PaneRecording)
 	}
 }

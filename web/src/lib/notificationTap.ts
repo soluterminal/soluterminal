@@ -51,11 +51,17 @@ const INBOX_TAP_PREFIXES = ['sched:', 'agent:', 'feedback:'];
 
 /** True for a target routeNotificationTap handles (not a pane id). */
 export function isInboxTapTarget(target: string): boolean {
-  return INBOX_TAP_PREFIXES.some((p) => target.startsWith(p));
+  return target === TEAM_LOGIN_TAP || INBOX_TAP_PREFIXES.some((p) => target.startsWith(p));
 }
+
+// The cloud's name-free "a team login stopped working" owner alert
+// (cloud/team_creds_owner_alert.go). It names no pane; opening the app is the
+// whole action, and the owner's Credentials panel shows which login.
+const TEAM_LOGIN_TAP = 'team-login';
 
 /** Routes a non-pane notification target. Returns false for a pane id. */
 export function routeNotificationTap(target: string): boolean {
+  if (target === TEAM_LOGIN_TAP) return true;
   if (target.startsWith('feedback:')) {
     const raw = target.slice('feedback:'.length);
     const number = /^[1-9]\d*$/.test(raw) ? Number(raw) : 0;

@@ -516,6 +516,10 @@ export function createServer(dist, state = {}) {
     if (req.method === 'GET' && url.pathname === '/api/health') return json(res, {
       status: 'ok',
       version: healthVersion,
+      // Only what this fixture serves (shared/daemonfeatures): the UI offers
+      // pane recording only when it is listed (ST-315). Not ui-prefs.v1: the
+      // fixture has no /api/settings/ui, and listing it makes the app call it.
+      features: ['pane-recording.v1'],
       system: { level: 'ok', sampledAt: new Date().toISOString() },
       releaseReadiness: {
         state: 'ok',

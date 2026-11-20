@@ -84,17 +84,26 @@ func TestUnattendedSubmitStopsEnterWhenAMenuOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	atomic.StoreInt64(&p.TotalStrippedChars, int64(len(shell)))
-	frames := captureFrames(t, p)
 	menu := "\nDo you want to proceed?\n ❯ 1. Yes\n   2. Yes, allow all edits during this session\n   3. No, and tell Claude what to do differently\n"
-	opened := make(chan struct{})
-	go func() {
-		<-frames // the line
+	frames := captureFrames(t, p)
+	// The menu opens in the pause between the line and its Enter, the window
+	// the Enter-time check covers. A goroutine racing the 100 ms pause missed
+	// it on a loaded runner.
+	prev := submitEnterGapWait
+	t.Cleanup(func() { submitEnterGapWait = prev })
+	submitEnterGapWait = func(time.Duration) {
 		_, _ = p.buffer.Write([]byte(menu))
 		atomic.AddInt64(&p.TotalStrippedChars, int64(len(menu)))
-		close(opened)
-	}()
+	}
 	_, err := submitLineToPane(p, "echo hi", false)
-	<-opened
+	select {
+	case got := <-frames:
+		if got != "\x1b[200~echo hi\x1b[201~" {
+			t.Fatalf("wrote %q, want the line", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the line was not written")
+	}
 	if !errors.Is(err, errDeliveryLeftInComposer) {
 		t.Fatalf("submit with a menu opening before Enter = %v, want errDeliveryLeftInComposer", err)
 	}

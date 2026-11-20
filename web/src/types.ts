@@ -886,6 +886,9 @@ export interface Port {
 }
 
 export interface Health {
+  // Named capabilities this daemon serves (shared/daemonfeatures). A newer UI
+  // offers a feature only when its daemon lists it (ST-315). Older daemons omit it.
+  features?: string[];
   // The person has paused agent-to-agent messaging (AgentMessagingChip).
   agentMessagingPaused?: boolean;
   // Shown to the person: the saved setting couldn't be read, or the state in

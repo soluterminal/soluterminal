@@ -63,7 +63,18 @@ func WriteProviderError(w http.ResponseWriter, upstream *http.Response) {
 // Keep quota, capacity and a rejected login distinct across both broker hops.
 func WriteBody(w http.ResponseWriter, kind string) {
 	message := kind
+	errorType := kind
 	switch kind {
+	case TeamLoginStopped:
+		// The provider rejected the team login's refresh grant: only an owner
+		// repair helps. The cloud flags the login in the owner's Credentials
+		// (a push may or may not reach them, so the copy does not promise one).
+		// Typed as an authentication error so CLIs handle it as one.
+		errorType = "authentication_error"
+		message = "This team login stopped working: the provider rejected it. It is flagged for your team owner, who needs to renew it. Check Credentials to use another account."
+	case TeamLoginStoppedSwitched:
+		errorType = "authentication_error"
+		message = "This team login stopped working: the provider rejected it. It is flagged for your team owner, who needs to renew it. SoluTerminal switched you to another team account; continue the conversation to use it."
 	case "authentication_refreshed":
 		message = "The shared account login was refreshed. Continue this conversation to use the renewed login."
 	case "authentication_error":
@@ -73,8 +84,15 @@ func WriteBody(w http.ResponseWriter, kind string) {
 	case "server_overloaded":
 		message = "The selected model is temporarily at capacity. Try again shortly."
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": kind, "code": kind, "message": message}})
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": errorType, "code": kind, "message": message}})
 }
+
+// Member-facing kinds for a team login the cloud broker stopped after the
+// provider rejected its refresh grant (cloud 401 at the "cloud" stage).
+const (
+	TeamLoginStopped         = "team_login_stopped"
+	TeamLoginStoppedSwitched = "team_login_stopped_switched"
+)
 
 // RejectedRefreshGrant distinguishes an explicit OAuth grant rejection from
 // network, edge, throttle and service failures. Only the former needs login.

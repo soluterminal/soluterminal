@@ -11,7 +11,9 @@ import (
 )
 
 func TestLowerProcessPriorityAppliesBestEffortIOClass(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "sleep 30")
+	// One process, no shell: a shell forking sleep while the priorities are
+	// applied leaves a member the group-wide ioprio_set walk never sees.
+	cmd := exec.Command("sleep", "30")
 	applyDetached(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

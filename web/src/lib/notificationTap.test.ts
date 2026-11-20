@@ -59,6 +59,8 @@ describe('routeNotificationTap', () => {
     expect(isInboxTapTarget('feedback:42')).toBe(true);
     expect(isInboxTapTarget('sched:s1')).toBe(true);
     expect(isInboxTapTarget('agent:agt_7')).toBe(true);
+    expect(isInboxTapTarget('team-login')).toBe(true);
+    expect(routeNotificationTap('team-login')).toBe(true);
     expect(isInboxTapTarget('pane-123')).toBe(false);
   });
 

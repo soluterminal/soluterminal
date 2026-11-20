@@ -186,6 +186,20 @@ describe('service worker feedback notification tap', () => {
 
 // ST-261 renamed schedules to Automations; the lock screen says so, in the
 // same words as the phone's FCM push (cloud/fcm.go fcmDisplay).
+// ST-314: the cloud's owner alert is name-free on the lock screen.
+describe('service worker team login alert', () => {
+  it('renders the name-free owner alert', async () => {
+    const shown = await renderPush({
+      paneId: 'team-login',
+      state: 'team-login',
+      title: 'Team login needs repair',
+      summary: 'A team login stopped working. Open Credentials > Repair.',
+    });
+    expect(shown.title).toBe('Team login needs repair');
+    expect(shown.body).toBe('A team login stopped working. Open Credentials > Repair.');
+  });
+});
+
 describe('service worker automation push rendering', () => {
   it('titles a failed automation run "Automation failed"', async () => {
     const shown = await renderPush({

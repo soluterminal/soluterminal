@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { deletePaneRecordings, startPaneRecording, stopPaneRecording } from '../lib/paneRecording';
+import { daemonSupports, PANE_RECORDING } from '../lib/daemonFeatures';
 import { api, currentRoutingScope, type RoutingScope } from '../api';
 import { useStore } from '../store';
 import { confirmDialog, promptDialog, selectDialog } from '../lib/dialog';
@@ -80,6 +81,20 @@ export function usePaneContextMenu({
   };
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement | null>(null);
+  // ST-315: recording is offered only when the daemon in THIS pane's scope says
+  // it serves it. Asked when the menu opens, in the scope the request will use
+  // (the shared health poll can be another backend's, or a scope switch behind).
+  const [recordingProbe, setRecordingProbe] = useState<{ key: string; ok: boolean } | null>(null);
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const probeScope = scope ?? currentRoutingScope();
+    let live = true;
+    api.healthScoped(probeScope)
+      .then((h) => { if (live) setRecordingProbe({ key: probeScope.key, ok: daemonSupports(h, PANE_RECORDING) }); })
+      .catch(() => { if (live) setRecordingProbe({ key: probeScope.key, ok: false }); });
+    return () => { live = false; };
+  }, [ctxMenu, scope]);
+  const recordingServed = !!recordingProbe && recordingProbe.ok && recordingProbe.key === (scope ?? currentRoutingScope()).key;
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -105,6 +120,7 @@ export function usePaneContextMenu({
   return {
     ctxMenu,
     ctxMenuRef,
+    recordingServed,
     openContextMenu: (e: ReactMouseEvent) => {
       if (!actionGuard()) return;
       e.preventDefault();

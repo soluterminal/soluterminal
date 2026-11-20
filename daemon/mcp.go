@@ -2131,7 +2131,10 @@ func (a *apiServer) mcpToolSpawnWorker(args map[string]any, callerPane string, w
 	}
 	a.announcePaneSpawn(p, paneOrigin, spawnTitle, workspace, number, show)
 	if worker != nil {
-		a.bindAutoWorker(worker.ID, p.ID)
+		model, _ := resp["model"].(string)
+		source, _ := resp["model_source"].(string)
+		note, _ := resp["model_note"].(string)
+		a.bindAutoWorker(worker.ID, p.ID, model, source, note)
 	}
 
 	for k, v := range a.spawnFollowUp(p, cmd, args) {

@@ -838,13 +838,16 @@ func (a *apiServer) workerQueueSnapshot() []map[string]any {
 	return out
 }
 
-func (a *apiServer) bindAutoWorker(id, paneID string) {
+// bindAutoWorker records the started pane and the model it got in one locked
+// step, so the queue never shows a started worker with no model.
+func (a *apiServer) bindAutoWorker(id, paneID, model, modelSource, modelNote string) {
 	q := a.workers()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, r := range q.requests {
 		if r.Info.ID == id {
 			r.PaneID = paneID
+			r.Model, r.ModelSource, r.ModelNote = model, modelSource, modelNote
 			return
 		}
 	}
