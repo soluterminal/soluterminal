@@ -2357,6 +2357,7 @@ pub fn ensure_daemon_running_wsl(app: &AppHandle) -> Result<DaemonStart, String>
 /// running is reused as it is.
 #[cfg(windows)]
 pub(crate) fn ensure_daemon_running_wsl_with(app: &AppHandle, headless: bool) -> Result<DaemonStart, String> {
+    crate::dual_migration::require_host_stateful_start().map_err(|e| e.to_string())?;
     launch_log("ensure_daemon_running_wsl: start");
 
     // Refresh the WSL launcher on EVERY app start, before any early return.
@@ -3001,6 +3002,28 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "  WSL_HOME=\"/home/$user\"\n",
             "fi\n",
             "export HOME=\"$WSL_HOME\"\n",
+            "refuse_migrated_linux() {{\n",
+            "  solu_fence_dir=$1\n",
+            "  case \"$solu_fence_dir\" in /*) ;; *) printf '%s\\n' \"can't check migration state; not starting\" >&2; return 78 ;; esac\n",
+            "  solu_fence_parent=${{solu_fence_dir%/*}}\n",
+            "  [ -n \"$solu_fence_parent\" ] || solu_fence_parent=/\n",
+            "  if [ ! -r \"$solu_fence_parent\" ] || [ ! -x \"$solu_fence_parent\" ]; then\n",
+            "    printf '%s\\n' \"can't check migration state; not starting\" >&2\n",
+            "    return 78\n",
+            "  fi\n",
+            "  for solu_fence_name in migration-in-progress.json retired-to-host.json; do\n",
+            "    if [ -e \"$solu_fence_dir/$solu_fence_name\" ] || [ -L \"$solu_fence_dir/$solu_fence_name\" ]; then\n",
+            "      printf '%s\\n' 'this PC moved to the Windows host' >&2\n",
+            "      return 78\n",
+            "    fi\n",
+            "  done\n",
+            "  if {{ [ -e \"$solu_fence_dir\" ] || [ -L \"$solu_fence_dir\" ]; }} && {{ [ ! -d \"$solu_fence_dir\" ] || [ ! -r \"$solu_fence_dir\" ] || [ ! -x \"$solu_fence_dir\" ]; }}; then\n",
+            "    printf '%s\\n' \"can't check migration state; not starting\" >&2\n",
+            "    return 78\n",
+            "  fi\n",
+            "  return 0\n",
+            "}}\n",
+            "refuse_migrated_linux \"$HOME/.solu\" || exit 78\n",
             "# The daemon and every worker it spawns inherit this environment. A\n",
             "# Windows desktop launch hands us a minimal PATH with no nvm/asdf/Volta\n",
             "# node, which made node-based provider CLIs fail with 'env: node: No such\n",
@@ -3769,6 +3792,7 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "# belong to the open file, so a daemon holding fd 9 would keep the lock\n",
             "# after its supervisor died and turn away every later supervisor.\n",
             "launch_daemon() {{\n",
+            "  refuse_migrated_linux \"$HOME/.solu\" || exit 78\n",
             "  LAUNCH_LOG_MARK=\"$(wc -c < \"$DAEMON_DIR/{log}\" 2>/dev/null | tr -dc '0-9' || true)\"\n",
             "  \"$LOCAL\" --addr \"$ADDR\" --wsl-addr \"$WSL_ADDR\" {relay}--backend-id {backend} --shell-version {shellver} --shell-platform {shellplat} 9>&- &\n",
             "  daemon_pid=\"$!\"\n",
@@ -3833,6 +3857,7 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "while true; do\n",
             "  started_at=\"$SECONDS\"\n",
             "  await_daemon\n",
+            "  refuse_migrated_linux \"$HOME/.solu\" || exit 78\n",
             "  # Re-read the marker after the wait: a successor can appear in the\n",
             "  # window between our last poll and the old daemon exiting.\n",
             "  next_pid=\"$(cat \"$PIDFILE\" 2>/dev/null || true)\"\n",
@@ -3852,6 +3877,7 @@ fn wsl_start_script_body(bundled_amd64_wsl: &str, bundled_arm64_wsl: &str) -> St
             "  # Status 73: another daemon already serves this data directory (the\n",
             "  # daemon's own log line names it). Relaunching cannot succeed until\n",
             "  # that one stops, and ten attempts would only bury the reason.\n",
+            "  if [ \"$status\" = \"78\" ]; then exit 78; fi\n",
             "  if [ \"$status\" = \"73\" ]; then\n",
             "    echo \"daemon exited (status=73): another soluterminal daemon serves this data directory; not relaunching\"\n",
             "    exit 73\n",
@@ -4027,6 +4053,7 @@ pub fn read_win_token() -> Result<String, String> {
 /// it on startup and we're racing that.
 #[cfg(windows)]
 pub fn read_wsl_token() -> Result<String, String> {
+    crate::dual_migration::require_host_stateful_start().map_err(|e| e.to_string())?;
     read_wsl_token_with(Duration::from_secs(3), false)
 }
 
@@ -4043,6 +4070,7 @@ fn read_wsl_token_patiently() -> Result<String, String> {
 
 #[cfg(windows)]
 fn read_wsl_token_with(timeout: Duration, bypass_cache: bool) -> Result<String, String> {
+    crate::dual_migration::require_host_stateful_start().map_err(|e| e.to_string())?;
     // Single-flight + cache. The token is stable for the life of a daemon
     // install, and this used to be a 150ms retry loop of unbounded wsl.exe
     // spawns called PER PROXIED CONNECTION during outages — a major
@@ -4203,6 +4231,7 @@ const WSL_CLAIM_ABSENT_EXIT: i32 = 3;
 /// (passwd db), matching the WSL daemon's own claim location.
 #[cfg(windows)]
 fn read_wsl_claim_bytes() -> Result<Option<Vec<u8>>, String> {
+    crate::dual_migration::require_host_stateful_start().map_err(|e| e.to_string())?;
     let cmd = format!(
         "{WSL_HOME_PREFIX}f=\"$home/.solu/claim.json\"; [ -s \"$f\" ] || exit {WSL_CLAIM_ABSENT_EXIT}; cat \"$f\""
     );
@@ -4222,6 +4251,7 @@ fn read_wsl_claim_bytes() -> Result<Option<Vec<u8>>, String> {
 /// could not answer.
 #[cfg(windows)]
 fn wsl_claim_mtime() -> Result<i64, String> {
+    crate::dual_migration::require_host_stateful_start().map_err(|e| e.to_string())?;
     let cmd = format!("{WSL_HOME_PREFIX}stat -c %Y \"$home/.solu/claim.json\"");
     let out = run_wsl_probe_bounded(&["-e", "bash", "-c", &cmd], CLAIM_MIRROR_WSL_TIMEOUT)?;
     if !out.status.success() {
@@ -4240,6 +4270,7 @@ fn wsl_claim_mtime() -> Result<i64, String> {
 /// every other mirror call.
 #[cfg(windows)]
 fn write_wsl_claim_bytes(bytes: &[u8]) -> Result<(), String> {
+    crate::dual_migration::require_host_stateful_start().map_err(|e| e.to_string())?;
     let cmd = format!(
         "{WSL_HOME_PREFIX}mkdir -p \"$home/.solu\" && umask 077 && cat > \"$home/.solu/claim.json.tmp\" && mv -f \"$home/.solu/claim.json.tmp\" \"$home/.solu/claim.json\""
     );
@@ -4314,6 +4345,10 @@ fn sync_dual_claim_once(win: Option<Vec<u8>>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+static DUAL_CLAIM_MIRROR: std::sync::OnceLock<crate::claim_mirror_control::MirrorControl> =
+    std::sync::OnceLock::new();
+
 /// Start the Dual-mode claim mirror loop for the process lifetime. Call once,
 /// only in Dual mode with both daemons running. The first pass runs
 /// immediately so a pre-existing pairing fixes the unpaired side at launch.
@@ -4328,18 +4363,39 @@ fn sync_dual_claim_once(win: Option<Vec<u8>>) -> Result<(), String> {
 /// cadence, and with exponential backoff while it is failing.
 #[cfg(windows)]
 pub fn start_dual_claim_mirror() {
-    launch_log("claim-mirror: starting Dual claim sync loop");
-    thread::spawn(|| {
+    match start_dual_claim_mirror_worker() {
+        Ok(true) => launch_log("claim-mirror: starting Dual claim sync loop"),
+        Ok(false) => {}
+        Err(error) => launch_log(&format!("claim-mirror: start refused: {error:?}")),
+    }
+}
+
+#[cfg(windows)]
+fn start_dual_claim_mirror_worker() -> Result<bool, crate::claim_mirror_control::ControlError> {
+    crate::dual_migration::require_host_stateful_start()
+        .map_err(|_| crate::claim_mirror_control::ControlError::Paused)?;
+    let control = DUAL_CLAIM_MIRROR.get_or_init(Default::default);
+    control.start(|cancel| {
         let mut schedule = ClaimMirrorSchedule::new(Instant::now());
+        // A failed WSL call can include a timeout. Do not attest quiescence
+        // for this worker after an unproven copy, even if it later retried.
+        let mut quiescence = Ok(());
         loop {
+            if cancel.is_cancelled() {
+                return quiescence;
+            }
             let win = read_win_claim_bytes();
             let now = Instant::now();
             if schedule.due(now, win.as_deref()) {
+                if cancel.is_cancelled() {
+                    return quiescence;
+                }
                 match sync_dual_claim_once(win.clone()) {
                     // Re-read: a WSL→Windows copy just changed it, and our own
                     // write must not look like a fresh Windows-side change.
                     Ok(()) => schedule.succeeded(now, read_win_claim_bytes()),
                     Err(e) => {
+                        quiescence = Err(());
                         let backoff = schedule.failed(now);
                         if schedule.should_log_failure() {
                             launch_log(&format!(
@@ -4351,9 +4407,42 @@ pub fn start_dual_claim_mirror() {
                     }
                 }
             }
-            thread::sleep(CLAIM_MIRROR_TICK);
+            if cancel.wait(CLAIM_MIRROR_TICK) {
+                return quiescence;
+            }
         }
-    });
+    })
+}
+
+/// In-process seam for the future desktop-owned migration coordinator.
+/// Call on a blocking worker after durably gating migration starts. ONLY Ok
+/// permits the next claim step; timeout/error must abort before rename/revoke.
+/// No Tauri command, daemon route or MCP operation exposes this control.
+#[cfg(windows)]
+#[allow(dead_code)]
+pub(crate) fn stop_dual_claim_mirror(timeout: Duration) -> Result<(), String> {
+    DUAL_CLAIM_MIRROR
+        .get_or_init(Default::default)
+        .stop_and_join(timeout)
+        .map_err(|error| format!("claim-mirror quiescence is unproven: {error:?}"))
+}
+
+/// In-memory abort recovery only. The coordinator must first prove that no
+/// claim was retired and release its durable intent gate. A retained worker
+/// must finish before it can be resumed. This does not clear either file.
+#[cfg(windows)]
+#[allow(dead_code)]
+pub(crate) fn resume_dual_claim_mirror_after_abort() -> Result<(), String> {
+    let should_resume = DUAL_CLAIM_MIRROR
+        .get_or_init(Default::default)
+        .allow_after_abort()
+        .map_err(|error| format!("claim-mirror abort recovery refused: {error:?}"))?;
+    if !should_resume {
+        return Ok(());
+    }
+    start_dual_claim_mirror_worker()
+        .map(|_| ())
+        .map_err(|error| format!("claim-mirror restart after abort refused: {error:?}"))
 }
 
 /// How often the mirror looks at the (local, free) Windows claim.
@@ -8428,5 +8517,85 @@ mod dual_fallback_tests {
         assert_eq!(wslconfig_networking_mode("[WSL2]\nnetworkingmode=nat\n").as_deref(), Some("nat"));
         assert_eq!(wslconfig_networking_mode("[experimental]\nnetworkingMode=mirrored\n"), None);
         assert_eq!(wslconfig_networking_mode("[wsl2]\n# networkingMode=mirrored\n"), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod linux_migration_launcher_fixtures {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn migrated_wsl_launcher_refuses_without_starting_or_repairing_anything() {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let script = wsl_start_script_body("/fixture/amd64.gz", "/fixture/arm64.gz");
+        let start = script.find("refuse_migrated_linux() {\n").unwrap();
+        let end = start + script[start..].find("\n}\n").unwrap() + 3;
+        let function = &script[start..end];
+        assert!(script[..start].contains("export HOME=\"$WSL_HOME\""));
+        assert!(script[end..].starts_with("refuse_migrated_linux \"$HOME/.solu\" || exit 78\n"));
+        let launch = script.find("launch_daemon() {\n").unwrap();
+        assert!(script[launch..].starts_with(
+            "launch_daemon() {\n  refuse_migrated_linux \"$HOME/.solu\" || exit 78\n"
+        ));
+        assert!(
+            script.contains("await_daemon\n  refuse_migrated_linux \"$HOME/.solu\" || exit 78\n")
+        );
+        assert!(script.contains("if [ \"$status\" = \"78\" ]; then exit 78; fi"));
+        for name in ["migration-in-progress.json", "retired-to-host.json"] {
+            let root = std::env::temp_dir().join(format!(
+                "solu-wsl-fence-fixture-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&root).unwrap();
+            struct Cleanup(std::path::PathBuf);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            let _cleanup = Cleanup(root.clone());
+            let bad = root.join("not-a-directory");
+            std::fs::write(&bad, b"").unwrap();
+            let uncertain = std::process::Command::new("/bin/bash")
+                .args(["-c", &format!("{function}\nrefuse_migrated_linux \"$1\" || exit 78\n"), "fixture"])
+                .arg(&bad)
+                .env_clear()
+                .env("PATH", &root)
+                .output()
+                .unwrap();
+            assert_eq!(uncertain.status.code(), Some(78));
+            let message = String::from_utf8_lossy(&uncertain.stderr);
+            assert!(message.contains("can't check migration state"));
+            assert!(!message.contains("this PC moved"));
+            let data = root.join("data");
+            std::fs::create_dir(&data).unwrap();
+            for present in [false, true] {
+                if present {
+                    std::fs::write(data.join(name), b"").unwrap();
+                }
+                let result = std::process::Command::new("/bin/bash")
+                    .args([
+                        "-c",
+                        &format!("{function}\nrefuse_migrated_linux \"$1\" || exit 78\n"),
+                        "fixture",
+                    ])
+                    .arg(&data)
+                    .env("PATH", &root)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    result.status.code(),
+                    Some(if present { 78 } else { 0 }),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                if present {
+                    assert!(String::from_utf8_lossy(&result.stderr)
+                        .contains("this PC moved to the Windows host"));
+                }
+            }
+        }
     }
 }

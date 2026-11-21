@@ -1,5 +1,7 @@
 import type { RefObject } from 'react';
-import { paneRecordable } from '../lib/paneRecording';
+import { recordingMenuState, type RecordingServed } from '../lib/paneRecording';
+import type { RecordingMenuAction } from './usePaneContextMenu';
+import type { RecordingCheck } from '../types';
 import type { PaneInfo } from '../types';
 import { AUTO_MODES, autoModeMenuLabel } from '../lib/autoMode';
 import { useClampedMenuPosition } from './useClampedMenuPosition';
@@ -68,10 +70,15 @@ interface PaneContextMenuProps {
   // Absent ⇒ hidden.
   onResumePane?: () => void;
   onClosePane: () => void;
-  // Output recording (lib/paneRecording.ts); omitted where it can't apply.
-  onRecording?: (action: 'start' | 'stop' | 'delete') => void;
-  /** ST-315: the daemon in this pane's scope serves recording (usePaneContextMenu asks it). Stop shows while one is on regardless. */
-  recordingServed?: boolean;
+  // Output recording (lib/paneRecording.ts). ST-317: the item always shows;
+  // when it can't be switched on it is greyed with the reason.
+  onRecording?: (action: RecordingMenuAction) => void;
+  /** ST-315: what the daemon in this pane's scope serves (usePaneContextMenu asks it). Stop shows while one is on regardless. */
+  recordingServed?: RecordingServed;
+  /** A pane-recording.v2 daemon's rule check for this pane, as codes. */
+  recordingCheck?: RecordingCheck | null;
+  /** Set when the pane is in the shown workspace and the daemon serves the workspace switch. */
+  recordingWorkspace?: { anyOn: boolean; count: number } | null;
   // Terminal selection actions (shown only when text is selected): paste the
   // selection into another pane's input (no Enter), or search every pane's
   // scrollback for it.
@@ -124,7 +131,9 @@ export function PaneContextMenu({
   onLastTurnDiff,
   onReviewChanges,
   onRecording,
-  recordingServed = false,
+  recordingServed = 'checking',
+  recordingCheck,
+  recordingWorkspace,
 }: PaneContextMenuProps) {
   const currentAutoMode = (pane.autoMode ?? '') as PaneAutoMode;
   const paneAgent = agentFromCommand(pane.cmd);
@@ -253,21 +262,42 @@ export function PaneContextMenu({
           )}
         </>
       )}
-      {onRecording && (pane.recording?.on || (recordingServed && paneRecordable(pane))) && (
-        <>
-          <div className="pane-ctx-menu-sep" />
-          <div className="pane-ctx-menu-label">Recording{pane.recording?.on ? ' — on' : ''}</div>
-          {pane.recording?.on ? (
-            <button role="menuitem" onClick={() => onRecording('stop')}>Stop recording</button>
-          ) : (
-            <button role="menuitem" onClick={() => onRecording('start')}
-              title="Saves this pane's output to a file on this computer only, deleted after 7 days, never sent to the cloud">
-              Start recording output…
-            </button>
-          )}
-          <button role="menuitem" className="danger" onClick={() => onRecording('delete')}>Delete this pane's recordings…</button>
-        </>
-      )}
+      {onRecording && (() => {
+        const state = recordingMenuState(pane, recordingServed, recordingCheck);
+        const served = recordingServed === 'v1' || recordingServed === 'v2';
+        return (
+          <>
+            <div className="pane-ctx-menu-sep" />
+            <div className="pane-ctx-menu-label">Recording{pane.recording?.on ? ' — on' : ''}</div>
+            {state.kind === 'on' && (
+              <button role="menuitem" onClick={() => onRecording('stop')}>Stop recording</button>
+            )}
+            {state.kind === 'start' && (
+              <button role="menuitem" onClick={() => onRecording('start')}
+                title="Saves this pane's output to a file on this computer only, never sent to the cloud">
+                Start recording output…
+              </button>
+            )}
+            {state.kind === 'greyed' && (
+              <>
+                <button role="menuitem" disabled aria-disabled="true" title={state.reason} aria-describedby={`rec-reason-${pane.id}`}>
+                  Start recording output…
+                </button>
+                <div className="pane-ctx-menu-hint" id={`rec-reason-${pane.id}`}>{state.reason}</div>
+              </>
+            )}
+            {recordingWorkspace && recordingWorkspace.count > 1 && (
+              <button role="menuitem" onClick={() => onRecording('workspace-start')}>Record every pane in this workspace…</button>
+            )}
+            {recordingWorkspace?.anyOn && (
+              <button role="menuitem" onClick={() => onRecording('workspace-stop')}>Stop recording this workspace</button>
+            )}
+            {served && (
+              <button role="menuitem" className="danger" onClick={() => onRecording('delete')}>Delete this pane's recordings…</button>
+            )}
+          </>
+        );
+      })()}
       <div className="pane-ctx-menu-sep" />
       {pane.flagged ? (
         <>

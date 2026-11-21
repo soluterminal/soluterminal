@@ -181,6 +181,12 @@
       "approvedBy": "Benjamin",
       "date": "2026-11-20",
       "note": "Benjamin approved the 1-line set (\"ok notes 038681c7, publish 0.0.1248 and publish team 0.0.1248, ok export 0.0.1248\", typed in @release-lead's pane, 2026-11-20T00:34:19.239Z)."
+    },
+    "0.0.1249": {
+      "sha256": "107cbe5b42803b0d319cc124d1b012af68d56fbe6232ceb8152f0109150b753e",
+      "approvedBy": "Benjamin",
+      "date": "2026-11-21",
+      "note": "Benjamin approved the 2-line set (\"ok notes 107cbe5b, publish 0.0.1249 and publish team 0.0.1249, ok export 0.0.1249\", @release-lead's pane, session 9492c373, 2026-11-21T02:12:32.229Z, relayed by @release-lead)."
     }
   }
 }

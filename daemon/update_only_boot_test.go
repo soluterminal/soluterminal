@@ -30,7 +30,7 @@ import (
 var updateOnlyBootCalls = map[string]bool{
 	// standard library
 	"context.Background": true, "context.WithTimeout": true, "errors.New": true, "errors.Is": true,
-	"flag.NewFlagSet": true, "fmt.Errorf": true, "log.Printf": true, "log.Print": true,
+	"flag.NewFlagSet": true, "fmt.Errorf": true, "fmt.Fprintln": true, "log.Printf": true, "log.Print": true,
 	"listenDaemon": true, "os.Getenv": true, "os.Unsetenv": true, "os.UserHomeDir": true,
 	"signal.NotifyContext": true, "strings.TrimSpace": true, "json.NewEncoder": true,
 	"make": true, "stop": true, "cancel": true, "h": true,
@@ -44,7 +44,8 @@ var updateOnlyBootCalls = map[string]bool{
 	"serveUpdateOnly": true, "updateOnlyRouter": true, "writeUpdateOnlyRefusal": true,
 	"updateOnlyDaemon": true, "updaterHasWhatItNeeds": true, "u.cloudCreds": true, "u.channelSnapshot": true,
 	// what the update needs
-	"readShellInfo": true, "claimDataDirForBoot": true, "lock.Release": true, "loadEnvFile": true,
+	"checkStatefulMigrationFence": true,
+	"readShellInfo":               true, "claimDataDirForBoot": true, "lock.Release": true, "loadEnvFile": true,
 	"daemonListenerNetwork": true, "isInsideWSL": true, "describeListenConflict": true,
 	"NewUpdater": true, "installCohortID": true, "newUpdateRollbackStore": true,
 	"loadClaimSafe": true, "httpsBaseFromRelayURL": true, "newTeamEntitlements": true,

@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { deletePaneRecordings, startPaneRecording, stopPaneRecording } from '../lib/paneRecording';
-import { daemonSupports, PANE_RECORDING } from '../lib/daemonFeatures';
+import {
+  deletePaneRecordings, startPaneRecording, startWorkspaceRecording, stopPaneRecording, stopWorkspaceRecording,
+  type RecordingServed,
+} from '../lib/paneRecording';
+import { daemonSupports, PANE_RECORDING, PANE_RECORDING_V2 } from '../lib/daemonFeatures';
+import { collectPaneIds } from '../lib/layout';
 import { api, currentRoutingScope, type RoutingScope } from '../api';
 import { useStore } from '../store';
 import { confirmDialog, promptDialog, selectDialog } from '../lib/dialog';
 import { paneLeadRole } from '../lib/paneTeam';
 import { confirmAutoModeChange } from '../lib/autoModeConfirm';
-import type { PaneInfo } from '../types';
+import type { PaneInfo, RecordingCheck } from '../types';
 import { agentLabel, effectivePaneAgent } from '../lib/agentKind';
 import { paneRunningWork } from '../lib/paneWork';
 import { clearOwnerURL } from '../lib/ownerView';
@@ -14,6 +18,7 @@ import { copyToClipboard } from '../lib/clipboard';
 import { paneConversation } from '../lib/paneConversation';
 
 type PaneAutoMode = NonNullable<PaneInfo['autoMode']>;
+export type RecordingMenuAction = 'start' | 'stop' | 'delete' | 'workspace-start' | 'workspace-stop';
 
 interface UsePaneContextMenuArgs {
   pane: PaneInfo;
@@ -81,20 +86,46 @@ export function usePaneContextMenu({
   };
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement | null>(null);
-  // ST-315: recording is offered only when the daemon in THIS pane's scope says
-  // it serves it. Asked when the menu opens, in the scope the request will use
-  // (the shared health poll can be another backend's, or a scope switch behind).
-  const [recordingProbe, setRecordingProbe] = useState<{ key: string; ok: boolean } | null>(null);
+  // ST-315: what the daemon in THIS pane's scope serves decides what the
+  // Recording item offers. Asked when the menu opens, in the scope the request
+  // will use (the shared health poll can be another backend's, or a scope
+  // switch behind). ST-317: a v2 daemon also says how its rules read the pane,
+  // so a pane it would refuse shows the item greyed with the reason.
+  const [recordingProbe, setRecordingProbe] = useState<{ key: string; served: RecordingServed; check?: RecordingCheck | null } | null>(null);
   useEffect(() => {
     if (!ctxMenu) return;
     const probeScope = scope ?? currentRoutingScope();
     let live = true;
+    const set = (served: RecordingServed, check?: RecordingCheck | null) => {
+      if (live) setRecordingProbe({ key: probeScope.key, served, check });
+    };
     api.healthScoped(probeScope)
-      .then((h) => { if (live) setRecordingProbe({ key: probeScope.key, ok: daemonSupports(h, PANE_RECORDING) }); })
-      .catch(() => { if (live) setRecordingProbe({ key: probeScope.key, ok: false }); });
+      .then(async (h) => {
+        if (!daemonSupports(h, PANE_RECORDING_V2)) return set(daemonSupports(h, PANE_RECORDING) ? 'v1' : 'none');
+        try {
+          set('v2', (await api.getPaneRecording(pane.id, probeScope)).check ?? null);
+        } catch {
+          set('unreachable');
+        }
+      })
+      .catch(() => set('unreachable'));
     return () => { live = false; };
-  }, [ctxMenu, scope]);
-  const recordingServed = !!recordingProbe && recordingProbe.ok && recordingProbe.key === (scope ?? currentRoutingScope()).key;
+  }, [ctxMenu, scope, pane.id]);
+  const probeCurrent = !!recordingProbe && recordingProbe.key === (scope ?? currentRoutingScope()).key;
+  const recordingServed: RecordingServed = probeCurrent ? recordingProbe.served : 'checking';
+  const recordingCheck = probeCurrent ? recordingProbe.check : undefined;
+  // "Record every pane in this workspace": the shown workspace's panes, read
+  // when the menu renders (it is short-lived).
+  const workspacePanes = (): { name: string; panes: PaneInfo[] } | null => {
+    const s = useStore.getState();
+    if (!s.activeWorkspace) return null;
+    const panes = collectPaneIds(s.layout).map((id) => s.panes[id]).filter((p): p is PaneInfo => !!p);
+    return panes.some((p) => p.id === pane.id) ? { name: s.activeWorkspace, panes } : null;
+  };
+  const shownWorkspace = ctxMenu && recordingServed === 'v2' ? workspacePanes() : null;
+  const recordingWorkspace = shownWorkspace
+    ? { anyOn: shownWorkspace.panes.some((p) => p.recording?.on), count: shownWorkspace.panes.length }
+    : null;
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -121,6 +152,8 @@ export function usePaneContextMenu({
     ctxMenu,
     ctxMenuRef,
     recordingServed,
+    recordingCheck,
+    recordingWorkspace,
     openContextMenu: (e: ReactMouseEvent) => {
       if (!actionGuard()) return;
       e.preventDefault();
@@ -226,7 +259,7 @@ export function usePaneContextMenu({
         void updatePane(()=>api.setPaneFlag(pane.id,false,'',scope));
       },
       // Output recording: start asks first; delete confirms (lib/paneRecording).
-      recording: (action: 'start' | 'stop' | 'delete') => {
+      recording: (action: RecordingMenuAction) => {
         if (!actionGuard()) return;
       setCtxMenu(null);
         // As setAutoMode: the view and scope captured at the click must still
@@ -239,9 +272,15 @@ export function usePaneContextMenu({
           const now = useStore.getState().panes[pane.id];
           return viewValid() && !!now && now.pid === pane.pid && now.status === pane.status;
         };
-        if (action === 'start') void startPaneRecording(pane, originScope, valid);
+        if (action === 'start') void startPaneRecording(pane, originScope, valid, recordingServed === 'v2' && recordingCheck ? { check: recordingCheck } : undefined);
         else if (action === 'stop') void stopPaneRecording(pane, originScope);
-        else void deletePaneRecordings(pane, originScope, valid);
+        else if (action === 'delete') void deletePaneRecordings(pane, originScope, valid);
+        else {
+          const ws = workspacePanes();
+          if (!ws) return;
+          if (action === 'workspace-stop') void stopWorkspaceRecording(ws.name, originScope);
+          else void startWorkspaceRecording(ws.name, ws.panes, originScope, () => viewValid() && useStore.getState().activeWorkspace === ws.name);
+        }
       },
       flagForAttention: () => {
         if (!actionGuard()) return;

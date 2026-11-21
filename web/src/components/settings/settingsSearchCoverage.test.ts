@@ -13,6 +13,7 @@ import { HUMAN_PROOF_LABEL } from './HumanProofSetting';
 import { PERSONAL_VIEW_LABEL } from './PersonalViewSetting';
 import { PRESENTATION_MODE_LABEL } from './PresentationModeSetting';
 import { PRIVATE_RELAY_LABEL, REMOTE_POLICY_LABEL } from './RemoteDevicesSetting';
+import { RECORDING_CAP_LABEL, RECORDING_DAYS_LABEL } from './RecordingSetting';
 import {
   VOICE_API_KEY_LABEL,
   VOICE_AUTO_SEND_LABEL,
@@ -70,6 +71,7 @@ describe('settings search coverage (ST-281)', () => {
       USAGE_LABEL, DEVELOPER_OVERRIDES_LABEL, HUMAN_PROOF_LABEL, PERSONAL_VIEW_LABEL, PRESENTATION_MODE_LABEL,
       PRIVATE_RELAY_LABEL, REMOTE_POLICY_LABEL, VOICE_API_KEY_LABEL, VOICE_AUTO_SEND_LABEL, VOICE_KEEP_MIC_LABEL,
       VOICE_LANGUAGE_LABEL, VOICE_LOCAL_LABEL, VOICE_READY_TICK_LABEL, VOICE_WORDS_LABEL, WORKER_MODEL_LABEL,
+      RECORDING_DAYS_LABEL, RECORDING_CAP_LABEL,
     ];
     expect(constants.filter((label) => !registered.has(label))).toEqual([]);
   });

@@ -88,6 +88,9 @@ func TestWSLRestartProofStopsOnlyDaemonAndExistingLoopRelaunches(t *testing.T) {
 	at := strings.Index(body, "restarts=0\nwhile true; do\n")
 	end := strings.Index(body[at:], "\ndone\n")
 	loop := body[at : at+end+len("\ndone\n")]
+	// Keep the real migration gate, bound to this test's explicit data path.
+	// Never inspect the invoking account's default .solu from an extracted loop.
+	loop = strings.ReplaceAll(loop, `"$HOME/.solu"`, shellSingleQuote(envDir))
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
 DAEMON_DIR=%q
@@ -102,7 +105,7 @@ daemon_bind_failed() { return 1; }
 rotate_daemon_log_if_big() { :; }
 trap 'kill "$daemon_pid" 2>/dev/null || true; exit' TERM INT
 launch_daemon
-`, installed) + loop
+`, installed) + "\n" + extractShellFunc(t, body, "refuse_migrated_linux") + "\n" + loop
 	supPath := filepath.Join(dir, "start-wsl.sh")
 	if err := os.WriteFile(supPath, []byte(script), 0700); err != nil {
 		t.Fatal(err)

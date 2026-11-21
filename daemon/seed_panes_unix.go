@@ -11,8 +11,8 @@ import (
 )
 
 // seedFileOwnedPrivately requires the seed file to be owned by this user and
-// not writable by group or others.
-func seedFileOwnedPrivately(st fs.FileInfo) error {
+// not writable by group or others. st is the open file's own stat.
+func seedFileOwnedPrivately(st fs.FileInfo, _ *os.File) error {
 	sys, ok := st.Sys().(*syscall.Stat_t)
 	if !ok {
 		return errors.New("cannot read the file's owner")

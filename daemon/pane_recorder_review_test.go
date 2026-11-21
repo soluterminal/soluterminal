@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -127,7 +128,7 @@ func TestRecordingCapStopStillCutsUncheckedOutput(t *testing.T) {
 	hold := make(chan struct{})
 	tp.hold.Store(&hold)
 	<-tp.blocked
-	refused := recordingPaneFacts{Agent: "claude", Cwd: "/work/project", LiveCwds: []string{"/etc"}, AgentRunning: true}
+	refused := recordingPaneFacts{Cwds: []string{"/work/project", "/etc"}, AgentRunning: true}
 	tp.facts.Store(&refused)
 	for i := 0; i < 40; i++ {
 		tp.send(FrameData, []byte(strings.Repeat("U", 50)+"UNCHECKED"))
@@ -225,8 +226,11 @@ func TestRecordingSwitchOnRechecksAfterActivation(t *testing.T) {
 		return f
 	}
 	t.Cleanup(func() { recordingFactsOf = prev })
-	if _, err := tp.m.StartRecording(tp.p, "local"); err != nil {
-		t.Fatal(err)
+	// ST-317: the switch-on answers with the rule that stopped it at once.
+	_, err := tp.m.StartRecording(tp.p, "local", recordingStartOptions{})
+	var refused recordingRefusedError
+	if !errors.As(err, &refused) || refused.rule != recordingRuleHandle {
+		t.Fatalf("switch-on: %v", err)
 	}
 	if rec := tp.p.recording.active.Load(); rec != nil {
 		t.Fatal("recording left on after a refused change during the start")

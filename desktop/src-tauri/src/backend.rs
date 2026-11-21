@@ -13,8 +13,8 @@
 // Windows and, only if WSL is already running, inside WSL (agent_detect.rs),
 // and runs where they are: Windows, WSL, or the side with more of them when
 // both have some (WSL on a tie). Dual is never chosen automatically; it runs
-// two daemons and shows one side at a time, so it stays a choice the person
-// makes from the tray's "Switch mode" menu. With no agent found the app runs
+// two daemons and shows one side at a time. Only existing Dual PCs keep that
+// choice in the tray's "Switch mode" menu. With no agent found the app runs
 // on Windows and saves nothing, so a later launch looks again; that holds on
 // a PC without WSL too. Such a PC starts on Windows PowerShell silently: a
 // setup prompt before the window opens is the scariest moment to ask a
@@ -84,6 +84,19 @@ pub fn resolve_backend(app: &AppHandle, interactive: bool) -> Backend {
     // Consume the one-shot Repair setup request on every path so it can't
     // leak into a later in-app restart.
     let offer_setup = take_wsl_setup_offer();
+    // Retirement survives a crash before the ordinary preference was changed.
+    // Select the host without reviving the saved Dual/WSL backend or its mirror.
+    if matches!(crate::dual_migration::host_state(), Ok(crate::dual_migration::State::Retired)) {
+        return Backend::HostNative;
+    }
+    if let Err(error) = crate::dual_migration::require_host_stateful_start() {
+        crate::startup_screen::wsl_fell_back(&error.to_string());
+        if interactive {
+            app.dialog().message(error.to_string()).title("Migration interrupted")
+                .kind(MessageDialogKind::Warning).show(|_| {});
+        }
+        return Backend::HostNative;
+    }
     if let Some(saved) = read_pref() {
         // A saved WSL/Dual preference is RE-VALIDATED every launch: the
         // distro can be removed, WSL can need updating, or the machine
@@ -897,6 +910,10 @@ fn run_wsl_command_elevated(ps_argument_list: &str) -> Result<(), String> {
 #[cfg(windows)]
 fn delete_pref() {
     if let Some(p) = pref_path() {
+        if let Err(e) = crate::legacy_dual::preserve(&p) {
+            crate::daemon::launch_log(&format!("preserve existing Dual setup: {e}"));
+            return;
+        }
         let _ = fs::remove_file(p);
     }
 }
@@ -920,6 +937,13 @@ pub fn saved_pref() -> Option<Backend> {
     read_pref()
 }
 
+/// Existing Dual PCs retain the option across repairs and mode changes.
+#[cfg(windows)]
+pub fn dual_available() -> bool {
+    if crate::dual_migration::require_host_stateful_start().is_err() { return false; }
+    pref_path().is_some_and(|p| crate::legacy_dual::available(&p))
+}
+
 #[cfg(windows)]
 fn read_pref() -> Option<Backend> {
     let p = pref_path()?;
@@ -934,9 +958,13 @@ fn read_pref() -> Option<Backend> {
 
 #[cfg(windows)]
 fn write_pref(b: Backend) -> std::io::Result<()> {
+    if matches!(b, Backend::Wsl | Backend::Dual) {
+        crate::dual_migration::require_host_stateful_start()?;
+    }
     let p = pref_path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "no LOCALAPPDATA")
     })?;
+    crate::legacy_dual::before_write(&p, b == Backend::Dual)?;
     if let Some(dir) = p.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -959,6 +987,12 @@ pub fn set_pref(b: Backend) -> std::io::Result<()> {
 /// The modes in the order the tray's "Switch mode" menu lists them.
 #[allow(dead_code)]
 pub const MODES: [Backend; 3] = [Backend::Wsl, Backend::HostNative, Backend::Dual];
+
+/// Menu options and native admission use the same legacy compatibility rule.
+#[allow(dead_code)]
+pub fn available_modes(legacy_dual: bool) -> &'static [Backend] {
+    if legacy_dual { &MODES } else { &MODES[..2] }
+}
 
 /// The tray menu id of a mode's item.
 #[allow(dead_code)]
@@ -1076,7 +1110,13 @@ mod wsl_readiness_tests {
 
 #[cfg(test)]
 mod switch_mode_tests {
-    use super::{mode_from_menu_id, mode_menu_id, mode_pick, Backend, ModePick, MODES};
+    use super::{available_modes, mode_from_menu_id, mode_menu_id, mode_pick, Backend, ModePick, MODES};
+
+    #[test]
+    fn dual_is_only_offered_to_existing_dual_pcs() {
+        assert_eq!(available_modes(false), &[Backend::Wsl, Backend::HostNative]);
+        assert_eq!(available_modes(true), &MODES);
+    }
 
     #[test]
     fn every_mode_has_its_own_menu_item() {

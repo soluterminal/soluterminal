@@ -46,6 +46,30 @@ say()   { printf '%s\n' "$*"; }
 warn()  { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 die()   { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
+# ST-253: migration mirrors this pair to the verified service data directory
+# AND the user's default data directory. Never revive a retired Linux service.
+refuse_migrated_linux() {
+  solu_fence_dir=$1
+  case "$solu_fence_dir" in /*) ;; *) printf "can't check migration state in %s; not starting\n" "$solu_fence_dir" >&2; return 78 ;; esac
+  solu_fence_parent=${solu_fence_dir%/*}
+  [ -n "$solu_fence_parent" ] || solu_fence_parent=/
+  if [ ! -r "$solu_fence_parent" ] || [ ! -x "$solu_fence_parent" ]; then
+    printf "can't check migration state in %s; not starting\n" "$solu_fence_dir" >&2
+    return 78
+  fi
+  for solu_fence_name in migration-in-progress.json retired-to-host.json; do
+    if [ -e "$solu_fence_dir/$solu_fence_name" ] || [ -L "$solu_fence_dir/$solu_fence_name" ]; then
+      printf '%s\n' 'this PC moved to the Windows host' >&2
+      return 78
+    fi
+  done
+  if { [ -e "$solu_fence_dir" ] || [ -L "$solu_fence_dir" ]; } && { [ ! -d "$solu_fence_dir" ] || [ ! -r "$solu_fence_dir" ] || [ ! -x "$solu_fence_dir" ]; }; then
+    printf "can't check migration state in %s; not starting\n" "$solu_fence_dir" >&2
+    return 78
+  fi
+  return 0
+}
+
 usage() {
   say "usage: install.sh [--force-downgrade] [--version X.Y.Z] [--cloud https://HOST]"
 }
@@ -212,6 +236,7 @@ case "$os" in
   linux|darwin) ;;
   *) die "unsupported OS \"$os\"; only linux and darwin are built." ;;
 esac
+if [ "$os" = "linux" ]; then refuse_migrated_linux "$DATA_DIR" || exit 78; fi
 BACKEND_ID="host"
 if [ "$os" = "linux" ] && [ "$(uname -r | grep -ic microsoft || true)" -gt 0 ]; then
   BACKEND_ID="wsl"
@@ -702,6 +727,7 @@ After=network.target
 EnvironmentFile=-$env_dst
 ExecStart=$dest --addr 127.0.0.1:8787 \$RELAY_ARGS
 Restart=always
+RestartPreventExitStatus=78
 RestartSec=2
 StandardOutput=journal
 StandardError=journal

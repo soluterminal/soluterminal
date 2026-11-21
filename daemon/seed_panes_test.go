@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,9 @@ func TestSeedPanesAllowed(t *testing.T) {
 	}{
 		{"flag off", false, side, 0, false, false, ""},
 		{"flag off on the primary says nothing", false, primary, 0, false, false, ""},
-		{"primary refuses with a log line", true, primary, 0, false, false, "primary daemon"},
+		{"primary refuses with a log line", true, primary, 0, false, false, "canonical port"},
+		{"canonical port with its own -data refuses", true, decideDaemonRole("linux", "127.0.0.1:8787", "/scratch", "/home/u/.solu"), 0, false, false, "canonical port"},
+		{"own port with the default -data refuses", true, decideDaemonRole("linux", "127.0.0.1:18899", "/home/u/.solu", "/home/u/.solu"), 0, false, false, "default -data"},
 		{"side daemon with saved panes", true, side, 2, false, false, "fresh -data"},
 		{"side daemon seeded before, every pane since closed", true, side, 0, true, false, "already seeded once"},
 		{"side daemon, fresh data", true, side, 0, false, true, ""},
@@ -263,5 +266,50 @@ func TestSeedPanesAtBoot(t *testing.T) {
 	a.seedPanesAtBoot(true, side) // no saved panes (no store), marker present
 	if spawned != 2 {
 		t.Fatalf("a second boot on a seeded -data seeded again (%d spawns)", spawned)
+	}
+}
+
+// The seed gate sees the canonical port in any spelling, and the default
+// data dir under any alias.
+func TestDaemonRoleSeesPortAndDataAliases(t *testing.T) {
+	if r := decideDaemonRole("linux", "127.0.0.1:08787", "/scratch", "/home/u/.solu"); !r.CanonicalPort {
+		t.Fatal("0-padded 8787 passed as a side port")
+	}
+	if r := decideDaemonRole("linux", "127.0.0.1:18899", "/scratch", "/home/u/.solu"); r.CanonicalPort || r.DefaultData || r.Primary {
+		t.Fatalf("a side daemon was taken for canonical: %+v", r)
+	}
+	home := t.TempDir()
+	def := filepath.Join(home, ".solu")
+	if err := os.Mkdir(def, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "fresh")
+	if err := os.Symlink(def, alias); err != nil {
+		t.Fatal(err)
+	}
+	r := decideDaemonRole("linux", "127.0.0.1:18899", alias, def)
+	if !r.DefaultData {
+		t.Fatal("a link to the default data dir passed as its own -data")
+	}
+	if ok, _ := seedPanesAllowed(true, r, 0, false); ok {
+		t.Fatal("seeding allowed through a link to the default data dir")
+	}
+}
+
+// Seeding is decided on the ports the daemon holds, not the flag.
+func TestRoleOnBoundPorts(t *testing.T) {
+	side := decideDaemonRole("linux", "127.0.0.1:0", "/scratch", "/home/u/.solu")
+	if side.CanonicalPort {
+		t.Fatal("port 0 counted as canonical before the bind")
+	}
+	got := roleOnBoundPorts(side, []net.Addr{&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 38787}})
+	if !got.CanonicalPort {
+		t.Fatal("a bound canonical port was missed")
+	}
+	if ok, _ := seedPanesAllowed(true, got, 0, false); ok {
+		t.Fatal("seeding allowed on a bound canonical port")
+	}
+	if r := roleOnBoundPorts(side, []net.Addr{&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 18797}}); r.CanonicalPort {
+		t.Fatal("a side port counted as canonical")
 	}
 }

@@ -144,6 +144,8 @@ export interface PaneReview {
 export interface PaneAsk { id: string; text: string; source: string; createdAt: number; workerPane?: string }
 
 export interface PaneInfo {
+  /** A Linux pane: its WSL distro and helper agent (ST-253). */
+  linux?: { distro: string; agentId?: string };
   neverAutoAnswer?: boolean;
   /** Open asks this pane's agent posted for the user, oldest first. */
   asks?: PaneAsk[];
@@ -1247,6 +1249,8 @@ export function deriveUpdateHoldPresentation(
 }
 
 export interface CreatePaneReq {
+  /** Open the pane in this WSL distro through its helper (Linux panes on a Windows host). */
+  distro?: string;
   neverAutoAnswer?: boolean;
   restore?: boolean;
   /** "user" when the person opened the pane from the app; the daemon records other callers as "api". */
@@ -1374,8 +1378,45 @@ export interface PaneRecording {
   bytesDropped?: number;
   bytesReplaced?: number;
   // Set when a recording stopped for a reason the person should see (disk
-  // cap, refused folder or pane, the 8-hour limit, a failed write), until
+  // cap, refused folder or pane, the time limit, a failed write), until
   // they dismiss it.
   stoppedReason?: string;
   stoppedAt?: number;
+  // A running recording's terms (pane-recording.v2): its time limit and the
+  // defaults the person overrode at switch-on, as codes.
+  hours?: number;
+  overrides?: RecordingRule[];
+  // The deletion age in force while it records (v2).
+  deleteAfterDays?: number;
+  // On GET /api/panes/{id}/recording only (v2): how the rules read the pane
+  // now, as codes, never a folder or a handle.
+  check?: RecordingCheck;
+}
+
+// The defaults a person may override for one switch-on.
+// Folder defaults are per root (Addendum C 1): an override names each one.
+export type RecordingRule = 'handle' | 'shell' | 'folder:launch_security' | 'folder:launch_deploy' | 'folder:config' | 'folder:etc';
+
+export interface RecordingCheck {
+  // Switch-on can't work at all: "windows", "not_running", "no_data_dir".
+  unavailable?: string;
+  // A rule no override touches: "hard_folder", "cwd_unknown".
+  hard?: string;
+  defaults?: RecordingRule[];
+}
+
+export interface RecordingSettings {
+  deleteAfterDays: number;
+  capMB: number;
+  bounds: {
+    deleteAfterDaysMin: number; deleteAfterDaysMax: number;
+    capMBMin: number; capMBMax: number;
+    hoursMin: number; hoursMax: number; hoursDefault: number;
+  };
+}
+
+export interface WorkspaceRecordingResult {
+  recorded: string[];
+  stopped?: string[];
+  skipped: { id: string; reason: string }[];
 }

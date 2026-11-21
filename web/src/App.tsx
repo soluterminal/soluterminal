@@ -168,6 +168,7 @@ import { PRIVATE_RELAY_STATUS_EVENT } from './lib/privateRelay';
 import { installerUpdate } from './lib/installerUpdate';
 import { recordDisplayFix } from './lib/displayFixTelemetry';
 import { installAltHeld } from './lib/altHeld';
+import { useRecordingViewRecords } from './lib/useRecordingViewRecords';
 
 const ActivityDialog = lazy(() =>
   import('./components/ActivityDialog').then((mod) => ({ default: mod.ActivityDialog })),
@@ -674,6 +675,9 @@ export default function App() {
     maxSize: Math.min(60, (SIDEBAR_MAX_PX / windowWidth) * 100),
   };
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // ST-317: while anything records, send this window's view to the session
+  // timeline (ids, rectangles and enums only).
+  useRecordingViewRecords({ sidebarCollapsed, panelOpen: settingsOpen });
   const toggleSidebar = () => {
     const p = sidebarRef.current;
     if (!p) return;

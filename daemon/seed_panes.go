@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -24,8 +26,9 @@ import (
 // prompts are untouched, and nothing is typed into a seeded pane after it
 // starts. The limits (security review, 12 Nov):
 //
-//   - only with -seed-panes, and only on a side daemon (daemon_role.go); the
-//     primary daemon refuses the flag with a log line;
+//   - only with -seed-panes, and only on a side daemon with BOTH its own port
+//     and its own -data (daemon_role.go); a daemon on the canonical port or
+//     the default data dir refuses the flag with a log line (@secure 21 Nov);
 //   - only from <data>/seed-panes.json: a regular file (not a symlink) owned by
 //     this user and not writable by group or others;
 //   - each pane's argv[0] is exactly "claude" or "codex", followed only by its
@@ -37,6 +40,12 @@ import (
 //     before (<data>/seed-panes.done); the whole file is validated before
 //     any pane starts;
 //   - each seeded pane carries origin source "seed" and is logged once.
+//
+// A pane may instead name a WSL distro ({"title","distro"}; ST-253 W2, the
+// Windows acceptance rig, @secure 21 Nov): it takes no argv or cwd and opens
+// that distro's login shell, exactly what the new-pane picker opens. The
+// whole file is refused unless Linux panes are switched on
+// (SOLU_LINUX_PANES=1) and wsl.exe lists every named distro.
 const (
 	seedPanesFileName = "seed-panes.json"
 	seedPanesMax      = 12
@@ -51,9 +60,10 @@ const (
 )
 
 type seedPaneSpec struct {
-	Title string   `json:"title"`
-	Cwd   string   `json:"cwd"`
-	Argv  []string `json:"argv"`
+	Title  string   `json:"title"`
+	Cwd    string   `json:"cwd,omitempty"`
+	Argv   []string `json:"argv,omitempty"`
+	Distro string   `json:"distro,omitempty"`
 }
 
 type seedPanesDoc struct {
@@ -74,17 +84,19 @@ func loadSeedPanes(dataDir string) ([]seedPaneSpec, error) {
 	if !lst.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file (symlinks are refused)", path)
 	}
-	if err := seedFileOwnedPrivately(lst); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	// The file read must be the file checked: refuse a swap between the two.
-	if st, err := f.Stat(); err != nil || !os.SameFile(lst, st) {
+	// The file read must be the file checked: refuse a swap between the two,
+	// and check the owner on what was opened.
+	st, err := f.Stat()
+	if err != nil || !os.SameFile(lst, st) {
 		return nil, fmt.Errorf("%s changed while it was read", path)
+	}
+	if err := seedFileOwnedPrivately(st, f); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, seedPanesMaxBytes+1))
 	if err != nil {
@@ -117,6 +129,15 @@ func loadSeedPanes(dataDir string) ([]seedPaneSpec, error) {
 }
 
 func validateSeedPane(p *seedPaneSpec) error {
+	if p.Distro != "" {
+		if len(p.Argv) != 0 || p.Cwd != "" {
+			return errors.New("a distro pane takes no argv or cwd: it opens the distro's login shell")
+		}
+		if !validWSLDistro.MatchString(p.Distro) {
+			return fmt.Errorf("distro %q is not a WSL distro name", p.Distro)
+		}
+		return validateSeedTitle(p)
+	}
 	if len(p.Argv) == 0 {
 		return errors.New("argv is empty")
 	}
@@ -144,9 +165,42 @@ func validateSeedPane(p *seedPaneSpec) error {
 	if st, err := os.Stat(p.Cwd); err != nil || !st.IsDir() {
 		return fmt.Errorf("cwd %q is not an existing directory", p.Cwd)
 	}
+	return validateSeedTitle(p)
+}
+
+func validateSeedTitle(p *seedPaneSpec) error {
 	p.Title = strings.TrimSpace(p.Title)
 	if len(p.Title) > seedPaneMaxTitle || strings.IndexFunc(p.Title, unicode.IsControl) >= 0 {
 		return errors.New("title must be at most 80 bytes with no control characters")
+	}
+	return nil
+}
+
+// checkSeedDistros refuses a file naming a distro unless Linux panes are on
+// and wsl.exe lists every distro it names.
+func (a *apiServer) checkSeedDistros(specs []seedPaneSpec) error {
+	var named []string
+	for _, s := range specs {
+		if s.Distro != "" {
+			named = append(named, s.Distro)
+		}
+	}
+	if len(named) == 0 {
+		return nil
+	}
+	if a.mgr == nil || a.mgr.linux == nil {
+		return errors.New("it names a WSL distro but Linux panes aren't switched on (SOLU_LINUX_PANES=1)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	listed, err := listWSLDistros(ctx)
+	if err != nil {
+		return fmt.Errorf("couldn't list WSL distros: %w", err)
+	}
+	for _, name := range named {
+		if !slices.ContainsFunc(listed, func(d linuxDistro) bool { return d.Name == name }) {
+			return fmt.Errorf("WSL distro %q isn't installed", name)
+		}
 	}
 	return nil
 }
@@ -250,8 +304,8 @@ func seedPanesAllowed(enabled bool, role daemonRole, existing int, seededBefore 
 	switch {
 	case !enabled:
 		return false, ""
-	case role.Primary:
-		return false, "seed panes: -seed-panes ignored: this is the primary daemon (port 8787 or 38787 with the default -data); only a side daemon seeds panes"
+	case role.Primary || role.CanonicalPort || role.DefaultData:
+		return false, "seed panes: -seed-panes ignored: this daemon is on the canonical port (8787 or 38787) or the default -data; only a side daemon with its own port and its own -data seeds panes"
 	case seededBefore:
 		return false, "seed panes: skipped: this -data was already seeded once (" + seedPanesDoneName + "); seeding runs only on a fresh -data"
 	case existing > 0:
@@ -281,6 +335,10 @@ func (a *apiServer) seedPanesAtBoot(enabled bool, role daemonRole) {
 		log.Printf("seed panes: refused: %v", err)
 		return
 	}
+	if err := a.checkSeedDistros(specs); err != nil {
+		log.Printf("seed panes: refused: %s: %v", seedPanesPath(a.dataDir), err)
+		return
+	}
 	// Mark the data dir before the first spawn: a crash mid-seed must not
 	// seed again. No marker, no seeding.
 	if err := os.WriteFile(done, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
@@ -289,25 +347,30 @@ func (a *apiServer) seedPanesAtBoot(enabled bool, role daemonRole) {
 	}
 	now := time.Now().UnixMilli()
 	for i, spec := range specs {
-		agent, _ := normalizeAgentKind("", spec.Argv, "")
-		p, err := a.spawnPaneForRequest(SpawnOpts{
-			Cwd:    spec.Cwd,
-			Cmd:    append([]string(nil), spec.Argv...),
+		opts := SpawnOpts{
 			Title:  spec.Title,
-			Agent:  agent,
 			Origin: &PaneOrigin{Source: seedPaneOriginSrc, Purpose: "seeded at boot from " + seedPanesFileName, At: now},
-		})
+		}
+		what := "WSL " + spec.Distro + " login shell"
+		if spec.Distro != "" {
+			opts.Distro = spec.Distro
+		} else {
+			opts.Agent, _ = normalizeAgentKind("", spec.Argv, "")
+			opts.Cwd, opts.Cmd = spec.Cwd, append([]string(nil), spec.Argv...)
+			what = strings.Join(spec.Argv, " ") + " in " + spec.Cwd
+		}
+		p, err := a.spawnPaneForRequest(opts)
 		if err != nil {
-			log.Printf("seed panes: pane %d (%s) failed to start: %v", i+1, spec.Argv[0], err)
+			log.Printf("seed panes: pane %d failed to start: %v", i+1, err)
 			continue
 		}
 		if a.panes != nil {
 			if err := a.panes.Put(p); err != nil {
 				a.rollbackSpawnedPane(p)
-				log.Printf("seed panes: pane %d (%s) not saved, closed: %v", i+1, spec.Argv[0], err)
+				log.Printf("seed panes: pane %d not saved, closed: %v", i+1, err)
 				continue
 			}
 		}
-		log.Printf("seed panes: started pane %s %q: %s in %s", p.ID, spec.Title, strings.Join(spec.Argv, " "), spec.Cwd)
+		log.Printf("seed panes: started pane %s %q: %s", p.ID, spec.Title, what)
 	}
 }

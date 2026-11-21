@@ -32,14 +32,17 @@ const (
 var memGuardInterval = 15 * time.Second
 
 type memGuardConfig struct {
-	role      string
-	dataDir   string
-	softMB    uint64
-	hardMB    uint64
-	interval  time.Duration
-	memFn     func() uint64
-	restartFn func() error
-	exitFn    func(int)
+	role    string
+	dataDir string
+	// cappedDiagnostics: dataDir is a WSL helper's per-agent diagnostics dir,
+	// so evidence is written under @secure's caps (memguard_capped.go).
+	cappedDiagnostics bool
+	softMB            uint64
+	hardMB            uint64
+	interval          time.Duration
+	memFn             func() uint64
+	restartFn         func() error
+	exitFn            func(int)
 }
 
 type memGuard struct {
@@ -238,7 +241,11 @@ func (g *memGuard) sample(now time.Time) {
 }
 
 func triggerMemGuard(cfg memGuardConfig, measuredMB, thresholdMB uint64, action string) {
-	dir, err := captureOOMDiagnostics(cfg.dataDir, cfg.role)
+	capture := captureOOMDiagnostics
+	if cfg.cappedDiagnostics {
+		capture = captureCappedOOMDiagnostics
+	}
+	dir, err := capture(cfg.dataDir, cfg.role)
 	log.Printf("[memguard] %s role=%s measured=%dMB threshold=%dMB diagnostics=%s",
 		action, cfg.role, measuredMB, thresholdMB, dir)
 	if err != nil {

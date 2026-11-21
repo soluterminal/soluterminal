@@ -306,6 +306,7 @@ func resumeSpawnOpts(snap PaneSnapshot, liveCols, liveRows uint16) SpawnOpts {
 	agent := effectiveAgentKind(snap.Agent)
 	conversationID := conversationIDForAgent(snap.Agent, snap.ClaudeSessionID, snap.CodexThreadID, snap.MuseSessionID)
 	opts := SpawnOpts{
+		Distro:                       linuxPaneDistro(snap.Linux),
 		AutoMode:                     snap.AutoMode,
 		NeverAutoAnswer:              snap.NeverAutoAnswer,
 		ID:                           snap.ID,
@@ -440,7 +441,59 @@ func (a *apiServer) paneRespawnInProgress(id string) bool {
 // does NOT interrupt (unlike performSwitchMode); a blind kill mid-turn would leave
 // a dangling tool_use for `--resume` to repair. On total failure the original
 // identity, layout reference and metadata remain as a retryable recovery tile.
+// respawnDetachedCandidates is the pre-kill descendant snapshot respawn
+// reaps afterwards. A pane with no agent pid (a failed respawn stores
+// AgentPid 0) has no tree: on Windows descendantPids(0) walks System (pid 4)
+// and every process recorded under ppid 0, which must never be killed
+// (ST-323).
+func respawnDetachedCandidates(tree processTreeSnapshot, pid int) []int {
+	if pid <= 0 {
+		return nil
+	}
+	return tree.descendantPids(pid)
+}
+
 func (a *apiServer) respawnInPlace(snap PaneSnapshot, opts SpawnOpts) (*Pane, error) {
+	if snap.Linux != nil {
+		// Refuse what a Linux pane can't do yet BEFORE its live agent is
+		// stopped (set-role, set-context-pack, …): a refusal must never
+		// cost the person their session.
+		opts.Distro = snap.Linux.Distro
+		if a.mgr == nil || a.mgr.linux == nil {
+			return nil, &SpawnError{msg: "Linux panes aren't switched on on this machine"}
+		}
+		if why := linuxPaneRefusal(opts); why != "" {
+			return nil, &SpawnError{msg: why}
+		}
+		if snap.Status != PaneRunning {
+			// A person's Resume of a tile kept after a slow or failed boot
+			// listing: a still-live agent is reattached, never killed.
+			// Only the tile this Resume holds may be reattached: one a close
+			// removed meanwhile must not come back.
+			old, ok := a.mgr.Get(snap.ID)
+			if !ok || !old.respawning.Load() {
+				return nil, &SpawnError{msg: "this Linux pane was closed"}
+			}
+			if p, err := a.mgr.reattachLinuxIfAlive(persistedFromSnapshot(snap), old); p != nil || err != nil {
+				if p != nil && a.panes != nil {
+					// Only while it's still the manager's pane: a close
+					// meanwhile must not bring its saved record back.
+					a.mgr.withCurrentPane(p, func() {
+						if perr := a.panes.Put(p); perr != nil {
+							log.Printf("respawn: linux pane %s reattached but persist failed: %v", p.ID, perr)
+						}
+					})
+				}
+				return p, err
+			}
+		}
+		// Stop its agent strictly before the rollback kill below, whose
+		// close-twice escape must never let a replacement start beside an
+		// agent that wasn't confirmed stopped.
+		if err := a.mgr.linuxPaneStopper(*snap.Linux)(); err != nil {
+			return nil, fmt.Errorf("stop the Linux pane's agent: %w", err)
+		}
+	}
 	finishPresence := a.trackPaneRespawn(snap.ID)
 	defer finishPresence()
 	opts.AutoMode, opts.NeverAutoAnswer = snap.AutoMode, snap.NeverAutoAnswer
@@ -453,7 +506,7 @@ func (a *apiServer) respawnInPlace(snap PaneSnapshot, opts SpawnOpts) (*Pane, er
 	// "Internal error". Forcing a fresh walk here and reaping the survivors
 	// releases the lock. (PID recycling cannot bite within the kill window;
 	// Linux allocates pids monotonically until wraparound.)
-	paneTree := snapshotProcessTreeMaxAge(0).descendantPids(snap.Pid)
+	paneTree := respawnDetachedCandidates(snapshotProcessTreeMaxAge(0), snap.Pid)
 
 	// Free the id from the manager. An exited pane lingers in m.panes (only an
 	// explicit Kill deletes it) and Spawn rejects a duplicate id; a LIVE pane's

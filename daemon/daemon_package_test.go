@@ -182,6 +182,10 @@ func TestMain(m *testing.M) {
 	if len(os.Args) >= 2 && os.Args[1] == "agent" {
 		os.Exit(runAgent())
 	}
+	// The WSL helper's end-to-end tests run this binary as `solud helper`.
+	if len(os.Args) >= 2 && os.Args[1] == helperCommand {
+		os.Exit(runHelperCommand(os.Args[2:]))
+	}
 	// Exercise the production fixed-recipe helper in subprocess fixtures.
 	if len(os.Args) >= 2 && os.Args[1] == capabilityCommand {
 		os.Exit(runCapabilityCommand(os.Args[2:], os.Stdout))

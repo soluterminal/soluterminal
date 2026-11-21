@@ -15,3 +15,4 @@ var errRecordingUnsupported = errors.New("recording is not available on Windows 
 func openNewRecordingFile(string) (*os.File, error)      { return nil, errRecordingUnsupported }
 func openExistingRecordingFile(string) (*os.File, error) { return nil, errRecordingUnsupported }
 func recordingOwnedByUs(os.FileInfo) bool                { return false }
+func readRecordingTimeline(string) (*os.File, error)     { return nil, errRecordingUnsupported }

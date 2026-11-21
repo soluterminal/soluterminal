@@ -44,7 +44,7 @@ const SETTINGS_INVENTORY: Record<SettingsCategory, string[]> = {
     'Words to recognise', 'Let agents in panes approve for me',
     'Require approved devices for actions that need you', 'This browser', 'Who can use this computer remotely',
     "Encrypt this browser's connection end to end", 'Verify this browser', 'Alerts handled by another app',
-    'Share usage statistics', 'Send crash reports', 'Developer overrides', 'Paused updates',
+    'Share usage statistics', 'Send crash reports', 'Delete pane recordings after', 'Space for pane recordings', 'Developer overrides', 'Paused updates',
     'Restart background service', 'Display fixes used',
   ],
 };

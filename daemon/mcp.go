@@ -79,7 +79,17 @@ func (a *apiServer) mcp(w http.ResponseWriter, r *http.Request) {
 	// callers that present the daemon token (Bearer / cookie). The cloud
 	// relay bypasses authGate and carries no token, so relay-tunnelled
 	// requests still fall through to the reject below.
-	if scope == nil && (a.gate == nil || !a.gate.isAuthed(r)) {
+	// A request the helper fwd path dispatched (helper_fwd_host.go) is
+	// admitted by its attestation: it has no token and no loopback address
+	// by design, and classifyCaller names its attested pane. It can't carry
+	// a scoped token: the helper builds it with no Authorization header, and
+	// the daemon's scoped workers run on this host, not in a WSL distro.
+	_, fromHelper := helperFwdCallerOf(r)
+	if fromHelper && scope != nil {
+		http.Error(w, "a forwarded request cannot carry a scoped token", http.StatusForbidden)
+		return
+	}
+	if scope == nil && !fromHelper && (a.gate == nil || !a.gate.isAuthed(r)) {
 		http.Error(w, "mcp endpoint requires loopback or a valid token", http.StatusForbidden)
 		return
 	}
@@ -1635,7 +1645,7 @@ func (a *apiServer) mcpToolListPanes(args map[string]any, callerPane string) any
 			out[len(out)-1].ReleaseNote = repoNotes(a, snap.Cwd)
 		}
 		if only != "" {
-			live := liveCwdOfPane(p)
+			live := a.mgr.paneLiveCwd(p)
 			if live == "" {
 				live = snap.Cwd // no shell child to read: the spawn cwd
 			}
@@ -1795,7 +1805,12 @@ func (a *apiServer) mcpToolSendInputOutcomeAs(args map[string]any, mode delivery
 		if agent {
 			body = a.labelPaneMessageAs(body, c, paneID)
 			sender := a.paneMessageSenderAs(c, paneID)
-			delivered := func(o deliveryOutcome) { p.recordAgentMessage(c.ID, sender, o, time.Now()) }
+			delivered := func(o deliveryOutcome) {
+				p.recordAgentMessage(c.ID, sender, o, time.Now())
+				if o != deliveryLeftInComposer {
+					a.mgr.recordingTimelineMessage(p.ID, c.ID)
+				}
+			}
 			wrote, outcome, err := deliverOrHoldAgentMessage(p, body, claude, mode, delivered, sender, c.messageKey())
 			if errors.Is(err, errHeldQueueFull) || errors.Is(err, errHeldPaneFull) {
 				return toolErr(fmt.Sprintf("pane %s: %v.", paneID, err)), ""

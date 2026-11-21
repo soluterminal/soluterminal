@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -18,9 +19,14 @@ import (
 	"github.com/hinshun/vt10x"
 
 	"soluterminal/grid"
+
+	"soluterminal/helperproto"
 )
 
 type SpawnOpts struct {
+	// Distro runs the pane in that WSL distro through its helper (ST-253);
+	// empty runs it on this machine.
+	Distro        string
 	workerAccount string // internal auto-worker account pin; never accepted from HTTP
 	workerTeamID  string
 	// Internal resume timestamp, installed before the pane is published.
@@ -554,6 +560,9 @@ func (m *Manager) Spawn(opts SpawnOpts) (*Pane, error) {
 }
 
 func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
+	if opts.Distro != "" {
+		return m.spawnLinuxPane(opts)
+	}
 	_, ok := normalizeAgentKind(opts.Agent, opts.Cmd, opts.CodexThreadID)
 	if !ok {
 		return nil, &SpawnError{msg: "unknown agent: " + strings.TrimSpace(opts.Agent)}
@@ -1003,6 +1012,53 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	}
 	// A (re)spawned process gets this daemon's current address.
 	paneAddressRespawned(id)
+	p := m.newSpawnedPane(opts, id, createdAt, now, conn, launchCredential, contextPack.Status)
+	p.Pid = agentPid
+	p.processScope = ownedScopeForProcess(agentCmd.Process)
+	p.SocketPath = socketPath
+
+	if err := m.publishSpawnedPane(p, opts, noticeReason, func() {
+		_ = conn.Close()
+		_ = terminatePid(agentPid)
+	}); err != nil {
+		return nil, err
+	}
+	started = true
+	return p, nil
+}
+
+// publishSpawnedPane makes a built pane live: it takes the pane's id slot
+// (unless another spawn took it meanwhile, when abandon stops the agent),
+// surfaces any resume discontinuity, and starts the read loop.
+func (m *Manager) publishSpawnedPane(p *Pane, opts SpawnOpts, noticeReason string, abandon func()) error {
+	m.mu.Lock()
+	if m.panes[p.ID] != opts.ReplaceSuspended {
+		m.mu.Unlock()
+		abandon()
+		return fmt.Errorf("pane changed while restoring: %s", p.ID)
+	}
+	m.panes[p.ID] = p
+	m.mu.Unlock()
+
+	// Surface any resume discontinuity the guards above inflicted (see
+	// noticeReason). fromKind is this pane's own kind; interrupted=true only
+	// for resume-repair (there IS a cut-off response to continue) — a
+	// fresh-start has nothing to continue, its banner is informational.
+	if noticeReason != "" {
+		p.setSwitchNoticeReason(kindOrTerminal(p.Kind), noticeReason, noticeReason == "resume-repair")
+	}
+
+	if p.Snapshot().AutoMode != "" {
+		p.ensureGrid()
+	}
+	go p.readLoop(m)
+	return nil
+}
+
+// newSpawnedPane builds a running pane around its agent connection. The
+// caller sets how the agent is reached: Pid, processScope and SocketPath
+// for a local agent, Linux for one behind a WSL helper.
+func (m *Manager) newSpawnedPane(opts SpawnOpts, id string, createdAt, now time.Time, conn net.Conn, launchCredential *paneCredentialInfo, contextPackStatus string) *Pane {
 	p := &Pane{
 		Credential:              launchCredential,
 		credentialSelection:     m.selectedCredentialAccount,
@@ -1019,10 +1075,7 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 		CreatedAt:               createdAt,
 		Cols:                    opts.Cols,
 		Rows:                    opts.Rows,
-		Pid:                     agentPid,
-		processScope:            ownedScopeForProcess(agentCmd.Process),
 		LastActivityMs:          now.UnixMilli(),
-		SocketPath:              socketPath,
 		ClaudeSessionID:         strings.TrimSpace(opts.ClaudeSessionID),
 		CodexThreadID:           strings.TrimSpace(opts.CodexThreadID),
 		MuseSessionID:           strings.TrimSpace(opts.MuseSessionID),
@@ -1060,32 +1113,8 @@ func (m *Manager) spawnPreparedPane(opts SpawnOpts) (*Pane, error) {
 	p.Role = opts.Role
 	p.ownerViewerKnowledgeKnown = opts.Role == paneRoleTaskOwner
 	p.ContextPack = opts.ContextPack
-	p.ContextPackStatus = contextPack.Status
-
-	m.mu.Lock()
-	if m.panes[id] != opts.ReplaceSuspended {
-		m.mu.Unlock()
-		_ = conn.Close()
-		_ = terminatePid(agentPid)
-		return nil, fmt.Errorf("pane changed while restoring: %s", id)
-	}
-	m.panes[id] = p
-	m.mu.Unlock()
-
-	// Surface any resume discontinuity the guards above inflicted (see
-	// noticeReason). fromKind is this pane's own kind; interrupted=true only
-	// for resume-repair (there IS a cut-off response to continue) — a
-	// fresh-start has nothing to continue, its banner is informational.
-	if noticeReason != "" {
-		p.setSwitchNoticeReason(kindOrTerminal(p.Kind), noticeReason, noticeReason == "resume-repair")
-	}
-
-	if p.Snapshot().AutoMode != "" {
-		p.ensureGrid()
-	}
-	started = true
-	go p.readLoop(m)
-	return p, nil
+	p.ContextPackStatus = contextPackStatus
+	return p
 }
 
 // kindOrTerminal normalizes the empty terminal Kind for the client contract.
@@ -1100,17 +1129,64 @@ func kindOrTerminal(kind string) string {
 // a daemon restart). Returns nil, nil if the agent is dead; callers retain
 // the pane as a suspended recovery record.
 func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
+	return m.attachExisting(info, nil)
+}
+
+// attachExisting is AttachExisting; for a Linux pane, agents (when non-nil)
+// is a listing the caller just took, else the boot-burst cache is used.
+func (m *Manager) attachExisting(info *PersistedPane, agents []helperproto.AgentEntry) (*Pane, error) {
+	return m.attachExistingFor(info, agents, nil, time.Time{})
+}
+
+// errLinuxReattachSuperseded: the tile a reattach was for was closed or
+// replaced meanwhile, so the reattached pane is not published.
+var errLinuxReattachSuperseded = errors.New("the Linux pane was closed or replaced while it was being reattached")
+
+// attachExistingFor is attachExisting for a pane that replaces expect (a
+// Linux tile being reattached): it is published only while expect is still
+// the manager's pane for that id and isn't being closed. A non-zero by
+// bounds the helper ops.
+func (m *Manager) attachExistingFor(info *PersistedPane, agents []helperproto.AgentEntry, expect *Pane, by time.Time) (*Pane, error) {
 	copy := *info
 	info = &copy
 	info.AutoMode, info.NeverAutoAnswer = tightenPaneAnswerSettings(info.Cwd, info.AutoMode, info.NeverAutoAnswer)
-	// Is the agent process alive?
-	if !pidAlive(info.AgentPid) {
-		return nil, nil
-	}
-	// Can we connect? Short timeout — if not, consider it dead.
-	conn, err := dialAgent(info.SocketPath, 1*time.Second)
-	if err != nil {
-		return nil, nil
+	var conn net.Conn
+	if info.Linux != nil {
+		// No Windows identity on a Linux pane, whatever the record says;
+		// and no automatic answers (its repo lock is in the distro).
+		info.AgentPid, info.SocketPath, info.ProcessScope = 0, "", nil
+		info.AutoMode, info.NeverAutoAnswer = "", true
+		// A Linux pane is reached through its distro's helper, never by a
+		// pid or socket on this machine. Boot doesn't wait on a broken
+		// helper: the listing is cached and bounded; the pane is kept as a
+		// recovery tile, and resume decides later on a fresh listing.
+		if m.linux == nil || !validWSLDistro.MatchString(info.Linux.Distro) {
+			return nil, nil
+		}
+		if agents == nil {
+			list, err := m.listLinuxAgents(info.Linux.Distro, false)
+			if err != nil {
+				log.Printf("linux pane %s: %s's helper: %v", info.ID, info.Linux.Distro, err)
+				return nil, nil
+			}
+			agents = list
+		}
+		c, err := m.attachLinuxConn(info, agents, by)
+		if err != nil {
+			return nil, nil
+		}
+		conn = c
+	} else {
+		// Is the agent process alive?
+		if !pidAlive(info.AgentPid) {
+			return nil, nil
+		}
+		// Can we connect? Short timeout — if not, consider it dead.
+		c, err := dialAgent(info.SocketPath, 1*time.Second)
+		if err != nil {
+			return nil, nil
+		}
+		conn = c
 	}
 
 	// PersistedPane has no proven activity epoch. Terminal replay must not
@@ -1142,6 +1218,7 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 		processScope:             cloneValuePtr(info.ProcessScope),
 		LastActivityMs:           activityMs,
 		SocketPath:               info.SocketPath,
+		Linux:                    cloneValuePtr(info.Linux),
 		Kind:                     info.Kind,
 		Agent:                    agent,
 		Provider:                 info.Provider,
@@ -1194,7 +1271,20 @@ func (m *Manager) AttachExisting(info *PersistedPane) (*Pane, error) {
 	}
 
 	p.codexIdentityBlocked.Store(info.IdentityBlocked)
+	if info.Linux != nil {
+		p.linuxStop = m.linuxPaneStopper(*info.Linux)
+	}
+	if expect != nil {
+		expect.mu.Lock()
+		p.linuxLostAt = expect.linuxLostAt
+		expect.mu.Unlock()
+	}
 	m.mu.Lock()
+	if expect != nil && (m.panes[info.ID] != expect || expect.closing.Load()) {
+		m.mu.Unlock()
+		_ = conn.Close()
+		return nil, errLinuxReattachSuperseded
+	}
 	m.panes[info.ID] = p
 	m.mu.Unlock()
 
@@ -1263,6 +1353,7 @@ func (m *Manager) SuspendExisting(info *PersistedPane) *Pane {
 		processScope:             cloneValuePtr(info.ProcessScope),
 		LastActivityMs:           time.Now().UnixMilli(),
 		SocketPath:               info.SocketPath,
+		Linux:                    cloneValuePtr(info.Linux),
 		Kind:                     info.Kind,
 		Agent:                    agent,
 		Provider:                 info.Provider,
@@ -1411,13 +1502,22 @@ func (m *Manager) ResumeAgentPane(info PersistedPane) (*Pane, error) {
 	}
 	// Hold the suspended pane's respawn lease before touching its socket;
 	// another client may already have resumed it while boot recovery queued.
-	if agentPidOwnsSocket(info.AgentPid, info.SocketPath) {
+	if info.Linux != nil && m.linux != nil && helperproto.ValidAgentID(info.Linux.AgentID) {
+		if p, err := m.reattachLinuxIfAlive(info, suspended); p != nil || err != nil {
+			return p, err
+		}
+		// Gone (or another process now): make sure, then replace.
+		if err := m.linuxPaneStopper(*info.Linux)(); err != nil {
+			return nil, fmt.Errorf("stop the Linux pane's old agent: %w", err)
+		}
+	} else if agentPidOwnsSocket(info.AgentPid, info.SocketPath) {
 		killAgentTree(info.AgentPid)
 	}
 	if info.SocketPath != "" {
 		_ = os.Remove(info.SocketPath)
 	}
 	p, err := m.Spawn(SpawnOpts{
+		Distro:                       linuxPaneDistro(info.Linux),
 		ID:                           info.ID,
 		CreatedAt:                    info.CreatedAt,
 		ReplaceSuspended:             suspended,

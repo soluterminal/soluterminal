@@ -215,6 +215,7 @@ export function BrowserPane({ info }: { info: BrowserInfo }) {
   return (
     <div
       className={`pane browser-pane ${focused ? 'focused' : ''} ${beingDragged ? 'dragging' : ''}`}
+      data-browser-id={info.id}
       onMouseDownCapture={() => setFocus(info.id)}
       onDragOver={(e) => {
         if (!e.dataTransfer.types.includes(DRAG_MIME)) return;

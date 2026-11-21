@@ -12,8 +12,9 @@ import (
 
 // A Claude pane is stored with Agent "" (healPaneIdentity's legacy zero
 // value), not "claude". The recorder must still read it as a Claude pane, or
-// (f)3 refuses every Claude pane as "not an agent pane". A plain shell where
-// someone typed claude stays refused.
+// the shell default refuses every Claude pane. Since ST-317 (C1, amendment
+// 2026-11-20 section 3.1) a live claude or codex process anywhere in a pane
+// makes it an agent pane, so a shell where someone typed claude counts too.
 func TestRecordingFactsReadAHealedClaudePaneAsClaude(t *testing.T) {
 	claudeOpts, _ := healSpawnOpts(SpawnOpts{Agent: agentClaude, Cmd: []string{"claude", "--resume", "5cd5f757-46de-43e1-abb8-363ab9ef5079"}})
 	if claudeOpts.Agent != "" {
@@ -62,21 +63,23 @@ func TestRecordingFactsReadAHealedClaudePaneAsClaude(t *testing.T) {
 	if claude.Agent != agentClaude {
 		t.Fatalf("healed Claude pane read as agent %q", claude.Agent)
 	}
-	if reason := recordingRefusal(claude, "", dataDir); reason != "" {
-		t.Fatalf("a running Claude pane was refused: %s", reason)
+	if v := recordingCheck(claude, "", dataDir); v.Hard != "" || len(v.Defaults) != 0 {
+		t.Fatalf("a running Claude pane was refused: %+v", v)
 	}
 
+	// A shell with claude typed in it: its agent is still "" (what it was
+	// started as), but the live claude child makes it an agent pane (C1).
 	shell := facts(shellOpts)
-	if shell.Agent != "" || shell.AgentRunning {
-		t.Fatalf("plain shell read as %+v", shell)
+	if shell.Agent != "" || !shell.AgentRunning {
+		t.Fatalf("shell with a claude child read as %+v", shell)
 	}
-	if reason := recordingRefusal(shell, "", dataDir); reason != recordingStopShell {
-		t.Fatalf("a shell with claude typed in it: refusal %q, want %q", reason, recordingStopShell)
+	if v := recordingCheck(shell, "", dataDir); len(v.Defaults) != 0 {
+		t.Fatalf("a shell running claude was refused: %+v", v)
 	}
 
-	// A Codex pane is stored as "codex"; its claude child is not its agent.
+	// A Codex pane stays "codex"; any live claude or codex counts (C1).
 	codex := facts(codexOpts)
-	if codex.Agent != agentCodex || codex.AgentRunning {
+	if codex.Agent != agentCodex || !codex.AgentRunning {
 		t.Fatalf("codex pane read as %+v", codex)
 	}
 }

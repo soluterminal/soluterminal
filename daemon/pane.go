@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -313,6 +314,19 @@ type Pane struct {
 	// can reattach after a restart. Immutable after spawn.
 	SocketPath string `json:"socketPath"`
 
+	// Linux names a pane whose agent runs in a WSL distro behind the helper
+	// (ST-253). Such a pane has no Windows process: Pid stays 0 and
+	// SocketPath empty, so nothing on the host can mistake the Linux pid for
+	// a local one. Immutable after spawn.
+	Linux *linuxPaneRef `json:"linux,omitempty"`
+	// linuxStop force-stops a Linux pane's agent through its helper (Kill's
+	// fallback when the agent doesn't answer its kill request).
+	linuxStop func() error
+	// linuxConfirm is the token a person's confirmed close sends to remove
+	// this Linux tile though its agent couldn't be confirmed stopped.
+	linuxConfirmOnce sync.Once
+	linuxConfirm     string
+
 	// LastPrompts is the pane's recent submitted-input history, newest
 	// first, capped at lastPromptsMax. Reconstructed by promptRec from
 	// the bytes flowing through Write, so every transport (WS typing,
@@ -402,6 +416,14 @@ type Pane struct {
 	// a natural process-exit (the agent's claude process ended on its own).
 	// Only the latter, with a session id, becomes Resumable. Guarded by mu.
 	userClosing bool
+	// closing mirrors userClosing for readers that can't take mu (a Linux
+	// reattach publishing under the manager lock).
+	closing atomic.Bool
+	// linuxLostAt: when this Linux pane's stream was first lost, carried to
+	// the pane that reattaches it until that one proves its stream with a
+	// frame (gotFrame), so a dial that keeps failing can't renew the window.
+	linuxLostAt time.Time
+	gotFrame    atomic.Bool
 	// respawning is the SHARED single-flight guard for every in-place
 	// kill→respawn of this pane — resume (POST /resume), refresh
 	// (POST /refresh), the synchronous switch-mode "now" path, AND the
@@ -937,6 +959,7 @@ type PaneSnapshot struct {
 	ProcessScope   *processScopeIdentity `json:"-"`
 	LastActivityMs int64                 `json:"lastActivityMs"`
 	SocketPath     string                `json:"socketPath"`
+	Linux          *linuxPaneRef         `json:"linux,omitempty"`
 	Kind           string                `json:"kind,omitempty"`
 	Agent          string                `json:"agent,omitempty"`
 	CodexThreadID  string                `json:"codexThreadId,omitempty"`
@@ -1010,6 +1033,7 @@ func (p *Pane) Snapshot() PaneSnapshot {
 		ProcessScope:             cloneValuePtr(p.processScope),
 		LastActivityMs:           atomic.LoadInt64(&p.LastActivityMs),
 		SocketPath:               p.SocketPath,
+		Linux:                    cloneValuePtr(p.Linux),
 		Kind:                     p.Kind,
 		Agent:                    p.Agent,
 		CodexThreadID:            p.CodexThreadID,
@@ -1047,6 +1071,12 @@ func (p *Pane) Snapshot() PaneSnapshot {
 }
 
 type Manager struct {
+	// linux runs Linux panes through the WSL helpers (ST-253); nil unless
+	// the Windows host has Linux panes switched on.
+	linux        linuxPaneBackend
+	linuxListsMu sync.Mutex
+	linuxLists   map[string]*linuxListEntry // boot-burst listing cache per distro
+
 	credentialSelection func(provider string) string
 	retirementOriginMu  sync.RWMutex
 	retirementOrigins   sync.Map // permanent automation provenance; durable in dataDir when configured
@@ -1055,10 +1085,24 @@ type Manager struct {
 	panes      map[string]*Pane
 	dataDir    string
 	onPaneExit func(*Pane)
+	// persistLinuxRecovery saves a Linux pane whose helper died once it is
+	// reattached or settled as a tile (main.go wires the pane store).
+	persistLinuxRecovery func(*Pane)
+	linuxReattach        linuxReattachTiming // zero: defaults (tests shorten it)
 	// recordings is the pane recorder's folder, cap and sweep (lazy; see
 	// recordingHub()).
 	recordingsMu sync.Mutex
 	recordings   *recordingHub
+	// The session layout timeline (pane_recorder_timeline.go): open while
+	// any pane records. recordingWorkspaces lists the saved workspaces for
+	// it (set in main.go; nil in tests).
+	timelineMu          sync.Mutex
+	timeline            atomic.Pointer[recordingTimeline]
+	recordingWorkspaces func() []*Workspace
+	// recordersLive counts recorders from the start of a switch-on until
+	// their finish has run, so the timeline ends only after the last one's
+	// lines are written and never under a start in progress.
+	recordersLive atomic.Int64
 	// onPaneRemoved fires after Kill takes a pane out of the manager (set
 	// with SetOnPaneRemoved; main.go drops agents' open requests about it).
 	onPaneRemoved func(id string)
@@ -1472,8 +1516,18 @@ func (p *Pane) readLoop(m *Manager) {
 
 	for {
 		t, payload, err := ReadFrame(conn)
+		if err == nil && !p.gotFrame.Load() {
+			p.gotFrame.Store(true)
+		}
 		if err != nil {
+			// A Linux pane's stream also ends when its distro's helper
+			// dies, while the agent lives on: keep it as a tile that
+			// reconnects when the helper lists that agent again.
+			lost := m.linuxStreamLost(p)
 			exit(nil)
+			if lost {
+				go m.reattachLinuxAfterLoss(p)
+			}
 			return
 		}
 		switch t {
@@ -1588,7 +1642,13 @@ func (p *Pane) readLoop(m *Manager) {
 				p.mu.Lock()
 				// The known wrapper PID is the ownership boundary; never let a
 				// malformed frame redirect inventory to an unrelated process.
-				if p.Pid <= 0 || p.Pid == rs.PID {
+				if p.Linux != nil {
+					// A Linux pane's agent reports a pid in its distro: it
+					// names no process on this machine, so keep it out of
+					// inventory and anything else that reads agentReportedPID.
+					p.agentVersion = strings.TrimSpace(rs.Version)
+					p.agentProto = rs.Proto
+				} else if p.Pid <= 0 || p.Pid == rs.PID {
 					p.agentVersion = strings.TrimSpace(rs.Version)
 					p.agentReportedPID = rs.PID
 					p.agentProto = rs.Proto
@@ -2655,6 +2715,7 @@ func (p *Pane) Kill() error {
 	// flag the pane Resumable. Every permanent-kill path (delete, switch-mode,
 	// migrate, rollback, ARIA) routes through here.
 	p.userClosing = true
+	p.closing.Store(true)
 	conn := p.agentConn
 	scope := cloneValuePtr(p.processScope)
 	p.mu.Unlock()
@@ -2672,6 +2733,11 @@ func (p *Pane) Kill() error {
 		}
 		return nil
 	case <-time.After(3 * time.Second):
+	}
+	if p.linuxStop != nil {
+		// A Linux pane: its agent is stopped through the distro's helper,
+		// never by a pid on this machine.
+		return p.linuxStop()
 	}
 	if scope != nil {
 		_, err := stopProcessScopeIdentity(*scope)
@@ -2848,15 +2914,92 @@ func (m *Manager) SetOnPaneRemoved(f func(id string)) {
 	m.mu.Unlock()
 }
 
-func (m *Manager) Kill(id string) error {
+func (m *Manager) Kill(id string) error { return m.kill(id, false, "") }
+
+// KillAsPerson is the person's close (DELETE /api/panes/{id}). Only it may
+// remove a Linux tile whose agent couldn't be confirmed stopped, and only
+// with that tile's confirm token: the token comes back in the refusal
+// (linuxStopError) and the app sends it after the person agrees, so
+// overlapping requests can't use up the warning. Every other caller (MCP
+// kill_pane, respawn, rollback, retries) keeps the tile.
+func (m *Manager) KillAsPerson(id, confirm string) error { return m.kill(id, true, confirm) }
+
+// errLinuxStopUnconfirmed: a Linux pane's agent couldn't be confirmed
+// stopped, so its tile stays.
+var errLinuxStopUnconfirmed = errors.New("the Linux pane's agent couldn't be confirmed stopped")
+
+// linuxStopError is errLinuxStopUnconfirmed with the token the person's
+// confirmed close must send to remove this tile anyway.
+type linuxStopError struct {
+	ConfirmToken string
+	cause        error
+}
+
+func (e *linuxStopError) Error() string {
+	return errLinuxStopUnconfirmed.Error() + ": " + e.cause.Error()
+}
+func (e *linuxStopError) Unwrap() error { return errLinuxStopUnconfirmed }
+
+// closeRefused undoes a close that was refused (its Linux agent couldn't be
+// confirmed stopped): the pane stays, so it may reconnect and be reattached.
+func (p *Pane) closeRefused() {
+	p.mu.Lock()
+	p.userClosing = false
+	p.mu.Unlock()
+	p.closing.Store(false)
+}
+
+func (m *Manager) kill(id string, asPerson bool, confirm string) error {
 	p, ok := m.Get(id)
 	if !ok {
 		return fmt.Errorf("pane not found: %s", id)
 	}
+	// insisted: nil only for the person's close carrying this tile's token.
+	insisted := func(err error) error {
+		if !asPerson {
+			return fmt.Errorf("%w: %v", errLinuxStopUnconfirmed, err)
+		}
+		if token := p.linuxConfirmToken(); confirm != "" && subtle.ConstantTimeCompare([]byte(confirm), []byte(token)) == 1 {
+			log.Printf("linux pane %s: removed on the person's confirmation although its agent in %s couldn't be confirmed stopped: %v", id, p.Linux.Distro, err)
+			return nil
+		}
+		return &linuxStopError{ConfirmToken: p.linuxConfirmToken(), cause: err}
+	}
+	stopped := false
 	if err := p.Kill(); err != nil {
-		return err
+		if p.Linux == nil {
+			return err
+		}
+		if err := insisted(err); err != nil {
+			p.closeRefused()
+			return err
+		}
+		// Removing anyway: end the stream so the pane finishes.
+		p.mu.Lock()
+		conn := p.agentConn
+		p.mu.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		stopped = true
 	}
 	<-p.done
+	if p.Linux != nil && !stopped {
+		// The stream can end while the agent lives on (a broken helper
+		// session): stop it through the helper, then reap, before the pane
+		// goes. An agent that already exited answers not_found and is only
+		// reaped. With Linux panes switched off nothing can confirm it.
+		err := errors.New("Linux panes are switched off on this machine")
+		if m.linux != nil {
+			err = m.linuxPaneStopper(*p.Linux)()
+		}
+		if err != nil {
+			if err := insisted(err); err != nil {
+				p.closeRefused()
+				return err
+			}
+		}
+	}
 	m.mu.Lock()
 	delete(m.panes, id)
 	forgetTerminalOneTapPane(id)

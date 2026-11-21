@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -11,6 +12,9 @@ func plainShellRecovery(info PersistedPane) bool {
 	}
 	if len(info.Cmd) == 0 {
 		return true
+	}
+	if info.Linux != nil && slices.Equal(info.Cmd, linuxPaneShell) {
+		return true // a Linux pane's default login shell
 	}
 	name := strings.TrimSuffix(strings.ToLower(filepath.Base(info.Cmd[0])), ".exe")
 	switch name {

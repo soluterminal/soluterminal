@@ -232,6 +232,16 @@ func TestRecordingsRefusedOnEveryFileSurface(t *testing.T) {
 	if err := os.WriteFile(cast, []byte(`{"version":2,"width":80,"height":24,"timestamp":1}`+"\n"+`[0.1, "o", "fixture-recording-content"]`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// ST-317: the session timelines sit under the same folder and the same
+	// refusals.
+	sessions := filepath.Join(data, recordingsDirName, recordingSessionsDirName)
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	timeline := filepath.Join(sessions, "20261119T000000Z.jsonl")
+	if err := os.WriteFile(timeline, []byte(`{"t":0,"ev":"header","app":"fixture-recording-content"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	project := filepath.Join(home, "project")
 	if err := os.MkdirAll(project, 0o700); err != nil {
 		t.Fatal(err)
@@ -248,8 +258,10 @@ func TestRecordingsRefusedOnEveryFileSurface(t *testing.T) {
 		cast,
 		filepath.Join(link, "pane_fixture", "20261119T000000Z.cast"),
 		filepath.Join(project, "..", "soludata", recordingsDirName, "pane_fixture", "20261119T000000Z.cast"),
+		timeline,
+		filepath.Join(link, recordingSessionsDirName, "20261119T000000Z.jsonl"),
 	}
-	dirs := []string{filepath.Join(data, recordingsDirName), pane, filepath.Join(link, "pane_fixture")}
+	dirs := []string{filepath.Join(data, recordingsDirName), pane, filepath.Join(link, "pane_fixture"), sessions}
 	send := func(caller, method, target, body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, target, strings.NewReader(body))
 		r.Host = "127.0.0.1:9791"
@@ -319,5 +331,8 @@ func TestRecordingsRefusedOnEveryFileSurface(t *testing.T) {
 	}
 	if raw, _ := os.ReadFile(cast); bytes.Contains(raw, []byte("forged")) {
 		t.Fatal("a file surface wrote into a recording")
+	}
+	if raw, _ := os.ReadFile(timeline); bytes.Contains(raw, []byte("forged")) {
+		t.Fatal("a file surface wrote into a timeline")
 	}
 }

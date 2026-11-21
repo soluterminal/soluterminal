@@ -72,6 +72,11 @@ func (a *apiServer) relayFileScope() *relayFileScope {
 	var paneDirs []string
 	if a.mgr != nil {
 		for _, p := range a.mgr.List() {
+			if p.Linux != nil {
+				// A distro path ("/home/u") would read as a Windows path on
+				// the current drive: no relay root until a \\wsl$ mapping.
+				continue
+			}
 			paneDirs = append(paneDirs, p.Cwd, liveCwdOfPane(p))
 		}
 	}

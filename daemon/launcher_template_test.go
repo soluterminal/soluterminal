@@ -481,9 +481,19 @@ func TestWSLLauncherStopsRelaunchingWhenTheDataDirIsOwned(t *testing.T) {
 	}
 	loop := body[start : start+end+len("\ndone\n")]
 
-	run := func(t *testing.T, statuses string) (string, string, error) {
+	run := func(t *testing.T, statuses, marker string) (string, string, error) {
 		t.Helper()
 		dir := t.TempDir()
+		data := filepath.Join(dir, ".solu")
+		if marker != "" {
+			if err := os.Mkdir(data, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(data, marker), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fixtureLoop := strings.ReplaceAll(loop, `"$HOME/.solu"`, shellSingleQuote(data))
 		stubs := strings.Join([]string{
 			"set -e",
 			"DAEMON_DIR='" + dir + "'",
@@ -497,13 +507,13 @@ func TestWSLLauncherStopsRelaunchingWhenTheDataDirIsOwned(t *testing.T) {
 			"rotate_daemon_log_if_big() { :; }",
 			"sleep() { :; }",
 		}, "\n") + "\n"
-		out, err := runBash(t, stubs+loop)
+		out, err := runBash(t, stubs+extractShellFunc(t, body, "refuse_migrated_linux")+"\n"+fixtureLoop)
 		logged, _ := os.ReadFile(filepath.Join(dir, "daemon.log"))
 		return out, string(logged), err
 	}
 
 	t.Run("owned data directory is final", func(t *testing.T) {
-		out, logged, err := run(t, "73")
+		out, logged, err := run(t, "73", "")
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 73 {
 			t.Fatalf("supervisor exit = %v, want 73\n%s%s", err, out, logged)
@@ -516,8 +526,18 @@ func TestWSLLauncherStopsRelaunchingWhenTheDataDirIsOwned(t *testing.T) {
 		}
 	})
 
+	for _, marker := range []string{"migration-in-progress.json", "retired-to-host.json"} {
+		t.Run(marker+" is final before relaunch", func(t *testing.T) {
+			out, logged, err := run(t, "1 73", marker)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 78 || strings.Contains(out+logged, "LAUNCHED") {
+				t.Fatalf("fenced supervisor relaunched: exit=%v output=%s%s", err, out, logged)
+			}
+		})
+	}
+
 	t.Run("a crash is still relaunched", func(t *testing.T) {
-		out, logged, err := run(t, "1 73")
+		out, logged, err := run(t, "1 73", "")
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 73 {
 			t.Fatalf("supervisor exit = %v, want 73 after one relaunch\n%s%s", err, out, logged)

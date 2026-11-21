@@ -1,5 +1,6 @@
 import type { ClosedPane } from './lib/closedPanes';
-import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, OrchestratorHostsInfo, PaneIdentity, PaneInfo, PaneOrigin, PaneRecording, PaneRole, Port, RecoverySettings, ReleaseCheck, AutomationsPause, RunNowOutcome, Schedule, ScheduleAgent, ScheduleHistoryPage, ScheduleInput, ScheduleLive, TurnRecord, BrowsedSession, UpdateSettings, UpdateSettingsPut, Workspace, WorkspaceSummary } from './types';
+import type { ArchivedWorker, WorkerSettings, CreatePaneReq, Health, McpServer, OrchestratorHostsInfo, PaneIdentity, PaneInfo, PaneOrigin, PaneRecording, PaneRole, RecordingRule, RecordingSettings, WorkspaceRecordingResult, Port, RecoverySettings, ReleaseCheck, AutomationsPause, RunNowOutcome, Schedule, ScheduleAgent, ScheduleHistoryPage, ScheduleInput, ScheduleLive, TurnRecord, BrowsedSession, UpdateSettings, UpdateSettingsPut, Workspace, WorkspaceSummary } from './types';
+import type { RecordingViewRecord } from './lib/useRecordingViewRecords';
 import { isRouterMode, isDesktopRouterMode } from './dualBackend';
 import { setEnterGapConfig } from './ptySubmit';
 import { openTicketedEventSource, type EventStream } from './lib/ticketedEventSource';
@@ -3801,8 +3802,13 @@ const coreApi = {
       body: JSON.stringify(body),
     }).then(j<{ dryRun?: boolean; mode?: string; affected?: Array<{ paneId: string; title: string; degradedReason: string }>; summary?: { total: number }; status?: string; count?: number }>),
 
-  deletePane: (id: string, scope?: RoutingScope) =>
-    workflowFetch(scope, `/api/panes/${id}`, { method: 'DELETE' }).then(j<void>),
+  /** confirmUnstopped: a Linux pane's confirm token (from a 409) after the person agreed. */
+  deletePane: (id: string, scope?: RoutingScope, confirmUnstopped?: string) =>
+    workflowFetch(
+      scope,
+      `/api/panes/${id}${confirmUnstopped ? `?confirmUnstopped=${encodeURIComponent(confirmUnstopped)}` : ''}`,
+      { method: 'DELETE' },
+    ).then(j<void>),
 
   resizePane: (id: string, cols: number, rows: number) =>
     apiFetch(`/api/panes/${id}/resize`, {
@@ -3851,12 +3857,51 @@ const coreApi = {
   // Pane output recording (daemon/pane_recorder_api.go). Switching on,
   // dismissing a stop notice and deleting are the person's at this computer
   // only; the daemon refuses agents and the relay. Off is anyone's.
-  setPaneRecording: (id: string, on: boolean, scope?: RoutingScope) =>
+  // terms (pane-recording.v2 only) go with on:true: the time limit and the
+  // defaults the person chose to override. Without them the daemon applies
+  // the defaults.
+  setPaneRecording: (id: string, on: boolean, scope?: RoutingScope, terms?: { hours: number; override: RecordingRule[]; pid?: number }) =>
     workflowFetch(scope, `/api/panes/${id}/recording`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ on }),
+      body: JSON.stringify(on && terms ? {
+        on, hours: terms.hours, ...(terms.override.length ? { override: terms.override } : {}), ...(terms.pid ? { pid: terms.pid } : {}),
+      } : { on }),
     }).then(j<PaneRecording>),
+
+  getPaneRecording: (id: string, scope?: RoutingScope) =>
+    workflowFetch(scope, `/api/panes/${id}/recording`).then(j<PaneRecording>),
+
+  setWorkspaceRecording: (
+    body: { workspace: string; on: true; hours: number; panes: { id: string; override?: RecordingRule[]; pid?: number }[] } | { workspace: string; on: false },
+    scope?: RoutingScope,
+  ) =>
+    workflowFetch(scope, '/api/recording/workspace', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(j<WorkspaceRecordingResult>),
+
+  // A view record for the session timeline (lib/useRecordingViewRecords).
+  // Answers the HTTP status: 409 means nothing in that view records.
+  sendRecordingView: (body: RecordingViewRecord, scope?: RoutingScope) =>
+    workflowFetch(scope, '/api/recording/view', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => r.status),
+
+  getRecordingSettings: (scope?: RoutingScope) =>
+    workflowFetch(scope, '/api/settings/recording').then(j<RecordingSettings>),
+
+  // expect* are the values the page read before deciding: the daemon answers
+  // 409 and changes nothing if they are no longer the stored ones.
+  putRecordingSettings: (body: { deleteAfterDays?: number; capMB?: number; expectDeleteAfterDays?: number; expectCapMB?: number }, scope?: RoutingScope) =>
+    workflowFetch(scope, '/api/settings/recording', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(j<RecordingSettings>),
 
   dismissPaneRecordingNotice: (id: string, scope?: RoutingScope) =>
     workflowFetch(scope, `/api/panes/${id}/recording`, {
@@ -4020,6 +4065,11 @@ const coreApi = {
     return apiFetch(`/api/dirs${qs}`).then(j<DirCandidate[]>);
   },
 
+  /** Linux panes on a Windows host: whether they're on, and the WSL distros. */
+  linuxDistros: () =>
+    apiFetch('/api/linux/distros').then(
+      j<{ enabled: boolean; distros: { name: string; default?: boolean }[]; error?: string }>,
+    ),
   paneLiveCwd: (id: string) =>
     apiFetch(`/api/panes/${id}/cwd`).then(j<{ cwd: string }>).then((r) => r.cwd),
 

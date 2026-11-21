@@ -44,6 +44,7 @@ function setDesktopBackend(backend: {
   fallback?: boolean;
   hostPlatform?: 'windows' | 'macos' | 'linux';
   launchMode?: 'local' | 'cloud';
+  legacyDual?: boolean;
 }) {
   Object.defineProperty(window, '__SOLU_TAURI__', { value: true, configurable: true });
   Object.defineProperty(window, '__SOLU_BACKEND__', {
@@ -134,7 +135,7 @@ describe('BackendControls via the hosting chip', () => {
     // No "Mode"/"Side" caption rows — the active segment carries the state.
     expect(screen.queryByText('Mode')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Linux' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Dual' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Dual' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Windows' })).toBeDisabled();
     // Hosting row: local launch mode active, cloud offered.
     expect(screen.getByRole('button', { name: 'Local' })).toBeDisabled();
@@ -195,7 +196,30 @@ describe('BackendControls via the hosting chip', () => {
 
     expect(screen.getByRole('button', { name: 'Linux' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Windows' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Dual' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Dual' })).not.toBeInTheDocument();
+  });
+
+  it('retains Dual on a legacy PC after switching to Windows', async () => {
+    setDesktopBackend({ requested: 'host', actual: 'host', legacyDual: true });
+    const invoke = vi.fn(async (cmd: string) => (cmd === 'desktop_wsl_readiness' ? 'ready' : undefined));
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    useStore.setState({
+      openDialog: (d: { resolve: (v: unknown) => void }) => d.resolve(true),
+    } as never);
+    render(<ContextPill />);
+    openEnv();
+    fireEvent.click(screen.getByRole('button', { name: 'Dual' }));
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('desktop_set_backend_mode', { mode: 'dual' }),
+    );
+  });
+
+  it('does not offer Dual before any startup choice has been saved', () => {
+    setDesktopBackend({ actual: 'wsl', legacyDual: false });
+    render(<ContextPill />);
+    openEnv();
+    expect(screen.queryByRole('button', { name: 'Dual' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Windows' })).not.toBeDisabled();
   });
 
   it('marks the saved mode on fallback, lets it retry, and lets Windows be chosen for good', async () => {
@@ -280,7 +304,7 @@ describe('BackendControls via the hosting chip', () => {
   });
 
   it('warns before restarting into Dual when WSL is not ready, and restarts if confirmed', async () => {
-    setDesktopBackend({ requested: 'host', actual: 'host' });
+    setDesktopBackend({ requested: 'host', actual: 'host', legacyDual: true });
     const invoke = vi.fn(async (cmd: string) => (cmd === 'desktop_wsl_readiness' ? 'not-installed' : undefined));
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     const messages: string[] = [];

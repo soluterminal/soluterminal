@@ -33,7 +33,7 @@ type recTestPane struct {
 }
 
 func allowedRecordingFacts() recordingPaneFacts {
-	return recordingPaneFacts{Agent: "claude", Cwd: "/work/project", AgentRunning: true}
+	return recordingPaneFacts{Cwds: []string{"/work/project"}, AgentRunning: true}
 }
 
 // newRecTestPane runs a real readLoop on a net.Pipe agent connection, with the
@@ -52,7 +52,7 @@ func newRecTestPane(t *testing.T) *recTestPane {
 	tp := &recTestPane{t: t, m: m, p: p, server: server, data: data, blocked: make(chan struct{}, 1)}
 	f := allowedRecordingFacts()
 	tp.facts.Store(&f)
-	prevFacts, prevEvery, prevMax := recordingFactsOf, recordingCheckEvery, recordingMaxOnFor
+	prevFacts, prevEvery, prevUnit := recordingFactsOf, recordingCheckEvery, recordingHourUnit
 	recordingFactsOf = func(*Pane) recordingPaneFacts {
 		tp.checks.Add(1)
 		if h := tp.hold.Swap(nil); h != nil {
@@ -62,7 +62,7 @@ func newRecTestPane(t *testing.T) *recTestPane {
 		return *tp.facts.Load()
 	}
 	recordingCheckEvery = 20 * time.Millisecond
-	t.Cleanup(func() { recordingFactsOf, recordingCheckEvery, recordingMaxOnFor = prevFacts, prevEvery, prevMax })
+	t.Cleanup(func() { recordingFactsOf, recordingCheckEvery, recordingHourUnit = prevFacts, prevEvery, prevUnit })
 	// Drain what the pane writes to its agent (resize frames).
 	go func() {
 		for {
@@ -93,7 +93,7 @@ func (tp *recTestPane) sync() {
 
 func (tp *recTestPane) start() *paneRecorder {
 	tp.t.Helper()
-	if _, err := tp.m.StartRecording(tp.p, "local"); err != nil {
+	if _, err := tp.m.StartRecording(tp.p, "local", recordingStartOptions{}); err != nil {
 		tp.t.Fatalf("start: %v", err)
 	}
 	rec := tp.p.recording.active.Load()
@@ -358,13 +358,16 @@ func TestRecordingOffWhenThePaneIsReplaced(t *testing.T) {
 	}
 }
 
-func TestRecordingOffAfterEightHours(t *testing.T) {
+func TestRecordingOffAfterEightHoursByDefault(t *testing.T) {
 	tp := newRecTestPane(t)
-	recordingMaxOnFor = 60 * time.Millisecond
+	recordingHourUnit = 10 * time.Millisecond
 	rec := tp.start()
+	if rec.terms.hours != 8 {
+		t.Fatalf("default limit %d hours", rec.terms.hours)
+	}
 	waitRecorder(t, rec)
 	d := tp.p.Recording()
-	if rec.reason != recordingStopMaxOn || d == nil || d.On || d.StoppedReason != recordingStopMaxOn {
+	if want := "8-hour limit"; rec.reason != want || d == nil || d.On || d.StoppedReason != want {
 		t.Fatalf("reason %q dto %+v", rec.reason, d)
 	}
 }
@@ -388,9 +391,10 @@ func TestRecordingPolicyStopCutsBackToTheLastPassingCheck(t *testing.T) {
 		facts recordingPaneFacts
 		want  string
 	}{
-		{"refused folder", recordingPaneFacts{Agent: "claude", Cwd: "/work/project", LiveCwds: []string{"/work/project", "/etc/ssl"}, AgentRunning: true}, recordingStopCwd},
-		{"agent exited to a shell", recordingPaneFacts{Agent: "claude", Cwd: "/work/project"}, recordingStopShell},
-		{"refused handle", recordingPaneFacts{Handle: "gate-main", Agent: "claude", Cwd: "/work/project", AgentRunning: true}, recordingStopHandle},
+		{"refused folder", recordingPaneFacts{Cwds: []string{"/work/project", "/etc/ssl"}, AgentRunning: true}, recordingStopCwd},
+		{"hard folder", recordingPaneFacts{Cwds: []string{"/work/project", "/etc/solu-gate"}, AgentRunning: true}, recordingStopHardFolder},
+		{"agent exited to a shell", recordingPaneFacts{Cwds: []string{"/work/project"}}, recordingStopShell},
+		{"refused handle", recordingPaneFacts{Handle: "gate-main", Cwds: []string{"/work/project"}, AgentRunning: true}, recordingStopHandle},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tp := newRecTestPane(t)
@@ -438,6 +442,14 @@ func TestRecordingPolicyStopCutsBackToTheLastPassingCheck(t *testing.T) {
 			if m := marks(all); len(m) == 0 || m[len(m)-1] != "stopped: "+tc.want {
 				t.Fatalf("marks %v", m)
 			}
+			// The session timeline counts toward the cap too (ST-317).
+			tp.m.timelineEndIfIdle()
+			sessions, _ := filepath.Glob(filepath.Join(tp.data, recordingsDirName, recordingSessionsDirName, "*.jsonl"))
+			for _, f := range sessions {
+				if info, err := os.Stat(f); err == nil {
+					onDisk += info.Size()
+				}
+			}
 			hub := tp.m.recordingHub()
 			hub.mu.Lock()
 			total := hub.total
@@ -468,21 +480,20 @@ func TestRecordingSwitchOnRefusedPanes(t *testing.T) {
 	tp := newRecTestPane(t)
 	cases := map[string]recordingPaneFacts{}
 	for _, h := range append(append([]string{}, recordingRefusedHandles...), "release-x", "publish-y", "gate-z", "Secure") {
-		cases["handle "+h] = recordingPaneFacts{Handle: h, Agent: "claude", Cwd: "/work", AgentRunning: true}
+		cases["handle "+h] = recordingPaneFacts{Handle: h, Cwds: []string{"/work"}, AgentRunning: true}
 	}
-	for _, dir := range recordingRefusedDirs(home, tp.data) {
-		cases["cwd "+dir] = recordingPaneFacts{Agent: "codex", Cwd: filepath.Join(dir, "sub"), AgentRunning: true}
-		// Another process in the pane in a refused folder, beside an allowed one.
-		cases["live cwd "+dir] = recordingPaneFacts{Agent: "codex", Cwd: "/work", LiveCwds: []string{"/work/sub", dir}, AgentRunning: true}
+	for _, dir := range append(recordingHardDirs(home, tp.data), recordingDefaultDirs(home)...) {
+		cases["cwd "+dir] = recordingPaneFacts{Cwds: []string{filepath.Join(dir, "sub")}, AgentRunning: true}
+		// The agent process in a refused folder, beside the shell in an allowed one.
+		cases["agent cwd "+dir] = recordingPaneFacts{Cwds: []string{"/work/sub", dir}, AgentRunning: true}
 	}
-	cases["folder can't be read"] = recordingPaneFacts{Agent: "claude", Cwd: "/work", CwdUnknown: true, AgentRunning: true}
-	cases["plain shell"] = recordingPaneFacts{Agent: "", Cwd: "/work", AgentRunning: false}
-	cases["other agent"] = recordingPaneFacts{Agent: "muse", Cwd: "/work", AgentRunning: true}
-	cases["agent exited"] = recordingPaneFacts{Agent: "claude", Cwd: "/work", AgentRunning: false}
+	cases["cwd /etc/solu-gate"] = recordingPaneFacts{Cwds: []string{"/etc/solu-gate/x"}, AgentRunning: true}
+	cases["folder can't be read"] = recordingPaneFacts{Cwds: []string{"/work"}, CwdUnknown: true, AgentRunning: true}
+	cases["plain shell"] = recordingPaneFacts{Cwds: []string{"/work"}}
 	for name, f := range cases {
 		f := f
 		tp.facts.Store(&f)
-		_, err := tp.m.StartRecording(tp.p, "local")
+		_, err := tp.m.StartRecording(tp.p, "local", recordingStartOptions{})
 		var refused recordingRefusedError
 		if err == nil || !errors.As(err, &refused) {
 			t.Errorf("%s: switch-on allowed (%v)", name, err)
@@ -492,7 +503,7 @@ func TestRecordingSwitchOnRefusedPanes(t *testing.T) {
 		t.Fatal("a refused switch-on created the folder")
 	}
 	ok := allowedRecordingFacts()
-	if recordingRefusal(ok, home, tp.data) != "" {
-		t.Fatal("an ordinary agent pane is refused")
+	if v := recordingCheck(ok, home, tp.data); v.Hard != "" || len(v.Defaults) != 0 {
+		t.Fatalf("an ordinary agent pane is refused: %+v", v)
 	}
 }

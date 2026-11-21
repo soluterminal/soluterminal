@@ -552,3 +552,152 @@ func TestAutoApprovalMenuVisibilityRequiresAcceptOnceFocus(t *testing.T) {
 		})
 	}
 }
+
+// ---- ST-328: the echoed command is payload, never the dialog's own words ----
+
+// claudeEchoedBashPrompt is Claude's Bash permission dialog for command,
+// drawn width columns wide: the command in the payload and echoed in row 2
+// ("Yes, and don't ask again for: <command>"), both wrapped to the width.
+func claudeEchoedBashPrompt(command string, width int) string {
+	wrap := func(indent, text string) []string {
+		var out []string
+		line := indent
+		for _, word := range strings.Fields(text) {
+			if len(line)+len(word)+1 > width && strings.TrimSpace(line) != "" {
+				out = append(out, line)
+				line = indent
+			}
+			if strings.TrimSpace(line) != "" {
+				line += " "
+			}
+			line += word
+		}
+		return append(out, line)
+	}
+	lines := []string{"● Searching for the limit copy.", "", strings.Repeat("─", width), " Bash command", ""}
+	lines = append(lines, wrap("   ", command)...)
+	lines = append(lines, "   Find the copy", "", " Do you want to proceed?", " ❯ 1. Yes")
+	row := wrap("   ", "2. Yes, and don’t ask again for: "+command)
+	lines = append(lines, row...)
+	lines = append(lines, "   3. No", "", " Esc to cancel · Tab to amend · ctrl+e to explain")
+	return fixtureScreen(lines...)
+}
+
+const st328Command = `grep -rn -iE 'usage credits|weekly limit|switch to usage|extra usage' daemon/ web/src`
+
+// Acceptance 1: the reported prompt, in a narrow pane with row 2 wrapped
+// over three lines, is an ordinary Bash permission prompt.
+func TestAutoApprovalEchoedCommandIsNotTheMenu(t *testing.T) {
+	t.Parallel()
+	for _, width := range []int{46, 60, 120} {
+		s := claudeEchoedBashPrompt(st328Command, width)
+		if width == 46 {
+			rows := 0
+			for _, line := range strings.Split(s, "\n") {
+				if strings.Contains(line, "ask again") || (rows > 0 && rows < 3 && strings.HasPrefix(line, "   ") && !strings.Contains(line, "3. No")) {
+					rows++
+				}
+			}
+			if rows < 3 {
+				t.Fatalf("fixture must wrap row 2 over three lines:\n%s", s)
+			}
+		}
+		if reason := autoApprovalDeclineReason(s, false); reason != "" {
+			t.Errorf("width %d: held as %q:\n%s", width, reason, s)
+		}
+	}
+}
+
+// Acceptance 2: every deny phrase (menu and header lists, and the limit and
+// switch patterns) inside the command leaves the prompt approvable.
+func TestAutoApprovalDenyPhraseInsideCommandIsApprovable(t *testing.T) {
+	t.Parallel()
+	var needles []string
+	for _, p := range autoApprovalDenyMenuPhrases {
+		needles = append(needles, p.needle)
+	}
+	for _, p := range autoApprovalDenyHeaderPhrases {
+		needles = append(needles, p.needle)
+	}
+	needles = append(needles, "reached your weekly limit", "switch to opus and continue")
+	for _, needle := range needles {
+		command := "grep -rn '" + needle + "' docs/"
+		for _, width := range []int{46, 120} {
+			s := claudeEchoedBashPrompt(command, width)
+			if reason := autoApprovalDeclineReason(s, false); reason != "" {
+				t.Errorf("%q at width %d: held as %q", needle, width, reason)
+			}
+		}
+	}
+	// Codex's session row echoes the command prefix in backticks.
+	codex := "Would you like to run the following command?\n\nReason: Find the copy.\n\n$ grep -rn 'usage credits' docs/\n\n" +
+		"› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with `grep -rn 'usage credits'` (p)\n" +
+		"  3. No, and tell Codex what to do differently (esc)\n\nPress enter to confirm or esc to cancel"
+	if reason := autoApprovalDeclineReason(codex, true); reason != "" {
+		t.Errorf("codex echoed prefix held as %q", reason)
+	}
+}
+
+// Only the echo is removed: a deny phrase elsewhere in the dialog (another
+// label, the footer) still holds it, even when the echo row is present.
+func TestAutoApprovalEchoStripKeepsOtherLabels(t *testing.T) {
+	t.Parallel()
+	s := strings.Replace(claudeEchoedBashPrompt("grep -rn 'todo' docs/", 120), "   3. No", "   3. Yes, and upgrade to Max\n   4. No", 1)
+	if reason := autoApprovalDeclineReason(s, false); reason != "billing/upgrade menu" {
+		t.Fatalf("a deny phrase in another label = %q, want billing/upgrade menu", reason)
+	}
+	// A phrase the payload does not show is not an echo, even in the row.
+	s = strings.Replace(claudeEchoedBashPrompt("grep -rn 'todo' docs/", 120), "ask again for: grep", "ask again for: buy usage credits grep", 1)
+	if reason := autoApprovalDeclineReason(s, false); reason != "billing/credits menu" {
+		t.Fatalf("a phrase absent from the payload = %q, want billing/credits menu", reason)
+	}
+}
+
+// Acceptance 4: a real billing menu drawn under stale command scrollback (a
+// Bash dialog whose command says "usage credits") stays denied, also when it
+// reuses the generic "Do you want to proceed?".
+func TestAutoApprovalBillingMenuUnderStaleCommandStaysDenied(t *testing.T) {
+	t.Parallel()
+	stale := fixtureScreen(
+		"────────────────────────────────────────",
+		" Bash command",
+		"",
+		"   grep -rn 'usage credits' docs/",
+		"   Find the copy",
+		"",
+	)
+	for name, menu := range map[string]string{
+		"buy credits":      claudeBuyCreditsScreen,
+		"re-enable":        claudeReenableCreditsScreen,
+		"use your reset":   claudeUseResetScreen,
+		"switch model":     claudeSwitchModelScreen,
+		"generic proceed?": fixtureScreen(" Fable runs on usage credits.", " Do you want to proceed?", " ❯ 1. Yes, buy usage credits", "   2. No, cancel"),
+	} {
+		if isAutoApprovalPromptText(stale+"\n"+menu, false) {
+			t.Errorf("%s under a stale command was approvable (reason %q)", name, autoApprovalDeclineReason(stale+"\n"+menu, false))
+		}
+	}
+	// solu-review round 1: a plain Yes/No decision drawn under a stale title,
+	// indented deeper than the title, must not pass as the title's payload.
+	for name, screen := range map[string]string{
+		"decision deeper than the title, question deeper too": fixtureScreen(
+			"Bash command", "  grep x", " You've reached your Fable limit",
+			" Do you want to proceed?", " ❯ 1. Yes", "   2. No", " Esc to cancel"),
+		"decision after the body, question at the title's indent": fixtureScreen(
+			" Bash command", "   grep x", " You've reached your Fable limit", "   continue on usage credits",
+			" Do you want to proceed?", " ❯ 1. Yes", "   2. No", " Esc to cancel"),
+	} {
+		if reason := autoApprovalDeclineReason(screen, false); reason == "" {
+			t.Errorf("%s: approved", name)
+		}
+	}
+}
+
+// A curly apostrophe inside the echoed command is stripped whole.
+func TestAutoApprovalEchoStripKeepsRunesWhole(t *testing.T) {
+	t.Parallel()
+	s := claudeEchoedBashPrompt("grep -rn 'don’t usage credits' docs/", 50)
+	if reason := autoApprovalDeclineReason(s, false); reason != "" {
+		t.Fatalf("held as %q", reason)
+	}
+}

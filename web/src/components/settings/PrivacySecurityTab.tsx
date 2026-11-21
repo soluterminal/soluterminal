@@ -5,6 +5,7 @@ import { HumanProofSetting } from './HumanProofSetting';
 import { AgentIntegrationSetting } from './AgentIntegrationSetting';
 import { CheckinSetting } from './CheckinSetting';
 import { DeveloperOverridesSetting } from './DeveloperOverridesSetting';
+import { RecordingSetting } from './RecordingSetting';
 
 // Settings › Privacy & security: the switches that most change what can act on
 // this computer come first — agents in panes approving prompts, which browsers
@@ -23,6 +24,7 @@ export function PrivacySecurityTab() {
       <AlertsHandlerSetting />
       <AgentIntegrationSetting />
       <CheckinSetting />
+      <RecordingSetting />
       <DeveloperOverridesSetting />
     </>
   );

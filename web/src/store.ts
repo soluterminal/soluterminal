@@ -1340,7 +1340,7 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   fireSchedule: (id: string) => Promise<void>;
   snoozeSchedule: (id: string) => Promise<void>;
 
-  createPane: (opts: { cwd: string; cmd: string[]; title?: string; agent?: 'claude' | 'codex' | 'muse'; claudeSessionId?: string; codexThreadId?: string; provider?: 'anthropic' | 'glm'; effort?: PaneEffort; model?: string; role?: PaneRole; contextPack?: string }) => Promise<PaneInfo>;
+  createPane: (opts: { cwd: string; cmd: string[]; title?: string; distro?: string; agent?: 'claude' | 'codex' | 'muse'; claudeSessionId?: string; codexThreadId?: string; provider?: 'anthropic' | 'glm'; effort?: PaneEffort; model?: string; role?: PaneRole; contextPack?: string }) => Promise<PaneInfo>;
   renamePane: (id: string, title: string) => Promise<PaneInfo | null>;
   /** Set or clear the pane's @handle and working-on line; throws the
    *  daemon's message (e.g. a taken handle) for the caller to show. */
@@ -1450,7 +1450,7 @@ export interface State extends ToastDialogSlice, FeatureSlices {
   consumeUserFocus: () => void;
   // Opens the pane on the named side of the focused tile (Split right, Split
   // down, Clone pane).
-  splitFocused: (direction: 'horizontal' | 'vertical', opts: { cwd: string; cmd: string[]; title?: string; agent?: 'claude' | 'codex' | 'muse'; claudeSessionId?: string; codexThreadId?: string; provider?: 'anthropic' | 'glm'; effort?: PaneEffort; model?: string; role?: PaneRole; contextPack?: string }) => Promise<void>;
+  splitFocused: (direction: 'horizontal' | 'vertical', opts: { cwd: string; cmd: string[]; title?: string; distro?: string; agent?: 'claude' | 'codex' | 'muse'; claudeSessionId?: string; codexThreadId?: string; provider?: 'anthropic' | 'glm'; effort?: PaneEffort; model?: string; role?: PaneRole; contextPack?: string }) => Promise<void>;
   // One-click "launch claude here": live-cwd of the given pane + cmd=['claude'], split right.
   launchClaudeHere: (paneId: string, direction?: 'horizontal' | 'vertical', placement?: PanePlacement) => Promise<void>;
   // One-click "launch shell here": same but spawns $SHELL (daemon default).
@@ -1945,7 +1945,10 @@ export function sameRecording(a: import('./types').PaneRecording | undefined, b:
   return on(a) === on(b)
     && (a?.startedAt ?? 0) === (b?.startedAt ?? 0)
     && (a?.stoppedReason ?? '') === (b?.stoppedReason ?? '')
-    && (a?.stoppedAt ?? 0) === (b?.stoppedAt ?? 0);
+    && (a?.stoppedAt ?? 0) === (b?.stoppedAt ?? 0)
+    && (a?.hours ?? 0) === (b?.hours ?? 0)
+    && (a?.deleteAfterDays ?? 0) === (b?.deleteAfterDays ?? 0)
+    && (a?.overrides ?? []).join(',') === (b?.overrides ?? []).join(',');
 }
 
 function samePaneInfo(a: PaneInfo, b: PaneInfo): boolean {
@@ -6233,6 +6236,24 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     // kills look complete when they weren't.
     const scope=currentRoutingScope(),generation=get().navigationGeneration;
     const current=()=>scope.key === currentRoutingScope().key && generation === get().navigationGeneration;
+    // A Linux pane closes on the daemon FIRST: its stop check, and the
+    // person's confirmation if the program couldn't be confirmed stopped,
+    // happen before the tile leaves the layout, so no layout without it is
+    // saved while they decide.
+    const linuxFirst = Boolean(get().panes[id]?.linux);
+    if (linuxFirst) {
+      try {
+        await deletePaneConfirmingLinuxStop(id, scope, opts?.silent);
+      } catch (e) {
+        if (!(e instanceof LinuxCloseCancelled) && !opts?.silent && current()) {
+          const msg = e instanceof ApiError && e.status === 409
+            ? "its program couldn't be confirmed stopped"
+            : (e as Error).message || 'request failed';
+          get().toast(`Couldn't close the Linux pane: ${msg}`, { kind: 'error', icon: '⚠', ttlMs: 5000 });
+        }
+        return false;
+      }
+    }
     const before = get();
     const priorLayoutFlush = flushAutosave(get, autosaveSnapshotFromState(before), { refreshWorkspaces: false });
     const earlierSaves = [...workspaceSaves];
@@ -6273,7 +6294,7 @@ export const useStore = create<State>((rawSet, get, storeApi) => {
     scheduleAutosave(get);
     try {
       await Promise.allSettled([priorLayoutFlush, ...earlierSaves]);
-      await api.deletePane(id,scope);
+      if (!linuxFirst) await deletePaneConfirmingLinuxStop(id, scope, opts?.silent);
       if (current()) await get().refreshWorkspaces({ full: true });
       const {forgetTerminalSession,sessionKey}=await import('./lib/terminalViewSessions');
       forgetTerminalSession(sessionKey(scope,id));
@@ -7631,3 +7652,34 @@ useStore.subscribe((s, previous) => {
   }
   if (s.zoomedPaneId && !layoutHasLeaf(shown, s.zoomedPaneId)) useStore.setState({ zoomedPaneId: null });
 });
+
+/** The person said no to closing a Linux pane anyway: not an error. */
+class LinuxCloseCancelled extends Error {}
+
+/**
+ * DELETE a pane. A Linux pane whose program couldn't be confirmed stopped
+ * answers 409 with a confirm token: ask the person, and only on their yes
+ * repeat the close with that token (the tile goes, the program may still be
+ * running in the distro). Silent closes never confirm.
+ */
+async function deletePaneConfirmingLinuxStop(id: string, scope: RoutingScope | undefined, silent?: boolean): Promise<void> {
+  try {
+    await api.deletePane(id, scope);
+  } catch (e) {
+    const token = e instanceof ApiError && e.status === 409
+      ? (e.body as { confirmToken?: unknown } | undefined)?.confirmToken
+      : undefined;
+    if (silent || typeof token !== 'string' || !token) throw e;
+    const ok = await confirmDialog({
+      title: 'Close this Linux pane anyway?',
+      message:
+        "SoluTerminal couldn't confirm that this pane's program stopped in its WSL distro. " +
+        'If you close the pane now, the program may keep running there, out of sight.',
+      confirmLabel: 'Close anyway',
+      danger: true,
+      focusCancel: true,
+    });
+    if (!ok) throw new LinuxCloseCancelled();
+    await api.deletePane(id, scope, token);
+  }
+}

@@ -32,6 +32,9 @@ func claimFilePath(dataDir string) string {
 // LoadClaim reads ~/.solu/claim.json if it exists. Returns nil if
 // absent; errors only on malformed contents.
 func LoadClaim(dataDir string) (*Claim, error) {
+	if err := checkStatefulMigrationFence(dataDir); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(claimFilePath(dataDir))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -88,6 +91,9 @@ func UpdateClaimToken(dataDir, newToken string) error {
 // SaveClaim writes claim.json atomically and durably with 0600 perms (it
 // contains the machine token). A power cut must not leave a torn pairing.
 func SaveClaim(dataDir string, c *Claim) error {
+	if err := checkStatefulMigrationFence(dataDir); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return err
 	}
@@ -206,6 +212,9 @@ func claimFromWait(relayURL string, w claimWaitResult) *Claim {
 // the result to claim.json. Blocks until the user accepts the code
 // on the web side, the code expires, or ctx is cancelled.
 func RunClaimFlow(ctx context.Context, relayURL, dataDir string) (*Claim, error) {
+	if err := checkStatefulMigrationFence(dataDir); err != nil {
+		return nil, err
+	}
 	httpBase, err := relayToHTTPBase(relayURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid --relay URL: %w", err)

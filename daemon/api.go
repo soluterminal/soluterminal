@@ -531,6 +531,10 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/panes/{id}/recording", a.paneRecordingStatus)
 	mux.HandleFunc("POST /api/panes/{id}/recording", a.setPaneRecording)
 	mux.HandleFunc("DELETE /api/panes/{id}/recordings", a.deletePaneRecordings)
+	mux.HandleFunc("POST /api/recording/workspace", a.setWorkspaceRecording)
+	mux.HandleFunc("POST /api/recording/view", a.recordingView)
+	mux.HandleFunc("GET /api/settings/recording", a.getRecordingSettings)
+	mux.HandleFunc("PUT /api/settings/recording", a.putRecordingSettings)
 	mux.HandleFunc("POST /api/panes/{id}/never-auto-answer", a.setPaneNeverAutoAnswer)
 	mux.HandleFunc("POST /api/panes/{id}/announce-delegation", a.setPaneAnnounceDelegation)
 	mux.HandleFunc("POST /api/panes/{id}/flag", a.setPaneFlag)
@@ -552,6 +556,7 @@ func (a *apiServer) routes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/dirs", a.listDirs)
 	mux.HandleFunc("GET /api/panes/{id}/cwd", a.paneLiveCwd)
+	mux.HandleFunc("GET /api/linux/distros", a.linuxDistros)
 	mux.HandleFunc("GET /api/sessions/recent", a.recentSessions)
 	mux.HandleFunc("GET /api/panes/closed", a.listClosedPanes)
 	mux.HandleFunc("POST /api/panes/closed/{id}/reopen", a.reopenClosedPane)
@@ -1676,11 +1681,14 @@ type createPaneReq struct {
 	Cwd             string   `json:"cwd"`
 	Cmd             []string `json:"cmd"`
 	Title           string   `json:"title"`
-	Cols            uint16   `json:"cols"`
-	Rows            uint16   `json:"rows"`
-	Workspace       string   `json:"workspace,omitempty"`
-	WorkspaceTarget string   `json:"workspaceTarget,omitempty"`
-	WorkspaceSplit  string   `json:"workspaceSplit,omitempty"`
+	// Distro opens the pane in that WSL distro through its helper (a
+	// Windows host with Linux panes on; GET /api/linux/distros).
+	Distro          string `json:"distro,omitempty"`
+	Cols            uint16 `json:"cols"`
+	Rows            uint16 `json:"rows"`
+	Workspace       string `json:"workspace,omitempty"`
+	WorkspaceTarget string `json:"workspaceTarget,omitempty"`
+	WorkspaceSplit  string `json:"workspaceSplit,omitempty"`
 	// Kind is the retired renderer selector. Only "" (terminal) is accepted; a
 	// saved Focus pane's "native" is converted by retireNativeCreateRequest.
 	Kind string `json:"kind,omitempty"`
@@ -1886,7 +1894,9 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 	inheritedPack := false
 	if pack == contextPackNone {
 		pack = ""
-	} else if pack == "" && workspace != "" && workspace != "_current" && a.ws != nil {
+	} else if pack == "" && strings.TrimSpace(req.Distro) == "" && workspace != "" && workspace != "_current" && a.ws != nil {
+		// (A Linux pane doesn't inherit a workspace pack: packs aren't
+		// available in Linux panes yet.)
 		if ws, ok := a.ws.Get(workspace); ok {
 			pack = ws.ContextPack
 			inheritedPack = pack != ""
@@ -1914,6 +1924,7 @@ func (a *apiServer) createPane(w http.ResponseWriter, r *http.Request) {
 	// an earlier restore.
 	paneOrigin = a.originAliases.resolveOrigin(paneOrigin)
 	p, err := a.spawnPaneForRequest(SpawnOpts{
+		Distro:                       strings.TrimSpace(req.Distro),
 		NeverAutoAnswer:              req.NeverAutoAnswer,
 		RequireResumableConversation: req.Restore && conversationIDForAgent(agent, req.ClaudeSessionID, req.CodexThreadID, req.MuseSessionID) != "",
 		Cwd:                          req.Cwd,
@@ -2001,10 +2012,17 @@ func (a *apiServer) deletePane(w http.ResponseWriter, r *http.Request) {
 	var closingEntry *closedPaneEntry
 	if closing != nil && a.closed != nil {
 		closing.refreshHarnessSession()
-		closingEntry = &closedPaneEntry{Snap: closing.Snapshot(), LiveCwd: liveCwdOfPane(closing)}
+		closingEntry = &closedPaneEntry{Snap: closing.Snapshot(), LiveCwd: a.mgr.paneLiveCwd(closing)}
 	}
-	if err := a.mgr.Kill(id); err != nil {
-		http.Error(w, err.Error(), 404)
+	if err := a.mgr.KillAsPerson(id, r.URL.Query().Get("confirmUnstopped")); err != nil {
+		var stop *linuxStopError
+		if errors.As(err, &stop) {
+			// The tile stays. The app asks the person, then repeats the
+			// close with this token to remove it anyway.
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "confirmToken": stop.ConfirmToken})
+			return
+		}
+		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	recordPaneClose(id, closingOrigin, "app", false)
@@ -2478,7 +2496,7 @@ func (a *apiServer) paneLiveCwd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", 404)
 		return
 	}
-	cwd := liveCwdOfPane(p)
+	cwd := a.mgr.paneLiveCwd(p)
 	if cwd == "" {
 		cwd = p.Cwd // fall back to spawn-time cwd
 	}

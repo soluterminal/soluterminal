@@ -13,6 +13,18 @@ mod wsl_update;
 mod hosted_cloud;
 mod hotkey_probe;
 mod launch_mode;
+#[cfg(any(windows, test))]
+mod legacy_dual;
+#[cfg(any(windows, test))]
+mod claim_mirror_control;
+#[cfg(any(windows, test))]
+mod dual_migration;
+#[cfg(any(windows, test))]
+mod dual_migration_evidence;
+#[cfg(any(windows, test))]
+mod dual_migration_record;
+#[cfg(any(windows, test))]
+mod dual_migration_durable;
 mod nav_guard;
 #[cfg(test)]
 mod capability_tests;
@@ -362,6 +374,21 @@ fn start_backends(
         )),
         launch_mode::LaunchMode::Local => {
             let chosen = chosen.expect("local desktop mode should resolve a backend");
+            #[cfg(windows)]
+            let chosen = if matches!(chosen, backend::Backend::Wsl | backend::Backend::Dual) {
+                match crate::dual_migration::require_host_stateful_start() {
+                    Ok(()) => chosen,
+                    Err(error) => {
+                        startup_screen::wsl_fell_back(&error.to_string());
+                        if interactive_startup {
+                            use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                            app_handle.dialog().message(error.to_string()).title("Migration interrupted")
+                                .kind(MessageDialogKind::Warning).show(|_| {});
+                        }
+                        backend::Backend::HostNative
+                    }
+                }
+            } else { chosen };
             // Drop ~/.solu/shell-info.json so a daemon launched
             // outside of Tauri can still discover the installed
             // shell version. Best-effort — failures are logged
@@ -703,13 +730,14 @@ fn finish_startup(
     // Backend signal for the web (status chip + fallback banner +
     // sidebar mode switcher).
     // SHARED CONTRACT: window.__SOLU_BACKEND__ = { requested,
-    // actual, fallback, hostPlatform, launchMode }. "requested"
+    // actual, fallback, hostPlatform, launchMode, legacyDual }. "requested"
     // is the backend the user wanted (resolved from their
     // saved/first-run choice); "actual" is what actually started
     // this session. fallback is true when the user wanted wsl/dual
     // but we ended up on host. hostPlatform/launchMode let the web
     // hide Windows-only local controls in Cloud mode and on
     // macOS/Linux desktop shells.
+    // legacyDual preserves the Dual option only for an existing Dual setup.
     // "requested" comes from the SAVED pref, not from `chosen`
     // (resolve_backend's output): when a saved WSL/Dual pref fails
     // validation, resolve folds it into HostNative, and deriving
@@ -794,13 +822,17 @@ fn finish_startup(
     // where Shinoque's phone access can't relay (ST-245). Older shells omit it.
     let shinoque_needs_windows_mode = fallback
         && SHINOQUE_NEEDS_WINDOWS_MODE.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(windows)]
+    let legacy_dual = backend::dual_available();
+    #[cfg(not(windows))]
+    let legacy_dual = false;
     let backend_script = format!(
         "window.__SOLU_BACKEND__ = {{ requested: \"{requested_backend}\", \
          actual: \"{actual_backend}\", fallback: {fallback}, \
          hostPlatform: \"{host_platform}\", launchMode: \"{launch_mode_value}\", \
          version: \"{shell_version}\", updateThisComputer: {update_this_computer}, \
          shellFlavor: \"{shell_flavor}\", wslDistro: {wsl_distro}, \
-         shinoqueNeedsWindowsMode: {shinoque_needs_windows_mode} }};"
+         shinoqueNeedsWindowsMode: {shinoque_needs_windows_mode}, legacyDual: {legacy_dual} }};"
     );
 
     // Restore the main window's saved geometry (position, size,
@@ -920,10 +952,9 @@ fn finish_startup(
         None::<&str>,
     )?;
 
-    // "Switch mode" tray submenu (Windows only): the three modes, with the
-    // saved one ticked. It used to be one item that cycled WSL → Windows →
-    // Dual, so from Dual the only offer was WSL and Windows was two restarts
-    // away. Picking a mode saves it and restarts the app so the new backend
+    // "Switch mode" tray submenu (Windows only): Linux and Windows, plus
+    // Dual on existing Dual PCs, with the saved one ticked.
+    // Picking a mode saves it and restarts the app so the new backend
     // comes up cleanly (rather than trying to swap daemons live, which would
     // orphan the webview's state). With nothing saved yet (no agent was found
     // to decide by) the mode running now is ticked, and picking it saves it.
@@ -933,7 +964,7 @@ fn finish_startup(
             .or(chosen)
             .unwrap_or(backend::Backend::HostNative);
         let mut items = Vec::with_capacity(backend::MODES.len());
-        for mode in backend::MODES {
+        for &mode in backend::available_modes(backend::dual_available()) {
             items.push((
                 mode,
                 CheckMenuItem::with_id(
@@ -954,7 +985,9 @@ fn finish_startup(
         "switch_mode",
         "Switch mode",
         true,
-        &[&mode_items[0].1, &mode_items[1].1, &mode_items[2].1],
+        &mode_items.iter()
+            .map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<_>)
+            .collect::<Vec<_>>(),
     )?;
 
     // "Repair setup" (Windows, Local only): clears the saved
@@ -1049,10 +1082,10 @@ fn finish_startup(
                     backend::ModePick::SaveAndRestart => {
                         if let Err(e) = backend::set_pref(target) {
                             eprintln!("desktop: set_pref failed: {e}");
+                        } else {
+                            // Restart only after the preference was saved.
+                            restart_from_main_thread(app);
                         }
-                        // Restart cleanly stops the current daemon/proxy via
-                        // SidecarGuard drop and re-runs .setup().
-                        restart_from_main_thread(app);
                     }
                 }
                 // A click toggles the item's own tick. Put the ticks back on

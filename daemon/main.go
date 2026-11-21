@@ -150,6 +150,10 @@ func main() {
 		}
 		os.Exit(runUnknownPaneShim(os.Args[0], os.Args[1:]))
 	}
+	if len(os.Args) >= 2 && os.Args[1] == helperCommand {
+		// Before anything else: the helper's stdout is its yamux session.
+		os.Exit(runHelperCommand(os.Args[2:]))
+	}
 	if len(os.Args) >= 2 && os.Args[1] == capabilityCommand {
 		os.Exit(runCapabilityCommand(os.Args[2:], os.Stdout))
 	}
@@ -158,6 +162,10 @@ func main() {
 		// Before logging starts: the bridge's stdout is the agent's MCP
 		// stream, and it writes nothing but forwarded lines there.
 		os.Exit(runMCPBridge(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	if len(os.Args) >= 2 && os.Args[1] == hookForwardCommand {
+		// A Claude Code command hook in a WSL pane: stdout stays empty.
+		os.Exit(runHookForward(os.Args[2:], os.Stdin, os.Stderr))
 	}
 	if len(os.Args) >= 2 && os.Args[1] == "support-bundle" {
 		os.Exit(runSupportBundleCLI(os.Args[2:], os.Stdout, os.Stderr))
@@ -222,12 +230,56 @@ func main() {
 	// flag surface (and so a misconfigured --addr / --relay can't
 	// block someone from rolling back).
 	if len(os.Args) >= 2 && (os.Args[1] == "--restore-previous" || os.Args[1] == "-restore-previous") {
+		if err := checkStartupMigrationFence(defaultDataDir()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(migrationFenceExitCode)
+		}
 		if err := RestorePrevious(); err != nil {
 			fmt.Fprintln(os.Stderr, "restore-previous:", err)
 			os.Exit(1)
 		}
 		fmt.Println("restored previous version. Re-launch the daemon to pick it up.")
 		return
+	}
+
+	addr := flag.String("addr", defaultDaemonAddr, "bind address")
+	wslAddr := flag.String("wsl-addr", "", "additional WSL IPv4 address on the loopback --addr port (requires --backend-id wsl)")
+	dataDir := flag.String("data", defaultDataDir(), "data directory for workspace persistence")
+	devWeb := flag.String("dev-web", "", "if set, serve static files from this path instead of embedded assets (for dev)")
+	relayURL := flag.String("relay", "", "if set, also dial out to this cloud relay URL (e.g. wss://soluterminal.app/relay)")
+	relayToken := flag.String("relay-token", "", "machine token for authenticating to the relay (overrides claim.json)")
+	// Backend identity for cloud-side routing. Two daemons on the same
+	// machine (WSL + Windows-native in the Tauri Dual backend) pair
+	// with the SAME cloud claim but present different backend IDs on
+	// the relay handshake. The cloud keys WS connections on (machineId,
+	// backendId) so /m/<mid>/b/<bid>/api/* can route to the right
+	// daemon, letting mobile clients see both backends at once instead
+	// of whichever one won the most recent reconnect race.
+	//
+	// Empty string = "legacy / single-backend daemon" — cloud routes
+	// /m/<mid>/api/* to this daemon normally (backward compat for
+	// installs that predate this flag).
+	backendID := flag.String("backend-id", "", "cloud-side identifier for this daemon when multiple daemons share one claim (e.g. 'wsl', 'win'). Empty for single-backend setups.")
+	// --shell-version is passed by the Tauri sidecar launcher so the
+	// updater can detect when a new NSIS installer is published. Empty
+	// when solud runs standalone — the shell-update channel disables
+	// itself in that case (no badge, no /api/update/apply-shell action).
+	shellVersion := flag.String("shell-version", "", "version of the Tauri shell that spawned this daemon (enables the shell-installer update channel)")
+	// Shell PLATFORM is independent of daemon platform: in WSL mode
+	// the daemon runs on linux-amd64 but the Tauri shell is a Windows
+	// .exe, so the shell-installer manifest key is windows-amd64. Tauri
+	// passes this based on its own cfg, not the daemon's runtime.GOOS.
+	// Empty falls back to runtime.GOOS+ARCH for backward compat.
+	shellPlatform := flag.String("shell-platform", "", "manifest platform key for the Tauri shell (e.g. windows-amd64). Empty = fall back to daemon's runtime platform.")
+	seedPanes := flag.Bool("seed-panes", false, "side daemons with their own port and -data only: open the panes listed in <data>/seed-panes.json at boot, on a fresh -data (seed_panes.go); ignored on the canonical port or the default -data")
+	doClaim := flag.Bool("claim", false, "pair this machine with the cloud: prints a 6-char code, waits for you to accept it in the web UI, then writes ~/.solu/claim.json and exits")
+	flag.Parse()
+	// Helper/agent dispatch stays above flag parsing. A stateful Linux boot
+	// checks both the actual data directory and the default retirement copy
+	// before logging, rollback, clean-env exec, credentials or listeners.
+	if err := checkStartupMigrationFence(*dataDir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(migrationFenceExitCode)
 	}
 
 	// Everything past this point is a long-running daemon: a fresh launch, a
@@ -281,38 +333,6 @@ func main() {
 	// crash table; recover()-site reports cover only crashes we survived.
 	watchdogEvidence := captureWatchdogRespawnEvidence()
 
-	addr := flag.String("addr", defaultDaemonAddr, "bind address")
-	wslAddr := flag.String("wsl-addr", "", "additional WSL IPv4 address on the loopback --addr port (requires --backend-id wsl)")
-	dataDir := flag.String("data", defaultDataDir(), "data directory for workspace persistence")
-	devWeb := flag.String("dev-web", "", "if set, serve static files from this path instead of embedded assets (for dev)")
-	relayURL := flag.String("relay", "", "if set, also dial out to this cloud relay URL (e.g. wss://soluterminal.app/relay)")
-	relayToken := flag.String("relay-token", "", "machine token for authenticating to the relay (overrides claim.json)")
-	// Backend identity for cloud-side routing. Two daemons on the same
-	// machine (WSL + Windows-native in the Tauri Dual backend) pair
-	// with the SAME cloud claim but present different backend IDs on
-	// the relay handshake. The cloud keys WS connections on (machineId,
-	// backendId) so /m/<mid>/b/<bid>/api/* can route to the right
-	// daemon, letting mobile clients see both backends at once instead
-	// of whichever one won the most recent reconnect race.
-	//
-	// Empty string = "legacy / single-backend daemon" — cloud routes
-	// /m/<mid>/api/* to this daemon normally (backward compat for
-	// installs that predate this flag).
-	backendID := flag.String("backend-id", "", "cloud-side identifier for this daemon when multiple daemons share one claim (e.g. 'wsl', 'win'). Empty for single-backend setups.")
-	// --shell-version is passed by the Tauri sidecar launcher so the
-	// updater can detect when a new NSIS installer is published. Empty
-	// when solud runs standalone — the shell-update channel disables
-	// itself in that case (no badge, no /api/update/apply-shell action).
-	shellVersion := flag.String("shell-version", "", "version of the Tauri shell that spawned this daemon (enables the shell-installer update channel)")
-	// Shell PLATFORM is independent of daemon platform: in WSL mode
-	// the daemon runs on linux-amd64 but the Tauri shell is a Windows
-	// .exe, so the shell-installer manifest key is windows-amd64. Tauri
-	// passes this based on its own cfg, not the daemon's runtime.GOOS.
-	// Empty falls back to runtime.GOOS+ARCH for backward compat.
-	shellPlatform := flag.String("shell-platform", "", "manifest platform key for the Tauri shell (e.g. windows-amd64). Empty = fall back to daemon's runtime platform.")
-	seedPanes := flag.Bool("seed-panes", false, "side daemons only: open the panes listed in <data>/seed-panes.json at boot, on a fresh -data (seed_panes.go); the primary daemon ignores it")
-	doClaim := flag.Bool("claim", false, "pair this machine with the cloud: prints a 6-char code, waits for you to accept it in the web UI, then writes ~/.solu/claim.json and exits")
-	flag.Parse()
 	// As given on the command line: the shell-info.json fallback below fills
 	// *shellVersion for any daemon on a machine with the desktop app.
 	shellVersionFlag := *shellVersion
@@ -440,6 +460,8 @@ func main() {
 	ensureDircolorsFile()
 
 	mgr := NewManager(*dataDir)
+	fwdHosts := newHelperFwdHosts(mgr)
+	mgr.linux = linuxPaneBackendFromEnv(fwdHosts.hooks()) // ST-253: off unless switched on
 	if _, port, err := net.SplitHostPort(*addr); err == nil {
 		mgr.codexDaemonURL = "http://127.0.0.1:" + port
 	}
@@ -454,6 +476,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("workspace store: %v", err)
 	}
+	// The recording session timeline reads which panes share a workspace.
+	mgr.recordingWorkspaces = ws.List
 	// Guarantee at least one named, user-visible workspace. Makes
 	// bootstrap obvious and — in dual-backend mode — means the other
 	// daemon always has something clickable in the sidebar, so users
@@ -486,6 +510,13 @@ func main() {
 			}
 		})
 		forgetPaneDegraded(p.ID)
+	}
+	mgr.persistLinuxRecovery = func(p *Pane) {
+		mgr.withCurrentPane(p, func() {
+			if err := paneStore.Put(p); err != nil {
+				log.Printf("persist linux pane %s: %v", p.ID, err)
+			}
+		})
 	}
 	// Persist + broadcast prompt-history changes. Set BEFORE the
 	// reattach loop below so reattached panes get the hook too; the
@@ -1028,7 +1059,7 @@ func main() {
 		}
 	}
 	api.storage = newHostStorageService(*dataDir, api.resources)
-	// Recordings older than recordingMaxAge go at start and hourly, whether
+	// Recordings past the deletion age go at start and hourly, whether
 	// or not anything is recording; the sweep creates nothing.
 	api.storage.afterSample = func() { mgr.recordingHub().sweepIfDue() }
 	coordLog.setDir(*dataDir)
@@ -1215,6 +1246,7 @@ func main() {
 	autoNamer := api.maybeAutoNamePane
 	paneAutoNamer.Store(&autoNamer)
 	workflowHandler := api.apiHandler(mux)
+	fwdHosts.setHandler(workflowHandler) // ST-253 W3: fwd stays off (helperFwdEnabled)
 	shinoqueTokens := &shinoqueTokenCache{}
 	shinoqueTokens.discovery.bridge = newPlatformShinoqueRelayBridge()
 	api.shinoqueTokens = shinoqueTokens
@@ -1800,7 +1832,12 @@ func main() {
 
 	runBootSteps(bootOwned, boot)
 	// Seeded panes (seed_panes.go): side daemons only, fresh -data only.
-	api.seedPanesAtBoot(*seedPanes, role)
+	// On the ports actually bound: -addr 127.0.0.1:0 could land on one.
+	var bound []net.Addr
+	for _, l := range listeners {
+		bound = append(bound, l.Addr())
+	}
+	api.seedPanesAtBoot(*seedPanes, roleOnBoundPorts(role, bound))
 
 	// Workflow drivers start only once this process owns the local port.
 	// A twin that loses the bind race exits before reaching here, so it can

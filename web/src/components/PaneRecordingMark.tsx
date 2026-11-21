@@ -1,6 +1,6 @@
 import type { PaneInfo } from '../types';
 import { useStore } from '../store';
-import { dismissPaneRecordingNotice, RECORDING_TOOLTIP, recordingStoppedText } from '../lib/paneRecording';
+import { dismissPaneRecordingNotice, recordingStoppedText, recordingTooltip } from '../lib/paneRecording';
 
 // The recording mark, from daemon state only (pane.recording): a red dot and
 // "REC" while the pane's output is being recorded, and "recording stopped:
@@ -14,8 +14,8 @@ export function PaneRecordingMark({ pane, place }: { pane: PaneInfo; place: 'hea
       <span
         className={`pane-rec-mark is-${place}`}
         role="status"
-        aria-label={RECORDING_TOOLTIP}
-        title={RECORDING_TOOLTIP}
+        aria-label={recordingTooltip(pane)}
+        title={recordingTooltip(pane)}
         data-testid={`pane-rec-${place}`}
         onMouseDownCapture={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
@@ -59,7 +59,7 @@ export function RecordingStatusChip() {
   if (!titles) return null;
   const names = titles.split('\n');
   const label = `${names.length} recording`;
-  const title = `Recording the output of: ${names.join(', ')}. Saved on this computer only, deleted after 7 days.`;
+  const title = `Recording the output of: ${names.join(', ')}. Saved on this computer only, never sent to the cloud.`;
   return (
     <span className="statusbar-recording" role="status" aria-label={title} title={title} data-testid="statusbar-recording">
       <span className="pane-rec-dot" aria-hidden />{label}

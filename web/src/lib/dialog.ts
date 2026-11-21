@@ -6,6 +6,7 @@
 // ANY file — components and plain non-component functions/hooks — because
 // they reach the store imperatively via getState().
 import { useStore } from '../store';
+import type { RecordingChoice, RecordingDialogSpec } from '../components/RecordingDialogBody';
 
 /** Replacement for window.confirm. Resolves true only on explicit confirm;
  *  cancel / backdrop / Escape resolve false. */
@@ -90,6 +91,27 @@ export function alertDialog(
       kind: 'alert',
       ...o,
       resolve: () => resolve(),
+    }),
+  );
+}
+
+/** The recording start dialog: the time limit and, per pane, the defaults the
+ *  person may override. Resolves the choice, or null on cancel. */
+export function recordingDialog(opts: { title: string; message: string; confirmLabel: string; recording: RecordingDialogSpec }): Promise<RecordingChoice | null> {
+  return new Promise((resolve) =>
+    useStore.getState().openDialog({
+      kind: 'recording',
+      ...opts,
+      // Cancel takes the focus: an Enter right after it opens starts nothing.
+      focusCancel: true,
+      resolve: (value) => {
+        if (typeof value !== 'string') return resolve(null);
+        try {
+          resolve(JSON.parse(value) as RecordingChoice);
+        } catch {
+          resolve(null);
+        }
+      },
     }),
   );
 }

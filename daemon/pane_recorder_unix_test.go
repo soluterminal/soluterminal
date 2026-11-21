@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestRecordingFolderAndFileModesWhateverTheUmask(t *testing.T) {
@@ -67,7 +68,7 @@ func TestRecordingRefusesUnsafeFolders(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			tp := newRecTestPane(t)
 			setup(t, tp.data, tp.p.ID)
-			_, err := tp.m.StartRecording(tp.p, "local")
+			_, err := tp.m.StartRecording(tp.p, "local", recordingStartOptions{})
 			if !errors.Is(err, errRecordingFolder) {
 				t.Fatalf("switch-on: %v", err)
 			}
@@ -96,5 +97,76 @@ func TestRecordingFileIsNeverOpenedThroughASymlink(t *testing.T) {
 	}
 	if exists(target) {
 		t.Fatal("the symlink target was created")
+	}
+}
+
+// ST-317 (amendment 7.7, Addendum B): the session timeline is created new,
+// 0600, never through a symlink at the file itself (a planted link at its
+// name is skipped, its target untouched), and never through a symlinked or
+// group-open .sessions folder (no timeline is started; the recording goes on).
+func TestRecordingTimelineIsNeverCreatedThroughASymlink(t *testing.T) {
+	tp := newRecTestPane(t)
+	hub := tp.m.recordingHub()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	hub.now = func() time.Time { return now }
+	sessions := filepath.Join(tp.data, recordingsDirName, recordingSessionsDirName)
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(filepath.Join(tp.data, recordingsDirName), 0o700)
+	target := filepath.Join(t.TempDir(), "elsewhere.jsonl")
+	planted := filepath.Join(sessions, now.Format(recordingFileTimeLayout)+".jsonl")
+	if err := os.Symlink(target, planted); err != nil {
+		t.Fatal(err)
+	}
+	rec := tp.start()
+	tl := tp.m.currentTimeline()
+	if tl == nil {
+		t.Fatal("no timeline")
+	}
+	if tl.path == planted || exists(target) {
+		t.Fatalf("written through the planted link (path %s)", tl.path)
+	}
+	info, err := os.Lstat(tl.path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("timeline file %v %v", info, err)
+	}
+	tp.m.StopRecording(tp.p, "test")
+	waitRecorder(t, rec)
+	tp.m.timelineEndIfIdle()
+
+	for name, setup := range map[string]func(t *testing.T){
+		".sessions is a symlink": func(t *testing.T) {
+			if err := os.RemoveAll(sessions); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(t.TempDir(), sessions); err != nil {
+				t.Fatal(err)
+			}
+		},
+		".sessions is open to the group": func(t *testing.T) {
+			_ = os.Remove(sessions)
+			if err := os.MkdirAll(sessions, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(sessions, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setup(t)
+			before, _ := os.ReadDir(sessions)
+			rec := tp.start()
+			if tp.m.currentTimeline() != nil {
+				t.Fatal("a timeline started in a refused folder")
+			}
+			after, _ := os.ReadDir(sessions)
+			if len(after) != len(before) {
+				t.Fatalf("a file was written into the refused folder: %d -> %d", len(before), len(after))
+			}
+			tp.m.StopRecording(tp.p, "test")
+			waitRecorder(t, rec)
+		})
 	}
 }

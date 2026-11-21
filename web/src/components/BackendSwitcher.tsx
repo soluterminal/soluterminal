@@ -37,6 +37,7 @@ type SoluBackend = {
   hostPlatform?: 'windows' | 'macos' | 'linux';
   launchMode?: 'local' | 'cloud';
   version?: string; // shell/installer version; absent on shells before it was added
+  legacyDual?: boolean; // existing Dual setup, retained across repairs/mode changes
   // This session runs Dual's Windows side alone on a PC with Shinoque, so
   // Shinoque's phone access is down until Windows mode (ST-245).
   shinoqueNeedsWindowsMode?: boolean;
@@ -216,6 +217,10 @@ export function useBackendEnv() {
   // and the app fell back, "Windows" looked selected, was disabled, and could
   // never be saved: every start tried WSL again.
   const savedStartup = startup;
+  // Older shells do not report eligibility; a saved Dual choice preserves
+  // their current setup, including its Windows-only fallback.
+  const legacyDual = desktopBackend?.legacyDual ?? (savedStartup === 'dual');
+  const startupModes: StartupMode[] = legacyDual ? ['wsl', 'host', 'dual'] : ['wsl', 'host'];
   // Running on something other than the saved mode (saved Dual, WSL didn't
   // start): the pill says so, not just the popover.
   const modeMismatch = showStartup && fallback && !!savedStartup && !!actual && savedStartup !== actual;
@@ -235,6 +240,7 @@ export function useBackendEnv() {
   else if (desktopBackend?.hostPlatform) osWord = osWordFromHostPlatform(desktopBackend.hostPlatform);
 
   const requestStartup = async (mode: StartupMode) => {
+    if (mode === 'dual' && !legacyDual) return;
     if (pendingStartup) return;
     // Picking the saved mode again only makes sense after a fallback: it
     // restarts and tries that mode once more.
@@ -316,7 +322,7 @@ export function useBackendEnv() {
     pendingStartup, pendingSide, pendingConn,
     showStartup, showRouterSide, showLegacySwap, showConnSwitch, showConnDisplay,
     connActive, machineName, paneCounts,
-    actual, fallback, activeStartup, savedStartup, osWord, modeMismatch, shinoqueNeedsWindowsMode,
+    actual, fallback, activeStartup, savedStartup, osWord, modeMismatch, shinoqueNeedsWindowsMode, startupModes,
     requestStartup, requestSide, requestConn,
     legacyActiveLabel, legacyTargetLabel, legacyTarget,
     actionable, summary, nothingToRender,
@@ -364,7 +370,7 @@ export function BackendControls() {
         <div className="env-popover-group">
           <div className="env-popover-label">Backend</div>
           <div className="backend-mode-row" aria-label="Startup mode">
-            {(['wsl', 'host', 'dual'] as StartupMode[]).map((mode) => (
+            {env.startupModes.map((mode) => (
               <button
                 key={mode}
                 type="button"

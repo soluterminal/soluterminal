@@ -118,6 +118,10 @@ func runUpdateOnlyBootContext(ctx context.Context, args []string, ready chan<- s
 		log.Printf("update-only: %v", err)
 		return 2
 	}
+	if err := checkStatefulMigrationFence(cfg.dataDir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return migrationFenceExitCode
+	}
 	// A daemon already owning the data dir keeps it; this one exits.
 	holder := dataDirLockHolder{Addr: cfg.addr, Backend: cfg.backendID, Version: version}
 	lock := claimDataDirForBoot(cfg.dataDir, holder)

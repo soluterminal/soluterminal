@@ -200,6 +200,8 @@ const CONTROL_SEEDS: ControlSeed[] = [
   ['devices.privacy', 'alertsHandler', 'Alerts handled by another app', ['alerts', 'notifications', 'push']],
   ['devices.privacy', 'usageStats', 'Share usage statistics', ['analytics', 'telemetry', 'usage']],
   ['devices.privacy', 'crashReports', 'Send crash reports', ['crash', 'telemetry']],
+  ['devices.privacy', 'recordingDays', 'Delete pane recordings after', ['recording', 'recordings', 'delete', 'days']],
+  ['devices.privacy', 'recordingCap', 'Space for pane recordings', ['recording', 'recordings', 'cap', 'disk', 'space']],
   ['devices.privacy', 'developerOverrides', 'Developer overrides', ['developer', 'overrides']],
   ['devices.updates', 'pausedUpdates', 'Paused updates', ['pause', 'update']],
   ['devices.diagnostics', 'restartService', 'Restart background service', ['restart', 'daemon', 'service']],

@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Terminal-text auto-approval classifier.
@@ -191,12 +192,16 @@ const (
 // ("Enter to" / "select") looks like.
 func parseAutoApprovalMenu(s string, focus int) autoApprovalMenu {
 	var m autoApprovalMenu
-	m.header = autoApprovalQuestionRegion(s[:focus])
+	var payload string
+	m.header, payload = permissionDialogRegion(s[:focus])
 	lines := strings.Split(s[focus:], "\n")
 	if len(lines) > autoApprovalMenuLines {
 		lines = lines[:autoApprovalMenuLines]
 	}
 	m.menu = normalizePromptText(strings.Join(lines, "\n"))
+	if payload != "" {
+		m.menu = stripEchoedPayload(m.menu, lines, payload)
+	}
 
 	// Option labels, each extended by wrapped continuation lines up to the
 	// next row or a blank line. Rows must number consecutively from 1, so
@@ -245,6 +250,14 @@ func parseAutoApprovalMenu(s string, focus int) autoApprovalMenu {
 // Claude puts its question AFTER the payload; Codex puts it BEFORE the payload.
 // Unknown menus retain the conservative bounded header scan.
 func autoApprovalQuestionRegion(before string) string {
+	region, _ := permissionDialogRegion(before)
+	return region
+}
+
+// permissionDialogRegion is autoApprovalQuestionRegion plus, when the text is
+// positively a permission dialog (its permission question and a payload block
+// were both found), that payload's normalized text; otherwise payload is "".
+func permissionDialogRegion(before string) (region, payload string) {
 	lines := strings.Split(before, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
@@ -258,6 +271,33 @@ func autoApprovalQuestionRegion(before string) string {
 		if at < 0 {
 			break
 		}
+		titleIndent := leadingSpaces(lines[at])
+		if isPermissionPayloadTitle(lines[at]) && leadingSpaces(lines[i]) == titleIndent && i-at <= autoApprovalHeaderLines {
+			// A titled dialog (Claude's "Bash command", "Edit file", ...)
+			// draws its command and description indented under the title,
+			// and its question at the title's own indentation: those body
+			// rows are payload, not question (ST-328: a command saying
+			// "usage credits" held a plain Bash prompt as a billing menu).
+			// The body is only the rows directly under the title; from the
+			// first row at the title's indentation or less (a decision drawn
+			// below a stale title) everything stays question, as before.
+			region := []string{line}
+			var body []string
+			inBody := true
+			for _, between := range lines[at+1 : i] {
+				trimmed := strings.TrimSpace(between)
+				if trimmed == "" || strings.Trim(trimmed, "─╌━-") == "" {
+					continue
+				}
+				if inBody && leadingSpaces(between) > titleIndent {
+					body = append(body, between)
+					continue
+				}
+				inBody = false
+				region = append(region, trimmed)
+			}
+			return normalizePromptText(strings.Join(region, "\n")), normalizePromptText(strings.Join(body, "\n"))
+		}
 		// Only the dialog's own separator may sit between its payload and the
 		// question. Anything else there (a login or billing decision drawn
 		// below stale payload-looking scrollback) stays in the question.
@@ -268,23 +308,122 @@ func autoApprovalQuestionRegion(before string) string {
 				region = append(region, between)
 			}
 		}
-		return normalizePromptText(strings.Join(region, "\n"))
+		return normalizePromptText(strings.Join(region, "\n")), normalizePromptText(strings.Join(payloadBlock(lines, at), "\n"))
 	}
 	// Codex's header precedes its payload. Remove only explicit renderer
 	// payload rows, retaining later plain-text login/question headings even
 	// when an old command modal remains above them.
 	var header []string
 	headerLines := strings.Split(lastNonEmptyLines(before, autoApprovalHeaderLines), "\n")
-	payload := permissionPayloadIndex(headerLines) >= 0
+	hasPayload := permissionPayloadIndex(headerLines) >= 0
 	for _, line := range headerLines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "$ ") || strings.HasPrefix(trimmed, "Reason:") ||
-			(payload && strings.HasPrefix(trimmed, "│")) || approvalDiffPayloadRE.MatchString(line) {
+			(hasPayload && strings.HasPrefix(trimmed, "│")) || approvalDiffPayloadRE.MatchString(line) {
 			continue
 		}
 		header = append(header, line)
 	}
-	return normalizePromptText(strings.Join(header, "\n"))
+	// A positive Codex dialog: its permission question, then a payload block
+	// below it with no menu in between.
+	for q := len(headerLines) - 1; q >= 0; q-- {
+		if isPermissionQuestionLine(headerLines[q]) {
+			if permissionPayloadIndex(headerLines[q+1:]) >= 0 {
+				payload = normalizePromptText(strings.Join(headerLines[q+1:], "\n"))
+			}
+			break
+		}
+	}
+	return normalizePromptText(strings.Join(header, "\n")), payload
+}
+
+// leadingSpaces counts a line's leading blanks.
+func leadingSpaces(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t\u00a0"))
+}
+
+// payloadBlock is the payload block ending at row at: back to the dialog's
+// separator line, or at most autoApprovalHeaderLines rows.
+func payloadBlock(lines []string, at int) []string {
+	start := at
+	for start > 0 && at-start < autoApprovalHeaderLines {
+		prev := strings.TrimSpace(lines[start-1])
+		if len([]rune(prev)) >= 8 && strings.Trim(prev, "─╌━-") == "" {
+			break
+		}
+		start--
+	}
+	return lines[start : at+1]
+}
+
+// echoedSpanMin is the shortest span of a session-allow row that counts as
+// the echoed payload: shorter than every deny phrase, longer than the row's
+// own small words.
+const echoedSpanMin = 8
+
+// stripEchoedPayload removes, from the session-allow row only ("Yes, and
+// don't ask again for: <command>" / Codex "... commands that start with
+// `<prefix>`", with its wrapped lines), every span of at least echoedSpanMin
+// characters that also appears in the dialog's payload: the echoed command,
+// derived from the payload shown above rather than from a phrase list (ST-328).
+// Every other label and the footer stay as they are, for the deny scan.
+func stripEchoedPayload(menu string, lines []string, payload string) string {
+	row := sessionAllowRowText(lines)
+	if row == "" {
+		return menu
+	}
+	var b strings.Builder
+	for i := 0; i < len(row); {
+		n := longestPayloadSpan(row[i:], payload)
+		// Whole characters only: never cut a multi-byte rune.
+		for n > 0 && i+n < len(row) && !utf8.RuneStart(row[i+n]) {
+			n--
+		}
+		if n >= echoedSpanMin {
+			b.WriteString(" ")
+			i += n
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(row[i:])
+		b.WriteString(row[i : i+size])
+		i += size
+	}
+	return strings.Replace(menu, row, normalizePromptText(b.String()), 1)
+}
+
+// sessionAllowRowText is the normalized text of the "ask again" option row
+// and its wrapped lines (up to the next row or a blank line, also for the last
+// row: a payload-common span is all that is removed from it), or "".
+func sessionAllowRowText(lines []string) string {
+	for i, line := range lines {
+		if menuOptionRow(line) == nil || !strings.Contains(normalizePromptText(line), "ask again") {
+			continue
+		}
+		text := []string{line}
+		for _, next := range lines[i+1:] {
+			if strings.TrimSpace(next) == "" || menuOptionRow(next) != nil {
+				break
+			}
+			text = append(text, next)
+		}
+		return normalizePromptText(strings.Join(text, "\n"))
+	}
+	return ""
+}
+
+// longestPayloadSpan is the length of the longest prefix of s that occurs in
+// payload (byte-wise; both are normalized).
+func longestPayloadSpan(s, payload string) int {
+	lo, hi := 0, len(s)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if strings.Contains(payload, s[:mid]) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo
 }
 
 var approvalDiffPayloadRE = regexp.MustCompile(`^\s*[0-9]+\s+(?:[+-]|\s)`)
@@ -309,14 +448,23 @@ func permissionPayloadIndex(lines []string) int {
 		if (separator && strings.HasPrefix(line, "│")) || strings.HasPrefix(line, "$ ") || approvalDiffPayloadRE.MatchString(line) {
 			return i
 		}
-		lower := normalizePromptText(line)
-		for _, title := range []string{"bash command", "edit file", "create file", "read file", "tool use"} {
-			if lower == title || strings.HasPrefix(lower, title+" ·") {
-				return i
-			}
+		if isPermissionPayloadTitle(line) {
+			return i
 		}
 	}
 	return -1
+}
+
+// isPermissionPayloadTitle reports a permission dialog's title row (Claude's
+// "Bash command", "Edit file", ...), which starts its payload block.
+func isPermissionPayloadTitle(line string) bool {
+	lower := normalizePromptText(line)
+	for _, title := range []string{"bash command", "edit file", "create file", "read file", "tool use"} {
+		if lower == title || strings.HasPrefix(lower, title+" ·") {
+			return true
+		}
+	}
+	return false
 }
 
 func isPermissionQuestionLine(line string) bool {

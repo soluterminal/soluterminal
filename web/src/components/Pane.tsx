@@ -317,6 +317,8 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
     closeContextMenu,
     actions: ctxMenuActions,
     recordingServed,
+    recordingCheck,
+    recordingWorkspace,
   } = usePaneContextMenu({
     pane,
     scope:session.scope, onPaneChanged:applyPaneSnapshot, actionGuard: actionValid, captureGuard:()=>captureSessionGesture(session), managedOwner:ownerPresentation,
@@ -3643,6 +3645,8 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
           onUnflag={ctxMenuActions.unflag}
           onRecording={ctxMenuActions.recording}
           recordingServed={recordingServed}
+          recordingCheck={recordingCheck}
+          recordingWorkspace={recordingWorkspace}
           onFlagForAttention={ctxMenuActions.flagForAttention}
           onRename={ctxMenuActions.rename}
           onCopySessionId={ctxMenuActions.copySessionId}

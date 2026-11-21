@@ -23,9 +23,17 @@ type recordingHub struct {
 	// write is the file write the recorders use; tests replace it to block
 	// the disk.
 	write func(f *os.File, b []byte) (int, error)
-	// totalCap and fileCap default to the policy constants; tests lower them.
+	// totalCap and maxAge are the settings in force (under mu after start),
+	// current their values; history keeps the values older files keep after
+	// another caller's lowering (pane_recorder_settings.go). fileCap is the
+	// policy constant. Tests lower them.
 	totalCap int64
+	maxAge   time.Duration
 	fileCap  int64
+	current  recordingSettings
+	history  []recordingSettingsEra
+	// capProtected: the last cap refusal left files the history protects.
+	capProtected bool
 
 	mu    sync.Mutex
 	total int64
@@ -35,15 +43,26 @@ type recordingHub struct {
 	totalKnown bool
 	open       map[string]bool
 	lastSweep  time.Time
+	// settingsMu serializes a settings change from reading the stored values
+	// through the raise check to saving and applying, so a stale read can
+	// never raise a value another request lowered.
+	settingsMu sync.Mutex
+	// onFileOpen, when set, hears each new .cast file (the session
+	// timeline's shared clock). Called without mu.
+	onFileOpen func(paneID, path string, start time.Time)
 }
 
 func newRecordingHub(dataDir string) *recordingHub {
+	s, history := loadRecordingSettings(dataDir)
 	return &recordingHub{
 		dataDir:  dataDir,
 		now:      time.Now,
 		write:    func(f *os.File, b []byte) (int, error) { return f.Write(b) },
-		totalCap: recordingTotalCap,
+		totalCap: s.totalCap(),
+		maxAge:   s.maxAge(),
 		fileCap:  recordingFileCap,
+		current:  s,
+		history:  history,
 		open:     map[string]bool{},
 	}
 }
@@ -54,7 +73,8 @@ var (
 	recordingPaneIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	// recordingFileNamePattern matches only the recorder's own files; the
 	// sweep, the cap and the person's delete touch nothing else.
-	recordingFileNamePattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z\.cast$`)
+	// A part after a roll-over is <recording start>_<part>.cast.
+	recordingFileNamePattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z(_[0-9]{6})?\.cast$`)
 )
 
 // paneDir returns recordings/<pane id>, refusing ids that could leave it.
@@ -122,11 +142,32 @@ func (h *recordingHub) prepare(paneID string) (string, error) {
 // following or reusing an existing name. A name taken within the same second
 // moves on to the next second.
 func (h *recordingHub) createFile(dir string, start time.Time) (*os.File, string, error) {
+	return h.createFileExt(dir, start, ".cast")
+}
+
+// createFileExt is createFile with the name's extension (.cast or .jsonl).
+func (h *recordingHub) createFileExt(dir string, start time.Time, ext string) (*os.File, string, error) {
+	return h.createNamed(dir, func(i int) string {
+		return start.Add(time.Duration(i)*time.Second).UTC().Format(recordingFileTimeLayout) + ext
+	})
+}
+
+// createPartFile makes the next part of a recording that rolled over at the
+// per-file cap: <recording start>_<part, 6 digits>.cast, so every part keeps
+// the recording's start time in its name (Addendum E 3 reads it) and the
+// names sort in recording order.
+func (h *recordingHub) createPartFile(dir, base string, part int) (*os.File, string, error) {
+	return h.createNamed(dir, func(i int) string { return fmt.Sprintf("%s_%06d.cast", base, part+i) })
+}
+
+// createNamed creates the first free name of up to 60 candidates, new and
+// never through a symlink, 0600 whatever the umask.
+func (h *recordingHub) createNamed(dir string, name func(i int) string) (*os.File, string, error) {
 	if err := checkRecordingDir(dir); err != nil {
 		return nil, "", err
 	}
 	for i := 0; i < 60; i++ {
-		path := filepath.Join(dir, start.Add(time.Duration(i)*time.Second).UTC().Format(recordingFileTimeLayout)+".cast")
+		path := filepath.Join(dir, name(i))
 		f, err := openNewRecordingFile(path)
 		if errors.Is(err, fs.ErrExist) {
 			continue
@@ -183,7 +224,7 @@ func (h *recordingHub) listFilesLocked() ([]recordingFileInfo, []string) {
 			continue
 		}
 		for _, f := range inner {
-			if !f.Type().IsRegular() || !recordingFileNamePattern.MatchString(f.Name()) {
+			if !f.Type().IsRegular() || !(recordingFileNamePattern.MatchString(f.Name()) || isTimelineEntry(dir, f.Name())) {
 				continue
 			}
 			info, err := f.Info()
@@ -220,6 +261,7 @@ func (h *recordingHub) reserve(n int64) bool {
 		h.pending += n
 		return true
 	}
+	h.capProtected = false
 	files, _ := h.listFilesLocked()
 	sort.Slice(files, func(i, j int) bool { return files[i].mtime.Before(files[j].mtime) })
 	for _, f := range files {
@@ -227,6 +269,12 @@ func (h *recordingHub) reserve(n int64) bool {
 			break
 		}
 		if h.open[f.path] {
+			continue
+		}
+		// A file is deleted for the cap only while the total is over the cap
+		// in force when it finished (Addendum D b).
+		if h.total+n <= h.capForLocked(f) {
+			h.capProtected = true
 			continue
 		}
 		if err := os.Remove(f.path); err == nil {
@@ -339,23 +387,47 @@ func (h *recordingHub) sweepIfDue() {
 	}
 }
 
-// sweep deletes every finished file whose last write is recordingMaxAge old,
-// removes empty pane folders and recounts the total. It reads only an existing
-// recordings/ folder and creates nothing.
+// sweep deletes every finished file whose last write is older than the
+// deletion age, then, while the total is over the cap (lowered by the
+// person), the oldest finished files; it removes empty pane folders and
+// recounts the total. It reads only an existing recordings/ folder and creates
+// nothing.
 func (h *recordingHub) sweep() (deleted int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := h.now()
 	h.lastSweep = now
 	files, dirs := h.listFilesLocked()
+	var kept []recordingFileInfo
+	var total int64
 	for _, f := range files {
-		if h.open[f.path] || now.Sub(f.mtime) < recordingMaxAge {
+		// Each file keeps the age in force when it finished (Addendum D a).
+		if !h.open[f.path] && now.Sub(f.mtime) >= h.ageForLocked(f) && os.Remove(f.path) == nil {
+			deleted++
 			continue
 		}
-		if err := os.Remove(f.path); err == nil {
-			deleted++
+		kept = append(kept, f)
+		total += f.size
+	}
+	if total+h.pending > h.totalCap {
+		sort.Slice(kept, func(i, j int) bool { return kept[i].mtime.Before(kept[j].mtime) })
+		for _, f := range kept {
+			if total+h.pending <= h.totalCap {
+				break
+			}
+			if h.open[f.path] || total+h.pending <= h.capForLocked(f) {
+				continue
+			}
+			if os.Remove(f.path) == nil {
+				deleted++
+				total -= f.size
+			}
 		}
 	}
+	if len(h.history) > 0 {
+		h.history = h.trimHistoryLocked(h.history, h.current)
+	}
+	deleted += h.pruneTimelinesLocked()
 	for _, dir := range dirs {
 		_ = os.Remove(dir) // only succeeds when empty
 	}
@@ -413,6 +485,7 @@ func (h *recordingHub) deletePane(paneID string) (int, error) {
 		n++
 	}
 	_ = os.Remove(dir)
+	h.pruneTimelinesLocked()
 	h.recountLocked()
 	return n, nil
 }

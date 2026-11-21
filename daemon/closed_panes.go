@@ -144,6 +144,7 @@ func reopenSpawnOpts(e closedPaneEntry, liveCols, liveRows uint16) SpawnOpts {
 			cwd = e.LiveCwd
 		}
 		opts = SpawnOpts{
+			Distro:      linuxPaneDistro(snap.Linux), // a Linux pane reopens in its distro
 			Cwd:         cwd,
 			Cmd:         stripMuseResumeArgv(stripCodexResumeArgv(stripResumeArgv(snap.Cmd))),
 			Title:       snap.Title,

@@ -33,8 +33,8 @@ func TestRecordingSweepDeletesSevenDaysAfterLastWrite(t *testing.T) {
 	hub := newRecordingHub(t.TempDir())
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	hub.now = func() time.Time { return now }
-	old := writeRecordingFixture(t, hub, "pane_a", "20261110T000000Z.cast", 10, now.Add(-recordingMaxAge-time.Minute))
-	fresh := writeRecordingFixture(t, hub, "pane_a", "20261118T000000Z.cast", 10, now.Add(-recordingMaxAge+time.Hour))
+	old := writeRecordingFixture(t, hub, "pane_a", "20261110T000000Z.cast", 10, now.Add(-hub.maxAge-time.Minute))
+	fresh := writeRecordingFixture(t, hub, "pane_a", "20261118T000000Z.cast", 10, now.Add(-hub.maxAge+time.Hour))
 	openOld := writeRecordingFixture(t, hub, "pane_b", "20261101T000000Z.cast", 10, now.Add(-30*24*time.Hour))
 	hub.open[openOld] = true
 	gone := writeRecordingFixture(t, hub, "pane_c", "20261101T000000Z.cast", 10, now.Add(-8*24*time.Hour))

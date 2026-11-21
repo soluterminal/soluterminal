@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { useFocusTrap } from './useFocusTrap';
+import { RecordingDialogBody, type RecordingChoice } from './RecordingDialogBody';
 
 // Single in-app modal that renders the current store dialog request and
 // resolves it on the user's choice. Mounted once in App (next to
@@ -13,6 +14,9 @@ export function DialogHost() {
   // Controlled input value for prompt dialogs. Re-seeded from defaultValue
   // each time a new dialog opens (keyed on dialog.id).
   const [value, setValue] = useState('');
+  // Recording dialogs: the choice the boxes add up to (null: nothing to record).
+  const [recordingChoice, setRecordingChoice] = useState<RecordingChoice | null>(null);
+  const onRecordingChange = useCallback((c: RecordingChoice | null) => setRecordingChoice(c), []);
   const inputRef = useRef<HTMLInputElement>(null);
   const selectRef = useRef<HTMLSelectElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
@@ -52,14 +56,19 @@ export function DialogHost() {
   const isPrompt = dialog.kind === 'prompt';
   const isSelect = dialog.kind === 'select';
   const isAlert = dialog.kind === 'alert';
+  const isRecording = dialog.kind === 'recording';
   const confirmLabel = dialog.confirmLabel ?? (isAlert ? 'OK' : 'Confirm');
   const cancelLabel = dialog.cancelLabel ?? 'Cancel';
 
   const onConfirm = () => {
     if (isSelect && !dialog.options?.includes(value)) return;
+    if (isRecording) {
+      if (recordingChoice) closeDialog(JSON.stringify(recordingChoice));
+      return;
+    }
     closeDialog(isPrompt || isSelect ? value : true);
   };
-  const onCancel = () => closeDialog(isPrompt || isSelect ? null : false);
+  const onCancel = () => closeDialog(isPrompt || isSelect || isRecording ? null : false);
   // Escape and a click outside: the same as Cancel, unless the caller asked
   // to tell a dismissal apart (it then resolves null).
   const onDismiss = () => (dialog.distinguishDismiss ? closeDialog(null) : onCancel());
@@ -73,6 +82,9 @@ export function DialogHost() {
       // Let the browser activate a focused button, including Cancel.
       // Preventing its default here and confirming would reverse that choice.
       if (e.target instanceof Element && e.target.closest('button')) return;
+      // A recording dialog starts only from its Start button: Enter on the
+      // time limit or a box must not switch recording on.
+      if (isRecording) return;
       // In a prompt, Enter in the input (or elsewhere) still submits.
       if (!e.repeat) {
         e.preventDefault();
@@ -110,6 +122,9 @@ export function DialogHost() {
             onChange={(e) => setValue(e.target.value)}
           />
         )}
+        {isRecording && dialog.recording && (
+          <RecordingDialogBody key={dialog.id} spec={dialog.recording} onChange={onRecordingChange} />
+        )}
         {isSelect && (
           <select ref={selectRef} className="app-dialog-input" aria-label={dialog.selectLabel ?? 'Choose an option'}
             value={value} onChange={(event) => setValue(event.target.value)}>
@@ -127,6 +142,7 @@ export function DialogHost() {
             type="button"
             className={`app-dialog-btn ${dialog.danger ? 'danger' : 'primary'}`}
             onClick={onConfirm}
+            disabled={isRecording && !recordingChoice}
           >
             {confirmLabel}
           </button>

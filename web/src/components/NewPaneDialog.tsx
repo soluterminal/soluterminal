@@ -111,6 +111,10 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
   const [cwd, setCwd] = useState('');
   const [cwdLoading, setCwdLoading] = useState(false);
   const [cmd, setCmd] = useState(SHELL_DEFAULT);
+  // A Linux pane's WSL distro ('' = a pane on this machine). The chips show
+  // only when this machine opens Linux panes (GET /api/linux/distros).
+  const [distro, setDistro] = useState('');
+  const [distros, setDistros] = useState<{ name: string; default?: boolean }[]>([]);
   // Which LLM backend a claude pane runs against. 'anthropic' is the default;
   // 'glm' routes to Z.ai (the daemon resolves the key from ~/.config/glm/env —
   // we only send the name). Only meaningful for claude commands; ignored for
@@ -154,6 +158,10 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
     if (!open) return;
     // Reset state each open.
     setCmd(presetCmd || SHELL_DEFAULT);
+    setDistro('');
+    api.linuxDistros()
+      .then((r) => setDistros(r.enabled ? r.distros : []))
+      .catch(() => setDistros([]));
     setProvider('anthropic');
     setEffort('');
     setEffortFromGlm(false);
@@ -254,17 +262,21 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
     const opts = {
       cwd: resolvedCwd,
       cmd: parts,
-      title: title.trim() || (role === 'orchestrator' && roleSupport.supported ? 'Orchestrator' : parts[0] ? parts[0] : 'shell'),
+      // A Linux pane with no title of its own gets the daemon's "Linux (<distro>)".
+      title: title.trim() || (distro ? '' : role === 'orchestrator' && roleSupport.supported ? 'Orchestrator' : parts[0] ? parts[0] : 'shell'),
       ...(commandAgent === 'codex' ? { agent: 'codex' as const } : {}),
       ...(provider === 'glm' && isClaudeCmd && glmAllowed ? { provider: 'glm' as const } : {}),
       // Effort rides only on a claude command. '' is omitted so the daemon
       // keeps its default (and still applies GLM's max default server-side).
       ...(effort && isClaudeCmd ? { effort } : {}),
+      ...(distro ? { distro } : {}),
       ...(role === 'orchestrator' && roleSupport.supported ? { role: 'orchestrator' as const } : {}),
-      ...(commandAgent && (commandAgent === 'claude' || commandAgent === 'codex') && contextPack.trim()
+      // Packs aren't available in Linux panes yet: send none for them, so a
+      // workspace's default pack doesn't refuse the launch.
+      ...(!distro && commandAgent && (commandAgent === 'claude' || commandAgent === 'codex') && contextPack.trim()
         ? { contextPack: contextPack.trim() }
         : {}),
-      ...(commandAgent && (commandAgent === 'claude' || commandAgent === 'codex') && workspaceDefaultContextPack && !contextPack.trim() && !inheritDefault
+      ...(!distro && commandAgent && (commandAgent === 'claude' || commandAgent === 'codex') && workspaceDefaultContextPack && !contextPack.trim() && !inheritDefault
         ? { contextPack: 'none' }
         : {}),
     };
@@ -380,7 +392,8 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
           </div>
         </div>
 
-        {!cwdLoading && (
+        {/* Resuming isn't available in Linux panes yet. */}
+        {!cwdLoading && !distro && (
           <PastSessions cwd={cwd} disabled={submitting} onResume={(sess) => void resumeSession(sess)} />
         )}
 
@@ -402,22 +415,39 @@ export function NewPaneDialog({ open, onClose, splitDirection, presetCwd, preset
             {/* shells (default + explicit alternatives) */}
             <button
               type="button"
-              onClick={() => { setCmd(SHELL_DEFAULT); setRole(''); }}
-              className={`dialog-chip${isDefaultShell ? ' dialog-chip-strong' : ''}`}
+              onClick={() => { setCmd(SHELL_DEFAULT); setRole(''); setDistro(''); }}
+              className={`dialog-chip${isDefaultShell && !distro ? ' dialog-chip-strong' : ''}`}
               title="Use $SHELL (your default shell)"
             >shell</button>
             {['bash', 'zsh', 'pwsh.exe', 'powershell.exe'].map((c) => (
               <button
                 type="button"
                 key={c}
-                onClick={() => { setCmd(c); setRole(''); }}
-                className={`dialog-chip${cmd.trim() === c ? ' dialog-chip-strong' : ''}`}
+                onClick={() => { setCmd(c); setRole(''); setDistro(''); }}
+                className={`dialog-chip${cmd.trim() === c && !distro ? ' dialog-chip-strong' : ''}`}
                 title={
                   c === 'pwsh.exe' ? 'PowerShell 7+ on Windows (via WSL interop)'
                     : c === 'powershell.exe' ? 'Windows PowerShell 5.1 (via WSL interop)'
                     : undefined
                 }
               >{c}</button>
+            ))}
+            {distros.length > 0 && <span className="dialog-chip-separator">·</span>}
+            {/* Linux panes: a shell (or the command above) in a WSL distro */}
+            {distros.map((d) => (
+              <button
+                type="button"
+                key={`linux:${d.name}`}
+                onClick={() => {
+                  setDistro(d.name);
+                  setRole('');
+                  // A Windows path means nothing there: clear it as an edit,
+                  // so a late live-cwd lookup can't put it back.
+                  if (distro === '') handleCwdChange('');
+                }}
+                className={`dialog-chip${distro === d.name ? ' dialog-chip-strong' : ''}`}
+                title={`Open in the ${d.name} WSL distro${d.default ? ' (your default)' : ''}. Leave the folder empty for your Linux home.`}
+              >{`Linux (${d.name})`}</button>
             ))}
             <span className="dialog-chip-separator">·</span>
             {/* claude quick options */}

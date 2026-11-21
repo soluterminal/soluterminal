@@ -146,7 +146,7 @@ func TestWSLLauncherRealNetworkColdStart(t *testing.T) {
 	pidfile := filepath.Join(home, "fixture-daemon.pid")
 	script := admissionScript(t, home, address, "1.0.0")
 	script += fmt.Sprintf("\nLOCAL=%s\nFIXTURE_DATA=%s\nPIDFILE=%s\n", shellSingleQuote(bin), shellSingleQuote(data), shellSingleQuote(pidfile))
-	script += launch + "\n" + extractShellFunc(t, body, "await_daemon") + "\n"
+	script += extractShellFunc(t, body, "refuse_migrated_linux") + "\n" + launch + "\n" + extractShellFunc(t, body, "await_daemon") + "\n"
 	// A job spec cannot accidentally name an unrelated process after PID reuse.
 	script += "trap 'kill -TERM %1 2>/dev/null || true; wait || true' EXIT\ntrap 'exit 0' TERM INT\nclaim_supervision\nlaunch_daemon\nawait_daemon\nexit \"$status\"\n"
 	log, err := os.Create(filepath.Join(home, "launcher.log"))

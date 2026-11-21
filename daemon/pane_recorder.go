@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +33,13 @@ type paneRecorder struct {
 	// reason than an (f) stop, so output since the last passing check is
 	// never kept unchecked; it returns the (f) reason, or "".
 	verify func() string
+	// terms are the switch-on's time limit and overrides, set before the
+	// recorder is published and never changed.
+	terms recordingTerms
+	// base is the first file's name without .cast (the recording's start);
+	// part counts files, the first being 1. Writer-owned.
+	base string
+	part int
 
 	mu          sync.Mutex
 	queue       []recItem
@@ -111,6 +120,7 @@ func startPaneRecorder(hub *recordingHub, paneID string, cols, rows uint16, veri
 		rows:     rows,
 	}
 	r.startedAt = r.now()
+	r.part = 1
 	if err := r.openFile(r.startedAt); err != nil {
 		return nil, err
 	}
@@ -240,7 +250,7 @@ func (r *paneRecorder) loop() string {
 		if err := r.writeItems(items); err != nil {
 			reason := recordingStopWriteError
 			if errors.Is(err, errRecordingCap) {
-				reason = recordingStopDiskCap
+				reason = r.hub.capStopReason()
 			}
 			return r.endUnchecked(reason)
 		}
@@ -409,6 +419,7 @@ func (r *paneRecorder) roll() error {
 	_ = r.file.Close()
 	r.hub.closed(r.path)
 	r.file = nil
+	r.part++
 	if err := r.openFile(r.now()); err != nil {
 		return err
 	}
@@ -419,7 +430,17 @@ func (r *paneRecorder) roll() error {
 // openFile creates a file and writes its header: version, width, height and
 // timestamp only. No env, command, title or folder.
 func (r *paneRecorder) openFile(start time.Time) error {
-	f, path, err := r.hub.createFile(r.dir, start)
+	var f *os.File
+	var path string
+	var err error
+	if r.part <= 1 {
+		f, path, err = r.hub.createFile(r.dir, start)
+		if err == nil {
+			r.base = strings.TrimSuffix(filepath.Base(path), ".cast")
+		}
+	} else {
+		f, path, err = r.hub.createPartFile(r.dir, r.base, r.part)
+	}
 	if err != nil {
 		return err
 	}
@@ -446,6 +467,9 @@ func (r *paneRecorder) openFile(start time.Time) error {
 	}
 	r.file, r.path, r.fileStart, r.fileSize = f, path, start, int64(n)
 	r.fileBytes.Add(int64(n))
+	if hook := r.hub.onFileOpen; hook != nil {
+		hook(r.paneID, path, start)
+	}
 	return nil
 }
 

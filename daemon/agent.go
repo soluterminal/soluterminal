@@ -97,7 +97,15 @@ func runAgent() int {
 	noPty := fs.Bool("no-pty", false, "wire the child to pipes instead of a PTY (headless stream-json agents like `claude -p` refuse a TTY stdin)")
 	provider := fs.String("provider", "", "LLM backend for the child claude: \"\" (Anthropic) or \"glm\" (Z.ai)")
 	dataDir := fs.String("data-dir", "", "daemon data dir for diagnostics and provider settings")
+	diagnosticsDir := fs.String("diagnostics-dir", "", "write memory-guard evidence here, capped and 0600, instead of the data dir (the WSL helper passes its 0700 per-agent dir)")
+	cappedLog := fs.Bool("capped-log", false, "cap this agent's own log output at 64 KiB; stderr is kept only for a crash report (the WSL helper sets it)")
 	_ = fs.Parse(os.Args[2:])
+	if *cappedLog {
+		// First, so even a startup failure below is capped.
+		capped := installCappedAgentLog(os.Stderr)
+		defer capped.Close()
+		catchHangup()
+	}
 	args := fs.Args()
 	if *socketPath == "" {
 		log.Fatalf("--socket is required")
@@ -152,6 +160,11 @@ func runAgent() int {
 	// sets its own. See stripInheritedClaudeEnv. (The PTY/pipe child creation
 	// itself happens in the *noPty branch below, sharing this env.)
 	env := stripInheritedClaudeEnv(os.Environ())
+	if *cappedLog {
+		// The helper sets GOTRACEBACK=single for this agent only; the pane's
+		// own programs must not inherit it (helper-protocol-v1, Agent output).
+		env = filterOutEnvKeys(env, []string{"GOTRACEBACK"})
+	}
 	if envValueFromList(strings.Split(*envStr, ","), "SOLU_QUOTA_WORKER") == "1" {
 		var keys []string
 		for _, entry := range strings.Split(*envStr, ",") {
@@ -372,11 +385,16 @@ func runAgent() int {
 	var childExited atomic.Bool
 	var exitMsgPtr atomic.Pointer[[]byte]
 	guardDataDir := *dataDir
-	if guardDataDir == "" {
+	if *diagnosticsDir != "" {
+		// A WSL helper's agent has no data dir: never fall back to the
+		// distro's ~/.solu, which may be a Linux-mode daemon's.
+		guardDataDir = *diagnosticsDir
+	} else if guardDataDir == "" {
 		guardDataDir = defaultDataDir()
 	}
 	var hardExitCode atomic.Int32
 	memCfg := agentMemGuardConfig(guardDataDir)
+	memCfg.cappedDiagnostics = *diagnosticsDir != ""
 	memCfg.exitFn = func(code int) {
 		// Follow the normal child teardown so the wait goroutine broadcasts
 		// FrameExit and cancels ctx before the accept loop returns. Bound both

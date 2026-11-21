@@ -2,7 +2,9 @@ package main
 
 import (
 	"net"
+	"os"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -28,6 +30,9 @@ import (
 // its durable log lives in <data>/logs (resolveDurableLogDir).
 type daemonRole struct {
 	Primary bool
+	// CanonicalPort and DefaultData: each half of the primary rule on its
+	// own (seeding refuses either one, @secure 21 Nov).
+	CanonicalPort, DefaultData bool
 	// Reasons say why this is a side daemon (empty when primary).
 	Reasons []string
 }
@@ -49,13 +54,20 @@ func registerSideDaemonSkip(feature string) {
 // normalisation, so the decision is testable on any host.
 func decideDaemonRole(goos, addr, dataDir, defaultData string) daemonRole {
 	var reasons []string
-	if _, port, err := net.SplitHostPort(strings.TrimSpace(addr)); err != nil || !canonicalDaemonPort(port) {
+	_, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if n, perr := strconv.Atoi(port); perr == nil {
+		port = strconv.Itoa(n) // "08787" listens on 8787
+	}
+	canonicalPort := err == nil && canonicalDaemonPort(port)
+	if !canonicalPort {
 		reasons = append(reasons, "non-canonical port in -addr "+addr)
 	}
-	if !sameDataDir(goos, dataDir, defaultData) {
+	// A link or other alias of the default data dir is that dir.
+	defaultDir := sameDataDir(goos, dataDir, defaultData) || sameDirOnDisk(dataDir, defaultData)
+	if !defaultDir {
 		reasons = append(reasons, "non-default -data "+dataDir)
 	}
-	return daemonRole{Primary: len(reasons) == 0, Reasons: reasons}
+	return daemonRole{Primary: len(reasons) == 0, CanonicalPort: canonicalPort, DefaultData: defaultDir, Reasons: reasons}
 }
 
 // bootDaemonRole is decideDaemonRole for this process.
@@ -74,4 +86,22 @@ func (r daemonRole) logLine() string {
 	}
 	return "daemon role: side daemon (" + strings.Join(r.Reasons, "; ") + "); skipped: " + skipped +
 		"; only the primary daemon (port 8787 or 38787 with the default -data) manages shared credentials"
+}
+
+// sameDirOnDisk reports whether two paths name the same existing directory.
+func sameDirOnDisk(a, b string) bool {
+	x, errX := os.Stat(a)
+	y, errY := os.Stat(b)
+	return errX == nil && errY == nil && x.IsDir() && os.SameFile(x, y)
+}
+
+// roleOnBoundPorts marks role as on a canonical port when any listener the
+// daemon actually holds is on one (-addr :0 picks its port at bind time).
+func roleOnBoundPorts(role daemonRole, bound []net.Addr) daemonRole {
+	for _, a := range bound {
+		if _, port, err := net.SplitHostPort(a.String()); err == nil && canonicalDaemonPort(port) {
+			role.CanonicalPort = true
+		}
+	}
+	return role
 }

@@ -81,6 +81,11 @@ type callerIdentity struct {
 	// PrivateDevice is the approved device whose private relay channel the
 	// request arrived on, or "".
 	PrivateDevice string
+	// Helper is the WSL distro whose A′ helper attested this caller over a
+	// fwd stream (helper_fwd_host.go). Such a caller is a verified pane
+	// caller for PaneID only: never human, relay or another pane, and PID is
+	// 0 because a Linux pid means nothing on this host (@secure 8.6a.1).
+	Helper string
 	// ScopedDevice is an approved alerts-only device
 	// (deviceStatusApprovedAlerts) that signed this request at this
 	// computer. It is never Device and never makes the caller the person:
@@ -246,6 +251,11 @@ func callerLogf(r *http.Request, format string, args ...any) {
 
 // classifyCaller is identifyCaller without the transport facts it adds.
 func (a *apiServer) classifyCaller(r *http.Request) callerIdentity {
+	// Read first: a request the helper fwd path dispatched carries the pane
+	// its helper attested, and nothing about the request can override it.
+	if c, ok := helperFwdCallerOf(r); ok {
+		return callerIdentity{Kind: callerPane, PaneID: c.PaneID, Helper: c.Distro}
+	}
 	if relayTransport(r) {
 		return callerIdentity{Kind: callerHuman, Relay: true}
 	}
@@ -834,7 +844,8 @@ var promptHelds = struct {
 }{seen: map[string]bool{}}
 
 func notePromptHeld(id callerIdentity, p *Pane) {
-	key := fmt.Sprintf("%s|%s|%d|%d", p.ID, id.Kind, id.PID, p.inputRevision.Load())
+	// The caller pane and helper distro keep pid-0 callers (fwd) apart.
+	key := fmt.Sprintf("%s|%s|%d|%s|%s|%d", p.ID, id.Kind, id.PID, id.PaneID, id.Helper, p.inputRevision.Load())
 	promptHelds.Lock()
 	if promptHelds.seen[key] {
 		promptHelds.Unlock()
@@ -845,7 +856,7 @@ func notePromptHeld(id callerIdentity, p *Pane) {
 	}
 	promptHelds.seen[key] = true
 	promptHelds.Unlock()
-	log.Printf("authority: refused %s input at a permission prompt on pane %s (pid %d, pane caller %q)", id.Kind, p.ID, id.PID, id.PaneID)
+	log.Printf("authority: refused %s input at a permission prompt on pane %s (pid %d, pane caller %q, helper %q)", id.Kind, p.ID, id.PID, id.PaneID, id.Helper)
 }
 
 // paneSocketInputPolicy classifies a pane terminal socket once, at upgrade.
@@ -975,7 +986,7 @@ var forwardedRefusals = struct {
 const forwardedRefusalsMax = 4096
 
 func noteForwardedRefusal(id callerIdentity, target, what string) {
-	key := fmt.Sprintf("%d|%s|%s|%s", id.PID, id.Device, id.PrivateDevice, target)
+	key := fmt.Sprintf("%d|%s|%s|%s|%s|%s", id.PID, id.PaneID, id.Helper, id.Device, id.PrivateDevice, target)
 	forwardedRefusals.Lock()
 	if forwardedRefusals.seen[key] {
 		forwardedRefusals.Unlock()

@@ -24,6 +24,14 @@ const (
 	// /api/panes/{id}/recordings (ST-315: a newer UI must not offer it to an
 	// older daemon, which answers 404).
 	PaneRecording = "pane-recording.v1"
+	// PaneRecordingV2: switch-on takes a time limit and per-pane overrides,
+	// the status route carries the rule check as codes, and the daemon serves
+	// /api/recording/workspace and /api/settings/recording (ST-317, 0.0.1249).
+	PaneRecordingV2 = "pane-recording.v2"
+	// PaneRecordingTimeline: while anything records, the daemon keeps the
+	// session layout timeline and takes view records on
+	// POST /api/recording/view (ST-317, 0.0.1249).
+	PaneRecordingTimeline = "pane-recording-timeline.v1"
 )
 
 // MaxFeatures bounds how many names one handshake may carry.

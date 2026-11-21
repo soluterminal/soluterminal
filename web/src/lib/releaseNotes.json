@@ -1,4 +1,8 @@
 {
+  "0.0.1249": [
+    "If the desktop app is newer than the background service it talks to, for example right after an update, a notice now says the service update is pending and shows both versions.",
+    "Fixed: with auto-approve on, a permission prompt whose command mentioned words like “usage credits” was mistaken for a billing menu and left waiting for you."
+  ],
   "0.0.1248": [
     "If the desktop app is newer than the background service it talks to, for example right after an update, a notice now says the service update is pending and shows both versions."
   ],

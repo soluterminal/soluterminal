@@ -1,3 +1,4 @@
+import type { RecordingDialogSpec } from '../components/RecordingDialogBody';
 import type { ReactNode } from 'react';
 import type { StateCreator } from 'zustand';
 import type { State } from '../store';
@@ -11,7 +12,7 @@ import type { State } from '../store';
  *  for prompt, and (ignored) for alert. */
 export interface DialogRequest {
   id: number;
-  kind: 'confirm' | 'prompt' | 'alert' | 'select';
+  kind: 'confirm' | 'prompt' | 'alert' | 'select' | 'recording';
   title?: string;
   message: string;
   confirmLabel?: string;
@@ -28,6 +29,9 @@ export interface DialogRequest {
   /** Confirm dialogs only: Cancel takes the focus, so Enter can't confirm a
    *  step that is hard to take back. */
   focusCancel?: boolean;
+  /** Recording dialogs only (lib/paneRecording): the panes and choices. The
+   *  dialog resolves the person's choice as JSON, or null. */
+  recording?: RecordingDialogSpec;
   resolve: (value: boolean | string | null) => void;
 }
 

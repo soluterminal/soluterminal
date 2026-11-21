@@ -94,7 +94,8 @@ func isMainTranscriptPath(tp string) bool {
 // synchronously; we want to return fast (<10ms on happy path) so the
 // agent isn't stalled.
 func (a *apiServer) hookToolCall(w http.ResponseWriter, r *http.Request) {
-	if !isLoopback(r) {
+	fwd, fromHelper := helperFwdCallerOf(r)
+	if !fromHelper && !isLoopback(r) {
 		http.Error(w, "loopback-only", http.StatusForbidden)
 		return
 	}
@@ -131,6 +132,26 @@ func (a *apiServer) hookToolCall(w http.ResponseWriter, r *http.Request) {
 	// overwrites paneID — the cc-usage ledger keys on header-present, not
 	// on whether attribution ultimately resolved a pane.
 	paneHeader := r.Header.Get("X-Soluterminal-Pane")
+	if fromHelper {
+		// A hook from a WSL pane (8.6a.3): its pane comes only from the
+		// helper's attestation, and it counts as that pane's own in-app
+		// hook. No cwd fallback. A session or transcript that another live
+		// pane holds is refused with no effect on either pane: checked here,
+		// before anything is recorded, and again under hookPinMu with the pin.
+		paneHeader = fwd.PaneID
+		// The session id later names files and argv on this host (the
+		// transcript lookup, --resume): only a well-formed one is accepted.
+		if payload.SessionID != "" && !claudeSessionIDWellFormed(payload.SessionID) {
+			log.Printf("hook: from %s pane %s refused: malformed session id", fwd.Distro, fwd.PaneID)
+			http.Error(w, "malformed session id", http.StatusBadRequest)
+			return
+		}
+		if other := helperHookNamesAnotherPane(a.mgr, fwd.PaneID, payload); other != "" {
+			log.Printf("hook: from %s pane %s refused: its session belongs to pane %s", fwd.Distro, fwd.PaneID, other)
+			http.Error(w, "session belongs to another pane", http.StatusForbidden)
+			return
+		}
+	}
 	paneID := paneHeader
 	if paneID == "" {
 		paneID = attributeByCwd(a.mgr, payload.CWD)
@@ -138,8 +159,17 @@ func (a *apiServer) hookToolCall(w http.ResponseWriter, r *http.Request) {
 	// Record the session's in-app flag for the transcript scanner. Every
 	// hook event (in-app or out-app) fires this; first-seen wins, in_app
 	// upgrades only. Guarded for tests that build apiServer without a ledger.
-	if a.ccLedger != nil && payload.SessionID != "" {
+	// The usage ledger. For a forwarded hook it runs only after the locked
+	// recheck below has passed, and records no host account: the Windows
+	// host's active Claude login says nothing about a WSL session.
+	recordLedger := func() {
+		if a.ccLedger == nil || payload.SessionID == "" {
+			return
+		}
 		a.ccLedger.Record(payload.SessionID, paneHeader != "")
+		if fromHelper {
+			return
+		}
 		// Attribute the session to the currently-active Claude account on
 		// SessionStart — it fires once at the start of every session, when the
 		// active-cred pointer already reflects the account that will produce
@@ -157,7 +187,24 @@ func (a *apiServer) hookToolCall(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if !fromHelper {
+		recordLedger()
+	}
+	// The another-pane check and every pane's in-memory session pin are one
+	// step under hookPinMu, so two hooks can't both pass the check and pin
+	// one session to two panes (8.6a.3). Only memory is touched inside: the
+	// pane store write happens after the lock is released.
 	var paneTitle string
+	var persistPane *Pane
+	hookPinMu.Lock()
+	if fromHelper {
+		if other := helperHookNamesAnotherPane(a.mgr, fwd.PaneID, payload); other != "" {
+			hookPinMu.Unlock()
+			log.Printf("hook: from %s pane %s refused: its session belongs to pane %s", fwd.Distro, fwd.PaneID, other)
+			http.Error(w, "session belongs to another pane", http.StatusForbidden)
+			return
+		}
+	}
 	if paneID != "" {
 		if pane, ok := a.mgr.Get(paneID); ok {
 			paneTitle = pane.Title
@@ -193,15 +240,16 @@ func (a *apiServer) hookToolCall(w http.ResponseWriter, r *http.Request) {
 					// transcript_path is the authoritative, rotation-proof anchor
 					// the conversation endpoint prefers. Empty on legacy clients —
 					// SetClaudeTranscriptPath no-ops, leaving id-based resolution.
-					if pane.SetClaudeTranscriptPath(payload.TranscriptPath) {
+					// Not from a WSL pane: its transcript_path names a
+					// file in the distro, and the host would open it on
+					// its own filesystem. Attestation is authority over a
+					// pane, never over host files; WSL transcripts are
+					// read through the helper (M4).
+					if !fromHelper && pane.SetClaudeTranscriptPath(payload.TranscriptPath) {
 						changed = true
 					}
 					if changed && a.panes != nil {
-						var persistErr error
-						a.mgr.withCurrentPane(pane, func() { persistErr = a.panes.Put(pane) })
-						if persistErr != nil {
-							log.Printf("hook: persist claude session pane=%s session=%s: %v", paneID, shortSessionID(payload.SessionID), persistErr)
-						}
+						persistPane = pane
 					}
 					// A session id that ROTATED to a different value (prior
 					// non-empty) is the /clear, respawn or resume-elsewhere
@@ -221,6 +269,17 @@ func (a *apiServer) hookToolCall(w http.ResponseWriter, r *http.Request) {
 					// can never trigger it.
 				}
 			}
+		}
+	}
+	hookPinMu.Unlock()
+	if fromHelper {
+		recordLedger()
+	}
+	if persistPane != nil {
+		var persistErr error
+		a.mgr.withCurrentPane(persistPane, func() { persistErr = a.panes.Put(persistPane) })
+		if persistErr != nil {
+			log.Printf("hook: persist claude session pane=%s session=%s: %v", paneID, shortSessionID(payload.SessionID), persistErr)
 		}
 	}
 	// One log line per session so a bad attribution is traceable.
@@ -268,7 +327,8 @@ func (a *apiServer) hookToolCall(w http.ResponseWriter, r *http.Request) {
 	// Record file-editing tool calls (full local path) for the sidebar's
 	// "agent just touched" list. Kept separate from the basename-redacted
 	// activity feed above; the serving endpoint transport-gates secrets.
-	if a.recentFiles != nil {
+	// Not for a WSL pane: its paths are in the distro, not on this host.
+	if a.recentFiles != nil && !fromHelper {
 		if path, ok := hookEditedPath(payload.ToolName, payload.ToolInput, payload.CWD); ok {
 			a.recentFiles.record(recentFileTouch{
 				Path:      path,
@@ -803,5 +863,57 @@ func hookAccountRetryDue(sessionID string, now time.Time) bool {
 		}
 	}
 	hookAccountRetry.last[sessionID] = now
+	return true
+}
+
+// hookPinMu serializes the attribution and session pin of hookToolCall.
+var hookPinMu sync.Mutex
+
+// helperHookNamesAnotherPane returns the id of a stored pane other than own that
+// already holds the hook's session id or main transcript path, or "". A hook
+// forwarded from a WSL pane may only act on its attested pane (8.6a.3).
+func helperHookNamesAnotherPane(mgr *Manager, own string, payload hookPayload) string {
+	sid := strings.TrimSpace(payload.SessionID)
+	tp := strings.TrimSpace(payload.TranscriptPath)
+	if mgr == nil || (sid == "" && tp == "") {
+		return ""
+	}
+	for _, p := range mgr.List() {
+		if p == nil || p.ID == own {
+			continue
+		}
+		// Every stored pane, exited or resumable too: a session an exited
+		// pane can resume is still that pane's.
+		snap := p.Snapshot()
+		if sid != "" && strings.TrimSpace(snap.ClaudeSessionID) == sid {
+			return p.ID
+		}
+		if tp != "" && strings.TrimSpace(snap.ClaudeTranscriptPath) == tp {
+			return p.ID
+		}
+	}
+	return ""
+}
+
+// claudeSessionIDWellFormed accepts a Claude Code session id as Claude writes
+// it: a lowercase UUID. Anything else (path separators, dots, upper case) is
+// refused before it can name a file or an argument.
+func claudeSessionIDWellFormed(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+				return false
+			}
+		}
+	}
 	return true
 }

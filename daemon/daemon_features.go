@@ -5,7 +5,7 @@ import "soluterminal-shared/daemonfeatures"
 // daemonFeatures is what this build serves. Registration runs during init,
 // alongside the optional implementation. The list is sent in the relay
 // handshake and /api/health so callers can detect supported capabilities.
-var daemonFeatures = []string{daemonfeatures.UIPrefs, daemonfeatures.PaneRecording}
+var daemonFeatures = []string{daemonfeatures.UIPrefs, daemonfeatures.PaneRecording, daemonfeatures.PaneRecordingV2, daemonfeatures.PaneRecordingTimeline}
 
 func registerDaemonFeature(name string) {
 	for _, existing := range daemonFeatures {

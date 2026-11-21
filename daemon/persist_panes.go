@@ -41,6 +41,7 @@ type PersistedPane struct {
 	Rows            uint16                `json:"rows"`
 	SocketPath      string                `json:"socketPath"`
 	AgentPid        int                   `json:"agentPid"`
+	Linux           *linuxPaneRef         `json:"linux,omitempty"` // a WSL helper pane (ST-253)
 	ProcessScope    *processScopeIdentity `json:"processScope,omitempty"`
 	Kind            string                `json:"kind,omitempty"`
 	// Agent is omitted for legacy/default Claude and explicit for Codex/Muse.
@@ -420,6 +421,7 @@ func persistedFromSnapshot(snap PaneSnapshot) PersistedPane {
 		Rows:                     snap.Rows,
 		SocketPath:               snap.SocketPath,
 		AgentPid:                 snap.Pid,
+		Linux:                    cloneValuePtr(snap.Linux),
 		ProcessScope:             cloneValuePtr(snap.ProcessScope),
 		Kind:                     snap.Kind,
 		Agent:                    snap.Agent,
